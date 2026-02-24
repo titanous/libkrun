@@ -148,4 +148,83 @@ mod tests {
         assert!(!bitmap.is_dirty(0));
         assert!(!bitmap.is_dirty(2));
     }
+
+    #[test]
+    fn test_last_valid_page() {
+        // AC2.1: Page at exactly num_pages - 1 (last valid index) is tracked
+        let base = 0x8000_0000;
+        let bitmap = DirtyBitmap::new(base, 4 * PAGE_SIZE);
+
+        // Mark the last valid page (page index 3, address base + 3*PAGE_SIZE)
+        let last_page_addr = base + 3 * PAGE_SIZE;
+        bitmap.mark_dirty(last_page_addr);
+
+        // Drain and verify the address is present
+        let dirty = bitmap.drain_dirty_pages();
+        assert_eq!(dirty.len(), 1);
+        assert_eq!(dirty[0], last_page_addr);
+    }
+
+    #[test]
+    fn test_out_of_bounds_ignored() {
+        // AC2.2: Page at num_pages (out-of-bounds) is silently ignored; no panic
+        let base = 0x8000_0000;
+        let bitmap = DirtyBitmap::new(base, 4 * PAGE_SIZE);
+
+        // Try to mark a page beyond the end (should be silently ignored)
+        let out_of_bounds_addr = base + 4 * PAGE_SIZE;
+        bitmap.mark_dirty(out_of_bounds_addr);
+
+        // Drain and verify nothing is marked dirty
+        let dirty = bitmap.drain_dirty_pages();
+        assert_eq!(dirty.len(), 0);
+    }
+
+    #[test]
+    fn test_all_pages_dirty() {
+        // AC2.3: All pages marked dirty → drain_dirty_pages returns the full set
+        let base = 0x8000_0000;
+        let bitmap = DirtyBitmap::new(base, 4 * PAGE_SIZE);
+
+        // Mark all 4 pages dirty
+        for i in 0..4 {
+            bitmap.mark_dirty(base + i * PAGE_SIZE);
+        }
+
+        // Drain and verify we get all 4 pages
+        let dirty = bitmap.drain_dirty_pages();
+        assert_eq!(dirty.len(), 4);
+        assert_eq!(dirty[0], base);
+        assert_eq!(dirty[1], base + PAGE_SIZE);
+        assert_eq!(dirty[2], base + 2 * PAGE_SIZE);
+        assert_eq!(dirty[3], base + 3 * PAGE_SIZE);
+    }
+
+    #[test]
+    fn test_no_pages_dirty() {
+        // AC2.4: No pages marked → drain_dirty_pages returns empty vec
+        let base = 0x8000_0000;
+        let bitmap = DirtyBitmap::new(base, 4 * PAGE_SIZE);
+
+        // Don't mark any pages dirty, just drain
+        let dirty = bitmap.drain_dirty_pages();
+        assert_eq!(dirty.len(), 0);
+    }
+
+    #[test]
+    fn test_duplicate_mark() {
+        // AC2.5: Same page marked dirty twice → appears exactly once in drain output
+        let base = 0x8000_0000;
+        let bitmap = DirtyBitmap::new(base, 4 * PAGE_SIZE);
+
+        // Mark the same page twice
+        let page_addr = base + PAGE_SIZE;
+        bitmap.mark_dirty(page_addr);
+        bitmap.mark_dirty(page_addr);
+
+        // Drain and verify the page appears exactly once (atomics naturally deduplicate)
+        let dirty = bitmap.drain_dirty_pages();
+        assert_eq!(dirty.len(), 1);
+        assert_eq!(dirty[0], page_addr);
+    }
 }
