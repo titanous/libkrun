@@ -60,6 +60,11 @@ mod common;
 
 #[cfg(feature = "host")]
 mod krun;
+
+#[cfg(feature = "host")]
+mod krun_rust;
+#[cfg(feature = "host")]
+pub use krun_rust::*;
 mod tcp_tester;
 
 #[host]
