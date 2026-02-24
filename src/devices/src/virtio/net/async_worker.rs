@@ -860,12 +860,46 @@ mod tests {
         q
     }
 
-    /// AC3.1: TX empty packet (virtio header only, zero payload).
+    /// AC3.1: TX header-only packet (virtio header only, zero payload) returns None.
     #[test]
-    fn test_empty_tx_packet() {
+    fn test_header_only_tx_returns_none() {
         let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
 
-        // Single descriptor with header + 1 byte payload (to have some data)
+        // Single descriptor with exactly VIRTIO_NET_HDR_SIZE bytes (header only, no payload).
+        // The production code checks `if offset > VIRTIO_NET_HDR_SIZE`, so an offset of
+        // exactly VIRTIO_NET_HDR_SIZE should return None.
+        let data = vec![0u8; VIRTIO_NET_HDR_SIZE];
+        mem.write_slice(&data, GuestAddress(PKT_DATA_ADDR))
+            .unwrap();
+
+        let desc = Descriptor {
+            addr: PKT_DATA_ADDR,
+            len: VIRTIO_NET_HDR_SIZE as u32,
+            flags: 0,
+            next: 0,
+        };
+        write_descriptor(&mem, 0, desc);
+
+        let mut q = setup_avail_ring(&mem, 0);
+        let chain = q.pop(&mem).unwrap();
+
+        let mut buf = vec![0u8; 65535 + VIRTIO_NET_HDR_SIZE];
+        let result = read_tx_packet(&mem, &chain, &mut buf);
+
+        assert_eq!(
+            result, None,
+            "TX packet with header only (zero payload) should return None; backend receives no data"
+        );
+    }
+
+    /// AC3.1 (sub-case): TX minimal valid packet (header + 1 byte payload).
+    #[test]
+    fn test_minimal_valid_tx_packet() {
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+
+        // Single descriptor with header + 1 byte payload (minimal valid packet).
+        // The production code checks `if offset > VIRTIO_NET_HDR_SIZE`, so an offset of
+        // VIRTIO_NET_HDR_SIZE + 1 should return Some(1).
         let data = vec![0u8; VIRTIO_NET_HDR_SIZE + 1];
         mem.write_slice(&data, GuestAddress(PKT_DATA_ADDR))
             .unwrap();
@@ -884,9 +918,10 @@ mod tests {
         let mut buf = vec![0u8; 65535 + VIRTIO_NET_HDR_SIZE];
         let result = read_tx_packet(&mem, &chain, &mut buf);
 
-        // With current code logic (offset > VIRTIO_NET_HDR_SIZE),
-        // a packet with just header + 1 byte returns Some(1)
-        assert_eq!(result, Some(1), "Packet with header + 1 byte should return Some(1)");
+        assert_eq!(
+            result, Some(1),
+            "TX packet with header + 1 byte payload should return Some(1)"
+        );
     }
 
     /// AC3.2: TX max-size packet (65535 B payload).
@@ -1122,6 +1157,7 @@ mod tests {
         assert_eq!(&buf[VIRTIO_NET_HDR_SIZE..VIRTIO_NET_HDR_SIZE + packet_data.len()], packet_data);
 
         stop_fd_clone.write(1).unwrap();
+        _handle.join().expect("worker thread panicked");
     }
 
     /// AC3.6: RX packet dropped when no guest RX buffers available.
@@ -1203,6 +1239,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(200));
 
         stop_fd_clone.write(1).unwrap();
+        _handle.join().expect("worker thread panicked");
     }
 
     /// AC3.7: Snapshot state survives quiesce/resync cycle.
@@ -1319,6 +1356,7 @@ mod tests {
         );
 
         stop_fd_clone.write(1).unwrap();
+        _handle.join().expect("worker thread panicked");
     }
 
     /// AC3.8: wake_rx signal triggers poll() call.
@@ -1409,6 +1447,7 @@ mod tests {
         );
 
         stop_fd_clone.write(1).unwrap();
+        _handle.join().expect("worker thread panicked");
     }
 
     /// AC3.9: poll_delay timer fires and triggers poll().
@@ -1484,6 +1523,7 @@ mod tests {
         );
 
         stop_fd_clone.write(1).unwrap();
+        _handle.join().expect("worker thread panicked");
     }
 
     /// Test that the quiesce protocol works: signal quiesce → worker acks → resume.
