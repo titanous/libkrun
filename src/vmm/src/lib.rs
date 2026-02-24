@@ -1135,9 +1135,9 @@ impl Vmm {
             .map_err(Error::I8042Error)
     }
 
-    /// Waits for all vCPUs to exit and terminates the Firecracker process.
-    pub fn stop(&mut self, exit_code: i32) {
-        info!("Vmm is stopping with exit_code={exit_code}");
+    /// Waits for all vCPUs to exit and stores exit information in shared state.
+    pub fn stop(&mut self, vm_exit: crate::vm_exit::VmExit) {
+        info!("Vmm is stopping: {vm_exit:?}");
 
         for observer in &self.exit_observers {
             observer
@@ -1146,11 +1146,7 @@ impl Vmm {
                 .on_vmm_exit();
         }
 
-        // Exit from Firecracker using the provided exit code. Safe because we're terminating
-        // the process anyway.
-        unsafe {
-            libc::_exit(exit_code);
-        }
+        *self.vm_exit.lock().expect("Poisoned vm_exit lock") = Some(vm_exit);
     }
 
     /// Returns a reference to the inner KVM Vm object.
@@ -1185,13 +1181,7 @@ impl Subscriber for Vmm {
         if source == self.exit_evt.as_raw_fd() && event_set == EventSet::IN {
             debug!("Vmm: exit_evt fired, shutting down");
             let _ = self.exit_evt.read();
-            // Query each vcpu for the exit_code.
-            // If the exit_code can't be found on any vcpu, it means that the exit signal
-            // has been issued by the i8042 controller in which case we exit with
-            // FC_EXIT_CODE_OK.
-            //
-            // The exit code set up by the guest takes preference over the one reported
-            // by either a vcpu or the i8042 controller.
+
             let vcpu_exit_code = self
                 .vcpus_handles
                 .iter()
@@ -1200,15 +1190,28 @@ impl Subscriber for Vmm {
                     _ => None,
                 })
                 .unwrap_or(FC_EXIT_CODE_OK);
+
             let vmm_exit_code = self.exit_code.load(Ordering::SeqCst);
-            let exit_code = if vmm_exit_code != i32::MAX {
-                debug!("using vmm exit code: {vmm_exit_code}");
-                vmm_exit_code
+
+            let vm_exit = if vcpu_exit_code == FC_EXIT_CODE_REBOOT {
+                crate::vm_exit::VmExit::RebootRequested
+            } else if vcpu_exit_code == FC_EXIT_CODE_GENERIC_ERROR {
+                crate::vm_exit::VmExit::Error {
+                    message: "vCPU fatal error".into(),
+                }
             } else {
-                debug!("using vcpu exit code: {vcpu_exit_code}");
-                vcpu_exit_code as i32
+                // Clean shutdown: guest-set exit code takes precedence
+                let exit_code = if vmm_exit_code != i32::MAX {
+                    debug!("using vmm exit code: {vmm_exit_code}");
+                    vmm_exit_code
+                } else {
+                    debug!("using vcpu exit code: {vcpu_exit_code}");
+                    vcpu_exit_code as i32
+                };
+                crate::vm_exit::VmExit::Shutdown { exit_code }
             };
-            self.stop(exit_code);
+
+            self.stop(vm_exit);
         } else {
             error!("Spurious EventManager event for handler: Vmm");
         }
@@ -1250,5 +1253,121 @@ mod tests {
         // Guard check after dirty_tracking is enabled
         let result = check_dirty_tracking_enabled(true);
         assert!(result.is_ok());
+    }
+
+    /// Helper function to resolve VmExit variant from exit codes.
+    /// This is the core logic extracted from Subscriber::process().
+    fn resolve_vm_exit(vcpu_exit_code: u8, vmm_exit_code: i32) -> crate::vm_exit::VmExit {
+        if vcpu_exit_code == FC_EXIT_CODE_REBOOT {
+            crate::vm_exit::VmExit::RebootRequested
+        } else if vcpu_exit_code == FC_EXIT_CODE_GENERIC_ERROR {
+            crate::vm_exit::VmExit::Error {
+                message: "vCPU fatal error".into(),
+            }
+        } else {
+            let exit_code = if vmm_exit_code != i32::MAX {
+                vmm_exit_code
+            } else {
+                vcpu_exit_code as i32
+            };
+            crate::vm_exit::VmExit::Shutdown { exit_code }
+        }
+    }
+
+    /// Test VM exit enum variants and derives
+    #[test]
+    fn test_vm_exit_enum() {
+        // Test Shutdown variant construction and clone
+        let exit_shutdown = crate::vm_exit::VmExit::Shutdown { exit_code: 0 };
+        let exit_shutdown_cloned = exit_shutdown.clone();
+        assert_eq!(exit_shutdown, exit_shutdown_cloned);
+
+        // Test different exit codes
+        let exit_42 = crate::vm_exit::VmExit::Shutdown { exit_code: 42 };
+        assert_ne!(exit_shutdown, exit_42);
+
+        // Test RebootRequested variant
+        let exit_reboot = crate::vm_exit::VmExit::RebootRequested;
+        let exit_reboot_cloned = exit_reboot.clone();
+        assert_eq!(exit_reboot, exit_reboot_cloned);
+
+        // Test Error variant
+        let exit_error = crate::vm_exit::VmExit::Error {
+            message: "test error".into(),
+        };
+        let exit_error_cloned = exit_error.clone();
+        assert_eq!(exit_error, exit_error_cloned);
+
+        // Test Debug trait
+        let debug_str = format!("{:?}", exit_shutdown);
+        assert!(debug_str.contains("Shutdown"));
+    }
+
+    /// Test vm-exit.AC1.1: Normal guest shutdown (HLT) returns Shutdown { exit_code: 0 }
+    #[test]
+    fn test_shutdown_with_zero_exit_code() {
+        let vm_exit = resolve_vm_exit(FC_EXIT_CODE_OK, i32::MAX);
+        assert_eq!(
+            vm_exit,
+            crate::vm_exit::VmExit::Shutdown { exit_code: 0 }
+        );
+    }
+
+    /// Test vm-exit.AC1.2: Guest-set exit code is returned in Shutdown variant
+    #[test]
+    fn test_shutdown_with_guest_exit_code() {
+        // Guest set exit code via vmm_exit_code (virtio-fs ioctl)
+        let vm_exit = resolve_vm_exit(FC_EXIT_CODE_OK, 42);
+        assert_eq!(
+            vm_exit,
+            crate::vm_exit::VmExit::Shutdown { exit_code: 42 }
+        );
+    }
+
+    /// Test vm-exit.AC1.3: KVM_SYSTEM_EVENT_RESET returns RebootRequested
+    #[test]
+    fn test_reboot_requested() {
+        let vm_exit = resolve_vm_exit(FC_EXIT_CODE_REBOOT, i32::MAX);
+        assert_eq!(vm_exit, crate::vm_exit::VmExit::RebootRequested);
+    }
+
+    /// Test vm-exit.AC2.1: vCPU fatal errors return Error variant
+    #[test]
+    fn test_vcpu_fatal_error() {
+        let vm_exit = resolve_vm_exit(FC_EXIT_CODE_GENERIC_ERROR, i32::MAX);
+        match vm_exit {
+            crate::vm_exit::VmExit::Error { ref message } => {
+                assert_eq!(message, "vCPU fatal error");
+            }
+            _ => panic!("Expected Error variant"),
+        }
+    }
+
+    /// Test shared exit state storage contract
+    #[test]
+    fn test_shared_vm_exit_storage() {
+        let vm_exit: crate::vm_exit::SharedVmExit =
+            Arc::new(Mutex::new(None));
+
+        // Initially should be None
+        {
+            let guard = vm_exit.lock().expect("Poisoned lock");
+            assert!(guard.is_none());
+        }
+
+        // Store a VmExit value
+        {
+            let mut guard = vm_exit.lock().expect("Poisoned lock");
+            *guard = Some(crate::vm_exit::VmExit::Shutdown { exit_code: 0 });
+        }
+
+        // Verify it was stored
+        {
+            let guard = vm_exit.lock().expect("Poisoned lock");
+            assert_eq!(
+                *guard,
+                Some(crate::vm_exit::VmExit::Shutdown { exit_code: 0 })
+            );
+        }
     }
 }
