@@ -68,9 +68,6 @@ impl NetWorker {
             VirtioNetBackend::CustomAsyncFactory(_) => {
                 panic!("CustomAsyncFactory should use AsyncNetWorker, not NetWorker")
             }
-            VirtioNetBackend::Proxy { .. } => {
-                panic!("Proxy should use ProxyNetWorker, not NetWorker")
-            }
         };
 
         Ok(Self {
