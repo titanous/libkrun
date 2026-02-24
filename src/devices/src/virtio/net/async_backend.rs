@@ -18,8 +18,7 @@
 //! 2. Implement `AsyncNetBackend` for packet handling
 //! 3. Pass the factory to libkrun via `VirtioNetBackend::CustomAsyncFactory`
 //!
-//! See the async backend and worker integration in this module and
-//! `crate::virtio::net::proxy` for an end-to-end example pattern.
+//! See the async backend and worker integration in this module for patterns and guidance.
 
 use bytes::Bytes;
 use std::io;
@@ -99,7 +98,7 @@ pub trait AsyncNetBackend: 'static {
     /// packets. The returned bytes are included in the device's snapshot and
     /// passed back to `restore_snapshot_state` on restore.
     ///
-    /// Backends with connection state (e.g., smoltcp SocketSet, NAT mappings)
+    /// Backends with connection state (e.g., TCP/IP stack state, NAT mappings)
     /// should implement this to preserve open connections across snapshots.
     /// The serialization format is entirely up to the backend.
     ///
