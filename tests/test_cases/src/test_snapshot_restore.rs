@@ -39,12 +39,6 @@ mod host {
             stream.read_exact(&mut buf).unwrap();
             assert_eq!(&buf, b"READY");
 
-            // Give the vsock device and timesync thread a chance to fully initialize.
-            // The vsock quiesce operation needs the guest-side timesync thread to be
-            // running and responsive to quiesce signals. Even though the guest has
-            // connected to vsock, the timesync thread may not be fully ready yet.
-            thread::sleep(Duration::from_millis(3000));
-
             // Take full snapshot
             handle.snapshot(&snap_dir)?;
 
@@ -80,11 +74,6 @@ mod guest {
 
             // Set counter to 42 — this value must be preserved after restore
             COUNTER.store(42, std::sync::atomic::Ordering::SeqCst);
-
-            // Give vsock timesync thread time to initialize before we signal READY.
-            // The host will take a snapshot shortly after READY, and the vsock device
-            // needs to be quiesce-able (which requires the timesync thread to be running).
-            std::thread::sleep(Duration::from_millis(2000));
 
             let sock = socket(AddressFamily::Vsock, SockType::Stream, SockFlag::empty(), None)
                 .unwrap();
@@ -152,12 +141,6 @@ mod host_incr {
             stream.read_exact(&mut buf).unwrap();
             assert_eq!(&buf, b"READY");
 
-            // Give the vsock device and timesync thread a chance to fully initialize.
-            // The vsock quiesce operation needs the guest-side timesync thread to be
-            // running and responsive to quiesce signals. Even though the guest has
-            // connected to vsock, the timesync thread may not be fully ready yet.
-            thread::sleep(Duration::from_millis(3000));
-
             // Take full snapshot and enable dirty tracking
             handle.snapshot(&full_snap_dir)?;
             handle.enable_dirty_tracking()?;
@@ -198,18 +181,12 @@ mod guest_incr {
     use std::time::Duration;
 
     // A fixed-size buffer in data segment — this memory will be tracked as dirty.
-    // This is safe because the guest code is single-threaded.
-    #[allow(static_mut_refs)]
+    // SAFETY: guest code is single-threaded, so no concurrent access is possible.
     static mut TEST_REGION: [u8; 64] = [0u8; 64];
     const EXPECTED_PATTERN: u8 = 0xAB;
 
     impl Test for TestSnapshotRestoreIncremental {
         fn in_guest(self: Box<Self>) {
-            // Give vsock timesync thread time to initialize before we signal READY.
-            // The host will take a snapshot shortly after READY, and the vsock device
-            // needs to be quiesce-able (which requires the timesync thread to be running).
-            std::thread::sleep(Duration::from_millis(2000));
-
             let sock = socket(AddressFamily::Vsock, SockType::Stream, SockFlag::empty(), None)
                 .unwrap();
             let addr = VsockAddr::new(VMADDR_CID_HOST, VSOCK_PORT_INCR);
@@ -227,6 +204,7 @@ mod guest_incr {
             assert_eq!(&buf, b"WRITE");
 
             // Write known pattern into the region
+            #[allow(static_mut_refs)]
             unsafe { TEST_REGION.fill(EXPECTED_PATTERN); }
 
             stream.write_all(b"WRITTEN").unwrap();
@@ -237,6 +215,7 @@ mod guest_incr {
             assert_eq!(&buf, b"VERIFY");
 
             // After incremental restore, the written region should still have our pattern
+            #[allow(static_mut_refs)]
             let pattern = unsafe { TEST_REGION[0] };
             assert_eq!(
                 pattern, EXPECTED_PATTERN,
