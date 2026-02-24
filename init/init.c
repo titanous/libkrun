@@ -898,13 +898,13 @@ int reopen_fd(int fd, char *path, int flags)
         return -1;
     }
 
-    close(fd);
     if (dup2(newfd, fd) < 0) {
         perror("dup2");
         close(newfd);
         return -1;
     }
-    close(newfd);
+    if (newfd != fd)
+        close(newfd);
     return 0;
 }
 
