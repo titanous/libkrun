@@ -1095,6 +1095,8 @@ pub fn build_microvm(
         pio_device_manager,
         #[cfg(target_os = "macos")]
         dirty_bitmaps: Vec::new(),
+        nested_enabled: vm_resources.nested_enabled,
+        dirty_tracking_enabled: false,
         #[cfg(target_os = "macos")]
         vcpu_list: vcpu_list.clone(),
         #[cfg(target_os = "macos")]

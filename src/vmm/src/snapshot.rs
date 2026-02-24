@@ -39,6 +39,8 @@ pub enum SnapshotError {
         expected: usize,
         got: usize,
     },
+    NestedEnabledMismatch,
+    DirtyTrackingNotEnabled,
 }
 
 impl Display for SnapshotError {
@@ -60,6 +62,12 @@ impl Display for SnapshotError {
             }
             SnapshotError::VcpuCountMismatch { expected, got } => {
                 write!(f, "vCPU count mismatch: expected {expected}, got {got}")
+            }
+            SnapshotError::NestedEnabledMismatch => {
+                write!(f, "Nested virtualization enabled mismatch between snapshot and current VM")
+            }
+            SnapshotError::DirtyTrackingNotEnabled => {
+                write!(f, "Dirty tracking is not enabled")
             }
         }
     }
@@ -85,6 +93,7 @@ pub fn validate_header_for_vm(
     header: &SnapshotHeader,
     guest_memory: &GuestMemoryMmap,
     expected_vcpu_count: usize,
+    expected_nested_enabled: bool,
 ) -> Result<(), SnapshotError> {
     validate_magic_and_version(header)?;
 
@@ -101,6 +110,10 @@ pub fn validate_header_for_vm(
             expected: expected_vcpu_count,
             got: header.vcpu_count as usize,
         });
+    }
+
+    if header.nested_enabled != expected_nested_enabled {
+        return Err(SnapshotError::NestedEnabledMismatch);
     }
 
     Ok(())

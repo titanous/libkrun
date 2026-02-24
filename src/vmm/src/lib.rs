@@ -218,6 +218,10 @@ pub struct Vmm {
     #[cfg(target_os = "macos")]
     dirty_bitmaps: Vec<dirty_bitmap::DirtyBitmap>,
 
+    // Snapshot and dirty tracking state.
+    nested_enabled: bool,
+    dirty_tracking_enabled: bool,
+
     // Interrupt controller state needed for snapshots.
     #[cfg(target_os = "macos")]
     #[cfg_attr(not(feature = "snapshot"), allow(dead_code))]
@@ -447,6 +451,7 @@ impl Vmm {
             &vmstate.header,
             &self.guest_memory,
             self.vcpus_handles.len(),
+            self.nested_enabled,
         )?;
 
         self.mmio_device_manager
@@ -652,6 +657,7 @@ impl Vmm {
             &vmstate.header,
             &self.guest_memory,
             self.vcpus_handles.len(),
+            self.nested_enabled,
         )?;
 
         // Quiesce all async device workers before overwriting guest memory.
@@ -752,6 +758,8 @@ impl Vmm {
                 .map_err(Error::VcpuEvent)?;
         }
 
+        self.dirty_tracking_enabled = true;
+
         Ok(())
     }
 
@@ -783,6 +791,10 @@ impl Vmm {
         path: &std::path::Path,
     ) -> std::result::Result<(), snapshot::SnapshotError> {
         use vm_memory::{GuestAddress, GuestMemory, GuestMemoryRegion};
+
+        if !self.dirty_tracking_enabled {
+            return Err(snapshot::SnapshotError::DirtyTrackingNotEnabled);
+        }
 
         // Save device state before vCPU state (Firecracker convention).
         let device_states = self
@@ -868,6 +880,7 @@ impl Vmm {
             &incremental.header,
             &self.guest_memory,
             self.vcpus_handles.len(),
+            self.nested_enabled,
         )?;
 
         // Quiesce all async device workers before overwriting guest memory.
@@ -940,6 +953,7 @@ impl Vmm {
                     .map_err(|e| Error::Vm(vstate::Error::SetUserMemoryRegion(e)))?;
             }
         }
+        self.dirty_tracking_enabled = true;
         Ok(())
     }
 
@@ -998,6 +1012,10 @@ impl Vmm {
         &mut self,
         path: &std::path::Path,
     ) -> std::result::Result<(), snapshot::SnapshotError> {
+        if !self.dirty_tracking_enabled {
+            return Err(snapshot::SnapshotError::DirtyTrackingNotEnabled);
+        }
+
         let device_states = self
             .mmio_device_manager
             .save_all_device_states()
@@ -1055,6 +1073,7 @@ impl Vmm {
             &incremental.header,
             &self.guest_memory,
             self.vcpus_handles.len(),
+            self.nested_enabled,
         )?;
 
         self.mmio_device_manager
