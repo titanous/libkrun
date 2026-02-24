@@ -20,4 +20,3 @@ tempdir = "0.3.7"
 tokio = { version = "1", features = ["sync"] }
 bytes = "1"
 pnet = "0.35"
-pnet_base = "0.35"

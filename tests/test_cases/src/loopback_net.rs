@@ -1,5 +1,3 @@
-#![cfg(feature = "host")]
-
 use std::io;
 use bytes::Bytes;
 use pnet::packet::ethernet::{EthernetPacket, EtherTypes, MutableEthernetPacket};
@@ -52,23 +50,7 @@ impl LoopbackBackend {
         Self { to_guest }
     }
 
-    fn icmp_checksum(data: &[u8]) -> u16 {
-        let mut sum: u32 = 0;
-        let mut i = 0;
-        while i + 1 < data.len() {
-            sum += ((data[i] as u32) << 8) | (data[i + 1] as u32);
-            i += 2;
-        }
-        if i < data.len() {
-            sum += (data[i] as u32) << 8;
-        }
-        while sum >> 16 != 0 {
-            sum = (sum & 0xffff) + (sum >> 16);
-        }
-        !sum as u16
-    }
-
-    fn ipv4_checksum(data: &[u8]) -> u16 {
+    fn internet_checksum(data: &[u8]) -> u16 {
         let mut sum: u32 = 0;
         let mut i = 0;
         while i + 1 < data.len() {
@@ -149,7 +131,7 @@ impl AsyncNetBackend for LoopbackBackend {
                                     }
 
                                     // Modify IPv4 header (starting at offset 14)
-                                    let ipv4_len = ((reply_buf[14] & 0x0f) as usize * 4);
+                                    let ipv4_len = (reply_buf[14] & 0x0f) as usize * 4;
                                     {
                                         let mut ipv4_reply =
                                             MutableIpv4Packet::new(&mut reply_buf[14..]).unwrap();
@@ -161,7 +143,7 @@ impl AsyncNetBackend for LoopbackBackend {
                                         ipv4_reply.set_checksum(0);
                                     }
                                     // Compute IPv4 checksum on a copy
-                                    let ipv4_cksum = Self::ipv4_checksum(&reply_buf[14..14 + ipv4_len]);
+                                    let ipv4_cksum = Self::internet_checksum(&reply_buf[14..14 + ipv4_len]);
                                     {
                                         let mut ipv4_reply =
                                             MutableIpv4Packet::new(&mut reply_buf[14..]).unwrap();
@@ -178,7 +160,7 @@ impl AsyncNetBackend for LoopbackBackend {
                                         icmp_reply.set_checksum(0);
                                     }
                                     // Compute ICMP checksum on a copy
-                                    let icmp_cksum = Self::icmp_checksum(&reply_buf[icmp_offset..]);
+                                    let icmp_cksum = Self::internet_checksum(&reply_buf[icmp_offset..]);
                                     {
                                         let mut icmp_reply =
                                             MutableIcmpPacket::new(&mut reply_buf[icmp_offset..])
