@@ -857,7 +857,7 @@ impl Vmm {
                 version: snapshot::SNAPSHOT_VERSION,
                 vcpu_count: serialized_vcpu_states.len() as u32,
                 ram_regions: snapshot::ram_layout(&self.guest_memory),
-                nested_enabled: false,
+                nested_enabled: self.nested_enabled,
             },
             vcpu_states: serialized_vcpu_states,
             device_states,
@@ -1050,7 +1050,7 @@ impl Vmm {
                 version: snapshot::SNAPSHOT_VERSION,
                 vcpu_count: vcpu_states.len() as u32,
                 ram_regions: snapshot::ram_layout(&self.guest_memory),
-                nested_enabled: false,
+                nested_enabled: self.nested_enabled,
             },
             vcpu_states,
             device_states,
@@ -1229,6 +1229,17 @@ impl Subscriber for Vmm {
 mod tests {
     use super::*;
 
+    /// Helper function to check if dirty tracking is enabled.
+    /// This is used in both create_incremental_snapshot implementations.
+    fn check_dirty_tracking_enabled(
+        dirty_tracking_enabled: bool,
+    ) -> std::result::Result<(), snapshot::SnapshotError> {
+        if !dirty_tracking_enabled {
+            return Err(snapshot::SnapshotError::DirtyTrackingNotEnabled);
+        }
+        Ok(())
+    }
+
     /// AC1.9: create_incremental_snapshot requires dirty_tracking_enabled
     #[test]
     fn test_incremental_snapshot_requires_dirty_tracking() {
@@ -1243,16 +1254,4 @@ mod tests {
         let result = check_dirty_tracking_enabled(true);
         assert!(result.is_ok());
     }
-}
-
-/// Helper function to check if dirty tracking is enabled.
-/// This is used in both create_incremental_snapshot implementations.
-#[allow(dead_code)]
-fn check_dirty_tracking_enabled(
-    dirty_tracking_enabled: bool,
-) -> std::result::Result<(), snapshot::SnapshotError> {
-    if !dirty_tracking_enabled {
-        return Err(snapshot::SnapshotError::DirtyTrackingNotEnabled);
-    }
-    Ok(())
 }

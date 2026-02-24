@@ -433,7 +433,7 @@ mod tests {
         assert!(matches!(result, Err(SnapshotError::MemoryLayoutMismatch { .. })));
     }
 
-    /// AC1.6: Memory size mismatch
+    /// AC1.5b: Memory layout mismatch (different regions)
     #[test]
     fn test_size_mismatch() {
         let mem = make_memory(&[(0x1000, 0x2000)]);
@@ -446,17 +446,55 @@ mod tests {
         assert!(matches!(result, Err(SnapshotError::MemoryLayoutMismatch { .. })));
     }
 
-    /// AC1.7: Truncated/Invalid vmstate data
+    /// AC1.6: Memory file size mismatch via load_memory
     #[cfg(feature = "snapshot")]
     #[test]
-    fn test_invalid_vmstate_data() {
-        // Try to deserialize a VmSnapshot from invalid data
-        let invalid_data = vec![0x01, 0x02, 0x03, 0x04];
-        let result: std::result::Result<VmSnapshot, _> =
-            bincode::deserialize(&invalid_data);
+    fn test_memory_file_size_mismatch() {
+        use std::io::Write;
+
+        let mem = make_memory(&[(0x1000, 0x2000)]);
+
+        // Create a temp file with incorrect size
+        let mut temp_file = std::io::Cursor::new(Vec::new());
+        // Write only 0x1000 bytes when expecting 0x2000
+        temp_file.write_all(&vec![0u8; 0x1000]).unwrap();
+
+        // We need to test load_memory with a real file, use a temp directory
+        let temp_dir = std::path::PathBuf::from("/tmp");
+        let temp_path = temp_dir.join(format!("libkrun_test_{}.bin", std::process::id()));
+
+        // Write wrong-sized memory file
+        std::fs::write(&temp_path, vec![0u8; 0x1000]).unwrap();
+
+        let result = load_memory(&mem, &temp_path);
+        let _ = std::fs::remove_file(&temp_path);
+
+        assert!(matches!(
+            result,
+            Err(SnapshotError::MemorySizeMismatch { expected: 0x2000, got: 0x1000 })
+        ));
+    }
+
+    /// AC1.7: Truncated/Invalid vmstate file
+    #[cfg(feature = "snapshot")]
+    #[test]
+    fn test_truncated_vmstate_file() {
+        use std::io::Write;
+
+        // Create a temp file with truncated/invalid vmstate data
+        let temp_dir = std::path::PathBuf::from("/tmp");
+        let temp_path = temp_dir.join(format!("libkrun_test_vmstate_{}.bin", std::process::id()));
+
+        // Write just a few bytes (not a valid serialized VmSnapshot)
+        let mut file = std::fs::File::create(&temp_path).unwrap();
+        file.write_all(&[0x01, 0x02, 0x03, 0x04]).unwrap();
+        drop(file);
+
+        let result = load_vmstate(&temp_path);
+        let _ = std::fs::remove_file(&temp_path);
 
         // Should fail to deserialize
-        assert!(result.is_err());
+        assert!(matches!(result, Err(SnapshotError::Deserialize(_))));
     }
 
     /// AC1.8: Nested enabled mismatch
