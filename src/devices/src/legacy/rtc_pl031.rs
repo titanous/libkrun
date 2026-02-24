@@ -9,10 +9,11 @@
 //!
 
 use std::fmt;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use std::{io, result};
 
 use crate::BusDevice;
+use crate::snapshot::{SnapshotError, Snapshottable};
 use utils::byte_order;
 use utils::eventfd::EventFd;
 //use bus::Error;
@@ -53,6 +54,17 @@ impl fmt::Display for Error {
     }
 }
 type Result<T> = result::Result<T, Error>;
+
+#[cfg_attr(feature = "snapshot", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone)]
+struct RtcState {
+    tick_offset: i64,
+    previous_now_elapsed_nanos: u64,
+    load: u32,
+    match_value: u32,
+    imsc: u32,
+    ris: u32,
+}
 
 /// A RTC device following the PL031 specification..
 pub struct RTC {
@@ -178,6 +190,69 @@ impl BusDevice for RTC {
             );
         }
     }
+
+    fn as_snapshottable(&self) -> Option<&dyn Snapshottable> {
+        Some(self)
+    }
+
+    fn as_snapshottable_mut(&mut self) -> Option<&mut dyn Snapshottable> {
+        Some(self)
+    }
+}
+
+impl Snapshottable for RTC {
+    fn snapshot_id(&self) -> &str {
+        "pl031"
+    }
+
+    fn save_state(&self) -> std::result::Result<Vec<u8>, SnapshotError> {
+        let elapsed = Instant::now()
+            .duration_since(self.previous_now)
+            .as_nanos() as u64;
+        let state = RtcState {
+            tick_offset: self.tick_offset,
+            previous_now_elapsed_nanos: elapsed,
+            load: self.load,
+            match_value: self.match_value,
+            imsc: self.imsc,
+            ris: self.ris,
+        };
+
+        #[cfg(feature = "snapshot")]
+        {
+            bincode::serialize(&state).map_err(|e| SnapshotError::Serialize(e.to_string()))
+        }
+        #[cfg(not(feature = "snapshot"))]
+        {
+            let _ = state;
+            Err(SnapshotError::Serialize(
+                "snapshot feature not enabled".to_string(),
+            ))
+        }
+    }
+
+    fn restore_state(&mut self, data: &[u8]) -> std::result::Result<(), SnapshotError> {
+        #[cfg(feature = "snapshot")]
+        {
+            let state: RtcState = bincode::deserialize(data)
+                .map_err(|e| SnapshotError::Deserialize(e.to_string()))?;
+            self.previous_now =
+                Instant::now() - Duration::from_nanos(state.previous_now_elapsed_nanos);
+            self.tick_offset = state.tick_offset;
+            self.load = state.load;
+            self.match_value = state.match_value;
+            self.imsc = state.imsc;
+            self.ris = state.ris;
+            Ok(())
+        }
+        #[cfg(not(feature = "snapshot"))]
+        {
+            let _ = data;
+            Err(SnapshotError::Deserialize(
+                "snapshot feature not enabled".to_string(),
+            ))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -237,5 +312,68 @@ mod tests {
         rtc.read(0, AMBA_ID_LOW, &mut data);
         let index = AMBA_ID_LOW + 3;
         assert_eq!(data[0], PL031_ID[((index - AMBA_ID_LOW) >> 2) as usize]);
+    }
+
+    #[test]
+    #[cfg(feature = "snapshot")]
+    fn test_rtc_snapshot_preserves_registers() {
+        let mut rtc = RTC::new(EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap());
+        let mut data = [0; 4];
+
+        // Set up non-default register values
+        // Write to RTCMR (match value)
+        byte_order::write_le_u32(&mut data, 0x12345678);
+        rtc.write(0, RTCMR, &data);
+
+        // Write to RTCLR (load value)
+        let load_value = 0x11223344u32;
+        byte_order::write_le_u32(&mut data, load_value);
+        rtc.write(0, RTCLR, &data);
+
+        // Write to RTCIMSC (interrupt mask)
+        byte_order::write_le_u32(&mut data, 1);
+        rtc.write(0, RTCIMSC, &data);
+
+        // Verify initial state
+        rtc.read(0, RTCMR, &mut data);
+        let mr = byte_order::read_le_u32(&data);
+        assert_eq!(mr, 0x12345678);
+
+        rtc.read(0, RTCLR, &mut data);
+        let lr = byte_order::read_le_u32(&data);
+        assert_eq!(lr, load_value);
+
+        rtc.read(0, RTCIMSC, &mut data);
+        let imsc = byte_order::read_le_u32(&data);
+        assert_eq!(imsc, 1);
+
+        // Save state
+        let saved_state = rtc.save_state().expect("Failed to save RTC state");
+
+        // Create a fresh RTC and restore
+        let mut rtc_restored = RTC::new(EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap());
+        rtc_restored
+            .restore_state(&saved_state)
+            .expect("Failed to restore RTC state");
+
+        // Verify registers after restore
+        rtc_restored.read(0, RTCMR, &mut data);
+        let mr_restored = byte_order::read_le_u32(&data);
+        assert_eq!(mr_restored, 0x12345678, "Match value not preserved");
+
+        rtc_restored.read(0, RTCLR, &mut data);
+        let lr_restored = byte_order::read_le_u32(&data);
+        assert_eq!(lr_restored, load_value, "Load value not preserved");
+
+        rtc_restored.read(0, RTCIMSC, &mut data);
+        let imsc_restored = byte_order::read_le_u32(&data);
+        assert_eq!(imsc_restored, 1, "IMSC not preserved");
+
+        // Verify get_time() returns a consistent value (within tolerance)
+        let time_before_save = rtc.get_time();
+        let time_after_restore = rtc_restored.get_time();
+        // Allow some tolerance for test execution time (a few seconds)
+        let time_diff = (time_after_restore as i64 - time_before_save as i64).abs();
+        assert!(time_diff < 5, "Time difference too large: {}", time_diff);
     }
 }
