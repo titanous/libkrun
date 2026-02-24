@@ -1286,7 +1286,6 @@ dependencies = [
  "macros",
  "nix 0.29.0",
  "pnet",
- "pnet_base",
  "tempdir",
  "tokio",
 ]

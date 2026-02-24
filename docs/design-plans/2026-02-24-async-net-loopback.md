@@ -130,7 +130,7 @@ Packet crafting with pnet follows the same approach used in the current `proxy.r
 
 **Dependencies:** Phase 1 (proxy code removed, `VirtioNetBackend::Proxy` gone)
 
-**Done when:** `make test FEATURE_FLAGS="--features embedded_init"` passes with the new test exercising the async backend path. Guest successfully pings `192.168.100.1` through the loopback backend. Covers `async-net-loopback.AC1.*` and `async-net-loopback.AC2.*`.
+**Done when:** `make test FEATURE_FLAGS="--features embedded_init"` passes with the new test exercising the async backend path. Guest successfully pings `192.168.100.1` through the loopback backend. Covers `async-net-loopback.AC2.*`, `async-net-loopback.AC3.*`, and `async-net-loopback.AC4.1`.
 <!-- END_PHASE_2 -->
 
 ## Additional Considerations
