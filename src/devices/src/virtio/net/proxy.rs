@@ -31,7 +31,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
-use tracing::{debug, error, info, trace, warn};
+use tracing::{error, info, trace, warn};
 use utils::eventfd::EventFd;
 use virtio_bindings::virtio_net::virtio_net_hdr_v1;
 use vm_memory::{Bytes as MemBytes, GuestMemoryMmap};
@@ -769,83 +769,92 @@ impl ProxyNetWorker {
     }
 
     fn handle_unix_listener_event(&mut self, token: Token) {
-        // Retrieve the listener and the target guest port.
-        if let Some((listener, guest_port)) = self.unix_listeners.remove(&token) {
-            loop {
-                let (mut stream, _addr) = match listener.accept() {
-                    Ok(res) => res,
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        // No more pending connections to accept.
-                        break;
-                    }
-                    Err(e) => {
-                        error!(?token, error = %e, "Failed to accept unix socket connection");
-                        // FIXME: probably need to cleanup something
-                        break;
-                    }
-                };
+        // Retrieve guest port without removing listener from map.
+        let guest_port = if let Some((_, guest_port)) = self.unix_listeners.get(&token) {
+            *guest_port
+        } else {
+            return;
+        };
 
-                trace!(
-                    ?token,
-                    port = guest_port,
-                    "Accepted new unix socket connection"
-                );
+        loop {
+            // Borrow listener mutably from the map for the accept call.
+            let accept_result = if let Some((listener, _)) = self.unix_listeners.get_mut(&token) {
+                listener.accept()
+            } else {
+                break;
+            };
 
-                // Create the smoltcp TCP socket that will connect TO the guest.
-                let rx_buffer = smoltcp::socket::tcp::SocketBuffer::new(vec![0; 65535]);
-                let tx_buffer = smoltcp::socket::tcp::SocketBuffer::new(vec![0; 65535]);
-                let mut smoltcp_socket = smoltcp::socket::tcp::Socket::new(rx_buffer, tx_buffer);
+            let (mut stream, _addr) = match accept_result {
+                Ok(res) => res,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    // No more pending connections to accept.
+                    break;
+                }
+                Err(e) => {
+                    error!(?token, error = %e, "Failed to accept unix socket connection");
+                    // FIXME: probably need to cleanup something
+                    break;
+                }
+            };
 
-                // Set up the connection parameters. The remote endpoint is the guest.
-                let remote_endpoint = IpEndpoint::new(IpAddress::from(VM_IP), guest_port);
-                let ephemeral_port = match self.get_ephemeral_port() {
-                    Ok(port) => port,
-                    Err(ProxyError::EphemeralPortsExhausted) => {
-                        error!(?token, "ephemeral ports exhausted, cannot accept new connection");
-                        self.unix_listeners.insert(token, (listener, guest_port));
-                        continue;
-                    }
-                };
+            trace!(
+                ?token,
+                port = guest_port,
+                "Accepted new unix socket connection"
+            );
 
-                trace!(?token, "connecting to {remote_endpoint}");
+            // Create the smoltcp TCP socket that will connect TO the guest.
+            let rx_buffer = smoltcp::socket::tcp::SocketBuffer::new(vec![0; 65535]);
+            let tx_buffer = smoltcp::socket::tcp::SocketBuffer::new(vec![0; 65535]);
+            let mut smoltcp_socket = smoltcp::socket::tcp::Socket::new(rx_buffer, tx_buffer);
 
-                // Tell the smoltcp socket to initiate a connection.
-                smoltcp_socket
-                    .connect(
-                        self.iface.context(),
-                        remote_endpoint,
-                        IpListenEndpoint {
-                            port: ephemeral_port,
-                            addr: Some(IpAddress::Ipv4(PROXY_IP)),
-                        },
-                    )
-                    .unwrap();
-                let smoltcp_handle = self.sockets.add(smoltcp_socket);
+            // Set up the connection parameters. The remote endpoint is the guest.
+            let remote_endpoint = IpEndpoint::new(IpAddress::from(VM_IP), guest_port);
+            let ephemeral_port = match self.get_ephemeral_port() {
+                Ok(port) => port,
+                Err(ProxyError::EphemeralPortsExhausted) => {
+                    error!(?token, "ephemeral ports exhausted, cannot accept new connection");
+                    continue;
+                }
+            };
 
-                // Register the new stream with mio for read/write events.
-                let new_token = Token(self.next_token);
-                self.next_token += 1;
-                self.registry
-                    .register(
-                        &mut stream,
-                        new_token,
-                        Interest::READABLE | Interest::WRITABLE,
-                    )
-                    .unwrap();
+            trace!(?token, "connecting to {remote_endpoint}");
 
-                // Add the new active connection to our tracking map.
-                self.host_connections.insert(
-                    new_token,
-                    Conn {
-                        socket: HostSocket::Unix(stream),
-                        handle: smoltcp_handle,
-                        last_activity: Instant::now(),
+            // Tell the smoltcp socket to initiate a connection.
+            smoltcp_socket
+                .connect(
+                    self.iface.context(),
+                    remote_endpoint,
+                    IpListenEndpoint {
+                        port: ephemeral_port,
+                        addr: Some(IpAddress::Ipv4(PROXY_IP)),
                     },
-                );
+                )
+                .unwrap();
+            let smoltcp_handle = self.sockets.add(smoltcp_socket);
 
-                trace!(token = ?new_token, "assigned token to proxy (host unix) connection");
-            }
-            self.unix_listeners.insert(token, (listener, guest_port));
+            // Register the new stream with mio for read/write events.
+            let new_token = Token(self.next_token);
+            self.next_token += 1;
+            self.registry
+                .register(
+                    &mut stream,
+                    new_token,
+                    Interest::READABLE | Interest::WRITABLE,
+                )
+                .unwrap();
+
+            // Add the new active connection to our tracking map.
+            self.host_connections.insert(
+                new_token,
+                Conn {
+                    socket: HostSocket::Unix(stream),
+                    handle: smoltcp_handle,
+                    last_activity: Instant::now(),
+                },
+            );
+
+            trace!(token = ?new_token, "assigned token to proxy (host unix) connection");
         }
     }
 
@@ -937,6 +946,7 @@ impl ProxyNetWorker {
                                         last_activity: Instant::now(),
                                     },
                                 );
+                                return true;
                             }
                         }
                     }
@@ -1599,6 +1609,7 @@ mod tests {
         use pnet::packet::ethernet::{EtherTypes, MutableEthernetPacket};
         use pnet::packet::ipv4::MutableIpv4Packet;
         use pnet::packet::tcp::MutableTcpPacket;
+        use pnet_base::MacAddr;
         use std::sync::atomic::AtomicUsize;
         use std::sync::Arc;
         use utils::eventfd::EventFd;
@@ -1615,7 +1626,7 @@ mod tests {
         let interrupt_evt = EventFd::new(0).unwrap();
 
         // Construct a minimal ProxyNetWorker
-        let mut proxy = match ProxyNetWorker::new(
+        let mut proxy = ProxyNetWorker::new(
             queues,
             queue_evts,
             interrupt_status,
@@ -1624,12 +1635,9 @@ mod tests {
             None, // no IRQ line
             mem,
             vec![], // no listeners
-        ) {
-            Ok(p) => p,
-            Err(_) => return, // Skip if construction fails
-        };
+        ).expect("ProxyNetWorker::new should succeed in test environment");
 
-        let socket_count_before = proxy.sockets.len();
+        let socket_count_before = proxy.sockets.iter().count();
 
         // Construct a TCP SYN packet targeting localhost:[listener_port]
         // Ethernet + IPv4 + TCP headers
@@ -1643,8 +1651,8 @@ mod tests {
         // Build Ethernet header
         {
             let mut eth = MutableEthernetPacket::new(&mut buf[..ETH_HEADER_SIZE]).unwrap();
-            eth.set_source(EthernetAddress([0xde, 0xad, 0xbe, 0xef, 0x00, 0x00]));
-            eth.set_destination(EthernetAddress([0x02, 0x00, 0x00, 0x01, 0x02, 0x03]));
+            eth.set_source(MacAddr(0xde, 0xad, 0xbe, 0xef, 0x00, 0x00));
+            eth.set_destination(MacAddr(0x02, 0x00, 0x00, 0x01, 0x02, 0x03));
             eth.set_ethertype(EtherTypes::Ipv4);
         }
 
@@ -1681,7 +1689,7 @@ mod tests {
         assert!(intercepted, "TCP SYN packet should be intercepted");
 
         // Assert socket count grew by 1 (a smoltcp twin socket was created)
-        let socket_count_after = proxy.sockets.len();
+        let socket_count_after = proxy.sockets.iter().count();
         assert!(
             socket_count_after > socket_count_before,
             "Socket count should increase after TCP SYN interception"
@@ -1711,7 +1719,7 @@ mod tests {
         let interrupt_evt = EventFd::new(0).unwrap();
 
         // Construct a minimal ProxyNetWorker
-        let mut proxy = match ProxyNetWorker::new(
+        let mut proxy = ProxyNetWorker::new(
             queues,
             queue_evts,
             interrupt_status,
@@ -1720,10 +1728,7 @@ mod tests {
             None,
             mem,
             vec![],
-        ) {
-            Ok(p) => p,
-            Err(_) => return,
-        };
+        ).expect("ProxyNetWorker::new should succeed in test environment");
 
         // Assert NAT table is initially empty
         assert_eq!(proxy.nat_table.len(), 0, "NAT table should be empty initially");
@@ -1772,7 +1777,7 @@ mod tests {
         let interrupt_evt = EventFd::new(0).unwrap();
 
         // Construct a minimal ProxyNetWorker
-        let mut proxy = match ProxyNetWorker::new(
+        let mut proxy = ProxyNetWorker::new(
             queues,
             queue_evts,
             interrupt_status,
@@ -1781,10 +1786,7 @@ mod tests {
             None,
             mem,
             vec![],
-        ) {
-            Ok(p) => p,
-            Err(_) => return,
-        };
+        ).expect("ProxyNetWorker::new should succeed in test environment");
 
         let guest_addr = std::net::Ipv4Addr::new(192, 168, 100, 2);
         let dest_addr = std::net::Ipv4Addr::new(127, 0, 0, 1);
@@ -1843,7 +1845,7 @@ mod tests {
         let interrupt_evt = EventFd::new(0).unwrap();
 
         // Construct a minimal ProxyNetWorker
-        let mut proxy = match ProxyNetWorker::new(
+        let mut proxy = ProxyNetWorker::new(
             queues,
             queue_evts,
             interrupt_status,
@@ -1852,10 +1854,7 @@ mod tests {
             None,
             mem,
             vec![],
-        ) {
-            Ok(p) => p,
-            Err(_) => return,
-        };
+        ).expect("ProxyNetWorker::new should succeed in test environment");
 
         // Test 1: Fresh worker should return Ok with a valid port
         let result = proxy.get_ephemeral_port();
