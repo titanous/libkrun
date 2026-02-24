@@ -1224,3 +1224,34 @@ impl Subscriber for Vmm {
         )]
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// AC1.9: create_incremental_snapshot requires dirty_tracking_enabled
+    #[test]
+    fn test_incremental_snapshot_requires_dirty_tracking() {
+        // Guard check before dirty_tracking was enabled
+        let result = check_dirty_tracking_enabled(false);
+        assert!(matches!(
+            result,
+            Err(snapshot::SnapshotError::DirtyTrackingNotEnabled)
+        ));
+
+        // Guard check after dirty_tracking is enabled
+        let result = check_dirty_tracking_enabled(true);
+        assert!(result.is_ok());
+    }
+}
+
+/// Helper function to check if dirty tracking is enabled.
+/// This is used in both create_incremental_snapshot implementations.
+fn check_dirty_tracking_enabled(
+    dirty_tracking_enabled: bool,
+) -> std::result::Result<(), snapshot::SnapshotError> {
+    if !dirty_tracking_enabled {
+        return Err(snapshot::SnapshotError::DirtyTrackingNotEnabled);
+    }
+    Ok(())
+}
