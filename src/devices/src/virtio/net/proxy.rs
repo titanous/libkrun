@@ -46,6 +46,12 @@ const PROXY_MAC: EthernetAddress = EthernetAddress([0x02, 0x00, 0x00, 0x01, 0x02
 const VM_IP: Ipv4Address = Ipv4Address::new(192, 168, 100, 2);
 const PROXY_IP: Ipv4Address = Ipv4Address::new(192, 168, 100, 1);
 
+// --- Error Types ---
+#[derive(Debug, Clone)]
+pub(crate) enum ProxyError {
+    EphemeralPortsExhausted,
+}
+
 /// Represents the virtio-net device as a `smoltcp` PHY device.
 /// This acts as the bridge between the VM's virtio queues and the smoltcp stack.
 struct VirtualDevice {
@@ -792,7 +798,14 @@ impl ProxyNetWorker {
 
                 // Set up the connection parameters. The remote endpoint is the guest.
                 let remote_endpoint = IpEndpoint::new(IpAddress::from(VM_IP), guest_port);
-                let ephemeral_port = self.get_ephemeral_port();
+                let ephemeral_port = match self.get_ephemeral_port() {
+                    Ok(port) => port,
+                    Err(ProxyError::EphemeralPortsExhausted) => {
+                        error!(?token, "ephemeral ports exhausted, cannot accept new connection");
+                        self.unix_listeners.insert(token, (listener, guest_port));
+                        continue;
+                    }
+                };
 
                 trace!(?token, "connecting to {remote_endpoint}");
 
@@ -1139,11 +1152,12 @@ impl ProxyNetWorker {
         }
     }
 
-    fn get_ephemeral_port(&mut self) -> u16 {
+    fn get_ephemeral_port(&mut self) -> Result<u16, ProxyError> {
         const EPHEMERAL_PORT_MIN: u16 = 49152;
+        const EPHEMERAL_PORT_MAX: u16 = 65535;
+        let total_ports = (EPHEMERAL_PORT_MAX - EPHEMERAL_PORT_MIN) as u32 + 1;
 
-        loop {
-            // Get the next port number from our counter.
+        for _ in 0..total_ports {
             let candidate_port = self.next_ephemeral_port;
 
             // Increment the counter for the next time, wrapping around if needed.
@@ -1165,11 +1179,13 @@ impl ProxyNetWorker {
 
             // If the port is not in use, we've found one. Return it.
             if !is_in_use {
-                return candidate_port;
+                return Ok(candidate_port);
             }
 
             // Otherwise, the loop continues and we'll try the next port.
         }
+
+        Err(ProxyError::EphemeralPortsExhausted)
     }
 
     fn handle_udp_datagram(
