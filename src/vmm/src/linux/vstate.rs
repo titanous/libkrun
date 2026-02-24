@@ -26,7 +26,7 @@ use std::thread;
 #[cfg(target_arch = "x86_64")]
 use std::time::Duration;
 
-use super::super::{FC_EXIT_CODE_GENERIC_ERROR, FC_EXIT_CODE_OK};
+use super::super::{FC_EXIT_CODE_GENERIC_ERROR, FC_EXIT_CODE_OK, FC_EXIT_CODE_REBOOT};
 
 #[cfg(feature = "amd-sev")]
 use super::tee::amdsnp::{AmdSnp, Error as SnpError};
@@ -1623,11 +1623,19 @@ impl Vcpu {
                 }
                 VcpuExit::SystemEvent(event, _reason) => {
                     match event {
-                        KVM_SYSTEM_EVENT_SHUTDOWN => info!("Received KVM_SYSTEM_EVENT_SHUTDOWN"),
-                        KVM_SYSTEM_EVENT_RESET => info!("Received KVM_SYSTEM_EVENT_RESET"),
-                        _ => error!("Received an unexpected System Event: {event}"),
+                        KVM_SYSTEM_EVENT_SHUTDOWN => {
+                            info!("Received KVM_SYSTEM_EVENT_SHUTDOWN");
+                            Ok(VcpuEmulation::Stopped)
+                        }
+                        KVM_SYSTEM_EVENT_RESET => {
+                            info!("Received KVM_SYSTEM_EVENT_RESET");
+                            Ok(VcpuEmulation::Rebooted)
+                        }
+                        _ => {
+                            error!("Received an unexpected System Event: {event}");
+                            Ok(VcpuEmulation::Stopped)
+                        }
                     }
-                    Ok(VcpuEmulation::Stopped)
                 }
                 r => {
                     // TODO: Are we sure we want to finish running a vcpu upon
@@ -1683,6 +1691,7 @@ impl Vcpu {
                 // seccomp failure because musl calls `sigprocmask` as part of `pthread_exit`.
                 // So we pause vCPU0 and send a signal to the emulation thread to stop the VMM.
                 Ok(VcpuEmulation::Stopped) => return self.exit(FC_EXIT_CODE_OK),
+                Ok(VcpuEmulation::Rebooted) => return self.exit(FC_EXIT_CODE_REBOOT),
                 // Emulation errors lead to vCPU exit.
                 Err(_) => return self.exit(FC_EXIT_CODE_GENERIC_ERROR),
             }
@@ -1993,6 +2002,7 @@ enum VcpuEmulation {
     Handled,
     Interrupted,
     Stopped,
+    Rebooted,
 }
 
 #[cfg(test)]
