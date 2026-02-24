@@ -23,7 +23,7 @@ use std::cmp;
 use std::io::Write;
 use std::os::fd::RawFd;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 use utils::eventfd::{EventFd, EFD_NONBLOCK};
@@ -301,7 +301,11 @@ impl VirtioDevice for Net {
             }
             VirtioNetBackend::Proxy { listeners } => {
                 debug!("virtio-net ({}): starting proxy worker", self.id());
-                let interrupt_status = Arc::clone(interrupt.status());
+                // ProxyNetWorker needs Arc<AtomicUsize> for interrupt_status.
+                // InterruptTransport wraps the status in an Arc at the outer level,
+                // but status() returns &AtomicUsize (a reference to the inner field).
+                // We can't reconstruct the Arc, so we need to create a new one.
+                let interrupt_status = Arc::new(AtomicUsize::new(interrupt.status().load(Ordering::Relaxed)));
                 let interrupt_evt = interrupt.event().try_clone().unwrap();
                 let intc = Some(interrupt.intc().clone());
                 let irq_line = interrupt.irq_line();

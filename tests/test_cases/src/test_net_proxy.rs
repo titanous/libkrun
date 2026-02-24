@@ -69,35 +69,67 @@ mod guest {
         fn in_guest(self: Box<Self>) {
             // Configure the network interface if not already done by init
             // The guest network setup: IP 192.168.100.2/24, gateway 192.168.100.1
-            let _ = Command::new("ip")
+            let ip_link_res = Command::new("ip")
                 .args(["link", "set", "eth0", "up"])
                 .status();
-            let _ = Command::new("ip")
+            eprintln!("ip link set eth0 up: {:?}", ip_link_res);
+
+            let ip_addr_res = Command::new("ip")
                 .args(["addr", "add", "192.168.100.2/24", "dev", "eth0"])
                 .status();
-            let _ = Command::new("ip")
+            eprintln!("ip addr add: {:?}", ip_addr_res);
+
+            let ip_route_res = Command::new("ip")
                 .args(["route", "add", "default", "via", "192.168.100.1"])
                 .status();
+            eprintln!("ip route add: {:?}", ip_route_res);
 
             // Read host port from the file written by the host
-            let port_str = std::fs::read_to_string("/host_port")
-                .expect("Failed to read /host_port");
-            let port: u16 = port_str.trim().parse().expect("Invalid port number");
+            let port_str = match std::fs::read_to_string("/host_port") {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Failed to read /host_port: {:?}", e);
+                    panic!("Failed to read /host_port: {:?}", e);
+                }
+            };
+            let port: u16 = match port_str.trim().parse() {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("Invalid port number: {:?}", e);
+                    panic!("Invalid port number: {:?}", e);
+                }
+            };
+            eprintln!("Connecting to 127.0.0.1:{}", port);
 
             // Connect to host TCP listener through the smoltcp proxy
             // The proxy intercepts this SYN and connects a real TcpStream to 127.0.0.1:port
-            let mut stream = TcpStream::connect(("127.0.0.1", port))
-                .expect("Failed to connect to host TCP listener");
+            let mut stream = match TcpStream::connect(("127.0.0.1", port)) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Failed to connect to 127.0.0.1:{}: {:?}", port, e);
+                    panic!("Failed to connect: {:?}", e);
+                }
+            };
+            eprintln!("Connected successfully");
+
             stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
             stream.set_write_timeout(Some(Duration::from_secs(10))).unwrap();
 
             // Send PING
-            stream.write_all(b"PING").expect("Failed to send PING");
+            if let Err(e) = stream.write_all(b"PING") {
+                eprintln!("Failed to send PING: {:?}", e);
+                panic!("Failed to send PING: {:?}", e);
+            }
+            eprintln!("Sent PING");
 
             // Receive PONG
             let mut buf = vec![0u8; 4];
-            stream.read_exact(&mut buf).expect("Failed to receive PONG");
+            if let Err(e) = stream.read_exact(&mut buf) {
+                eprintln!("Failed to receive PONG: {:?}", e);
+                panic!("Failed to receive PONG: {:?}", e);
+            }
             assert_eq!(&buf, b"PONG", "Expected PONG, got {:?}", &buf);
+            eprintln!("Received PONG");
 
             println!("OK");
         }

@@ -28,6 +28,9 @@ mod mem_block_backend;
 mod test_custom_block_backend;
 use test_custom_block_backend::TestCustomBlockBackend;
 
+mod test_net_proxy;
+use test_net_proxy::TestNetProxy;
+
 pub fn test_cases() -> Vec<TestCase> {
     // Register your test here:
     vec![
@@ -65,6 +68,7 @@ pub fn test_cases() -> Vec<TestCase> {
         TestCase::new("rust-api-pause-resume", Box::new(TestRustApiPauseResume)),
         TestCase::new("rust-api-shutdown", Box::new(TestRustApiShutdown)),
         TestCase::new("custom-block-backend", Box::new(TestCustomBlockBackend)),
+        TestCase::new("net-proxy-ping-pong", Box::new(TestNetProxy)),
     ]
 }
 
