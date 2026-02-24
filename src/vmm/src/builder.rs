@@ -15,7 +15,7 @@ use std::io::{self, IsTerminal, Read};
 use std::os::fd::AsRawFd;
 use std::os::fd::{BorrowedFd, FromRawFd};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicI32;
+use std::sync::atomic::{AtomicBool, AtomicI32};
 use std::sync::{Arc, Mutex};
 
 use super::{Error, Vmm};
@@ -945,6 +945,13 @@ pub fn build_microvm(
     #[cfg(all(target_os = "macos", not(target_arch = "aarch64")))]
     let mut boot_senders: Vec<Sender<u64>> = Vec::new();
     let intc: IrqChip;
+
+    // Create shared exit flag for vCPUs (Linux/KVM only; macOS HVF handles exits differently)
+    #[cfg(target_os = "linux")]
+    let vcpu_exit_flag = Arc::new(AtomicBool::new(false));
+    #[cfg(target_os = "macos")]
+    let vcpu_exit_flag = Arc::new(AtomicBool::new(false)); // Placeholder for cross-platform builder
+
     // For x86_64 we need to create the interrupt controller before calling `KVM_CREATE_VCPUS`
     // while on aarch64 we need to do it the other way around.
     #[cfg(target_arch = "x86_64")]
@@ -976,6 +983,7 @@ pub fn build_microvm(
             payload_config.entry_addr,
             &pio_device_manager.io_bus,
             &exit_evt,
+            vcpu_exit_flag.clone(),
             kernel_boot,
             #[cfg(feature = "tee")]
             _sender,
@@ -1003,6 +1011,7 @@ pub fn build_microvm(
             &arch_memory_info,
             payload_config.entry_addr,
             &exit_evt,
+            vcpu_exit_flag.clone(),
         )
         .map_err(StartMicrovmError::Internal)?;
 
@@ -1075,6 +1084,7 @@ pub fn build_microvm(
             &guest_memory,
             payload_config.entry_addr,
             &exit_evt,
+            vcpu_exit_flag.clone(),
         )
         .map_err(StartMicrovmError::Internal)?;
 
@@ -1105,6 +1115,7 @@ pub fn build_microvm(
         exit_observers: Vec::new(),
         exit_code: exit_code.clone(),
         vm_exit: vm_exit.clone(),
+        vcpu_exit_flag,
         vm,
         mmio_device_manager,
         #[cfg(target_arch = "x86_64")]
@@ -1901,6 +1912,7 @@ fn create_vcpus_x86_64(
     entry_addr: GuestAddress,
     io_bus: &devices::Bus,
     exit_evt: &EventFd,
+    should_exit: Arc<AtomicBool>,
     kernel_boot: bool,
     #[cfg(feature = "tee")] pm_sender: Sender<WorkerMessage>,
 ) -> super::Result<Vec<Vcpu>> {
@@ -1913,6 +1925,7 @@ fn create_vcpus_x86_64(
             vm.supported_msrs().clone(),
             io_bus.clone(),
             exit_evt.try_clone().map_err(Error::EventFd)?,
+            should_exit.clone(),
             #[cfg(feature = "tee")]
             pm_sender.clone(),
         )
@@ -1933,6 +1946,7 @@ fn create_vcpus_aarch64(
     mem_info: &ArchMemoryInfo,
     entry_addr: GuestAddress,
     exit_evt: &EventFd,
+    should_exit: Arc<AtomicBool>,
 ) -> super::Result<Vec<Vcpu>> {
     let mut vcpus = Vec::with_capacity(vcpu_config.vcpu_count as usize);
     for cpu_index in 0..vcpu_config.vcpu_count {
@@ -1940,6 +1954,7 @@ fn create_vcpus_aarch64(
             cpu_index,
             vm.fd(),
             exit_evt.try_clone().map_err(Error::EventFd)?,
+            should_exit.clone(),
         )
         .map_err(Error::Vcpu)?;
 
@@ -2011,6 +2026,7 @@ fn create_vcpus_riscv64(
     guest_mem: &GuestMemoryMmap,
     entry_addr: GuestAddress,
     exit_evt: &EventFd,
+    should_exit: Arc<AtomicBool>,
 ) -> super::Result<Vec<Vcpu>> {
     let mut vcpus = Vec::with_capacity(vcpu_config.vcpu_count as usize);
     for cpu_index in 0..vcpu_config.vcpu_count {
@@ -2018,6 +2034,7 @@ fn create_vcpus_riscv64(
             cpu_index,
             vm.fd(),
             exit_evt.try_clone().map_err(Error::EventFd)?,
+            should_exit.clone(),
         )
         .map_err(Error::Vcpu)?;
 
@@ -2632,6 +2649,7 @@ pub mod tests {
         // Dummy entry_addr, vcpus will not boot.
         let entry_addr = GuestAddress(0);
         let bus = devices::Bus::new();
+        let vcpu_exit_flag = Arc::new(AtomicBool::new(false));
         let vcpu_vec = create_vcpus_x86_64(
             &vm,
             &vcpu_config,
@@ -2639,6 +2657,7 @@ pub mod tests {
             entry_addr,
             &bus,
             &EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
+            vcpu_exit_flag,
             true,
         )
         .unwrap();
@@ -2661,12 +2680,14 @@ pub mod tests {
 
         // Dummy entry_addr, vcpus will not boot.
         let entry_addr = GuestAddress(0);
+        let vcpu_exit_flag = Arc::new(AtomicBool::new(false));
         let vcpu_vec = create_vcpus_aarch64(
             &vm,
             &vcpu_config,
             &arch_memory_info,
             entry_addr,
             &EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
+            vcpu_exit_flag,
         )
         .unwrap();
         assert_eq!(vcpu_vec.len(), vcpu_count as usize);

@@ -19,9 +19,8 @@ use std::os::unix::io::RawFd;
 #[cfg(target_arch = "x86_64")]
 use std::env;
 use std::result;
-use std::sync::atomic::{fence, Ordering};
-#[cfg(not(test))]
-use std::sync::Barrier;
+use std::sync::atomic::{fence, AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 #[cfg(target_arch = "x86_64")]
 use std::time::Duration;
@@ -995,6 +994,8 @@ pub struct Vcpu {
 
     #[cfg(feature = "tee")]
     pm_sender: Sender<WorkerMessage>,
+
+    should_exit: Arc<AtomicBool>,
 }
 
 impl Vcpu {
@@ -1098,6 +1099,7 @@ impl Vcpu {
         msr_list: MsrList,
         io_bus: devices::Bus,
         exit_evt: EventFd,
+        should_exit: Arc<AtomicBool>,
         #[cfg(feature = "tee")] pm_sender: Sender<WorkerMessage>,
     ) -> Result<Self> {
         let kvm_vcpu = vm_fd.create_vcpu(id as u64).map_err(Error::VcpuFd)?;
@@ -1125,6 +1127,7 @@ impl Vcpu {
             event_sender: Some(event_sender),
             response_receiver: Some(response_receiver),
             response_sender,
+            should_exit,
             #[cfg(feature = "tee")]
             pm_sender,
         })
@@ -1139,7 +1142,7 @@ impl Vcpu {
     /// * `exit_evt` - An `EventFd` that will be written into when this vcpu exits.
     /// * `create_ts` - A timestamp used by the vcpu to calculate its lifetime.
     #[cfg(target_arch = "aarch64")]
-    pub fn new_aarch64(id: u8, vm_fd: &VmFd, exit_evt: EventFd) -> Result<Self> {
+    pub fn new_aarch64(id: u8, vm_fd: &VmFd, exit_evt: EventFd, should_exit: Arc<AtomicBool>) -> Result<Self> {
         let kvm_vcpu = vm_fd.create_vcpu(id as u64).map_err(Error::VcpuFd)?;
         let (event_sender, event_receiver) = unbounded();
         let (response_sender, response_receiver) = unbounded();
@@ -1154,6 +1157,7 @@ impl Vcpu {
             event_sender: Some(event_sender),
             response_receiver: Some(response_receiver),
             response_sender,
+            should_exit,
         })
     }
 
@@ -1166,7 +1170,7 @@ impl Vcpu {
     /// * `exit_evt` - An `EventFd` that will be written into when this vcpu exits.
     /// * `create_ts` - A timestamp used by the vcpu to calculate its lifetime.
     #[cfg(target_arch = "riscv64")]
-    pub fn new_riscv64(id: u8, vm_fd: &VmFd, exit_evt: EventFd) -> Result<Self> {
+    pub fn new_riscv64(id: u8, vm_fd: &VmFd, exit_evt: EventFd, should_exit: Arc<AtomicBool>) -> Result<Self> {
         let kvm_vcpu = vm_fd.create_vcpu(id as u64).map_err(Error::VcpuFd)?;
         let (event_sender, event_receiver) = unbounded();
         let (response_sender, response_receiver) = unbounded();
@@ -1180,6 +1184,7 @@ impl Vcpu {
             event_sender: Some(event_sender),
             response_receiver: Some(response_receiver),
             response_sender,
+            should_exit,
         })
     }
 
@@ -1824,11 +1829,10 @@ impl Vcpu {
     #[cfg(not(test))]
     // This is the main loop of the `Exited` state.
     fn exited(&mut self) -> StateMachine<Self> {
-        // Wait indefinitely.
-        // The VMM thread will kill the entire process.
-        let barrier = Barrier::new(2);
-        barrier.wait();
-
+        // Poll the exit flag. Once the VMM sets it, this thread can unwind.
+        while !self.should_exit.load(std::sync::atomic::Ordering::Acquire) {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         StateMachine::finish()
     }
 
@@ -2046,6 +2050,7 @@ mod tests {
         assert!(vm.memory_init(&gm, kvm.max_memslots()).is_ok());
 
         let exit_evt = EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap();
+        let should_exit = Arc::new(AtomicBool::new(false));
 
         let vcpu;
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -2057,12 +2062,13 @@ mod tests {
                 vm.supported_msrs().clone(),
                 devices::Bus::new(),
                 exit_evt,
+                should_exit,
             )
             .unwrap();
         }
         #[cfg(target_arch = "aarch64")]
         {
-            vcpu = Vcpu::new_aarch64(1, vm.fd(), exit_evt).unwrap();
+            vcpu = Vcpu::new_aarch64(1, vm.fd(), exit_evt, should_exit).unwrap();
         }
 
         (vm, vcpu, gm)
@@ -2256,5 +2262,50 @@ mod tests {
     #[test]
     fn test_vcpu_rtsig_offset() {
         assert!(validate_signal_num(sigrtmin() + VCPU_RTSIG_OFFSET).is_ok());
+    }
+
+    #[test]
+    fn test_vcpu_exit_flag_polling() {
+        // AC3.2: Verify that a vCPU thread exits when the should_exit flag is set.
+        let should_exit = Arc::new(AtomicBool::new(false));
+        let should_exit_clone = should_exit.clone();
+
+        let handle = std::thread::Builder::new()
+            .name("test_vcpu_exit_flag".to_string())
+            .spawn(move || {
+                // Simulate the exited() state behavior: poll until flag is set
+                while !should_exit_clone.load(Ordering::Acquire) {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                // Thread exits here
+            })
+            .expect("cannot start thread");
+
+        // Give thread a moment to start polling
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // Set the exit flag
+        should_exit.store(true, Ordering::Release);
+
+        // Thread should join within reasonable timeout (1 second)
+        let result = std::thread::Builder::new()
+            .spawn(move || {
+                let timeout = std::time::Duration::from_secs(1);
+                let start = std::time::Instant::now();
+                loop {
+                    if handle.is_finished() {
+                        return true;
+                    }
+                    if start.elapsed() > timeout {
+                        return false;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            })
+            .expect("cannot start timeout thread")
+            .join()
+            .expect("timeout thread panicked");
+
+        assert!(result, "vCPU thread did not exit within timeout");
     }
 }
