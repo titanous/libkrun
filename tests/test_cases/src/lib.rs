@@ -25,6 +25,9 @@ use test_rust_api::{TestRustApiZeroVcpu, TestRustApiDeviceInfo, TestRustApiPause
 #[cfg(feature = "host")]
 mod mem_block_backend;
 
+#[cfg(feature = "host")]
+mod loopback_net;
+
 mod test_custom_block_backend;
 use test_custom_block_backend::TestCustomBlockBackend;
 
