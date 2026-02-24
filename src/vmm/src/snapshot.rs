@@ -346,3 +346,138 @@ pub fn apply_dirty_pages(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Create a test GuestMemoryMmap from a list of (guest_addr, size) pairs.
+    fn make_memory(regions: &[(u64, u64)]) -> GuestMemoryMmap {
+        let regions_with_addr: Vec<(GuestAddress, usize)> =
+            regions.iter().map(|(addr, size)| (GuestAddress(*addr), *size as usize)).collect();
+        GuestMemoryMmap::from_ranges(&regions_with_addr).unwrap()
+    }
+
+    /// Create a valid SnapshotHeader matching the given memory and parameters.
+    fn valid_header(mem: &GuestMemoryMmap, vcpu_count: u32, nested: bool) -> SnapshotHeader {
+        SnapshotHeader {
+            magic: SNAPSHOT_MAGIC,
+            version: SNAPSHOT_VERSION,
+            vcpu_count,
+            ram_regions: ram_layout(mem),
+            nested_enabled: nested,
+        }
+    }
+
+    /// AC1.1: Valid SnapshotHeader roundtrip
+    #[test]
+    fn test_header_roundtrip() {
+        let mem = make_memory(&[(0x1000, 0x2000), (0x4000, 0x3000)]);
+        let header = valid_header(&mem, 4, false);
+
+        let data = bincode::serialize(&header).unwrap();
+        let decoded: SnapshotHeader = bincode::deserialize(&data).unwrap();
+
+        assert_eq!(decoded.magic, header.magic);
+        assert_eq!(decoded.version, header.version);
+        assert_eq!(decoded.vcpu_count, header.vcpu_count);
+        assert_eq!(decoded.ram_regions, header.ram_regions);
+        assert_eq!(decoded.nested_enabled, header.nested_enabled);
+    }
+
+    /// AC1.2: Invalid magic bytes
+    #[test]
+    fn test_invalid_magic() {
+        let mem = make_memory(&[(0x1000, 0x2000)]);
+        let mut header = valid_header(&mem, 4, false);
+        header.magic = 0xDEAD_BEEF;
+
+        let result = validate_header_for_vm(&header, &mem, 4, false);
+        assert!(matches!(result, Err(SnapshotError::InvalidMagic)));
+    }
+
+    /// AC1.3: Invalid version
+    #[test]
+    fn test_invalid_version() {
+        let mem = make_memory(&[(0x1000, 0x2000)]);
+        let mut header = valid_header(&mem, 4, false);
+        header.version = 99;
+
+        let result = validate_header_for_vm(&header, &mem, 4, false);
+        assert!(matches!(result, Err(SnapshotError::InvalidVersion(99))));
+    }
+
+    /// AC1.4: vCPU count mismatch
+    #[test]
+    fn test_vcpu_count_mismatch() {
+        let mem = make_memory(&[(0x1000, 0x2000)]);
+        let header = valid_header(&mem, 2, false);
+
+        let result = validate_header_for_vm(&header, &mem, 4, false);
+        assert!(matches!(
+            result,
+            Err(SnapshotError::VcpuCountMismatch { expected: 4, got: 2 })
+        ));
+    }
+
+    /// AC1.5: Memory layout mismatch
+    #[test]
+    fn test_layout_mismatch() {
+        let mem = make_memory(&[(0x1000, 0x2000), (0x4000, 0x3000)]);
+        let mut header = valid_header(&mem, 4, false);
+
+        // Corrupt the layout: change second region size
+        header.ram_regions[1] = (0x4000, 0x1000);
+
+        let result = validate_header_for_vm(&header, &mem, 4, false);
+        assert!(matches!(result, Err(SnapshotError::MemoryLayoutMismatch { .. })));
+    }
+
+    /// AC1.6: Memory size mismatch
+    #[test]
+    fn test_size_mismatch() {
+        let mem = make_memory(&[(0x1000, 0x2000)]);
+        let header = valid_header(&mem, 4, false);
+
+        // Create a different memory with different total size
+        let different_mem = make_memory(&[(0x1000, 0x1000)]);
+
+        let result = validate_header_for_vm(&header, &different_mem, 4, false);
+        assert!(matches!(result, Err(SnapshotError::MemoryLayoutMismatch { .. })));
+    }
+
+    /// AC1.7: Truncated/Invalid vmstate data
+    #[cfg(feature = "snapshot")]
+    #[test]
+    fn test_invalid_vmstate_data() {
+        // Try to deserialize a VmSnapshot from invalid data
+        let invalid_data = vec![0x01, 0x02, 0x03, 0x04];
+        let result: std::result::Result<VmSnapshot, _> =
+            bincode::deserialize(&invalid_data);
+
+        // Should fail to deserialize
+        assert!(result.is_err());
+    }
+
+    /// AC1.8: Nested enabled mismatch
+    #[test]
+    fn test_nested_enabled_mismatch() {
+        let mem = make_memory(&[(0x1000, 0x2000)]);
+        let header = valid_header(&mem, 4, true); // Header says nested=true
+
+        // But validate with expected_nested_enabled=false
+        let result = validate_header_for_vm(&header, &mem, 4, false);
+        assert!(matches!(result, Err(SnapshotError::NestedEnabledMismatch)));
+    }
+
+    /// AC1.8 variant: nested_enabled matches
+    #[test]
+    fn test_nested_enabled_match() {
+        let mem = make_memory(&[(0x1000, 0x2000)]);
+        let header = valid_header(&mem, 4, true);
+
+        let result = validate_header_for_vm(&header, &mem, 4, true);
+        assert!(result.is_ok());
+    }
+}
+
