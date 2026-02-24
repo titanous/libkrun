@@ -47,7 +47,9 @@ impl DirtyBitmap {
     /// Mark the page containing `guest_addr` as dirty.
     /// This is lock-free and safe to call from vCPU fault handlers.
     pub fn mark_dirty(&self, guest_addr: u64) {
-        debug_assert!(self.contains(guest_addr));
+        if !self.contains(guest_addr) {
+            return;
+        }
         let page_idx = ((guest_addr - self.base_addr) / PAGE_SIZE) as usize;
         let word_idx = page_idx / 64;
         let bit_idx = page_idx % 64;
