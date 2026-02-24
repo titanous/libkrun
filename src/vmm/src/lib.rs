@@ -212,6 +212,7 @@ pub struct Vmm {
     vm: Vm,
     exit_observers: Vec<Arc<Mutex<dyn VmmExitObserver>>>,
     exit_code: Arc<AtomicI32>,
+    vm_exit: crate::vm_exit::SharedVmExit,
 
     // Guest VM devices.
     mmio_device_manager: MMIODeviceManager,

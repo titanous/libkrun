@@ -579,6 +579,8 @@ pub struct BuiltVm {
     vcpus: Option<Vec<Vcpu>>,
     /// Device information populated during build - access this before calling `run()`.
     pub device_info: VmDeviceInfo,
+    /// Shared VM exit state.
+    vm_exit: crate::vm_exit::SharedVmExit,
     /// Boot senders for secondary vCPUs. Used to unblock them during cold
     /// restore (they wait on boot_receiver for a PSCI CPU_ON that never comes
     /// when we skip the kernel boot).
@@ -591,6 +593,11 @@ impl BuiltVm {
     /// Returns a reference to the VMM.
     pub fn vmm(&self) -> &Arc<Mutex<Vmm>> {
         &self.vmm
+    }
+
+    /// Returns a reference to the shared VM exit state.
+    pub fn vm_exit(&self) -> &crate::vm_exit::SharedVmExit {
+        &self.vm_exit
     }
 
     /// Start the vCPUs and run the microVM.
@@ -1086,6 +1093,9 @@ pub fn build_microvm(
     // We use this atomic to record the exit code set by init/init.c in the VM.
     let exit_code = Arc::new(AtomicI32::new(i32::MAX));
 
+    // Shared VM exit state.
+    let vm_exit: crate::vm_exit::SharedVmExit = Arc::new(Mutex::new(None));
+
     let mut vmm = Vmm {
         guest_memory,
         arch_memory_info,
@@ -1094,6 +1104,7 @@ pub fn build_microvm(
         exit_evt,
         exit_observers: Vec::new(),
         exit_code: exit_code.clone(),
+        vm_exit: vm_exit.clone(),
         vm,
         mmio_device_manager,
         #[cfg(target_arch = "x86_64")]
@@ -1288,6 +1299,7 @@ pub fn build_microvm(
         vmm,
         vcpus: Some(vcpus),
         device_info,
+        vm_exit,
         #[cfg(target_os = "macos")]
         boot_senders,
     })
