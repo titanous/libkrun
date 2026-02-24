@@ -700,6 +700,113 @@ mod tests {
         }
     }
 
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use bytes::Bytes;
+
+    /// Mock AsyncNetBackend that records TX calls and supports injecting RX packets.
+    struct TrackingNetBackend {
+        /// All payloads delivered via handle_guest_tx, in order.
+        tx_received: Arc<Mutex<Vec<Vec<u8>>>>,
+        /// Set this before running a test to control poll_delay().
+        poll_delay_value: Option<Duration>,
+        /// Count of poll() invocations.
+        poll_count: Arc<AtomicUsize>,
+        /// Data returned by save_snapshot_state (None means no state).
+        snapshot_data: Option<Vec<u8>>,
+        /// Data received by restore_snapshot_state.
+        restored_state: Arc<Mutex<Option<Vec<u8>>>>,
+    }
+
+    impl TrackingNetBackend {
+        fn new(snapshot_data: Option<Vec<u8>>) -> (
+            Self,
+            Arc<Mutex<Vec<Vec<u8>>>>,
+            Arc<AtomicUsize>,
+            Arc<Mutex<Option<Vec<u8>>>>,
+        ) {
+            let tx_received = Arc::new(Mutex::new(Vec::new()));
+            let poll_count = Arc::new(AtomicUsize::new(0));
+            let restored_state = Arc::new(Mutex::new(None));
+            let backend = TrackingNetBackend {
+                tx_received: tx_received.clone(),
+                poll_delay_value: None,
+                poll_count: poll_count.clone(),
+                snapshot_data,
+                restored_state: restored_state.clone(),
+            };
+            (backend, tx_received, poll_count, restored_state)
+        }
+    }
+
+    impl AsyncNetBackend for TrackingNetBackend {
+        fn handle_guest_tx(&mut self, packet: &[u8]) {
+            self.tx_received.lock().unwrap().push(packet.to_vec());
+        }
+
+        fn poll(&mut self) {
+            self.poll_count.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn poll_delay(&mut self) -> Option<Duration> {
+            self.poll_delay_value
+        }
+
+        fn save_snapshot_state(&self) -> Option<Vec<u8>> {
+            self.snapshot_data.clone()
+        }
+
+        fn restore_snapshot_state(&mut self, data: &[u8]) {
+            *self.restored_state.lock().unwrap() = Some(data.to_vec());
+        }
+
+        fn on_exit(&mut self) {}
+    }
+
+    /// Factory that creates a TrackingNetBackend with optional wake and RX channels.
+    struct TrackingNetBackendFactory {
+        backend: Option<TrackingNetBackend>,
+        rx_sender: tokio::sync::mpsc::Sender<Bytes>,
+        wake_sender: Option<tokio::sync::mpsc::Sender<()>>,
+    }
+
+    impl TrackingNetBackendFactory {
+        fn new(
+            backend: TrackingNetBackend,
+            rx_sender: tokio::sync::mpsc::Sender<Bytes>,
+            wake_sender: Option<tokio::sync::mpsc::Sender<()>>,
+        ) -> Self {
+            Self {
+                backend: Some(backend),
+                rx_sender,
+                wake_sender,
+            }
+        }
+    }
+
+    impl AsyncNetBackendFactory for TrackingNetBackendFactory {
+        fn create(mut self: Box<Self>) -> SendBoxFuture<'static, std::io::Result<NetBackendHandle>> {
+            Box::pin(async move {
+                let (to_guest_tx, to_guest_rx) = tokio::sync::mpsc::channel(16);
+                // Keep tx alive so the channel doesn't close
+                std::mem::forget(to_guest_tx);
+
+                let backend = self.backend.take().expect("backend should be present");
+                Ok(NetBackendHandle {
+                    backend: Box::new(backend),
+                    to_guest_rx,
+                    wake_rx: self.wake_sender.as_ref().map(|_| {
+                        let (wake_tx, wake_rx) = tokio::sync::mpsc::channel(1);
+                        if let Some(sender) = self.wake_sender.take() {
+                            std::mem::forget(sender);
+                        }
+                        std::mem::forget(wake_tx);
+                        wake_rx
+                    }),
+                })
+            })
+        }
+    }
+
     /// Test that the quiesce protocol works: signal quiesce → worker acks → resume.
     #[test]
     fn test_quiesce_ack_resume() {
