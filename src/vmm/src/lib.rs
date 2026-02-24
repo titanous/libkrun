@@ -1149,7 +1149,7 @@ impl Vmm {
         }
 
         // Signal vCPU threads to exit their blocking state (AC3.2)
-        self.vcpu_exit_flag.store(true, std::sync::atomic::Ordering::Release);
+        self.vcpu_exit_flag.store(true, Ordering::Release);
 
         // Store the exit reason for Context::run() to read
         *self.vm_exit.lock().expect("Poisoned vm_exit lock") = Some(vm_exit);
