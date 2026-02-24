@@ -11,6 +11,7 @@ use std::{io, result};
 use utils::eventfd::EventFd;
 
 use crate::bus::BusDevice;
+use crate::snapshot::{SnapshotError, Snapshottable};
 
 #[derive(Debug)]
 pub enum Error {
@@ -68,6 +69,18 @@ const KEY_DEL: u16 = 0xE071;
 
 /// Internal i8042 buffer size, in bytes
 const BUF_SIZE: usize = 16;
+
+#[cfg_attr(feature = "snapshot", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone)]
+struct I8042State {
+    status: u8,
+    control: u8,
+    outp: u8,
+    cmd: u8,
+    buf: Vec<u8>,
+    bhead: usize,
+    btail: usize,
+}
 
 /// A i8042 PS/2 controller that emulates just enough to shutdown the machine.
 pub struct I8042Device {
@@ -305,6 +318,152 @@ impl BusDevice for I8042Device {
             }
             _ => {}
         }
+    }
+
+    fn as_snapshottable(&self) -> Option<&dyn Snapshottable> {
+        Some(self)
+    }
+
+    fn as_snapshottable_mut(&mut self) -> Option<&mut dyn Snapshottable> {
+        Some(self)
+    }
+}
+
+impl Snapshottable for I8042Device {
+    fn snapshot_id(&self) -> &str {
+        "i8042"
+    }
+
+    fn save_state(&self) -> std::result::Result<Vec<u8>, SnapshotError> {
+        let state = I8042State {
+            status: self.status,
+            control: self.control,
+            outp: self.outp,
+            cmd: self.cmd,
+            buf: self.buf[..].to_vec(),
+            bhead: self.bhead.0,
+            btail: self.btail.0,
+        };
+
+        #[cfg(feature = "snapshot")]
+        {
+            bincode::serialize(&state).map_err(|e| SnapshotError::Serialize(e.to_string()))
+        }
+        #[cfg(not(feature = "snapshot"))]
+        {
+            let _ = state;
+            Err(SnapshotError::Serialize(
+                "snapshot feature not enabled".to_string(),
+            ))
+        }
+    }
+
+    fn restore_state(&mut self, data: &[u8]) -> std::result::Result<(), SnapshotError> {
+        #[cfg(feature = "snapshot")]
+        {
+            let state: I8042State = bincode::deserialize(data)
+                .map_err(|e| SnapshotError::Deserialize(e.to_string()))?;
+            self.status = state.status;
+            self.control = state.control;
+            self.outp = state.outp;
+            self.cmd = state.cmd;
+            for (i, &byte) in state.buf.iter().enumerate() {
+                if i < BUF_SIZE {
+                    self.buf[i] = byte;
+                }
+            }
+            self.bhead = Wrapping(state.bhead);
+            self.btail = Wrapping(state.btail);
+            Ok(())
+        }
+        #[cfg(not(feature = "snapshot"))]
+        {
+            let _ = data;
+            Err(SnapshotError::Deserialize(
+                "snapshot feature not enabled".to_string(),
+            ))
+        }
+    }
+}
+
+#[cfg(all(test, feature = "snapshot"))]
+mod snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn test_i8042_snapshot_registers() {
+        let mut i8042 = I8042Device::new(
+            EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
+            EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
+        );
+
+        let mut data = [1];
+        data[0] = CMD_WRITE_CTR;
+        i8042.write(0, OFS_STATUS, &data);
+        data[0] = 0x52;
+        i8042.write(0, OFS_DATA, &data);
+
+        data[0] = CMD_WRITE_OUTP;
+        i8042.write(0, OFS_STATUS, &data);
+        data[0] = 0xA3;
+        i8042.write(0, OFS_DATA, &data);
+
+        let saved = i8042.save_state().unwrap();
+
+        let mut i8042_2 = I8042Device::new(
+            EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
+            EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
+        );
+        i8042_2.restore_state(&saved).unwrap();
+
+        data[0] = CMD_READ_CTR;
+        i8042_2.write(0, OFS_STATUS, &data);
+        i8042_2.read(0, OFS_DATA, &mut data);
+        assert_eq!(data[0], 0x52);
+
+        data[0] = CMD_READ_OUTP;
+        i8042_2.write(0, OFS_STATUS, &data);
+        i8042_2.read(0, OFS_DATA, &mut data);
+        assert_eq!(data[0], 0xA3);
+    }
+
+    #[test]
+    fn test_i8042_snapshot_buffer() {
+        let mut i8042 = I8042Device::new(
+            EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
+            EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
+        );
+
+        i8042.push_byte(0x11).unwrap();
+        i8042.push_byte(0x22).unwrap();
+        i8042.push_byte(0x33).unwrap();
+
+        let saved = i8042.save_state().unwrap();
+
+        let mut i8042_2 = I8042Device::new(
+            EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
+            EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
+        );
+        i8042_2.restore_state(&saved).unwrap();
+
+        let mut data = [0u8];
+        i8042_2.read(0, OFS_DATA, &mut data);
+        assert_eq!(data[0], 0x11);
+        i8042_2.read(0, OFS_DATA, &mut data);
+        assert_eq!(data[0], 0x22);
+        i8042_2.read(0, OFS_DATA, &mut data);
+        assert_eq!(data[0], 0x33);
+    }
+
+    #[test]
+    fn test_i8042_snapshot_corrupted_state() {
+        let mut i8042 = I8042Device::new(
+            EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
+            EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
+        );
+
+        let result = i8042.restore_state(&[0xFF, 0xFF, 0xFF]);
+        assert!(matches!(result, Err(SnapshotError::Deserialize(_))));
     }
 }
 
