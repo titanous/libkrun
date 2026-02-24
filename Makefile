@@ -132,6 +132,7 @@ endif
 
 ifeq ($(BUILD_INIT),1)
 INIT_BINARY = init/init
+FEATURE_FLAGS += --features embedded_init
 $(INIT_BINARY): $(INIT_SRC) $(SYSROOT_TARGET)
 	$(CC_LINUX) -O2 -static -Wall $(INIT_DEFS) -o $@ $(INIT_SRC) $(INIT_DEFS)
 endif
