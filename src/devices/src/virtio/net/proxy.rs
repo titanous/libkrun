@@ -27,8 +27,6 @@ use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::os::fd::AsRawFd;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 use tracing::{error, info, trace, warn};
@@ -1275,7 +1273,7 @@ impl ProxyNetWorker {
     }
 
     /// Signals the guest that there are used descriptors in a queue.
-    fn signal_used_queue(&mut self, queue_index: usize) -> Result<(), DeviceError> {
+    fn signal_used_queue(&mut self, _queue_index: usize) -> Result<(), DeviceError> {
         self.interrupt_status
             .fetch_or(VIRTIO_MMIO_INT_VRING as usize, Ordering::SeqCst);
         if let Some(intc) = &self.intc {
@@ -1467,6 +1465,8 @@ mod tests {
     use super::*;
     use crate::virtio::queue::Descriptor;
     use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use vm_memory::GuestAddress;
 
     // Memory layout constants for virtio queue
@@ -1773,17 +1773,13 @@ mod tests {
         let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 1024 * 1024)]).unwrap();
         let queues = vec![Queue::new(256), Queue::new(256)];
         let queue_evts = vec![EventFd::new(0).unwrap(), EventFd::new(0).unwrap()];
-        let interrupt_status = Arc::new(AtomicUsize::new(0));
-        let interrupt_evt = EventFd::new(0).unwrap();
+        let interrupt = make_test_interrupt();
 
         // Construct a minimal ProxyNetWorker
         let mut proxy = ProxyNetWorker::new(
             queues,
             queue_evts,
-            interrupt_status,
-            interrupt_evt,
-            None,
-            None,
+            interrupt,
             mem,
             vec![],
         ).expect("ProxyNetWorker::new should succeed in test environment");
@@ -1833,25 +1829,17 @@ mod tests {
     /// and the error type can be pattern-matched.
     #[test]
     fn test_ephemeral_port_exhaustion() {
-        use std::sync::atomic::AtomicUsize;
-        use std::sync::Arc;
-        use utils::eventfd::EventFd;
-
         // Construct memory and queues for ProxyNetWorker
         let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 1024 * 1024)]).unwrap();
         let queues = vec![Queue::new(256), Queue::new(256)];
         let queue_evts = vec![EventFd::new(0).unwrap(), EventFd::new(0).unwrap()];
-        let interrupt_status = Arc::new(AtomicUsize::new(0));
-        let interrupt_evt = EventFd::new(0).unwrap();
+        let interrupt = make_test_interrupt();
 
         // Construct a minimal ProxyNetWorker
         let mut proxy = ProxyNetWorker::new(
             queues,
             queue_evts,
-            interrupt_status,
-            interrupt_evt,
-            None,
-            None,
+            interrupt,
             mem,
             vec![],
         ).expect("ProxyNetWorker::new should succeed in test environment");

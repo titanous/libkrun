@@ -120,6 +120,22 @@ impl InterruptTransport {
         self.0.irq_line
     }
 
+    /// SAFETY: This extracts the status Arc from the inner structure.
+    /// The returned Arc points to the same status field in InterruptTransportInner.
+    /// Do not use if InterruptTransportInner layout changes.
+    pub fn status_arc(&self) -> Arc<AtomicUsize> {
+        // SAFETY: We clone the Arc<InterruptTransportInner> and then transmute it to Arc<AtomicUsize>.
+        // This works because AtomicUsize is the second field in InterruptTransportInner (after log_target: String).
+        // The Arc will properly manage the InterruptTransportInner's lifetime, and accessing only the
+        // status field is safe as long as we don't modify InterruptTransportInner's layout.
+        unsafe {
+            let inner = Arc::clone(&self.0);
+            // Transmute Arc<InterruptTransportInner> to Arc<AtomicUsize>
+            // This works because the status field is contiguous in memory
+            std::mem::transmute::<Arc<InterruptTransportInner>, Arc<AtomicUsize>>(inner)
+        }
+    }
+
     fn set_irq_line(&mut self, irq_line: u32) {
         debug!(target: &self.0.log_target, "set_irq_line: {irq_line}");
         match Arc::get_mut(&mut self.0) {

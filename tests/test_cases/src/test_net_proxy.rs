@@ -60,17 +60,46 @@ mod host {
 mod guest {
     use super::*;
     use crate::Test;
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
 
     impl Test for TestNetProxy {
         fn in_guest(self: Box<Self>) {
-            // The ProxyNetWorker integration test.
-            // For now, this is a placeholder that confirms the test harness works.
-            // Full networking validation requires:
-            // 1. Guest network interface auto-configuration (or manual setup)
-            // 2. smoltcp proxy routing to work correctly
-            // 3. Port forwarding coordination between host and guest
-            //
-            // TODO: Implement full TCP PING/PONG once guest networking is verified
+            // Configure the eth0 interface with IP 192.168.100.2/24 and gateway 192.168.100.1
+            // Try to use the ip command if available in the guest
+            let setup_result = std::process::Command::new("sh")
+                .arg("-c")
+                .arg("ip addr add 192.168.100.2/24 dev eth0 && ip link set eth0 up && ip route add default via 192.168.100.1")
+                .status();
+
+            // Log the result but continue even if setup fails (might already be configured)
+            if let Ok(status) = setup_result {
+                if !status.success() {
+                    eprintln!("Network setup command failed or not available");
+                }
+            }
+
+            // Read host port from the file written by the host
+            let port_str = std::fs::read_to_string("/host_port")
+                .expect("Failed to read /host_port");
+            let port: u16 = port_str.trim().parse().expect("Invalid port number");
+
+            // Connect to host TCP listener through the smoltcp proxy
+            // The proxy intercepts this SYN and connects a real TcpStream to 127.0.0.1:port
+            let mut stream = TcpStream::connect(("127.0.0.1", port))
+                .expect("Failed to connect to host TCP listener");
+            stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            stream.set_write_timeout(Some(Duration::from_secs(10))).unwrap();
+
+            // Send PING
+            stream.write_all(b"PING").expect("Failed to send PING");
+
+            // Receive PONG
+            let mut buf = vec![0u8; 4];
+            stream.read_exact(&mut buf).expect("Failed to receive PONG");
+            assert_eq!(&buf, b"PONG", "Expected PONG, got {:?}", &buf);
+
             println!("OK");
         }
     }
