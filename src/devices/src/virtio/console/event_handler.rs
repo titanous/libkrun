@@ -45,7 +45,7 @@ impl Console {
             "console: activate event (ports: {:?})",
             self.ports
                 .iter()
-                .map(|port| (port.port_id, port.name.to_owned()))
+                .map(|port| (port.port_id, port.name.clone()))
                 .collect::<Vec<_>>()
         );
         if let Err(e) = self.activate_evt.read() {

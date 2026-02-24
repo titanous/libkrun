@@ -715,8 +715,8 @@ mod tests {
         }
     }
 
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use bytes::Bytes;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Mock AsyncNetBackend that records TX calls and supports injecting RX packets.
     struct TrackingNetBackend {
@@ -733,7 +733,9 @@ mod tests {
     }
 
     impl TrackingNetBackend {
-        fn new(snapshot_data: Option<Vec<u8>>) -> (
+        fn new(
+            snapshot_data: Option<Vec<u8>>,
+        ) -> (
             Self,
             Arc<Mutex<Vec<Vec<u8>>>>,
             Arc<AtomicUsize>,
@@ -802,7 +804,9 @@ mod tests {
     }
 
     impl AsyncNetBackendFactory for TrackingNetBackendFactory {
-        fn create(mut self: Box<Self>) -> SendBoxFuture<'static, std::io::Result<NetBackendHandle>> {
+        fn create(
+            mut self: Box<Self>,
+        ) -> SendBoxFuture<'static, std::io::Result<NetBackendHandle>> {
             let tx_from_factory = self.tx_from_factory.clone();
             let wake_enabled = self.wake_enabled.clone();
             let wake_tx_from_factory = self.wake_tx_from_factory.clone();
@@ -840,11 +844,8 @@ mod tests {
 
     /// Write a descriptor to guest memory at the given table offset.
     fn write_descriptor(mem: &GuestMemoryMmap, index: u16, desc: Descriptor) {
-        mem.write_obj(
-            desc,
-            GuestAddress(DESC_TABLE_ADDR + (index as u64) * 16),
-        )
-        .unwrap();
+        mem.write_obj(desc, GuestAddress(DESC_TABLE_ADDR + (index as u64) * 16))
+            .unwrap();
     }
 
     /// Set up the available ring and create a Queue ready to pop.
@@ -854,11 +855,8 @@ mod tests {
         mem.write_obj(1u16, GuestAddress(AVAIL_RING_ADDR + 2))
             .unwrap();
         // Write ring[0] = head_index
-        mem.write_obj(
-            head_index,
-            GuestAddress(AVAIL_RING_ADDR + 4),
-        )
-        .unwrap();
+        mem.write_obj(head_index, GuestAddress(AVAIL_RING_ADDR + 4))
+            .unwrap();
 
         // Write used ring flags and idx
         mem.write_obj(0u16, GuestAddress(USED_RING_ADDR)).unwrap();
@@ -867,7 +865,7 @@ mod tests {
 
         // Create and configure queue
         let mut q = Queue::new(256);
-        q.size = 256;  // Must set the size that the driver negotiated
+        q.size = 256; // Must set the size that the driver negotiated
         q.ready = true;
         q.desc_table = GuestAddress(DESC_TABLE_ADDR);
         q.avail_ring = GuestAddress(AVAIL_RING_ADDR);
@@ -884,8 +882,7 @@ mod tests {
         // The production code checks `if offset > VIRTIO_NET_HDR_SIZE`, so an offset of
         // exactly VIRTIO_NET_HDR_SIZE should return None.
         let data = vec![0u8; VIRTIO_NET_HDR_SIZE];
-        mem.write_slice(&data, GuestAddress(PKT_DATA_ADDR))
-            .unwrap();
+        mem.write_slice(&data, GuestAddress(PKT_DATA_ADDR)).unwrap();
 
         let desc = Descriptor {
             addr: PKT_DATA_ADDR,
@@ -916,8 +913,7 @@ mod tests {
         // The production code checks `if offset > VIRTIO_NET_HDR_SIZE`, so an offset of
         // VIRTIO_NET_HDR_SIZE + 1 should return Some(1).
         let data = vec![0u8; VIRTIO_NET_HDR_SIZE + 1];
-        mem.write_slice(&data, GuestAddress(PKT_DATA_ADDR))
-            .unwrap();
+        mem.write_slice(&data, GuestAddress(PKT_DATA_ADDR)).unwrap();
 
         let desc = Descriptor {
             addr: PKT_DATA_ADDR,
@@ -934,7 +930,8 @@ mod tests {
         let result = read_tx_packet(&mem, &chain, &mut buf);
 
         assert_eq!(
-            result, Some(1),
+            result,
+            Some(1),
             "TX packet with header + 1 byte payload should return Some(1)"
         );
     }
@@ -971,7 +968,11 @@ mod tests {
         let mut buf = vec![0u8; 65535 + VIRTIO_NET_HDR_SIZE];
         let result = read_tx_packet(&mem, &chain, &mut buf);
 
-        assert_eq!(result, Some(65535), "Max-size packet should return Some(65535)");
+        assert_eq!(
+            result,
+            Some(65535),
+            "Max-size packet should return Some(65535)"
+        );
         // Verify payload was copied correctly (without header)
         assert!(buf[..65535].iter().all(|&b| b == 0xAB));
     }
@@ -1018,7 +1019,11 @@ mod tests {
         let mut buf = vec![0u8; 65535 + VIRTIO_NET_HDR_SIZE];
         let result = read_tx_packet(&mem, &chain, &mut buf);
 
-        assert_eq!(result, Some(100), "Multi-descriptor packet should return Some(100)");
+        assert_eq!(
+            result,
+            Some(100),
+            "Multi-descriptor packet should return Some(100)"
+        );
         // Verify payload was copied correctly (without header)
         assert!(buf[..100].iter().all(|&b| b == 0xCD));
     }
@@ -1079,12 +1084,15 @@ mod tests {
 
         // Set up available ring with one buffer
         mem.write_obj(0u16, GuestAddress(AVAIL_RING_ADDR)).unwrap();
-        mem.write_obj(1u16, GuestAddress(AVAIL_RING_ADDR + 2)).unwrap();
-        mem.write_obj(0u16, GuestAddress(AVAIL_RING_ADDR + 4)).unwrap();
+        mem.write_obj(1u16, GuestAddress(AVAIL_RING_ADDR + 2))
+            .unwrap();
+        mem.write_obj(0u16, GuestAddress(AVAIL_RING_ADDR + 4))
+            .unwrap();
 
         // Initialize used ring
         mem.write_obj(0u16, GuestAddress(USED_RING_ADDR)).unwrap();
-        mem.write_obj(0u16, GuestAddress(USED_RING_ADDR + 2)).unwrap();
+        mem.write_obj(0u16, GuestAddress(USED_RING_ADDR + 2))
+            .unwrap();
 
         let tx_queue = Queue::new(256);
         let queues = vec![rx_queue, tx_queue];
@@ -1113,8 +1121,12 @@ mod tests {
 
         let stop_fd_clone = stop_fd.try_clone().unwrap();
 
-        let factory: Box<dyn AsyncNetBackendFactory> =
-            Box::new(TrackingNetBackendFactory::new(backend, tx_from_factory, wake_enabled, wake_tx_from_factory));
+        let factory: Box<dyn AsyncNetBackendFactory> = Box::new(TrackingNetBackendFactory::new(
+            backend,
+            tx_from_factory,
+            wake_enabled,
+            wake_tx_from_factory,
+        ));
 
         let worker = AsyncNetWorker::new(
             queues,
@@ -1135,12 +1147,15 @@ mod tests {
         let _handle = worker.run();
 
         // Wait for factory to be called (worker startup)
-        poll_until("factory tx sender populated", || tx_for_test.lock().unwrap().is_some());
+        poll_until("factory tx sender populated", || {
+            tx_for_test.lock().unwrap().is_some()
+        });
 
         // Get the sender from the factory
         let tx_sender = {
             let mut lock = tx_for_test.lock().unwrap();
-            lock.take().expect("Factory should have populated tx sender")
+            lock.take()
+                .expect("Factory should have populated tx sender")
         };
 
         // Send an RX packet
@@ -1155,23 +1170,37 @@ mod tests {
 
         // Wait for packet to be written into the used ring
         poll_until("used ring incremented", || {
-            mem.read_obj::<u16>(GuestAddress(USED_RING_ADDR + 2)).unwrap() > 0
+            mem.read_obj::<u16>(GuestAddress(USED_RING_ADDR + 2))
+                .unwrap()
+                > 0
         });
 
         // Check if packet appears in used ring
         // Used ring format: flags (u16) at +0, idx (u16) at +2, ring[idx] at +4
-        let used_idx = mem.read_obj::<u16>(GuestAddress(USED_RING_ADDR + 2)).unwrap();
-        assert!(used_idx > 0, "Used ring idx should have incremented after RX packet");
+        let used_idx = mem
+            .read_obj::<u16>(GuestAddress(USED_RING_ADDR + 2))
+            .unwrap();
+        assert!(
+            used_idx > 0,
+            "Used ring idx should have incremented after RX packet"
+        );
 
         // Read the packet data from guest memory
         let mut buf = vec![0u8; 256];
-        mem.read_slice(&mut buf, GuestAddress(PKT_DATA_ADDR)).unwrap();
+        mem.read_slice(&mut buf, GuestAddress(PKT_DATA_ADDR))
+            .unwrap();
 
         // Verify header (first VIRTIO_NET_HDR_SIZE bytes are zeros)
-        assert!(buf[..VIRTIO_NET_HDR_SIZE].iter().all(|b| *b == 0), "Header should be all zeros");
+        assert!(
+            buf[..VIRTIO_NET_HDR_SIZE].iter().all(|b| *b == 0),
+            "Header should be all zeros"
+        );
 
         // Verify payload
-        assert_eq!(&buf[VIRTIO_NET_HDR_SIZE..VIRTIO_NET_HDR_SIZE + packet_data.len()], packet_data);
+        assert_eq!(
+            &buf[VIRTIO_NET_HDR_SIZE..VIRTIO_NET_HDR_SIZE + packet_data.len()],
+            packet_data
+        );
 
         stop_fd_clone.write(1).unwrap();
         _handle.join().expect("worker thread panicked");
@@ -1214,8 +1243,12 @@ mod tests {
 
         let stop_fd_clone = stop_fd.try_clone().unwrap();
 
-        let factory: Box<dyn AsyncNetBackendFactory> =
-            Box::new(TrackingNetBackendFactory::new(backend, tx_from_factory, wake_enabled, wake_tx_from_factory));
+        let factory: Box<dyn AsyncNetBackendFactory> = Box::new(TrackingNetBackendFactory::new(
+            backend,
+            tx_from_factory,
+            wake_enabled,
+            wake_tx_from_factory,
+        ));
 
         let worker = AsyncNetWorker::new(
             queues,
@@ -1236,12 +1269,15 @@ mod tests {
         let _handle = worker.run();
 
         // Wait for factory to be called (worker startup)
-        poll_until("factory tx sender populated", || tx_for_test.lock().unwrap().is_some());
+        poll_until("factory tx sender populated", || {
+            tx_for_test.lock().unwrap().is_some()
+        });
 
         // Get the sender from the factory
         let tx_sender = {
             let mut lock = tx_for_test.lock().unwrap();
-            lock.take().expect("Factory should have populated tx sender")
+            lock.take()
+                .expect("Factory should have populated tx sender")
         };
 
         // Try to send packet (should be silently dropped, no panic)
@@ -1293,8 +1329,12 @@ mod tests {
         let wake_enabled = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let wake_tx_from_factory = Arc::new(Mutex::new(None));
 
-        let factory: Box<dyn AsyncNetBackendFactory> =
-            Box::new(TrackingNetBackendFactory::new(backend, tx_from_factory, wake_enabled, wake_tx_from_factory));
+        let factory: Box<dyn AsyncNetBackendFactory> = Box::new(TrackingNetBackendFactory::new(
+            backend,
+            tx_from_factory,
+            wake_enabled,
+            wake_tx_from_factory,
+        ));
 
         let shared_backend_state = Arc::new(Mutex::new(None));
         let shared_backend_state_clone = shared_backend_state.clone();
@@ -1340,7 +1380,8 @@ mod tests {
         // Check if snapshot state was saved
         let saved_state = shared_backend_state_clone.lock().unwrap().clone();
         assert_eq!(
-            saved_state, Some(snapshot_data.clone()),
+            saved_state,
+            Some(snapshot_data.clone()),
             "Snapshot state should be saved in shared_backend_state"
         );
 
@@ -1363,7 +1404,8 @@ mod tests {
         // Check if restore_snapshot_state was called
         let restored = restored_state.lock().unwrap();
         assert_eq!(
-            *restored, Some(snapshot_data),
+            *restored,
+            Some(snapshot_data),
             "restore_snapshot_state should have been called with snapshot data"
         );
 
@@ -1404,8 +1446,12 @@ mod tests {
 
         let stop_fd_clone = stop_fd.try_clone().unwrap();
 
-        let factory: Box<dyn AsyncNetBackendFactory> =
-            Box::new(TrackingNetBackendFactory::new(backend, tx_from_factory, wake_enabled, wake_tx_from_factory));
+        let factory: Box<dyn AsyncNetBackendFactory> = Box::new(TrackingNetBackendFactory::new(
+            backend,
+            tx_from_factory,
+            wake_enabled,
+            wake_tx_from_factory,
+        ));
 
         let shared_backend_state = Arc::new(Mutex::new(None));
 
@@ -1428,12 +1474,15 @@ mod tests {
         let _handle = worker.run();
 
         // Wait for factory to be called (worker startup)
-        poll_until("factory wake sender populated", || wake_for_test.lock().unwrap().is_some());
+        poll_until("factory wake sender populated", || {
+            wake_for_test.lock().unwrap().is_some()
+        });
 
         // Get the wake sender from the factory
         let wake_sender = {
             let mut lock = wake_for_test.lock().unwrap();
-            lock.take().expect("Factory should have populated wake sender")
+            lock.take()
+                .expect("Factory should have populated wake sender")
         };
 
         // Get initial poll count
@@ -1487,7 +1536,8 @@ mod tests {
         let quiesce_ack = Arc::new((Mutex::new(false), Condvar::new()));
 
         // Create TrackingNetBackend with a 50ms poll_delay
-        let (mut backend, _tx_received, poll_count, _restored_state) = TrackingNetBackend::new(None);
+        let (mut backend, _tx_received, poll_count, _restored_state) =
+            TrackingNetBackend::new(None);
         backend.poll_delay_value = Some(std::time::Duration::from_millis(50));
         let poll_count_clone = poll_count.clone();
 
@@ -1497,8 +1547,12 @@ mod tests {
 
         let stop_fd_clone = stop_fd.try_clone().unwrap();
 
-        let factory: Box<dyn AsyncNetBackendFactory> =
-            Box::new(TrackingNetBackendFactory::new(backend, tx_from_factory, wake_enabled, wake_tx_from_factory));
+        let factory: Box<dyn AsyncNetBackendFactory> = Box::new(TrackingNetBackendFactory::new(
+            backend,
+            tx_from_factory,
+            wake_enabled,
+            wake_tx_from_factory,
+        ));
 
         let shared_backend_state = Arc::new(Mutex::new(None));
 

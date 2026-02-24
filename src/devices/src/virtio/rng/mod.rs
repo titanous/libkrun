@@ -18,9 +18,7 @@ pub struct OsRngBackend;
 
 impl RngBackend for OsRngBackend {
     fn fill_bytes(&mut self, buf: &mut [u8]) -> io::Result<()> {
-        OsRng
-            .try_fill_bytes(buf)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+        OsRng.try_fill_bytes(buf).map_err(io::Error::other)
     }
 }
 

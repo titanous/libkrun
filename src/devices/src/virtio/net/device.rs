@@ -86,7 +86,9 @@ pub enum VirtioNetBackend {
     CustomAsyncFactory(Box<dyn AsyncNetBackendFactory>),
     /// Use smoltcp-based ProxyNetWorker as the network backend.
     /// `listeners` maps VM-side ports to host Unix socket paths for ingress connections.
-    Proxy { listeners: Vec<(u16, String)> },
+    Proxy {
+        listeners: Vec<(u16, String)>,
+    },
 }
 
 impl Clone for VirtioNetBackend {
@@ -99,7 +101,9 @@ impl Clone for VirtioNetBackend {
             #[cfg(target_os = "linux")]
             Self::Tap(s) => Self::Tap(s.clone()),
             Self::CustomAsyncFactory(_) => panic!("CustomAsyncFactory cannot be cloned"),
-            Self::Proxy { listeners } => Self::Proxy { listeners: listeners.clone() },
+            Self::Proxy { listeners } => Self::Proxy {
+                listeners: listeners.clone(),
+            },
         }
     }
 }

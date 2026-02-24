@@ -105,7 +105,7 @@ impl InterruptTransport {
     }
 
     pub fn status(&self) -> &AtomicUsize {
-        &*self.0.status
+        &self.0.status
     }
 
     pub fn status_arc(&self) -> Arc<AtomicUsize> {
@@ -645,7 +645,7 @@ impl Snapshottable for MmioTransport {
     fn save_state(&self) -> Result<Vec<u8>, SnapshotError> {
         self.begin_snapshot_quiesce(SNAPSHOT_QUIESCE_TIMEOUT)?;
 
-        let save_result = (|| {
+        let save_result = {
             let mut device = self.locked_device();
             device.sync_queues_for_snapshot();
             let queue_states: Vec<QueueState> = device
@@ -687,7 +687,7 @@ impl Snapshottable for MmioTransport {
                     "snapshot feature not enabled".to_string(),
                 ))
             }
-        })();
+        };
 
         self.abort_snapshot_quiesce();
         save_result

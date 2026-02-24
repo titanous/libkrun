@@ -151,9 +151,9 @@ impl VsockMuxer {
         muxer_quiesce_fd: EventFd,
         muxer_resume_fd: EventFd,
         muxer_quiesce_ack: Arc<(Mutex<bool>, Condvar)>,
-        timesync_quiesce_fd: EventFd,
-        timesync_resume_fd: EventFd,
-        timesync_quiesce_ack: Arc<(Mutex<bool>, Condvar)>,
+        _timesync_quiesce_fd: EventFd,
+        _timesync_resume_fd: EventFd,
+        _timesync_quiesce_ack: Arc<(Mutex<bool>, Condvar)>,
     ) {
         self.queue = Some(queue.clone());
         self.mem = Some(mem.clone());

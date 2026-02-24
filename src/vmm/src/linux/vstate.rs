@@ -42,23 +42,24 @@ use crate::resources::TeeConfig;
 use crate::vmm_config::machine_config::CpuFeaturesTemplate;
 #[cfg(target_arch = "x86_64")]
 use cpuid::{c3, filter_cpuid, t2, VmSpec};
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "snapshot"))]
 use kvm_bindings::{
     kvm_clock_data, kvm_debugregs, kvm_irqchip, kvm_lapic_state, kvm_mp_state, kvm_pit_state2,
-    kvm_regs, kvm_sregs, kvm_vcpu_events, kvm_xcrs, kvm_xsave, CpuId, MsrList, Msrs,
-    KVM_CLOCK_TSC_STABLE, KVM_IRQCHIP_IOAPIC, KVM_IRQCHIP_PIC_MASTER, KVM_IRQCHIP_PIC_SLAVE,
-    KVM_MAX_CPUID_ENTRIES,
+    kvm_regs, kvm_sregs, kvm_vcpu_events, kvm_xcrs, kvm_xsave, Msrs, KVM_CLOCK_TSC_STABLE,
+    KVM_IRQCHIP_IOAPIC, KVM_IRQCHIP_PIC_MASTER, KVM_IRQCHIP_PIC_SLAVE,
 };
 use kvm_bindings::{
     kvm_create_guest_memfd, kvm_userspace_memory_region, kvm_userspace_memory_region2,
     KVM_API_VERSION, KVM_MEM_GUEST_MEMFD, KVM_SYSTEM_EVENT_RESET, KVM_SYSTEM_EVENT_SHUTDOWN,
 };
-#[cfg(all(target_arch = "aarch64", feature = "snapshot"))]
-use kvm_bindings::{kvm_mp_state, RegList};
 #[cfg(feature = "tee")]
 use kvm_bindings::{kvm_enable_cap, KVM_CAP_EXIT_HYPERCALL, KVM_MEMORY_EXIT_FLAG_PRIVATE};
 #[cfg(not(target_arch = "riscv64"))]
 use kvm_bindings::{kvm_memory_attributes, KVM_MEMORY_ATTRIBUTE_PRIVATE};
+#[cfg(all(target_arch = "aarch64", feature = "snapshot"))]
+use kvm_bindings::{kvm_mp_state, RegList};
+#[cfg(target_arch = "x86_64")]
+use kvm_bindings::{CpuId, MsrList, KVM_MAX_CPUID_ENTRIES};
 use kvm_ioctls::{Cap::*, *};
 use utils::eventfd::EventFd;
 use utils::signal::{register_signal_handler, sigrtmin, Killable};
@@ -789,12 +790,8 @@ impl Vm {
         }
 
         #[cfg(feature = "snapshot")]
-        self.mem_slots.push((
-            self.next_mem_slot,
-            start,
-            region.len(),
-            host_addr as u64,
-        ));
+        self.mem_slots
+            .push((self.next_mem_slot, start, region.len(), host_addr as u64));
 
         self.next_mem_slot += 1;
 
@@ -979,6 +976,7 @@ pub struct Vcpu {
     #[cfg(target_arch = "x86_64")]
     cpuid: CpuId,
     #[cfg(target_arch = "x86_64")]
+    #[cfg_attr(not(feature = "snapshot"), allow(dead_code))]
     msr_list: MsrList,
     #[cfg(target_arch = "x86_64")]
     kernel_enomem_workaround: bool,
@@ -1468,9 +1466,8 @@ impl Vcpu {
         // Get the list of register IDs from KVM.
         // Try with 500 slots first; handle E2BIG by reallocating to the
         // kernel-reported count (SVE-capable CPUs can exceed 500).
-        let mut reg_list = RegList::new(500).map_err(|e| {
-            Error::VcpuState(format!("Failed to allocate RegList: {e}"))
-        })?;
+        let mut reg_list = RegList::new(500)
+            .map_err(|e| Error::VcpuState(format!("Failed to allocate RegList: {e}")))?;
         match self.fd.get_reg_list(&mut reg_list) {
             Ok(_) => {}
             Err(e) if e.errno() == libc::E2BIG => {

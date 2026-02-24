@@ -206,7 +206,7 @@ impl Console {
                         "sending PORT_READY {cmd:?} (ports: {:?})",
                         self.ports
                             .iter()
-                            .map(|port| (port.port_id, port.name.to_owned()))
+                            .map(|port| (port.port_id, port.name.clone()))
                             .collect::<Vec<_>>()
                     );
 

@@ -219,7 +219,9 @@ pub struct Vmm {
     dirty_bitmaps: Vec<dirty_bitmap::DirtyBitmap>,
 
     // Snapshot and dirty tracking state.
+    #[cfg_attr(not(feature = "snapshot"), allow(dead_code))]
     nested_enabled: bool,
+    #[cfg_attr(not(feature = "snapshot"), allow(dead_code))]
     dirty_tracking_enabled: bool,
 
     // Interrupt controller state needed for snapshots.
@@ -473,13 +475,9 @@ impl Vmm {
         if let Some(data) = &vmstate.vm_state {
             let state: vstate::VmState = bincode::deserialize(data)
                 .map_err(|e| snapshot::SnapshotError::Deserialize(e.to_string()))?;
-            self.vm
-                .restore_state(&state)
-                .map_err(|e| {
-                    snapshot::SnapshotError::Deserialize(format!(
-                        "Failed to restore VM state: {e}"
-                    ))
-                })?;
+            self.vm.restore_state(&state).map_err(|e| {
+                snapshot::SnapshotError::Deserialize(format!("Failed to restore VM state: {e}"))
+            })?;
         }
 
         self.mmio_device_manager
@@ -628,8 +626,7 @@ impl Vmm {
         let serialized_vcpu_states: Vec<Vec<u8>> = vcpu_states
             .iter()
             .map(|s| {
-                bincode::serialize(s)
-                    .map_err(|e| snapshot::SnapshotError::Serialize(e.to_string()))
+                bincode::serialize(s).map_err(|e| snapshot::SnapshotError::Serialize(e.to_string()))
             })
             .collect::<std::result::Result<_, _>>()?;
 
@@ -641,7 +638,7 @@ impl Vmm {
             serialized_vcpu_states,
             device_states,
             gic_state,
-            None, // vm_state: not needed on macOS/aarch64
+            None,  // vm_state: not needed on macOS/aarch64
             false, // TODO: get nested_enabled from VM config
         )
     }
@@ -811,8 +808,7 @@ impl Vmm {
         let serialized_vcpu_states: Vec<Vec<u8>> = vcpu_states
             .iter()
             .map(|s| {
-                bincode::serialize(s)
-                    .map_err(|e| snapshot::SnapshotError::Serialize(e.to_string()))
+                bincode::serialize(s).map_err(|e| snapshot::SnapshotError::Serialize(e.to_string()))
             })
             .collect::<std::result::Result<_, _>>()?;
 
@@ -992,9 +988,8 @@ impl Vmm {
                                     "Invalid guest address for dirty page 0x{addr:x}: {e}"
                                 ))
                             })?;
-                        let data = unsafe {
-                            std::slice::from_raw_parts(host_ptr, page_size as usize)
-                        };
+                        let data =
+                            unsafe { std::slice::from_raw_parts(host_ptr, page_size as usize) };
                         pages.push(snapshot::DirtyPage {
                             guest_addr: addr,
                             data: data.to_vec(),
@@ -1095,13 +1090,9 @@ impl Vmm {
         if let Some(data) = &incremental.vm_state {
             let state: vstate::VmState = bincode::deserialize(data)
                 .map_err(|e| snapshot::SnapshotError::Deserialize(e.to_string()))?;
-            self.vm
-                .restore_state(&state)
-                .map_err(|e| {
-                    snapshot::SnapshotError::Deserialize(format!(
-                        "Failed to restore VM state: {e}"
-                    ))
-                })?;
+            self.vm.restore_state(&state).map_err(|e| {
+                snapshot::SnapshotError::Deserialize(format!("Failed to restore VM state: {e}"))
+            })?;
         }
 
         self.mmio_device_manager
@@ -1121,9 +1112,10 @@ impl Vmm {
             })?;
         self.mmio_device_manager.resume_all_device_workers();
 
-        self.restore_vcpu_states(incremental.vcpu_states).map_err(|e| {
-            snapshot::SnapshotError::Deserialize(format!("Failed to restore vCPU states: {e}"))
-        })?;
+        self.restore_vcpu_states(incremental.vcpu_states)
+            .map_err(|e| {
+                snapshot::SnapshotError::Deserialize(format!("Failed to restore vCPU states: {e}"))
+            })?;
         Ok(())
     }
 

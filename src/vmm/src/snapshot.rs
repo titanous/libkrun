@@ -64,7 +64,10 @@ impl Display for SnapshotError {
                 write!(f, "vCPU count mismatch: expected {expected}, got {got}")
             }
             SnapshotError::NestedEnabledMismatch => {
-                write!(f, "Nested virtualization enabled mismatch between snapshot and current VM")
+                write!(
+                    f,
+                    "Nested virtualization enabled mismatch between snapshot and current VM"
+                )
             }
             SnapshotError::DirtyTrackingNotEnabled => {
                 write!(f, "Dirty tracking is not enabled")
@@ -179,7 +182,7 @@ pub fn load_memory(guest_memory: &GuestMemoryMmap, path: &Path) -> Result<(), Sn
             .get_host_address(region.start_addr())
             .map_err(|e| SnapshotError::Deserialize(format!("Invalid guest address: {e}")))?;
         let len = region.len() as usize;
-        let slice = unsafe { std::slice::from_raw_parts_mut(host_addr as *mut u8, len) };
+        let slice = unsafe { std::slice::from_raw_parts_mut(host_addr, len) };
         file.read_exact(slice)?;
     }
     Ok(())
@@ -353,8 +356,10 @@ mod tests {
 
     /// Create a test GuestMemoryMmap from a list of (guest_addr, size) pairs.
     fn make_memory(regions: &[(u64, u64)]) -> GuestMemoryMmap {
-        let regions_with_addr: Vec<(GuestAddress, usize)> =
-            regions.iter().map(|(addr, size)| (GuestAddress(*addr), *size as usize)).collect();
+        let regions_with_addr: Vec<(GuestAddress, usize)> = regions
+            .iter()
+            .map(|(addr, size)| (GuestAddress(*addr), *size as usize))
+            .collect();
         GuestMemoryMmap::from_ranges(&regions_with_addr).unwrap()
     }
 
@@ -417,7 +422,10 @@ mod tests {
         let result = validate_header_for_vm(&header, &mem, 4, false);
         assert!(matches!(
             result,
-            Err(SnapshotError::VcpuCountMismatch { expected: 4, got: 2 })
+            Err(SnapshotError::VcpuCountMismatch {
+                expected: 4,
+                got: 2
+            })
         ));
     }
 
@@ -431,7 +439,10 @@ mod tests {
         header.ram_regions[1] = (0x4000, 0x1000);
 
         let result = validate_header_for_vm(&header, &mem, 4, false);
-        assert!(matches!(result, Err(SnapshotError::MemoryLayoutMismatch { .. })));
+        assert!(matches!(
+            result,
+            Err(SnapshotError::MemoryLayoutMismatch { .. })
+        ));
     }
 
     /// AC1.5b: Memory layout mismatch (different region sizes)
@@ -444,7 +455,10 @@ mod tests {
         let different_mem = make_memory(&[(0x1000, 0x1000)]);
 
         let result = validate_header_for_vm(&header, &different_mem, 4, false);
-        assert!(matches!(result, Err(SnapshotError::MemoryLayoutMismatch { .. })));
+        assert!(matches!(
+            result,
+            Err(SnapshotError::MemoryLayoutMismatch { .. })
+        ));
     }
 
     /// AC1.6: Memory file size mismatch via load_memory
@@ -472,7 +486,10 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(SnapshotError::MemorySizeMismatch { expected: 0x2000, got: 0x1000 })
+            Err(SnapshotError::MemorySizeMismatch {
+                expected: 0x2000,
+                got: 0x1000
+            })
         ));
     }
 
@@ -519,4 +536,3 @@ mod tests {
         assert!(result.is_ok());
     }
 }
-

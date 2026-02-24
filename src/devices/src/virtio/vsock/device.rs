@@ -249,11 +249,9 @@ impl Vsock {
                     queue_tx.undo_pop();
                     break;
                 }
-            } else {
-                if self.muxer.send_stream_pkt(&pkt).is_err() {
-                    queue_tx.undo_pop();
-                    break;
-                }
+            } else if self.muxer.send_stream_pkt(&pkt).is_err() {
+                queue_tx.undo_pop();
+                break;
             }
 
             have_used = true;

@@ -15,12 +15,12 @@ pub const TX_INDEX: usize = 1;
 
 mod backend;
 pub mod device;
+pub mod proxy;
 #[cfg(target_os = "linux")]
 mod tap;
 mod unixgram;
 mod unixstream;
 mod worker;
-pub mod proxy;
 
 pub mod async_backend;
 pub mod async_worker;

@@ -7,9 +7,9 @@ use devices::virtio::gpu::display::DisplayInfo;
 #[cfg(feature = "blk")]
 pub use devices::virtio::CacheType;
 use env_logger::{Env, Target};
-use std::ops::{Deref, DerefMut};
 #[cfg(feature = "gpu")]
 use krun_display::DisplayBackend;
+use std::ops::{Deref, DerefMut};
 
 #[cfg(feature = "blk")]
 pub use devices::virtio::block::device::BlockDeviceType;
@@ -38,8 +38,6 @@ use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::env;
-#[cfg(target_os = "linux")]
-use std::ffi::CString;
 use std::ffi::{c_void, CStr};
 use std::fs::File;
 use std::io::IsTerminal;
@@ -196,15 +194,6 @@ impl ContextConfig {
         }
     }
 
-    #[cfg(all(feature = "blk", not(feature = "tee")))]
-    fn set_block_root(&mut self, device: String, fstype: Option<String>, options: Option<String>) {
-        self.block_root = Some(BlockRootConfig {
-            device,
-            fstype,
-            options,
-        });
-    }
-
     fn get_block_root(&self) -> String {
         #[cfg(feature = "blk")]
         match &self.block_root {
@@ -246,16 +235,6 @@ impl ContextConfig {
     }
 
     #[cfg(feature = "blk")]
-    fn add_block_cfg(&mut self, block_cfg: BlockDeviceConfig) {
-        self.block_cfgs.push(block_cfg);
-    }
-
-    #[cfg(feature = "blk")]
-    fn set_root_block_cfg(&mut self, block_cfg: BlockDeviceConfig) {
-        self.root_block_cfg = Some(block_cfg);
-    }
-
-    #[cfg(feature = "blk")]
     fn set_data_block_cfg(&mut self, block_cfg: BlockDeviceConfig) {
         self.data_block_cfg = Some(block_cfg);
     }
@@ -275,11 +254,6 @@ impl ContextConfig {
         } else {
             std::mem::take(&mut self.block_cfgs)
         }
-    }
-
-    #[cfg(feature = "net")]
-    fn set_net_mac(&mut self, mac: [u8; 6]) {
-        self.legacy_mac = Some(mac);
     }
 
     #[cfg(feature = "tee")]
@@ -2301,7 +2275,7 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
             Ok(_) => 0,
             Err(e) => {
                 error!("{e}");
-                return -libc::EINVAL;
+                -libc::EINVAL
             }
         }
     })
@@ -2569,6 +2543,7 @@ impl Builder {
         self
     }
 
+    #[allow(clippy::result_unit_err)]
     pub fn port_map(&mut self, new_port_map: HashMap<u16, u16>) -> Result<&mut Self, ()> {
         if self.config.net_index != 0 {
             return Err(());

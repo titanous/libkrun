@@ -390,13 +390,11 @@ impl AsyncBlockWorker {
                             debug!("async block worker: quiesce requested, draining in-flight ops");
 
                             // 1. Drain write_queue: start remaining batch and await completion
-                            if !write_queue.is_empty() {
-                                if current_write_batch.is_none() {
-                                    current_write_batch = Some(start_write_batch(
-                                        &mut write_queue,
-                                        disk.clone(),
-                                    ));
-                                }
+                            if !write_queue.is_empty() && current_write_batch.is_none() {
+                                current_write_batch = Some(start_write_batch(
+                                    &mut write_queue,
+                                    disk.clone(),
+                                ));
                             }
 
                             // 2. Await current_write_batch if in progress, complete its requests

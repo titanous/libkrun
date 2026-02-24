@@ -213,8 +213,7 @@ impl KvmGicV3 {
     fn save_gic_state(&self) -> Result<GicV3State, Error> {
         self.save_pending_tables()?;
 
-        let nr_irqs =
-            (arch::aarch64::layout::IRQ_MAX - arch::aarch64::layout::IRQ_BASE + 1) as u64;
+        let nr_irqs = (arch::aarch64::layout::IRQ_MAX - arch::aarch64::layout::IRQ_BASE + 1) as u64;
         // Number of SPI (Shared Peripheral Interrupt) registers
         // SPIs start at IRQ 32, each register covers 32 IRQs
         let nr_spis = nr_irqs.saturating_sub(32);
@@ -277,28 +276,16 @@ impl KvmGicV3 {
             let mut vcpu_regs = Vec::new();
 
             // GICR_IGROUPR0
-            vcpu_regs.push((
-                GICR_IGROUPR0,
-                self.get_redist_reg(vcpu, GICR_IGROUPR0)?,
-            ));
+            vcpu_regs.push((GICR_IGROUPR0, self.get_redist_reg(vcpu, GICR_IGROUPR0)?));
 
             // GICR_ISENABLER0
-            vcpu_regs.push((
-                GICR_ISENABLER0,
-                self.get_redist_reg(vcpu, GICR_ISENABLER0)?,
-            ));
+            vcpu_regs.push((GICR_ISENABLER0, self.get_redist_reg(vcpu, GICR_ISENABLER0)?));
 
             // GICR_ISPENDR0
-            vcpu_regs.push((
-                GICR_ISPENDR0,
-                self.get_redist_reg(vcpu, GICR_ISPENDR0)?,
-            ));
+            vcpu_regs.push((GICR_ISPENDR0, self.get_redist_reg(vcpu, GICR_ISPENDR0)?));
 
             // GICR_ISACTIVER0
-            vcpu_regs.push((
-                GICR_ISACTIVER0,
-                self.get_redist_reg(vcpu, GICR_ISACTIVER0)?,
-            ));
+            vcpu_regs.push((GICR_ISACTIVER0, self.get_redist_reg(vcpu, GICR_ISACTIVER0)?));
 
             // GICR_IPRIORITYR (8 registers for 32 SGI/PPI IRQs)
             for i in 0..8u64 {
@@ -308,10 +295,7 @@ impl KvmGicV3 {
 
             // GICR_ICFGR0 (and ICFGR1 for PPIs)
             vcpu_regs.push((GICR_ICFGR0, self.get_redist_reg(vcpu, GICR_ICFGR0)?));
-            vcpu_regs.push((
-                GICR_ICFGR0 + 4,
-                self.get_redist_reg(vcpu, GICR_ICFGR0 + 4)?,
-            ));
+            vcpu_regs.push((GICR_ICFGR0 + 4, self.get_redist_reg(vcpu, GICR_ICFGR0 + 4)?));
 
             redist_regs.push(vcpu_regs);
         }
@@ -330,8 +314,7 @@ impl KvmGicV3 {
     /// out, then write the saved IS* values to set the correct bits.
     #[cfg(feature = "snapshot")]
     fn restore_gic_state(&self, state: &GicV3State) -> Result<(), Error> {
-        let nr_irqs =
-            (arch::aarch64::layout::IRQ_MAX - arch::aarch64::layout::IRQ_BASE + 1) as u64;
+        let nr_irqs = (arch::aarch64::layout::IRQ_MAX - arch::aarch64::layout::IRQ_BASE + 1) as u64;
         let nr_spis = nr_irqs.saturating_sub(32);
         let nr_spi_regs = (nr_spis + 31) / 32;
 

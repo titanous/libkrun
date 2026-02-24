@@ -292,11 +292,6 @@ impl<B: BlockBackend + 'static> BlockWorker<B> {
         }
     }
 
-    fn process_queue_event(&mut self) {
-        let mut dummy = 0u64;
-        self.process_queue_event_counted(&mut dummy);
-    }
-
     /// Process device virtio queue(s).
     fn process_virtio_queues_counted(&mut self, total_requests: &mut u64) {
         let mem = self.mem.clone();

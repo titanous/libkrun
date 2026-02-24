@@ -41,7 +41,6 @@ const VIRTQ_TX_TOKEN: Token = Token(0);
 const VIRTQ_RX_TOKEN: Token = Token(1);
 const HOST_SOCKET_START_TOKEN: usize = 2;
 
-const VM_MAC: EthernetAddress = EthernetAddress([0xde, 0xad, 0xbe, 0xef, 0x00, 0x00]);
 const PROXY_MAC: EthernetAddress = EthernetAddress([0x02, 0x00, 0x00, 0x01, 0x02, 0x03]);
 const VM_IP: Ipv4Address = Ipv4Address::new(192, 168, 100, 2);
 const PROXY_IP: Ipv4Address = Ipv4Address::new(192, 168, 100, 1);
@@ -164,7 +163,7 @@ struct RxToken {
     buffer: Bytes,
 }
 
-impl<'a> phy::RxToken for RxToken {
+impl phy::RxToken for RxToken {
     fn consume<R, F>(self, f: F) -> R
     where
         F: FnOnce(&[u8]) -> R,
@@ -277,6 +276,7 @@ pub struct ProxyNetWorker {
 }
 
 impl ProxyNetWorker {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         queues: Vec<Queue>,
         queue_evts: Vec<EventFd>,
@@ -379,7 +379,11 @@ impl ProxyNetWorker {
             irq_line,
             device: virtual_device,
             iface,
-            sockets: unsafe { std::mem::transmute(sockets) },
+            sockets: unsafe {
+                std::mem::transmute::<smoltcp::iface::SocketSet<'_>, smoltcp::iface::SocketSet<'_>>(
+                    sockets,
+                )
+            },
             poll,
             registry,
             next_token,
@@ -433,7 +437,7 @@ impl ProxyNetWorker {
                     SmoltcpInstant::from_millis(start_time.elapsed().as_millis() as i64),
                     &self.sockets,
                 )
-                .map(|d| std::time::Duration::from_millis(d.total_millis() as u64));
+                .map(|d| std::time::Duration::from_millis(d.total_millis()));
 
             self.poll.poll(&mut events, timeout).unwrap();
 
@@ -493,7 +497,7 @@ impl ProxyNetWorker {
                                 smoltcp::socket::Socket::Raw(socket) => {
                                     trace!(%handle, ip_version = ?socket.ip_version(), ip_protocol = ?socket.ip_protocol(), "raw socket");
                                 }
-                                smoltcp::socket::Socket::Icmp(socket) => {
+                                smoltcp::socket::Socket::Icmp(_socket) => {
                                     trace!(%handle, "icmp socket");
                                 }
                                 smoltcp::socket::Socket::Udp(socket) => {
@@ -502,10 +506,10 @@ impl ProxyNetWorker {
                                 smoltcp::socket::Socket::Tcp(socket) => {
                                     trace!(%handle, local_ep = ?socket.local_endpoint(), remote_ep = ?socket.remote_endpoint(), listen_ep = %socket.listen_endpoint(), state = %socket.state(), "tcp socket");
                                 }
-                                smoltcp::socket::Socket::Dhcpv4(socket) => {
+                                smoltcp::socket::Socket::Dhcpv4(_socket) => {
                                     trace!(%handle, "dhcpv4 socket");
                                 }
-                                smoltcp::socket::Socket::Dns(socket) => {
+                                smoltcp::socket::Socket::Dns(_socket) => {
                                     trace!(%handle, "dns socket");
                                 }
                             }
@@ -776,6 +780,7 @@ impl ProxyNetWorker {
             return;
         };
 
+        #[allow(clippy::while_let_loop)]
         loop {
             // Borrow listener mutably from the map for the accept call.
             let accept_result = if let Some((listener, _)) = self.unix_listeners.get_mut(&token) {
@@ -813,7 +818,10 @@ impl ProxyNetWorker {
             let ephemeral_port = match self.get_ephemeral_port() {
                 Ok(port) => port,
                 Err(ProxyError::EphemeralPortsExhausted) => {
-                    error!(?token, "ephemeral ports exhausted, cannot accept new connection");
+                    error!(
+                        ?token,
+                        "ephemeral ports exhausted, cannot accept new connection"
+                    );
                     continue;
                 }
             };
@@ -872,7 +880,7 @@ impl ProxyNetWorker {
                             if tcp.get_flags() == TcpFlags::SYN {
                                 let guest_addr = IpAddress::from(ipv4.get_source());
                                 let dest_addr = IpAddress::from(ipv4.get_destination());
-                                let guest_port = tcp.get_source();
+                                let _guest_port = tcp.get_source();
                                 let dest_port = tcp.get_destination();
 
                                 let dest_socket_addr =
@@ -883,7 +891,8 @@ impl ProxyNetWorker {
                                 // Connections to the proxy's own IP (PROXY_IP = 192.168.100.1)
                                 // are treated as connections to the host's loopback, since
                                 // PROXY_IP is the gateway the guest sees as "the host".
-                                let host_dest_ip: IpAddr = if dest_addr == IpAddress::from(PROXY_IP) {
+                                let host_dest_ip: IpAddr = if dest_addr == IpAddress::from(PROXY_IP)
+                                {
                                     "127.0.0.1".parse().unwrap()
                                 } else {
                                     dest_addr.into()
@@ -956,7 +965,9 @@ impl ProxyNetWorker {
                                 );
                                 // Forward the SYN to smoltcp so it can complete the TCP
                                 // handshake with the guest (send SYN-ACK, then receive ACK).
-                                self.device.rx_buffer.push_back(Bytes::copy_from_slice(data));
+                                self.device
+                                    .rx_buffer
+                                    .push_back(Bytes::copy_from_slice(data));
                                 return true;
                             }
                         }
@@ -1278,7 +1289,7 @@ impl ProxyNetWorker {
         if let Some(conn) = self.host_connections.get(&token) {
             if let HostSocket::Udp(s) = &conn.socket {
                 let real_dest = SocketAddr::new(dest_addr.into(), dest_port);
-                if let Err(e) = s.send_to(udp_packet.payload(), real_dest.into()) {
+                if let Err(e) = s.send_to(udp_packet.payload(), real_dest) {
                     error!("Failed to send initial UDP datagram: {}", e);
                 }
             }
@@ -1331,13 +1342,13 @@ mod packet_dumper {
         }
         s
     }
-    pub fn log_vm_packet_in(data: &[u8]) -> PacketDumper {
+    pub fn log_vm_packet_in(data: &[u8]) -> PacketDumper<'_> {
         PacketDumper {
             data,
             direction: "VM|IN",
         }
     }
-    pub fn log_vm_packet_out(data: &[u8]) -> PacketDumper {
+    pub fn log_vm_packet_out(data: &[u8]) -> PacketDumper<'_> {
         PacketDumper {
             data,
             direction: "VM|OUT",
@@ -1489,10 +1500,7 @@ mod tests {
     const PKT_DATA_ADDR: u64 = 0x4000;
     const VIRTIO_NET_HDR_SIZE: usize = std::mem::size_of::<virtio_net_hdr_v1>();
 
-    fn make_virtual_device(
-        mem: &GuestMemoryMmap,
-        queues: Vec<Queue>,
-    ) -> VirtualDevice {
+    fn make_virtual_device(mem: &GuestMemoryMmap, queues: Vec<Queue>) -> VirtualDevice {
         VirtualDevice {
             rx_buffer: VecDeque::new(),
             mem: mem.clone(),
@@ -1503,29 +1511,21 @@ mod tests {
     }
 
     fn write_descriptor(mem: &GuestMemoryMmap, index: u16, desc: Descriptor) {
-        mem.write_obj(
-            desc,
-            GuestAddress(DESC_TABLE_ADDR + (index as u64) * 16),
-        )
-        .unwrap();
+        mem.write_obj(desc, GuestAddress(DESC_TABLE_ADDR + (index as u64) * 16))
+            .unwrap();
     }
 
     fn setup_avail_ring(mem: &GuestMemoryMmap, head_index: u16) -> Queue {
         // Write avail ring flags and idx
-        mem.write_obj(0u16, GuestAddress(AVAIL_RING_ADDR))
-            .unwrap();
+        mem.write_obj(0u16, GuestAddress(AVAIL_RING_ADDR)).unwrap();
         mem.write_obj(1u16, GuestAddress(AVAIL_RING_ADDR + 2))
             .unwrap();
         // Write ring[0] = head_index
-        mem.write_obj(
-            head_index,
-            GuestAddress(AVAIL_RING_ADDR + 4),
-        )
-        .unwrap();
+        mem.write_obj(head_index, GuestAddress(AVAIL_RING_ADDR + 4))
+            .unwrap();
 
         // Write used ring flags and idx
-        mem.write_obj(0u16, GuestAddress(USED_RING_ADDR))
-            .unwrap();
+        mem.write_obj(0u16, GuestAddress(USED_RING_ADDR)).unwrap();
         mem.write_obj(0u16, GuestAddress(USED_RING_ADDR + 2))
             .unwrap();
 
@@ -1547,8 +1547,7 @@ mod tests {
         // Write a packet with header (12 bytes) + payload (5 bytes recognizable data).
         let mut data = vec![0u8; VIRTIO_NET_HDR_SIZE + 5];
         data[VIRTIO_NET_HDR_SIZE..].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF, 0x42]);
-        mem.write_slice(&data, GuestAddress(PKT_DATA_ADDR))
-            .unwrap();
+        mem.write_slice(&data, GuestAddress(PKT_DATA_ADDR)).unwrap();
 
         // Set up a single descriptor (TX queue) pointing to the packet.
         let desc = Descriptor {
@@ -1585,8 +1584,7 @@ mod tests {
 
         // Write a packet with exactly VIRTIO_NET_HDR_SIZE bytes (header only, no payload).
         let data = vec![0u8; VIRTIO_NET_HDR_SIZE];
-        mem.write_slice(&data, GuestAddress(PKT_DATA_ADDR))
-            .unwrap();
+        mem.write_slice(&data, GuestAddress(PKT_DATA_ADDR)).unwrap();
 
         // Set up a single descriptor (TX queue) pointing to the packet.
         let desc = Descriptor {
@@ -1648,7 +1646,8 @@ mod tests {
             None, // no IRQ line
             mem,
             vec![], // no listeners
-        ).expect("ProxyNetWorker::new should succeed in test environment");
+        )
+        .expect("ProxyNetWorker::new should succeed in test environment");
 
         let socket_count_before = proxy.sockets.iter().count();
 
@@ -1671,7 +1670,10 @@ mod tests {
 
         // Build IPv4 header
         {
-            let mut ipv4 = MutableIpv4Packet::new(&mut buf[ETH_HEADER_SIZE..ETH_HEADER_SIZE + IPV4_HEADER_SIZE]).unwrap();
+            let mut ipv4 = MutableIpv4Packet::new(
+                &mut buf[ETH_HEADER_SIZE..ETH_HEADER_SIZE + IPV4_HEADER_SIZE],
+            )
+            .unwrap();
             ipv4.set_version(4);
             ipv4.set_header_length(5); // 20 bytes / 4
             ipv4.set_total_length((IPV4_HEADER_SIZE + TCP_HEADER_SIZE) as u16);
@@ -1684,7 +1686,8 @@ mod tests {
 
         // Build TCP header with SYN flag targeting listener_port
         {
-            let mut tcp = MutableTcpPacket::new(&mut buf[ETH_HEADER_SIZE + IPV4_HEADER_SIZE..]).unwrap();
+            let mut tcp =
+                MutableTcpPacket::new(&mut buf[ETH_HEADER_SIZE + IPV4_HEADER_SIZE..]).unwrap();
             tcp.set_source(54321);
             tcp.set_destination(listener_port);
             tcp.set_sequence(1000);
@@ -1741,10 +1744,15 @@ mod tests {
             None,
             mem,
             vec![],
-        ).expect("ProxyNetWorker::new should succeed in test environment");
+        )
+        .expect("ProxyNetWorker::new should succeed in test environment");
 
         // Assert NAT table is initially empty
-        assert_eq!(proxy.nat_table.len(), 0, "NAT table should be empty initially");
+        assert_eq!(
+            proxy.nat_table.len(),
+            0,
+            "NAT table should be empty initially"
+        );
 
         // Construct a minimal UDP packet
         let mut buf = vec![0u8; 28]; // Minimal UDP packet
@@ -1799,7 +1807,8 @@ mod tests {
             None,
             mem,
             vec![],
-        ).expect("ProxyNetWorker::new should succeed in test environment");
+        )
+        .expect("ProxyNetWorker::new should succeed in test environment");
 
         let guest_addr = std::net::Ipv4Addr::new(192, 168, 100, 2);
         let dest_addr = std::net::Ipv4Addr::new(127, 0, 0, 1);
@@ -1817,7 +1826,10 @@ mod tests {
         }
 
         let nat_table_len_after_first = proxy.nat_table.len();
-        assert_eq!(nat_table_len_after_first, 1, "NAT table should have one entry after first datagram");
+        assert_eq!(
+            nat_table_len_after_first, 1,
+            "NAT table should have one entry after first datagram"
+        );
 
         // Second UDP datagram to same endpoint (same source port and destination)
         {
@@ -1863,7 +1875,8 @@ mod tests {
             None,
             mem,
             vec![],
-        ).expect("ProxyNetWorker::new should succeed in test environment");
+        )
+        .expect("ProxyNetWorker::new should succeed in test environment");
 
         // Test 1: Fresh worker should return Ok with a valid port
         let result = proxy.get_ephemeral_port();

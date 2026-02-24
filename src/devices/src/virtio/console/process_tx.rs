@@ -338,7 +338,12 @@ mod tests {
     impl RecordingPortOutput {
         fn new() -> (Self, Arc<Mutex<Vec<u8>>>) {
             let received = Arc::new(Mutex::new(Vec::new()));
-            (RecordingPortOutput { received: received.clone() }, received)
+            (
+                RecordingPortOutput {
+                    received: received.clone(),
+                },
+                received,
+            )
         }
     }
 
@@ -371,14 +376,17 @@ mod tests {
 
         // Initialize avail and used ring headers
         mem.write_obj(0u16, GuestAddress(AVAIL_RING_ADDR)).unwrap(); // flags
-        mem.write_obj(0u16, GuestAddress(AVAIL_RING_ADDR + 2)).unwrap(); // idx
+        mem.write_obj(0u16, GuestAddress(AVAIL_RING_ADDR + 2))
+            .unwrap(); // idx
         mem.write_obj(0u16, GuestAddress(USED_RING_ADDR)).unwrap(); // flags
-        mem.write_obj(0u16, GuestAddress(USED_RING_ADDR + 2)).unwrap(); // idx
+        mem.write_obj(0u16, GuestAddress(USED_RING_ADDR + 2))
+            .unwrap(); // idx
 
         // Write the payload to guest memory
         let payload_addr = DATA_AREA_ADDR;
         if !payload.is_empty() {
-            mem.write_slice(payload, GuestAddress(payload_addr)).unwrap();
+            mem.write_slice(payload, GuestAddress(payload_addr))
+                .unwrap();
         }
 
         // Write descriptor at index 0
@@ -395,7 +403,8 @@ mod tests {
         mem.write_obj(0u16, GuestAddress(ring_entry_addr)).unwrap(); // avail ring[0] = 0
 
         // Bump avail idx to 1
-        mem.write_obj(1u16, GuestAddress(AVAIL_RING_ADDR + 2)).unwrap();
+        mem.write_obj(1u16, GuestAddress(AVAIL_RING_ADDR + 2))
+            .unwrap();
 
         // Create and configure the queue
         let q = {
@@ -440,7 +449,10 @@ mod tests {
             if !received_clone.lock().unwrap().is_empty() {
                 break;
             }
-            assert!(std::time::Instant::now() < deadline, "timed out waiting for tx data");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for tx data"
+            );
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
 
@@ -480,9 +492,9 @@ mod tests {
             desc,
             &mut failing_output,
             &interrupt,
-            0,  // port_id
-            0,  // head_index
-            0,  // desc_ordinal
+            0, // port_id
+            0, // head_index
+            0, // desc_ordinal
         );
 
         // The result should be an error (broken pipe)
@@ -516,9 +528,9 @@ mod tests {
             desc,
             &mut recording_output,
             &interrupt,
-            0,  // port_id
-            0,  // head_index
-            0,  // desc_ordinal
+            0, // port_id
+            0, // head_index
+            0, // desc_ordinal
         );
 
         // Should succeed with 0 bytes written (zero-length descriptor)
