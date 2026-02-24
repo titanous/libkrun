@@ -22,6 +22,9 @@ use test_snapshot_errors::{TestSnapshotWrongMagic, TestSnapshotVcpuMismatch, Tes
 mod test_rust_api;
 use test_rust_api::{TestRustApiZeroVcpu, TestRustApiDeviceInfo, TestRustApiPauseResume, TestRustApiShutdown};
 
+mod test_vm_exit;
+use test_vm_exit::TestVmExit;
+
 #[cfg(feature = "host")]
 mod mem_block_backend;
 
@@ -70,6 +73,7 @@ pub fn test_cases() -> Vec<TestCase> {
         TestCase::new("rust-api-device-info", Box::new(TestRustApiDeviceInfo)),
         TestCase::new("rust-api-pause-resume", Box::new(TestRustApiPauseResume)),
         TestCase::new("rust-api-shutdown", Box::new(TestRustApiShutdown)),
+        TestCase::new("vm-exit-clean-shutdown", Box::new(TestVmExit)),
         TestCase::new("custom-block-backend", Box::new(TestCustomBlockBackend)),
         TestCase::new("net-async-loopback", Box::new(TestNetAsyncLoopback)),
     ]
