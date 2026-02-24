@@ -436,26 +436,29 @@ impl VirtioDevice for Vsock {
         }
         drop(guard);
 
-        // Quiesce the timesync thread.
+        // Quiesce the timesync thread (macOS only — not started on Linux).
+        #[cfg(target_os = "macos")]
         {
-            let (lock, _) = &*self.timesync_quiesce_ack;
-            *lock.lock().unwrap() = false;
-        }
-        let _ = self.timesync_quiesce_fd.write(1);
+            {
+                let (lock, _) = &*self.timesync_quiesce_ack;
+                *lock.lock().unwrap() = false;
+            }
+            let _ = self.timesync_quiesce_fd.write(1);
 
-        let (lock, cvar) = &*self.timesync_quiesce_ack;
-        let guard = lock.lock().unwrap();
-        let (guard, wait_result) = cvar
-            .wait_timeout_while(guard, timeout, |acked| !*acked)
-            .unwrap();
-        if !*guard || wait_result.timed_out() {
-            // Resume the muxer thread since it already quiesced.
-            let _ = self.muxer_resume_fd.write(1);
-            return Err(SnapshotError::QuiesceTimeout {
-                device_id: String::new(),
-                timeout_ms: timeout.as_millis() as u64,
-                detail: Some("vsock timesync thread did not ack quiesce".into()),
-            });
+            let (lock, cvar) = &*self.timesync_quiesce_ack;
+            let guard = lock.lock().unwrap();
+            let (guard, wait_result) = cvar
+                .wait_timeout_while(guard, timeout, |acked| !*acked)
+                .unwrap();
+            if !*guard || wait_result.timed_out() {
+                // Resume the muxer thread since it already quiesced.
+                let _ = self.muxer_resume_fd.write(1);
+                return Err(SnapshotError::QuiesceTimeout {
+                    device_id: String::new(),
+                    timeout_ms: timeout.as_millis() as u64,
+                    detail: Some("vsock timesync thread did not ack quiesce".into()),
+                });
+            }
         }
 
         Ok(())
@@ -469,17 +472,19 @@ impl VirtioDevice for Vsock {
         if !self.device_state.is_activated() {
             return;
         }
-        // Reset ack flags and resume both threads.
+        // Reset ack flags and resume threads.
         {
             let (lock, _) = &*self.muxer_quiesce_ack;
             *lock.lock().unwrap() = false;
         }
+        let _ = self.muxer_resume_fd.write(1);
+        // Timesync thread is macOS-only — only resume it there.
+        #[cfg(target_os = "macos")]
         {
             let (lock, _) = &*self.timesync_quiesce_ack;
             *lock.lock().unwrap() = false;
+            let _ = self.timesync_resume_fd.write(1);
         }
-        let _ = self.muxer_resume_fd.write(1);
-        let _ = self.timesync_resume_fd.write(1);
     }
 
     fn sync_queues_for_snapshot(&mut self) {
