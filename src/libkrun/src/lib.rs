@@ -29,6 +29,7 @@ pub use devices::virtio::port_io::{self, PortInput, PortOutput};
 #[cfg(not(feature = "tee"))]
 pub use devices::virtio::rng::{OsRngBackend, RngBackend};
 pub use devices::virtio::PortDescription;
+pub use vmm::vm_exit::VmExit;
 use libc::{c_char, c_int, size_t};
 use once_cell::sync::Lazy;
 use polly::event_manager::EventManager;
@@ -3003,6 +3004,7 @@ impl Builder {
         vmm::worker::start_worker_thread(built_vm.vmm().clone(), _receiver.clone()).unwrap();
 
         Ok(Context {
+            vm_exit: built_vm.vm_exit().clone(),
             built_vm,
             event_manager,
             shutdown_efd: shutdown_efd_clone,
@@ -3028,6 +3030,7 @@ pub struct Context {
     event_manager: EventManager,
     /// Cloned shutdown eventfd for host-initiated GPIO shutdown.
     shutdown_efd: Option<Arc<EventFd>>,
+    vm_exit: vmm::vm_exit::SharedVmExit,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -3077,7 +3080,7 @@ impl Context {
     }
 
     /// Start the VM and run the event loop. This blocks until the VM exits.
-    pub fn run(mut self) -> Result<(), StartError> {
+    pub fn run(mut self) -> Result<vmm::vm_exit::VmExit, StartError> {
         // Start the vCPUs
         self.built_vm.run()?;
 
@@ -3086,6 +3089,11 @@ impl Context {
             self.event_manager
                 .run()
                 .map_err(StartError::EventManagerRun)?;
+
+            // Check if the VM has exited
+            if let Some(vm_exit) = self.vm_exit.lock().expect("Poisoned vm_exit lock").take() {
+                return Ok(vm_exit);
+            }
         }
     }
 
@@ -3099,7 +3107,7 @@ impl Context {
         mut self,
         base_path: &std::path::Path,
         incremental_paths: &[&std::path::Path],
-    ) -> Result<(), StartError> {
+    ) -> Result<vmm::vm_exit::VmExit, StartError> {
         self.built_vm
             .restore_from_snapshot(base_path, incremental_paths)?;
 
@@ -3107,6 +3115,11 @@ impl Context {
             self.event_manager
                 .run()
                 .map_err(StartError::EventManagerRun)?;
+
+            // Check if the VM has exited
+            if let Some(vm_exit) = self.vm_exit.lock().expect("Poisoned vm_exit lock").take() {
+                return Ok(vm_exit);
+            }
         }
     }
 }
