@@ -75,7 +75,7 @@ mod host {
 
     fn build_minimal_context(_test_setup: &TestSetup) -> anyhow::Result<krun::Context> {
         let mut builder = krun::Builder::new();
-        builder.vm_config(1, 128);
+        builder.vm_config(1, 128)?;
         // restore_and_run fails on snapshot validation before needing root/exec.
         // The snapshot validation happens in restore_and_run before any guest execution,
         // so we don't need to set up the guest filesystem for these error tests.

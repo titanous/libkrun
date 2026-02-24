@@ -503,6 +503,10 @@ pub extern "C" fn krun_free_ctx(ctx_id: u32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn krun_set_vm_config(ctx_id: u32, num_vcpus: u8, ram_mib: u32) -> i32 {
+    if num_vcpus == 0 {
+        return -libc::EINVAL;
+    }
+
     let mem_size_mib: usize = match ram_mib.try_into() {
         Ok(size) => size,
         Err(e) => {
@@ -2371,7 +2375,11 @@ impl Builder {
         }
     }
 
-    pub fn vm_config(&mut self, num_vcpus: u8, ram_mib: u32) -> &mut Self {
+    pub fn vm_config(&mut self, num_vcpus: u8, ram_mib: u32) -> Result<&mut Self, StartError> {
+        if num_vcpus == 0 {
+            return Err(StartError::ZeroVcpus);
+        }
+
         let mem_size_mib: usize = ram_mib.try_into().expect("ram_mib did not fit in a usize");
 
         let vm_config = VmConfig {
@@ -2384,8 +2392,8 @@ impl Builder {
         self.config
             .vmr
             .set_vm_config(&vm_config)
-            .expect("invalid vm config");
-        self
+            .map_err(|_| StartError::ZeroVcpus)?;
+        Ok(self)
     }
 
     pub fn workdir(&mut self, workdir: String) -> &mut Self {
@@ -2964,6 +2972,8 @@ pub enum StartError {
     Setuid(std::io::Error),
     #[error("could not setgid: {0}")]
     Setgid(std::io::Error),
+    #[error("vcpu_count must be at least 1")]
+    ZeroVcpus,
     #[error(transparent)]
     Microvm(#[from] StartMicrovmError),
     #[error("{0:?}")]

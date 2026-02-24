@@ -689,6 +689,14 @@ pub fn build_microvm(
 ) -> std::result::Result<BuiltVm, StartMicrovmError> {
     let mut device_info = VmDeviceInfo::default();
 
+    // Populate device_info with configured vCPU count and RAM size
+    if let Some(vcpu_count) = vm_resources.vm_config().vcpu_count {
+        device_info.vcpu_count = vcpu_count;
+    }
+    if let Some(mem_size_mib) = vm_resources.vm_config().mem_size_mib {
+        device_info.ram_mib = mem_size_mib as u32;
+    }
+
     let payload = choose_payload(vm_resources)?;
 
     let (guest_memory, arch_memory_info, mut _shm_manager, payload_config) = create_guest_memory(

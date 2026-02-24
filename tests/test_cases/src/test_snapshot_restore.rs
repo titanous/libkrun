@@ -22,7 +22,7 @@ mod host {
             let listener = UnixListener::bind(&sock_path).unwrap();
 
             let mut builder = krun::Builder::new();
-            builder.vm_config(1, 512);
+            builder.vm_config(1, 512)?;
             setup_fs_builder(&mut builder, &test_setup)?;
             builder.add_vsock_port(VSOCK_PORT, sock_path, false);
 
@@ -123,7 +123,7 @@ mod host_incr {
             let listener = UnixListener::bind(&sock_path).unwrap();
 
             let mut builder = krun::Builder::new();
-            builder.vm_config(1, 512);
+            builder.vm_config(1, 512)?;
             setup_fs_builder(&mut builder, &test_setup)?;
             builder.add_vsock_port(VSOCK_PORT_INCR, sock_path, false);
 

@@ -55,6 +55,10 @@ pub struct ConsolePortInfo {
 pub struct VmDeviceInfo {
     /// Information about virtio-console ports
     pub console_ports: Vec<ConsolePortInfo>,
+    /// Number of vCPUs configured for the VM
+    pub vcpu_count: u8,
+    /// RAM size in MiB configured for the VM
+    pub ram_mib: u32,
 }
 
 /// Errors encountered when configuring microVM resources.
