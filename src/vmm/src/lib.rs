@@ -1247,6 +1247,7 @@ mod tests {
 
 /// Helper function to check if dirty tracking is enabled.
 /// This is used in both create_incremental_snapshot implementations.
+#[allow(dead_code)]
 fn check_dirty_tracking_enabled(
     dirty_tracking_enabled: bool,
 ) -> std::result::Result<(), snapshot::SnapshotError> {
