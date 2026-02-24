@@ -370,6 +370,7 @@ mod tests {
     }
 
     /// AC1.1: Valid SnapshotHeader roundtrip
+    #[cfg(feature = "snapshot")]
     #[test]
     fn test_header_roundtrip() {
         let mem = make_memory(&[(0x1000, 0x2000), (0x4000, 0x3000)]);
@@ -433,9 +434,9 @@ mod tests {
         assert!(matches!(result, Err(SnapshotError::MemoryLayoutMismatch { .. })));
     }
 
-    /// AC1.5b: Memory layout mismatch (different regions)
+    /// AC1.5b: Memory layout mismatch (different region sizes)
     #[test]
-    fn test_size_mismatch() {
+    fn test_layout_mismatch_different_region_sizes() {
         let mem = make_memory(&[(0x1000, 0x2000)]);
         let header = valid_header(&mem, 4, false);
 

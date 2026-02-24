@@ -648,6 +648,21 @@ fn dup_fd(evt: &EventFd) -> OwnedFd {
 mod tests {
     use super::*;
 
+    /// Poll until `condition` returns true or 5 seconds elapse.
+    fn poll_until<F: Fn() -> bool>(msg: &str, condition: F) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if condition() {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for: {msg}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
     #[test]
     fn test_virtio_net_hdr_size() {
         // Verify our constant matches the actual struct size
@@ -1119,8 +1134,8 @@ mod tests {
 
         let _handle = worker.run();
 
-        // Give worker time to start and factory to be called
-        std::thread::sleep(std::time::Duration::from_millis(150));
+        // Wait for factory to be called (worker startup)
+        poll_until("factory tx sender populated", || tx_for_test.lock().unwrap().is_some());
 
         // Get the sender from the factory
         let tx_sender = {
@@ -1138,8 +1153,10 @@ mod tests {
             });
         });
 
-        // Wait for packet to be processed
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        // Wait for packet to be written into the used ring
+        poll_until("used ring incremented", || {
+            mem.read_obj::<u16>(GuestAddress(USED_RING_ADDR + 2)).unwrap() > 0
+        });
 
         // Check if packet appears in used ring
         // Used ring format: flags (u16) at +0, idx (u16) at +2, ring[idx] at +4
@@ -1218,8 +1235,8 @@ mod tests {
 
         let _handle = worker.run();
 
-        // Give worker time to start and factory to be called
-        std::thread::sleep(std::time::Duration::from_millis(150));
+        // Wait for factory to be called (worker startup)
+        poll_until("factory tx sender populated", || tx_for_test.lock().unwrap().is_some());
 
         // Get the sender from the factory
         let tx_sender = {
@@ -1235,9 +1252,7 @@ mod tests {
             });
         });
 
-        // If this completes without panic, the test passes
-        std::thread::sleep(std::time::Duration::from_millis(200));
-
+        // Stop the worker; if the packet drop caused a panic, join will propagate it
         stop_fd_clone.write(1).unwrap();
         _handle.join().expect("worker thread panicked");
     }
@@ -1302,9 +1317,6 @@ mod tests {
 
         let _handle = worker.run();
 
-        // Give worker time to start
-        std::thread::sleep(std::time::Duration::from_millis(100));
-
         // --- First quiesce cycle: save snapshot state ---
         {
             let (lock, _) = &*quiesce_ack_clone;
@@ -1339,14 +1351,14 @@ mod tests {
         }
         resume_fd_clone.write(1).unwrap();
 
-        // Wait briefly for resume to complete
-        std::thread::sleep(std::time::Duration::from_millis(50));
-
         // --- Resync to trigger restore_snapshot_state ---
         resync_fd_clone.write(1).unwrap();
 
-        // Wait for resync to be processed
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        // Wait for resync to be processed (restore_snapshot_state populates restored_state)
+        let restored_state_clone = restored_state.clone();
+        poll_until("restore_snapshot_state called", move || {
+            restored_state_clone.lock().unwrap().is_some()
+        });
 
         // Check if restore_snapshot_state was called
         let restored = restored_state.lock().unwrap();
@@ -1415,8 +1427,8 @@ mod tests {
 
         let _handle = worker.run();
 
-        // Give worker time to start and factory to be called
-        std::thread::sleep(std::time::Duration::from_millis(150));
+        // Wait for factory to be called (worker startup)
+        poll_until("factory wake sender populated", || wake_for_test.lock().unwrap().is_some());
 
         // Get the wake sender from the factory
         let wake_sender = {
@@ -1435,8 +1447,11 @@ mod tests {
             });
         });
 
-        // Wait for poll to be called
-        std::thread::sleep(std::time::Duration::from_millis(150));
+        // Wait for poll to be triggered by the wake signal
+        let poll_count_for_wait = poll_count_clone.clone();
+        poll_until("poll_count incremented after wake", move || {
+            poll_count_for_wait.load(Ordering::SeqCst) > initial_count
+        });
 
         let final_count = poll_count_clone.load(Ordering::SeqCst);
         assert!(
@@ -1505,14 +1520,16 @@ mod tests {
 
         let _handle = worker.run();
 
-        // Give worker time to start
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        // Wait for worker to start and perform at least one poll (timer fires ~50ms after start)
+        poll_until("initial poll performed", || {
+            poll_count_clone.load(Ordering::SeqCst) > 0
+        });
 
-        // Get initial poll count
+        // Record count and wait for a subsequent timer-driven poll
         let initial_count = poll_count_clone.load(Ordering::SeqCst);
-
-        // Wait for timer to fire (50ms delay + some margin)
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        poll_until("poll_count incremented by timer", || {
+            poll_count_clone.load(Ordering::SeqCst) > initial_count
+        });
 
         let final_count = poll_count_clone.load(Ordering::SeqCst);
         assert!(

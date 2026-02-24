@@ -433,8 +433,16 @@ mod tests {
             process_tx(0, mem, queue, interrupt, output, stop_clone);
         });
 
-        // Give the thread time to process the single queued descriptor.
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        // Wait until the descriptor has been processed and data written to output.
+        let received_clone = received.clone();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if !received_clone.lock().unwrap().is_empty() {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "timed out waiting for tx data");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
 
         // Signal the thread to stop (it has parked waiting for more data).
         stop.store(true, Ordering::SeqCst);

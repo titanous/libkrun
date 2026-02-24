@@ -1478,7 +1478,7 @@ mod tests {
     use super::*;
     use crate::virtio::queue::Descriptor;
     use std::collections::VecDeque;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
     use vm_memory::GuestAddress;
 
@@ -1872,7 +1872,7 @@ mod tests {
             "Fresh ProxyNetWorker should return Ok for get_ephemeral_port"
         );
         let port = result.unwrap();
-        assert!(port >= 49152 && port <= 65535, "Port should be in ephemeral range");
+        assert!(port >= 49152, "Port should be in ephemeral range");
 
         // Test 2: Verify that ProxyError::EphemeralPortsExhausted can be pattern-matched
         let error = ProxyError::EphemeralPortsExhausted;

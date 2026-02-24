@@ -8,7 +8,7 @@ mod host {
     use crate::krun_rust::setup_fs_builder;
     use crate::{Test, TestSetup};
     use std::io::{Read, Write};
-    use std::net::{TcpListener, TcpStream};
+    use std::net::TcpListener;
     use std::time::Duration;
     use std::thread;
 
