@@ -82,7 +82,10 @@ mod host {
         Ok(builder.build()?)
     }
 
-    fn expect_snapshot_error(result: Result<(), krun::StartError>, expected_msg_fragment: &str) {
+    fn expect_snapshot_error(
+        result: Result<krun::VmExit, krun::StartError>,
+        expected_msg_fragment: &str,
+    ) {
         match result {
             Err(e) => {
                 let msg = e.to_string();
@@ -91,7 +94,7 @@ mod host {
                     "Expected error containing '{expected_msg_fragment}', got: {msg}"
                 );
             }
-            Ok(()) => panic!("Expected error but restore_and_run succeeded"),
+            Ok(_) => panic!("Expected error but restore_and_run succeeded"),
         }
     }
 
