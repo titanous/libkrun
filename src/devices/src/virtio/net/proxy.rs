@@ -1451,3 +1451,144 @@ mod packet_dumper {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::virtio::queue::Descriptor;
+    use std::collections::VecDeque;
+    use vm_memory::GuestAddress;
+
+    // Memory layout constants for virtio queue
+    const DESC_TABLE_ADDR: u64 = 0x1000;
+    const AVAIL_RING_ADDR: u64 = 0x2000;
+    const USED_RING_ADDR: u64 = 0x3000;
+    const PKT_DATA_ADDR: u64 = 0x4000;
+    const VIRTIO_NET_HDR_SIZE: usize = std::mem::size_of::<virtio_net_hdr_v1>();
+
+    fn make_virtual_device(
+        mem: &GuestMemoryMmap,
+        queues: Vec<Queue>,
+    ) -> VirtualDevice {
+        VirtualDevice {
+            rx_buffer: VecDeque::new(),
+            mem: mem.clone(),
+            queues,
+            rx_frame_buf: [0u8; MAX_BUFFER_SIZE],
+            tx_frame_buf: [0u8; MAX_BUFFER_SIZE],
+        }
+    }
+
+    fn write_descriptor(mem: &GuestMemoryMmap, index: u16, desc: Descriptor) {
+        mem.write_obj(
+            desc,
+            GuestAddress(DESC_TABLE_ADDR + (index as u64) * 16),
+        )
+        .unwrap();
+    }
+
+    fn setup_avail_ring(mem: &GuestMemoryMmap, head_index: u16) -> Queue {
+        // Write avail ring flags and idx
+        mem.write_obj(0u16, GuestAddress(AVAIL_RING_ADDR))
+            .unwrap();
+        mem.write_obj(1u16, GuestAddress(AVAIL_RING_ADDR + 2))
+            .unwrap();
+        // Write ring[0] = head_index
+        mem.write_obj(
+            head_index,
+            GuestAddress(AVAIL_RING_ADDR + 4),
+        )
+        .unwrap();
+
+        // Write used ring flags and idx
+        mem.write_obj(0u16, GuestAddress(USED_RING_ADDR))
+            .unwrap();
+        mem.write_obj(0u16, GuestAddress(USED_RING_ADDR + 2))
+            .unwrap();
+
+        // Create and configure queue
+        let mut q = Queue::new(256);
+        q.size = 256;
+        q.ready = true;
+        q.desc_table = GuestAddress(DESC_TABLE_ADDR);
+        q.avail_ring = GuestAddress(AVAIL_RING_ADDR);
+        q.used_ring = GuestAddress(USED_RING_ADDR);
+        q
+    }
+
+    /// AC4.1: VirtualDevice strips virtio-net header from packet payload.
+    #[test]
+    fn test_receive_raw_strips_header() {
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+
+        // Write a packet with header (12 bytes) + payload (5 bytes recognizable data).
+        let mut data = vec![0u8; VIRTIO_NET_HDR_SIZE + 5];
+        data[VIRTIO_NET_HDR_SIZE..].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF, 0x42]);
+        mem.write_slice(&data, GuestAddress(PKT_DATA_ADDR))
+            .unwrap();
+
+        // Set up a single descriptor (TX queue) pointing to the packet.
+        let desc = Descriptor {
+            addr: PKT_DATA_ADDR,
+            len: (VIRTIO_NET_HDR_SIZE + 5) as u32,
+            flags: 0, // readable
+            next: 0,
+        };
+        write_descriptor(&mem, 0, desc);
+
+        // Create TX queue (index 1 in VirtualDevice)
+        let tx_queue = setup_avail_ring(&mem, 0);
+        let rx_queue = Queue::new(256);
+
+        let mut queues = vec![rx_queue, tx_queue];
+        let mut vdev = make_virtual_device(&mem, queues);
+
+        // Call receive_raw_from_guest (which reads from TX queue, the guest's output).
+        let result = vdev.receive_raw_from_guest();
+
+        // Assert that it returns Some with the payload (header stripped).
+        assert!(
+            result.is_some(),
+            "Header-stripped packet should return Some"
+        );
+        let payload = result.unwrap();
+        assert_eq!(payload.as_ref(), &[0xDE, 0xAD, 0xBE, 0xEF, 0x42]);
+    }
+
+    /// AC4.2: VirtualDevice returns None for header-only packet (zero payload).
+    #[test]
+    fn test_receive_raw_header_only_no_panic() {
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+
+        // Write a packet with exactly VIRTIO_NET_HDR_SIZE bytes (header only, no payload).
+        let data = vec![0u8; VIRTIO_NET_HDR_SIZE];
+        mem.write_slice(&data, GuestAddress(PKT_DATA_ADDR))
+            .unwrap();
+
+        // Set up a single descriptor (TX queue) pointing to the packet.
+        let desc = Descriptor {
+            addr: PKT_DATA_ADDR,
+            len: VIRTIO_NET_HDR_SIZE as u32,
+            flags: 0, // readable
+            next: 0,
+        };
+        write_descriptor(&mem, 0, desc);
+
+        // Create TX queue (index 1 in VirtualDevice)
+        let tx_queue = setup_avail_ring(&mem, 0);
+        let rx_queue = Queue::new(256);
+
+        let mut queues = vec![rx_queue, tx_queue];
+        let mut vdev = make_virtual_device(&mem, queues);
+
+        // Call receive_raw_from_guest.
+        let result = vdev.receive_raw_from_guest();
+
+        // Assert that it returns None (no payload after header, so condition
+        // read_count > header_len is false).
+        assert_eq!(
+            result, None,
+            "Header-only packet should return None; no panic"
+        );
+    }
+}
