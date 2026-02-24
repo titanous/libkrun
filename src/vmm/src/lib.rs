@@ -1193,24 +1193,14 @@ impl Subscriber for Vmm {
 
             let vmm_exit_code = self.exit_code.load(Ordering::SeqCst);
 
-            let vm_exit = if vcpu_exit_code == FC_EXIT_CODE_REBOOT {
-                crate::vm_exit::VmExit::RebootRequested
-            } else if vcpu_exit_code == FC_EXIT_CODE_GENERIC_ERROR {
-                crate::vm_exit::VmExit::Error {
-                    message: "vCPU fatal error".into(),
-                }
+            // Log which exit code is being used for shutdown
+            if vmm_exit_code != i32::MAX {
+                debug!("using vmm exit code: {vmm_exit_code}");
             } else {
-                // Clean shutdown: guest-set exit code takes precedence
-                let exit_code = if vmm_exit_code != i32::MAX {
-                    debug!("using vmm exit code: {vmm_exit_code}");
-                    vmm_exit_code
-                } else {
-                    debug!("using vcpu exit code: {vcpu_exit_code}");
-                    vcpu_exit_code as i32
-                };
-                crate::vm_exit::VmExit::Shutdown { exit_code }
-            };
+                debug!("using vcpu exit code: {vcpu_exit_code}");
+            }
 
+            let vm_exit = resolve_vm_exit(vcpu_exit_code, vmm_exit_code);
             self.stop(vm_exit);
         } else {
             error!("Spurious EventManager event for handler: Vmm");
@@ -1222,6 +1212,27 @@ impl Subscriber for Vmm {
             EventSet::IN,
             self.exit_evt.as_raw_fd() as u64,
         )]
+    }
+}
+
+/// Helper function to resolve VmExit variant from exit codes.
+/// This is the core logic used by Subscriber::process() to determine
+/// the correct VmExit variant based on vCPU exit code and VMM exit code.
+/// Tests call this same function to verify the dispatch logic.
+pub(crate) fn resolve_vm_exit(vcpu_exit_code: u8, vmm_exit_code: i32) -> crate::vm_exit::VmExit {
+    if vcpu_exit_code == FC_EXIT_CODE_REBOOT {
+        crate::vm_exit::VmExit::RebootRequested
+    } else if vcpu_exit_code == FC_EXIT_CODE_GENERIC_ERROR {
+        crate::vm_exit::VmExit::Error {
+            message: "vCPU fatal error".into(),
+        }
+    } else {
+        let exit_code = if vmm_exit_code != i32::MAX {
+            vmm_exit_code
+        } else {
+            vcpu_exit_code as i32
+        };
+        crate::vm_exit::VmExit::Shutdown { exit_code }
     }
 }
 
@@ -1253,25 +1264,6 @@ mod tests {
         // Guard check after dirty_tracking is enabled
         let result = check_dirty_tracking_enabled(true);
         assert!(result.is_ok());
-    }
-
-    /// Helper function to resolve VmExit variant from exit codes.
-    /// This is the core logic extracted from Subscriber::process().
-    fn resolve_vm_exit(vcpu_exit_code: u8, vmm_exit_code: i32) -> crate::vm_exit::VmExit {
-        if vcpu_exit_code == FC_EXIT_CODE_REBOOT {
-            crate::vm_exit::VmExit::RebootRequested
-        } else if vcpu_exit_code == FC_EXIT_CODE_GENERIC_ERROR {
-            crate::vm_exit::VmExit::Error {
-                message: "vCPU fatal error".into(),
-            }
-        } else {
-            let exit_code = if vmm_exit_code != i32::MAX {
-                vmm_exit_code
-            } else {
-                vcpu_exit_code as i32
-            };
-            crate::vm_exit::VmExit::Shutdown { exit_code }
-        }
     }
 
     /// Test VM exit enum variants and derives
