@@ -24,8 +24,8 @@ use super::{Error, Vmm};
 use crate::device_manager::legacy::PortIODeviceManager;
 use crate::device_manager::mmio::MMIODeviceManager;
 use crate::resources::{
-    ConsolePortInfo, DefaultVirtioConsoleConfig, PortConfig, VirtioConsoleConfigMode, VmDeviceInfo,
-    VmResources,
+    ConsolePortInfo, DefaultVirtioConsoleConfig, PortConfig, TsiFlags, VirtioConsoleConfigMode,
+    VmDeviceInfo, VmResources,
 };
 use crate::vmm_config::external_kernel::{ExternalKernel, KernelFormat};
 #[cfg(feature = "net")]
@@ -59,7 +59,7 @@ use crate::signal_handler::register_sigwinch_handler;
 use crate::terminal::{term_restore_mode, term_set_raw_mode};
 #[cfg(feature = "blk")]
 use crate::vmm_config::block::BlockBuilder;
-#[cfg(not(any(feature = "tee", feature = "nitro")))]
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 use crate::vmm_config::fs::FsDeviceConfig;
 use crate::vmm_config::kernel_cmdline::DEFAULT_KERNEL_CMDLINE;
 #[cfg(target_os = "linux")]
@@ -73,7 +73,7 @@ use device_manager::shm::ShmManager;
 use devices::virtio::display::DisplayInfo;
 #[cfg(feature = "gpu")]
 use devices::virtio::display::NoopDisplayBackend;
-#[cfg(not(any(feature = "tee", feature = "nitro")))]
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 use devices::virtio::{fs::ExportTable, VirtioShmRegion};
 use flate2::read::GzDecoder;
 #[cfg(feature = "gpu")]
@@ -91,10 +91,10 @@ use utils::eventfd::EventFd;
 use utils::worker_message::WorkerMessage;
 #[cfg(all(target_arch = "x86_64", not(feature = "efi"), not(feature = "tee")))]
 use vm_memory::mmap::MmapRegion;
-#[cfg(not(any(feature = "tee", feature = "nitro")))]
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 use vm_memory::Address;
 use vm_memory::Bytes;
-#[cfg(not(feature = "nitro"))]
+#[cfg(not(feature = "aws-nitro"))]
 use vm_memory::GuestMemory;
 #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
 use vm_memory::GuestRegionMmap;
@@ -653,10 +653,7 @@ impl BuiltVm {
         }
 
         let snapshot_err = |e: super::snapshot::SnapshotError| {
-            StartMicrovmError::Internal(super::Error::EventFd(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            )))
+            StartMicrovmError::Internal(super::Error::EventFd(std::io::Error::other(e.to_string())))
         };
 
         // Step 3: Load the full base snapshot (memory, devices, interrupts, vCPU state).
@@ -1161,7 +1158,7 @@ pub fn build_microvm(
         console_id += 1;
     }
 
-    #[cfg(not(any(feature = "tee", feature = "nitro")))]
+    #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
     let export_table: Option<ExportTable> = if cfg!(feature = "gpu") {
         Some(Default::default())
     } else {
@@ -1176,7 +1173,6 @@ pub fn build_microvm(
 
         attach_gpu_device(
             &mut vmm,
-            event_manager,
             &mut _shm_manager,
             #[cfg(not(feature = "tee"))]
             export_table.clone(),
@@ -1194,7 +1190,7 @@ pub fn build_microvm(
         attach_input_devices(&mut vmm, &vm_resources.input_backends, intc.clone())?;
     }
 
-    #[cfg(not(any(feature = "tee", feature = "nitro")))]
+    #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
     attach_fs_devices(
         &mut vmm,
         &vm_resources.fs,
@@ -1208,16 +1204,18 @@ pub fn build_microvm(
     )?;
     #[cfg(feature = "blk")]
     attach_block_devices(&mut vmm, &vm_resources.block, intc.clone())?;
+
     if let Some(vsock) = vm_resources.vsock.get() {
         attach_unixsock_vsock_device(&mut vmm, vsock, event_manager, intc.clone())?;
-        #[cfg(not(feature = "net"))]
-        vmm.kernel_cmdline.insert_str("tsi_hijack")?;
-        #[cfg(feature = "net")]
-        if vm_resources.net.list.is_empty() {
-            // Only enable TSI if we don't have any network devices.
+        let tsi_flags = vm_resources.vsock.tsi_flags();
+        if tsi_flags.contains(TsiFlags::HIJACK_INET) {
             vmm.kernel_cmdline.insert_str("tsi_hijack")?;
         }
+        if tsi_flags.contains(TsiFlags::HIJACK_UNIX) {
+            vmm.kernel_cmdline.insert_str("tsi_hijack_unix")?;
+        }
     }
+
     #[cfg(feature = "net")]
     attach_net_devices(&mut vmm, &vm_resources.net, intc.clone())?;
     #[cfg(feature = "snd")]
@@ -1618,9 +1616,13 @@ pub fn create_guest_memory(
                 };
             arch::arch_memory_regions(mem_size, Some(kernel_guest_addr), kernel_size, 0, None)
         }
-        Payload::ExternalKernel(external_kernel) => {
-            arch::arch_memory_regions(mem_size, None, 0, external_kernel.initramfs_size, None)
-        }
+        Payload::ExternalKernel(external_kernel) => arch::arch_memory_regions(
+            mem_size,
+            None,
+            0,
+            external_kernel.initramfs_size,
+            firmware_size,
+        ),
         #[cfg(feature = "tee")]
         Payload::Tee => {
             let (kernel_guest_addr, kernel_size) =
@@ -1668,10 +1670,14 @@ pub fn create_guest_memory(
     let (guest_mem, entry_addr, initrd_config, cmdline) =
         load_payload(vm_resources, guest_mem, &arch_mem_info, payload)?;
 
-    if let Some(firmware_data) = firmware_data.as_ref() {
-        guest_mem
-            .write(firmware_data, GuestAddress(arch_mem_info.firmware_addr))
-            .map_err(StartMicrovmError::FirmwareInvalidAddress)?;
+    // Only write firmware if data exists AND this isn't an ExternalKernel payload
+    // (ExternalKernel does direct kernel boot and doesn't use EFI firmware)
+    if !matches!(payload, Payload::ExternalKernel(_)) {
+        if let Some(firmware_data) = firmware_data.as_ref() {
+            guest_mem
+                .write(firmware_data, GuestAddress(arch_mem_info.firmware_addr))
+                .map_err(StartMicrovmError::FirmwareInvalidAddress)?;
+        }
     }
 
     let payload_config = PayloadConfig {
@@ -2039,7 +2045,7 @@ fn attach_mmio_device(
     Ok(())
 }
 
-#[cfg(not(any(feature = "tee", feature = "nitro")))]
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 fn attach_fs_devices(
     vmm: &mut Vmm,
     fs_devs: &[FsDeviceConfig],
@@ -2057,6 +2063,7 @@ fn attach_fs_devices(
                 config.fs_id.clone(),
                 config.shared_dir.clone(),
                 exit_code.clone(),
+                config.allow_root_dir_delete,
             )
             .unwrap(),
         ));
@@ -2491,7 +2498,6 @@ fn attach_rtc_device(
 #[allow(clippy::too_many_arguments)]
 fn attach_gpu_device(
     vmm: &mut Vmm,
-    event_manager: &mut EventManager,
     shm_manager: &mut ShmManager,
     #[cfg(not(feature = "tee"))] mut export_table: Option<ExportTable>,
     intc: IrqChip,
@@ -2512,10 +2518,6 @@ fn attach_gpu_device(
         )
         .unwrap(),
     ));
-
-    event_manager
-        .add_subscriber(gpu.clone())
-        .map_err(RegisterEvent)?;
 
     let id = String::from(gpu.lock().unwrap().id());
 

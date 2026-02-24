@@ -362,7 +362,9 @@ impl ProxyNetWorker {
             listener_socket.listen(1024)?;
             info!(socket_path = %path, %vm_port, "Listening for Unix socket ingress connections");
 
-            let mut listener = UnixListener::from_std(listener_socket.into());
+            let owned_fd: std::os::fd::OwnedFd = listener_socket.into();
+            let std_listener = std::os::unix::net::UnixListener::from(owned_fd);
+            let mut listener = UnixListener::from_std(std_listener);
 
             let token = Token(next_token);
             registry.register(&mut listener, token, Interest::READABLE)?;

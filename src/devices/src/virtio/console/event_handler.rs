@@ -69,17 +69,11 @@ impl Console {
                     self_subscriber.clone(),
                 )
                 .unwrap_or_else(|e| {
-                    error!(
-                        "Failed to register queue index {queue_index} with event manager: {e:?}"
-                    );
+                    // On re-activation (e.g. snapshot restore), the queue events
+                    // may already be registered. EEXIST from epoll_ctl is harmless.
+                    debug!("console: queue {queue_index} register (may be re-register): {e:?}");
                 });
         }
-
-        event_manager
-            .unregister(self.activate_evt.as_raw_fd())
-            .unwrap_or_else(|e| {
-                error!("Failed to unregister fs activate evt: {e:?}");
-            })
     }
 
     fn handle_sigwinch_event(&mut self, event: &EpollEvent) {

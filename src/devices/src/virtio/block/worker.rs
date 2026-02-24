@@ -1,7 +1,7 @@
 use crate::virtio::descriptor_utils::{Reader, Writer};
 use crate::virtio::file_traits::BlockBackendAdapter;
 
-use super::super::Queue;
+use super::super::{DeviceQueue, Queue};
 use super::{BlockBackend, CacheType};
 
 use crate::virtio::InterruptTransport;
@@ -58,8 +58,7 @@ pub struct DiscardWriteData {
 unsafe impl ByteValued for DiscardWriteData {}
 
 pub struct BlockWorker<B: BlockBackend> {
-    queue: Queue,
-    queue_evt: EventFd,
+    device_queue: DeviceQueue,
     interrupt: InterruptTransport,
     mem: GuestMemoryMmap,
     disk: B,
@@ -76,8 +75,7 @@ pub struct BlockWorker<B: BlockBackend> {
 impl<B: BlockBackend + 'static> BlockWorker<B> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        queue: Queue,
-        queue_evt: EventFd,
+        device_queue: DeviceQueue,
         interrupt: InterruptTransport,
         mem: GuestMemoryMmap,
         disk: B,
@@ -91,8 +89,7 @@ impl<B: BlockBackend + 'static> BlockWorker<B> {
     ) -> Self {
         let applied_generation = shared_generation.load(Ordering::Acquire);
         Self {
-            queue,
-            queue_evt,
+            device_queue,
             interrupt,
             mem,
             disk,
@@ -115,7 +112,7 @@ impl<B: BlockBackend + 'static> BlockWorker<B> {
     }
 
     fn work(mut self) {
-        let virtq_ev_fd = self.queue_evt.as_raw_fd();
+        let virtq_ev_fd = self.device_queue.event.as_raw_fd();
         let stop_ev_fd = self.stop_fd.as_raw_fd();
         let resync_ev_fd = self.resync_fd.as_raw_fd();
         let quiesce_ev_fd = self.quiesce_fd.as_raw_fd();
@@ -127,9 +124,9 @@ impl<B: BlockBackend + 'static> BlockWorker<B> {
         log::debug!(
             "sync block worker [ns={}]: starting, queue ready={} avail={} used={}",
             worker_nsectors,
-            self.queue.ready,
-            self.queue.next_avail().0,
-            self.queue.next_used().0,
+            self.device_queue.queue.ready,
+            self.device_queue.queue.next_avail().0,
+            self.device_queue.queue.next_used().0,
         );
 
         let epoll = Epoll::new().unwrap();
@@ -172,8 +169,8 @@ impl<B: BlockBackend + 'static> BlockWorker<B> {
                                     "sync block worker [ns={}]: queue event #{} avail={} used={}",
                                     worker_nsectors,
                                     total_queue_events,
-                                    self.queue.next_avail().0,
-                                    self.queue.next_used().0,
+                                    self.device_queue.queue.next_avail().0,
+                                    self.device_queue.queue.next_used().0,
                                 );
                                 let before = total_requests;
                                 self.process_queue_event_counted(&mut total_requests);
@@ -191,15 +188,15 @@ impl<B: BlockBackend + 'static> BlockWorker<B> {
                                 log::debug!(
                                     "sync block worker [ns={}]: resync event, before: avail={} used={}",
                                     worker_nsectors,
-                                    self.queue.next_avail().0,
-                                    self.queue.next_used().0,
+                                    self.device_queue.queue.next_avail().0,
+                                    self.device_queue.queue.next_used().0,
                                 );
                                 self.apply_shared_queue_state();
                                 log::debug!(
                                     "sync block worker [ns={}]: resync done, after: avail={} used={}",
                                     worker_nsectors,
-                                    self.queue.next_avail().0,
-                                    self.queue.next_used().0,
+                                    self.device_queue.queue.next_avail().0,
+                                    self.device_queue.queue.next_used().0,
                                 );
                             }
                             EventSet::IN if source == quiesce_ev_fd => {
@@ -241,7 +238,7 @@ impl<B: BlockBackend + 'static> BlockWorker<B> {
     fn handle_quiesce(&mut self) {
         // Publish current queue state so sync_queues_for_snapshot captures reality.
         if let Ok(mut shared) = self.shared_queue.lock() {
-            *shared = self.queue.clone();
+            *shared = self.device_queue.queue.clone();
         }
 
         // Signal the device that we're quiesced.
@@ -263,18 +260,18 @@ impl<B: BlockBackend + 'static> BlockWorker<B> {
         }
 
         if let Ok(shared) = self.shared_queue.lock() {
-            self.queue = shared.clone();
+            self.device_queue.queue = shared.clone();
 
-            if self.queue.ready {
-                if let Some(used_idx_addr) = self.queue.used_ring.checked_add(2) {
+            if self.device_queue.queue.ready {
+                if let Some(used_idx_addr) = self.device_queue.queue.used_ring.checked_add(2) {
                     if let Ok(used_idx) = self.mem.read_obj::<u16>(used_idx_addr) {
-                        self.queue.set_next_used(used_idx);
+                        self.device_queue.queue.set_next_used(used_idx);
                     }
                 }
-                if let Some(avail_idx_addr) = self.queue.avail_ring.checked_add(2) {
+                if let Some(avail_idx_addr) = self.device_queue.queue.avail_ring.checked_add(2) {
                     if let Ok(avail_idx) = self.mem.read_obj::<u16>(avail_idx_addr) {
-                        if self.queue.next_avail().0 > avail_idx {
-                            self.queue.set_next_avail(avail_idx);
+                        if self.device_queue.queue.next_avail().0 > avail_idx {
+                            self.device_queue.queue.set_next_avail(avail_idx);
                         }
                     }
                 }
@@ -285,7 +282,7 @@ impl<B: BlockBackend + 'static> BlockWorker<B> {
     }
 
     fn process_queue_event_counted(&mut self, total_requests: &mut u64) {
-        if let Err(e) = self.queue_evt.read() {
+        if let Err(e) = self.device_queue.event.read() {
             error!("Failed to get queue event: {e:?}");
         } else {
             self.process_virtio_queues_counted(total_requests);
@@ -296,11 +293,11 @@ impl<B: BlockBackend + 'static> BlockWorker<B> {
     fn process_virtio_queues_counted(&mut self, total_requests: &mut u64) {
         let mem = self.mem.clone();
         loop {
-            self.queue.disable_notification(&mem).unwrap();
+            self.device_queue.queue.disable_notification(&mem).unwrap();
 
             self.process_queue_counted(&mem, total_requests);
 
-            if !self.queue.enable_notification(&mem).unwrap() {
+            if !self.device_queue.queue.enable_notification(&mem).unwrap() {
                 break;
             }
         }
@@ -308,7 +305,7 @@ impl<B: BlockBackend + 'static> BlockWorker<B> {
 
     fn process_queue_counted(&mut self, mem: &GuestMemoryMmap, total_requests: &mut u64) {
         let worker_nsectors = self.disk.nsectors();
-        while let Some(head) = self.queue.pop(mem) {
+        while let Some(head) = self.device_queue.queue.pop(mem) {
             *total_requests += 1;
             let mut reader = match Reader::new(mem, head.clone()) {
                 Ok(r) => r,
@@ -363,11 +360,15 @@ impl<B: BlockBackend + 'static> BlockWorker<B> {
                 error!("Failed to write virtio block status: {e:?}")
             }
 
-            if let Err(e) = self.queue.add_used(mem, head.index, len as u32) {
+            if let Err(e) = self
+                .device_queue
+                .queue
+                .add_used(mem, head.index, len as u32)
+            {
                 error!("failed to add used elements to the queue: {e:?}");
             }
 
-            if self.queue.needs_notification(mem).unwrap() {
+            if self.device_queue.queue.needs_notification(mem).unwrap() {
                 if let Err(e) = self.interrupt.try_signal_used_queue() {
                     error!("error signalling queue: {e:?}");
                 }

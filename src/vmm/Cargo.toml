@@ -15,7 +15,7 @@ efi = [ "blk", "net" ]
 gpu = ["krun_display"]
 snd = []
 input = ["krun_input"]
-nitro = []
+aws-nitro = []
 snapshot = ["serde", "serde_json", "bincode", "devices/snapshot", "hvf?/snapshot"]
 
 [dependencies]

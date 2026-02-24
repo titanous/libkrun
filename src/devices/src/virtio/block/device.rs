@@ -35,15 +35,15 @@ use vm_memory::{ByteValued, GuestMemoryMmap, VolatileSlice};
 
 use super::worker::BlockWorker;
 use super::{
-    super::{ActivateResult, DeviceState, Queue, VirtioDevice, TYPE_BLOCK},
-    BlockBackend, Error, QUEUE_SIZES, SECTOR_SHIFT, SECTOR_SIZE,
+    super::{ActivateResult, DeviceQueue, DeviceState, Queue, VirtioDevice, TYPE_BLOCK},
+    BlockBackend, Error, NUM_QUEUES, QUEUE_CONFIG, QUEUE_SIZES, SECTOR_SHIFT, SECTOR_SIZE,
 };
 
 use crate::snapshot::SnapshotError;
 use crate::virtio::block::{AsyncBlockBackendFactory, AsyncBlockWorker};
 use crate::virtio::{
     block::{ImageType, SyncMode},
-    ActivateError, InterruptTransport, VmmExitObserver,
+    ActivateError, InterruptTransport, QueueConfig, VmmExitObserver,
 };
 
 /// Configuration options for disk caching.
@@ -353,9 +353,11 @@ pub struct Block {
     pub(crate) acked_features: u64,
     config: VirtioBlkConfig,
 
+    // Queue snapshot buffer.
+    queues: Vec<Queue>,
+    queue_evts: Vec<EventFd>,
+
     // Transport related fields.
-    pub(crate) queues: Vec<Queue>,
-    pub(crate) queue_evts: [EventFd; 1],
     pub(crate) device_state: DeviceState,
 
     // Implementation specific fields.
@@ -460,10 +462,13 @@ impl Block {
             avail_features |= 1u64 << VIRTIO_BLK_F_RO;
         };
 
-        let queue_evts = [EventFd::new(EFD_NONBLOCK)?];
-
         let queues: Vec<Queue> = QUEUE_SIZES.iter().map(|&s| Queue::new(s)).collect();
-        let worker_queue_state = Arc::new(Mutex::new(queues[0].clone()));
+        let mut queue_evts = Vec::new();
+        for _ in QUEUE_SIZES.iter() {
+            queue_evts.push(EventFd::new(EFD_NONBLOCK)?);
+        }
+
+        let worker_queue_state = Arc::new(Mutex::new(Queue::new(QUEUE_SIZES[0])));
         let worker_queue_generation = Arc::new(AtomicU64::new(0));
 
         let config = VirtioBlkConfig {
@@ -487,8 +492,8 @@ impl Block {
             disk: Some(disk),
             avail_features,
             acked_features: 0u64,
-            queue_evts,
             queues,
+            queue_evts,
             device_state: DeviceState::Inactive,
             worker_thread: None,
             worker_stopfd: EventFd::new(EFD_NONBLOCK)?,
@@ -525,6 +530,10 @@ impl VirtioDevice for Block {
 
     fn device_name(&self) -> &str {
         "block"
+    }
+
+    fn queue_config(&self) -> &[QueueConfig] {
+        &QUEUE_CONFIG
     }
 
     fn queues(&self) -> &[Queue] {
@@ -573,17 +582,29 @@ impl VirtioDevice for Block {
         self.device_state.is_activated()
     }
 
-    fn activate(&mut self, mem: GuestMemoryMmap, interrupt: InterruptTransport) -> ActivateResult {
+    fn activate(
+        &mut self,
+        mem: GuestMemoryMmap,
+        interrupt: InterruptTransport,
+        queues: Vec<DeviceQueue>,
+    ) -> ActivateResult {
         log::debug!("block: activate called");
         if self.worker_thread.is_some() {
             panic!("virtio_blk: worker thread already exists");
         }
 
-        let event_idx: bool = (self.acked_features & (1 << VIRTIO_RING_F_EVENT_IDX)) != 0;
-        self.queues[0].set_event_idx(event_idx);
+        let [blk_q]: [_; NUM_QUEUES] = queues.try_into().map_err(|_| {
+            error!("Cannot perform activate. Expected {} queue(s)", NUM_QUEUES);
+            ActivateError::BadActivate
+        })?;
 
         // Take ownership of the disk - for async factory we need to move it to the worker
         let disk = self.disk.take().ok_or(ActivateError::BadActivate)?;
+
+        if let Ok(mut shared) = self.worker_queue_state.lock() {
+            *shared = blk_q.queue.clone();
+        }
+        self.worker_queue_generation.fetch_add(1, Ordering::SeqCst);
 
         match disk {
             BlockDeviceBackend::Sync(backend) => {
@@ -591,14 +612,8 @@ impl VirtioDevice for Block {
                 // Put the backend back so on_exit can access it
                 self.disk = Some(BlockDeviceBackend::Sync(backend.clone()));
 
-                if let Ok(mut shared) = self.worker_queue_state.lock() {
-                    *shared = self.queues[0].clone();
-                }
-                self.worker_queue_generation.fetch_add(1, Ordering::SeqCst);
-
                 let worker = BlockWorker::new(
-                    self.queues[0].clone(),
-                    self.queue_evts[0].try_clone().unwrap(),
+                    blk_q,
                     interrupt.clone(),
                     mem.clone(),
                     backend,
@@ -615,9 +630,10 @@ impl VirtioDevice for Block {
             BlockDeviceBackend::AsyncFactory(factory) => {
                 log::debug!("block: starting async worker with factory");
                 // Factory is consumed by the worker, don't put it back
+                let blk_evt = blk_q.event.as_ref().try_clone().unwrap();
                 let worker = AsyncBlockWorker::new(
-                    self.queues[0].clone(),
-                    self.queue_evts[0].try_clone().unwrap(),
+                    blk_q.queue.clone(),
+                    blk_evt,
                     interrupt.clone(),
                     mem.clone(),
                     factory,
@@ -630,10 +646,6 @@ impl VirtioDevice for Block {
                     self.worker_quiesce_ack.clone(),
                     self.worker_backend_state.clone(),
                 );
-                if let Ok(mut shared) = self.worker_queue_state.lock() {
-                    *shared = self.queues[0].clone();
-                }
-                self.worker_queue_generation.fetch_add(1, Ordering::SeqCst);
                 self.worker_thread = Some(worker.run());
             }
         }

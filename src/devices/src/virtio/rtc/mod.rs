@@ -5,9 +5,12 @@ pub use self::defs::uapi::VIRTIO_ID_CLOCK as TYPE_RTC;
 pub use self::device::Rtc;
 
 mod defs {
+    use crate::virtio::QueueConfig;
+
     pub const RTC_DEV_ID: &str = "virtio_rtc";
     pub const NUM_QUEUES: usize = 1;
     pub const QUEUE_SIZES: &[u16] = &[64; NUM_QUEUES];
+    pub static QUEUE_CONFIG: [QueueConfig; NUM_QUEUES] = [QueueConfig::new(64); NUM_QUEUES];
 
     pub mod uapi {
         pub const VIRTIO_F_VERSION_1: u32 = 32;

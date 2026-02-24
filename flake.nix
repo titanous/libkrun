@@ -45,6 +45,9 @@
             # so clang needs an explicit path via BINDGEN_EXTRA_CLANG_ARGS
             glibc.dev
 
+            # libcap-ng: linked by the capng Rust crate (upstream dependency)
+            libcap_ng
+
             # ifconfig: used by tests/run.sh to configure loopback in network namespace
             nettools
 

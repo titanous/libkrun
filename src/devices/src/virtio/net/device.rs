@@ -6,10 +6,11 @@
 // found in the THIRD-PARTY file.
 use crate::snapshot::SnapshotError;
 use crate::virtio::net::{Error, Result};
-use crate::virtio::net::{QUEUE_SIZES, RX_INDEX, TX_INDEX};
+use crate::virtio::net::{NUM_QUEUES, QUEUE_CONFIG, QUEUE_SIZES};
 use crate::virtio::queue::Error as QueueError;
 use crate::virtio::{
-    ActivateError, ActivateResult, DeviceState, InterruptTransport, Queue, VirtioDevice, TYPE_NET,
+    ActivateError, ActivateResult, DeviceQueue, DeviceState, InterruptTransport, Queue,
+    QueueConfig, VirtioDevice, TYPE_NET,
 };
 use crate::Error as DeviceError;
 
@@ -28,7 +29,6 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 use utils::eventfd::{EventFd, EFD_NONBLOCK};
 use virtio_bindings::virtio_net::VIRTIO_NET_F_MAC;
-use virtio_bindings::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
 use vm_memory::{ByteValued, GuestMemoryError, GuestMemoryMmap};
 
 const VIRTIO_F_VERSION_1: u32 = 32;
@@ -229,6 +229,10 @@ impl VirtioDevice for Net {
         "net"
     }
 
+    fn queue_config(&self) -> &[QueueConfig] {
+        &QUEUE_CONFIG
+    }
+
     fn queues(&self) -> &[Queue] {
         &self.queues
     }
@@ -263,16 +267,16 @@ impl VirtioDevice for Net {
         );
     }
 
-    fn activate(&mut self, mem: GuestMemoryMmap, interrupt: InterruptTransport) -> ActivateResult {
-        let event_idx: bool = (self.acked_features & (1 << VIRTIO_RING_F_EVENT_IDX)) != 0;
-        self.queues[RX_INDEX].set_event_idx(event_idx);
-        self.queues[TX_INDEX].set_event_idx(event_idx);
-
-        let queue_evts: Vec<EventFd> = self
-            .queue_evts
-            .iter()
-            .map(|e| e.try_clone().unwrap())
-            .collect();
+    fn activate(
+        &mut self,
+        mem: GuestMemoryMmap,
+        interrupt: InterruptTransport,
+        queues: Vec<DeviceQueue>,
+    ) -> ActivateResult {
+        let [rx_q, tx_q]: [_; NUM_QUEUES] = queues.try_into().map_err(|_| {
+            error!("Cannot perform activate. Expected {} queue(s)", NUM_QUEUES);
+            ActivateError::BadActivate
+        })?;
 
         // Take ownership of the backend - for async factory we need to move it to the worker
         let backend = self.cfg_backend.take().ok_or(ActivateError::BadActivate)?;
@@ -280,8 +284,18 @@ impl VirtioDevice for Net {
         match backend {
             VirtioNetBackend::CustomAsyncFactory(factory) => {
                 debug!("virtio-net ({}): starting async worker", self.id());
+                // AsyncNetWorker still uses old-style Vec<Queue> + Vec<EventFd>
+                let queue_list = vec![rx_q.queue.clone(), tx_q.queue.clone()];
+                let queue_evts = vec![
+                    rx_q.event.try_clone().unwrap(),
+                    tx_q.event.try_clone().unwrap(),
+                ];
+                if let Ok(mut shared) = self.worker_queue_state.lock() {
+                    *shared = queue_list.clone();
+                }
+                self.worker_queue_generation.fetch_add(1, Ordering::SeqCst);
                 let worker = AsyncNetWorker::new(
-                    self.queues.clone(),
+                    queue_list,
                     queue_evts,
                     interrupt.clone(),
                     mem.clone(),
@@ -295,24 +309,24 @@ impl VirtioDevice for Net {
                     self.worker_quiesce_ack.clone(),
                     self.worker_backend_state.clone(),
                 );
-                if let Ok(mut shared) = self.worker_queue_state.lock() {
-                    *shared = self.queues.clone();
-                }
-                self.worker_queue_generation.fetch_add(1, Ordering::SeqCst);
                 worker.run();
                 self.device_state = DeviceState::Activated(mem, interrupt);
                 Ok(())
             }
             VirtioNetBackend::Proxy { listeners } => {
                 debug!("virtio-net ({}): starting proxy worker", self.id());
-
+                let queue_list = vec![rx_q.queue.clone(), tx_q.queue.clone()];
+                let queue_evts = vec![
+                    rx_q.event.try_clone().unwrap(),
+                    tx_q.event.try_clone().unwrap(),
+                ];
                 let interrupt_status = interrupt.status_arc();
                 let interrupt_evt = interrupt.event().try_clone().unwrap();
                 let intc = Some(interrupt.intc().clone());
                 let irq_line = interrupt.irq_line();
 
                 match ProxyNetWorker::new(
-                    self.queues.clone(),
+                    queue_list,
                     queue_evts,
                     interrupt_status,
                     interrupt_evt,
@@ -337,8 +351,8 @@ impl VirtioDevice for Net {
                 self.cfg_backend = Some(sync_backend.clone());
 
                 match NetWorker::new(
-                    self.queues.clone(),
-                    queue_evts,
+                    rx_q,
+                    tx_q,
                     interrupt.clone(),
                     mem.clone(),
                     self.acked_features,

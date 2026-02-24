@@ -5,7 +5,7 @@ use vm_memory::{Address, ByteValued, Bytes, GuestMemoryMmap, Le16, Le64};
 
 use super::super::{ActivateError, ActivateResult, DeviceState, Queue as VirtQueue, VirtioDevice};
 use super::{defs, defs::uapi, RtcError};
-use crate::virtio::InterruptTransport;
+use crate::virtio::{DeviceQueue, InterruptTransport, QueueConfig};
 
 #[cfg(target_os = "macos")]
 use hvf::Vcpus;
@@ -516,6 +516,10 @@ impl VirtioDevice for Rtc {
         "rtc"
     }
 
+    fn queue_config(&self) -> &[QueueConfig] {
+        &defs::QUEUE_CONFIG
+    }
+
     fn queues(&self) -> &[VirtQueue] {
         &self.queues
     }
@@ -541,15 +545,26 @@ impl VirtioDevice for Rtc {
         );
     }
 
-    fn activate(&mut self, mem: GuestMemoryMmap, interrupt: InterruptTransport) -> ActivateResult {
-        if self.queues.len() != defs::NUM_QUEUES {
+    fn activate(
+        &mut self,
+        mem: GuestMemoryMmap,
+        interrupt: InterruptTransport,
+        queues: Vec<DeviceQueue>,
+    ) -> ActivateResult {
+        if queues.len() != defs::NUM_QUEUES {
             error!(
                 "Cannot perform activate. Expected {} queue(s), got {}",
                 defs::NUM_QUEUES,
-                self.queues.len()
+                queues.len()
             );
             return Err(ActivateError::BadActivate);
         }
+
+        self.queues = queues.iter().map(|dq| dq.queue.clone()).collect();
+        self.queue_events = queues
+            .iter()
+            .map(|dq| dq.event.as_ref().try_clone().unwrap())
+            .collect();
 
         if self.activate_evt.write(1).is_err() {
             error!("Cannot write to activate_evt");

@@ -38,7 +38,7 @@ use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::env;
-use std::ffi::{c_void, CStr};
+use std::ffi::{c_void, CStr, CString};
 use std::fs::File;
 use std::io::IsTerminal;
 #[cfg(target_os = "linux")]
@@ -51,7 +51,9 @@ use std::sync::{Arc, LazyLock, Mutex};
 use utils::eventfd::EventFd;
 use vmm::builder::StartMicrovmError;
 pub use vmm::resources::VirtioConsoleConfigMode;
-use vmm::resources::{DefaultVirtioConsoleConfig, PortConfig, SerialConsoleConfig, VmResources};
+use vmm::resources::{
+    DefaultVirtioConsoleConfig, PortConfig, SerialConsoleConfig, TsiFlags, VmResources, VsockConfig,
+};
 #[cfg(feature = "blk")]
 pub use vmm::vmm_config::block::{BlockConfigError, BlockDeviceConfig, BlockRootConfig};
 #[cfg(not(feature = "tee"))]
@@ -69,15 +71,13 @@ use vmm::vmm_config::machine_config::VmConfig;
 use vmm::vmm_config::net::{NetworkInterfaceConfig, NetworkInterfaceError};
 use vmm::vmm_config::vsock::VsockDeviceConfig;
 
-#[cfg(feature = "nitro")]
-use nitro::enclaves::NitroEnclave;
+#[cfg(feature = "aws-nitro")]
+use aws_nitro::enclave::NitroEnclave;
 
 #[cfg(feature = "gpu")]
 use devices::virtio::display::{DisplayInfoEdid, PhysicalSize, MAX_DISPLAYS};
 #[cfg(feature = "input")]
 use krun_input::{InputConfigBackend, InputEventProviderBackend};
-#[cfg(feature = "nitro")]
-use nitro_enclaves::launch::StartFlags;
 
 // Value returned on success. We use libc's errors otherwise.
 const KRUN_SUCCESS: i32 = 0;
@@ -93,6 +93,9 @@ const KRUNFW_NAME: &str = "libkrunfw-sev.so.5";
 const KRUNFW_NAME: &str = "libkrunfw-tdx.so.5";
 #[cfg(target_os = "macos")]
 const KRUNFW_NAME: &str = "libkrunfw.5.dylib";
+
+#[cfg(feature = "aws-nitro")]
+static KRUN_NITRO_DEBUG: Mutex<bool> = Mutex::new(false);
 
 // Path to the init binary to be executed inside the VM.
 const INIT_PATH: &str = "/init.krun";
@@ -155,6 +158,7 @@ pub struct ContextConfig {
     legacy_mac: Option<[u8; 6]>,
     net_index: u8,
     tsi_port_map: Option<HashMap<u16, u16>>,
+    vsock_config: VsockConfig,
     #[cfg(feature = "blk")]
     block_cfgs: Vec<BlockDeviceConfig>,
     #[cfg(feature = "blk")]
@@ -173,10 +177,6 @@ pub struct ContextConfig {
     console_output: Option<PathBuf>,
     vmm_uid: Option<libc::uid_t>,
     vmm_gid: Option<libc::gid_t>,
-    #[cfg(feature = "nitro")]
-    nitro_image_path: Option<PathBuf>,
-    #[cfg(feature = "nitro")]
-    nitro_start_flags: StartFlags,
 }
 
 impl ContextConfig {
@@ -266,18 +266,19 @@ impl ContextConfig {
         self.tee_config_file.clone()
     }
 
-    #[cfg(feature = "nitro")]
+    #[cfg(feature = "aws-nitro")]
     fn set_nitro_image(&mut self, image_path: PathBuf) {
         self.nitro_image_path = Some(image_path);
     }
 
-    #[cfg(feature = "nitro")]
+    #[cfg(feature = "aws-nitro")]
     fn set_nitro_start_flags(&mut self, start_flags: StartFlags) {
         self.nitro_start_flags = start_flags;
     }
+
 }
 
-#[cfg(feature = "nitro")]
+#[cfg(feature = "aws-nitro")]
 impl TryFrom<ContextConfig> for NitroEnclave {
     type Error = i32;
 
@@ -316,25 +317,24 @@ impl TryFrom<ContextConfig> for NitroEnclave {
             return Err(-libc::EINVAL);
         };
 
-        let net = {
+        let net_unixfd = {
             let mut list = ctx.vmr.net.list;
             let len = list.len();
             match len {
                 0 => None,
                 1 => {
                     let device = list.pop_front().unwrap();
+                    let device = device.lock().unwrap();
 
-                    match device.lock().unwrap().backend() {
-                        Some(
-                            VirtioNetBackend::UnixstreamFd(_) | VirtioNetBackend::UnixstreamPath(_),
-                        ) => {}
+                    let fd = match device.backend() {
+                        Some(VirtioNetBackend::UnixstreamFd(fd)) => RawFd::from(*fd),
                         _ => {
-                            error!("configured virtio-net backend must be unix stream");
+                            error!("configured virtio-net backend must be unix stream fd");
                             return Err(-libc::EINVAL);
                         }
                     };
 
-                    Some(device)
+                    Some(fd)
                 }
                 _ => {
                     error!(
@@ -345,16 +345,23 @@ impl TryFrom<ContextConfig> for NitroEnclave {
             }
         };
 
+        let Some(output_path) = ctx.console_output else {
+            error!("console output path not specified");
+            return Err(-libc::EINVAL);
+        };
+
+        let debug = KRUN_NITRO_DEBUG.lock().unwrap();
+
         Ok(Self {
-            _image_path: ctx.nitro_image_path,
             mem_size_mib,
             vcpus,
             rootfs,
-            start_flags: ctx.nitro_start_flags,
             exec_path,
             exec_args,
             exec_env,
-            net,
+            net_unixfd,
+            output_path,
+            debug: *debug,
         })
     }
 }
@@ -403,6 +410,17 @@ fn log_level_to_filter_str(level: u32) -> &'static str {
 pub extern "C" fn krun_set_log_level(level: u32) -> i32 {
     let filter = log_level_to_filter_str(level);
     env_logger::Builder::from_env(Env::default().default_filter_or(filter)).init();
+
+    #[cfg(feature = "aws-nitro")]
+    {
+        // Notify krun-awsnitro to enable debug for log level.
+        if level == 4 {
+            let mut debug = KRUN_NITRO_DEBUG.lock().unwrap();
+
+            *debug = true;
+        }
+    }
+
     KRUN_SUCCESS
 }
 
@@ -541,6 +559,7 @@ pub unsafe extern "C" fn krun_add_virtiofs(
             fs_id: tag.to_string(),
             shared_dir: path.to_string(),
             shm_size: None,
+            allow_root_dir_delete: false,
         });
         KRUN_SUCCESS
     })
@@ -569,6 +588,7 @@ pub unsafe extern "C" fn krun_add_virtiofs2(
             fs_id: tag.to_string(),
             shared_dir: path.to_string(),
             shm_size: Some(shm_size.try_into().unwrap()),
+            allow_root_dir_delete: false,
         });
 
         KRUN_SUCCESS
@@ -1105,6 +1125,9 @@ pub unsafe extern "C" fn krun_set_port_map(ctx_id: u32, c_port_map: *const *cons
     }
 
     with_builder(ctx_id, |cfg| {
+        if cfg.config.vsock_config == VsockConfig::Disabled {
+            return -libc::ENODEV;
+        }
         if cfg.port_map(port_map).is_err() {
             return -libc::EINVAL;
         }
@@ -1288,7 +1311,7 @@ pub unsafe extern "C" fn krun_add_vsock_port2(
     c_filepath: *const c_char,
     listen: bool,
 ) -> i32 {
-    #[cfg(feature = "nitro")]
+    #[cfg(feature = "aws-nitro")]
     if listen {
         return -libc::EINVAL;
     }
@@ -1307,6 +1330,9 @@ pub unsafe extern "C" fn krun_add_vsock_port2(
     }
 
     with_builder(ctx_id, |cfg| {
+        if cfg.config.vsock_config == VsockConfig::Disabled {
+            return -libc::ENODEV;
+        }
         cfg.add_vsock_port(port, filepath, listen);
 
         KRUN_SUCCESS
@@ -1679,6 +1705,38 @@ pub unsafe extern "C" fn krun_check_nested_virt() -> i32 {
     -libc::EOPNOTSUPP
 }
 
+const KRUN_FEATURE_NET: u64 = 0;
+const KRUN_FEATURE_BLK: u64 = 1;
+const KRUN_FEATURE_GPU: u64 = 2;
+const KRUN_FEATURE_SND: u64 = 3;
+const KRUN_FEATURE_INPUT: u64 = 4;
+const KRUN_FEATURE_EFI: u64 = 5;
+const KRUN_FEATURE_TEE: u64 = 6;
+const KRUN_FEATURE_AMD_SEV: u64 = 7;
+const KRUN_FEATURE_INTEL_TDX: u64 = 8;
+const KRUN_FEATURE_AWS_NITRO: u64 = 9;
+const KRUN_FEATURE_VIRGL_RESOURCE_MAP2: u64 = 10;
+
+#[no_mangle]
+pub extern "C" fn krun_has_feature(feature: u64) -> c_int {
+    let supported = match feature {
+        KRUN_FEATURE_NET => cfg!(feature = "net"),
+        KRUN_FEATURE_BLK => cfg!(feature = "blk"),
+        KRUN_FEATURE_GPU => cfg!(feature = "gpu"),
+        KRUN_FEATURE_SND => cfg!(feature = "snd"),
+        KRUN_FEATURE_INPUT => cfg!(feature = "input"),
+        KRUN_FEATURE_EFI => cfg!(feature = "efi"),
+        KRUN_FEATURE_TEE => cfg!(feature = "tee"),
+        KRUN_FEATURE_AMD_SEV => cfg!(feature = "amd-sev"),
+        KRUN_FEATURE_INTEL_TDX => cfg!(feature = "tdx"),
+        KRUN_FEATURE_AWS_NITRO => cfg!(feature = "aws-nitro"),
+        KRUN_FEATURE_VIRGL_RESOURCE_MAP2 => cfg!(feature = "virgl_resource_map2"),
+        _ => return -libc::EINVAL,
+    };
+
+    supported as c_int
+}
+
 /// Gets the maximum number of vCPUs supported by the hypervisor.
 ///
 /// Returns the maximum number of vCPUs that can be created by this hypervisor,
@@ -1990,7 +2048,7 @@ pub extern "C" fn krun_setgid(ctx_id: u32, gid: libc::gid_t) -> i32 {
     })
 }
 
-#[cfg(feature = "nitro")]
+#[cfg(feature = "aws-nitro")]
 #[allow(clippy::missing_safety_doc)]
 #[no_mangle]
 pub unsafe extern "C" fn krun_nitro_set_image(ctx_id: u32, c_image_filepath: *const c_char) -> i32 {
@@ -2006,7 +2064,7 @@ pub unsafe extern "C" fn krun_nitro_set_image(ctx_id: u32, c_image_filepath: *co
     })
 }
 
-#[cfg(feature = "nitro")]
+#[cfg(feature = "aws-nitro")]
 #[allow(clippy::missing_safety_doc)]
 #[no_mangle]
 pub unsafe extern "C" fn krun_nitro_set_start_flags(ctx_id: u32, start_flags: u64) -> i32 {
@@ -2101,6 +2159,7 @@ pub unsafe extern "C" fn krun_set_root_disk_remount(
             shared_dir: empty_root.to_string_lossy().into(),
             // Default to a conservative 512 MB window.
             shm_size: Some(1 << 29),
+            allow_root_dir_delete: true,
         });
 
         cfg.block_root(device, fstype, options);
@@ -2114,6 +2173,36 @@ pub extern "C" fn krun_disable_implicit_console(ctx_id: u32) -> i32 {
     with_builder(ctx_id, |cfg| match cfg.disable_implicit_console() {
         Ok(_) => KRUN_SUCCESS,
         Err(_) => -libc::EINVAL,
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn krun_disable_implicit_vsock(ctx_id: u32) -> i32 {
+    with_builder(ctx_id, |cfg| {
+        cfg.config.vsock_config = VsockConfig::Disabled;
+        KRUN_SUCCESS
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn krun_add_vsock(ctx_id: u32, tsi_features: u32) -> i32 {
+    let tsi_flags = match TsiFlags::from_bits(tsi_features) {
+        Some(flags) => flags,
+        None => return -libc::EINVAL,
+    };
+
+    if cfg!(target_os = "macos") && tsi_flags.contains(TsiFlags::HIJACK_UNIX) {
+        error!("TSI hijacking of UNIX sockets is not yet supported on macOS");
+        return -libc::EINVAL;
+    }
+
+    with_builder(ctx_id, |cfg| {
+        if cfg.config.vsock_config != VsockConfig::Disabled {
+            return -libc::EEXIST;
+        }
+        cfg.config.vsock_config = VsockConfig::Explicit { tsi_flags };
+
+        KRUN_SUCCESS
     })
 }
 
@@ -2262,6 +2351,18 @@ pub unsafe extern "C" fn krun_set_kernel_console(ctx_id: u32, console_id: *const
 #[no_mangle]
 #[allow(unreachable_code)]
 pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
+    #[cfg(target_os = "linux")]
+    {
+        let prname = match env::var("HOSTNAME") {
+            Ok(val) => CString::new(format!("VM:{val}")).unwrap(),
+            Err(_) => CString::new("libkrun VM").unwrap(),
+        };
+        unsafe { libc::prctl(libc::PR_SET_NAME, prname.as_ptr()) };
+    }
+
+    #[cfg(feature = "aws-nitro")]
+    return krun_start_enter_nitro(ctx_id);
+
     take_builder(ctx_id, |builder| {
         let ctx = match builder.build() {
             Ok(ctx) => ctx,
@@ -2281,7 +2382,7 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
     })
 }
 
-#[cfg(feature = "nitro")]
+#[cfg(feature = "aws-nitro")]
 #[no_mangle]
 fn krun_start_enter_nitro(ctx_id: u32) -> i32 {
     take_builder(ctx_id, |ctx_cfg| {
@@ -2445,6 +2546,7 @@ impl Builder {
             fs_id: tag.to_string(),
             shared_dir: host_path.to_string(),
             shm_size: None,
+            allow_root_dir_delete: false,
         });
         self
     }
@@ -2532,6 +2634,7 @@ impl Builder {
             shared_dir,
             // Default to a conservative 512 MB window.
             shm_size: Some(1 << 29),
+            allow_root_dir_delete: false,
         });
 
         self
@@ -2716,13 +2819,13 @@ impl Builder {
         self
     }
 
-    #[cfg(feature = "nitro")]
+    #[cfg(feature = "aws-nitro")]
     pub fn nitro_image(&mut self, image_path: PathBuf) -> &mut Self {
         self.config.nitro_image_path = Some(image_path);
         self
     }
 
-    #[cfg(feature = "nitro")]
+    #[cfg(feature = "aws-nitro")]
     pub fn nitro_start_flags(&mut self, start_flags: StartFlags) -> &mut Self {
         self.config.nitro_start_flags = start_flags;
         self
@@ -2805,43 +2908,44 @@ impl Builder {
             }
         }
 
-        #[allow(unused_assignments)]
-        let mut vsock_set = false;
-        let mut vsock_config = VsockDeviceConfig {
-            vsock_id: "vsock0".to_string(),
-            guest_cid: 3,
-            host_port_map: None,
-            unix_ipc_port_map: None,
-            enable_tsi: false,
-            enable_tsi_unix: false,
-        };
+        match &ctx_cfg.vsock_config {
+            VsockConfig::Disabled => (),
+            VsockConfig::Explicit { tsi_flags } => {
+                let vsock_device_config = VsockDeviceConfig {
+                    vsock_id: "vsock0".to_string(),
+                    guest_cid: 3,
+                    host_port_map: ctx_cfg.tsi_port_map,
+                    unix_ipc_port_map: ctx_cfg.unix_ipc_port_map.clone(),
+                    tsi_flags: *tsi_flags,
+                };
+                ctx_cfg.vmr.set_vsock_device(vsock_device_config).unwrap();
+            }
+            VsockConfig::Implicit => {
+                #[cfg(feature = "net")]
+                let enable_tsi =
+                    ctx_cfg.vmr.net.list.is_empty() && ctx_cfg.legacy_net_cfg.is_none();
+                #[cfg(not(feature = "net"))]
+                let enable_tsi = true;
 
-        #[cfg(feature = "net")]
-        if ctx_cfg.vmr.net.list.is_empty() && ctx_cfg.legacy_net_cfg.is_none() {
-            vsock_config.host_port_map = ctx_cfg.tsi_port_map;
-            vsock_config.enable_tsi = true;
-            vsock_set = true;
-        }
-        #[cfg(not(feature = "net"))]
-        {
-            vsock_config.host_port_map = ctx_cfg.tsi_port_map;
-            vsock_config.enable_tsi = true;
-            vsock_set = true;
-        }
+                let has_ipc_map = ctx_cfg.unix_ipc_port_map.is_some();
 
-        if let Some(ref map) = ctx_cfg.unix_ipc_port_map {
-            vsock_config.unix_ipc_port_map = Some(map.clone());
-            vsock_set = true;
-        }
+                if enable_tsi || has_ipc_map {
+                    let (tsi_flags, host_port_map) = if enable_tsi {
+                        (TsiFlags::HIJACK_INET, ctx_cfg.tsi_port_map)
+                    } else {
+                        (TsiFlags::empty(), None)
+                    };
 
-        if vsock_set {
-            if vsock_config.enable_tsi {
-                #[cfg(not(feature = "tee"))]
-                if ctx_cfg.vmr.fs.len() == 1 && ctx_cfg.vmr.fs[0].shared_dir == "/" {
-                    vsock_config.enable_tsi_unix = true;
+                    let vsock_device_config = VsockDeviceConfig {
+                        vsock_id: "vsock0".to_string(),
+                        guest_cid: 3,
+                        host_port_map,
+                        unix_ipc_port_map: ctx_cfg.unix_ipc_port_map.clone(),
+                        tsi_flags,
+                    };
+                    ctx_cfg.vmr.set_vsock_device(vsock_device_config).unwrap();
                 }
             }
-            ctx_cfg.vmr.set_vsock_device(vsock_config).unwrap();
         }
 
         if let Some(virgl_flags) = ctx_cfg.gpu_virgl_flags {
@@ -3020,10 +3124,7 @@ impl VmHandle {
     #[cfg(feature = "snapshot")]
     fn snapshot_err_to_start_error(e: vmm::snapshot::SnapshotError) -> StartError {
         StartError::Microvm(vmm::builder::StartMicrovmError::Internal(
-            vmm::Error::EventFd(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            )),
+            vmm::Error::EventFd(std::io::Error::other(e.to_string())),
         ))
     }
 

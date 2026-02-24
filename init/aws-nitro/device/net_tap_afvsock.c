@@ -5,6 +5,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <stdatomic.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -25,30 +26,30 @@
 #include <linux/if_tun.h>
 #include <linux/vm_sockets.h>
 
-#include "include/tap_afvsock.h"
-#include "include/vsock.h"
+#include "include/device.h"
 
 #define TUN_DEV_MAJOR 10
 #define TUN_DEV_MINOR 200
 
-#define VSOCK_NET_PORT 8080
-
-volatile sig_atomic_t proxy_ready = 0;
-
-static void sig_handler(int sig)
+/*
+ * Forward ethernet packets to/from the host vsock providing network access and
+ * the guest TAP device routing application network traffic.
+ */
+static int tap_vsock_forward(int tun_fd, int vsock_fd, int shutdown_fd,
+                             char *tap_name)
 {
-    if (sig == SIGUSR1)
-        proxy_ready = 1;
-}
-
-static int tap_vsock_forward(int tun_fd, int vsock_fd, char *tap_name)
-{
-    struct pollfd pfds[2];
+    struct pollfd pfds[3];
     unsigned char *buf;
+    bool event_found;
     struct ifreq ifr;
-    ssize_t nread;
     int ret, sock_fd;
+    unsigned int sz;
+    ssize_t nread;
 
+    /*
+     * Fetch the TAP device's Maximum Transfer Unit (MTU) and allocate a buffer
+     * in that size to transfer ethernet frames to/from the host.
+     */
     sock_fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock_fd < 0) {
         perror("creating INET socket to get TAP MTU");
@@ -62,7 +63,7 @@ static int tap_vsock_forward(int tun_fd, int vsock_fd, char *tap_name)
     if (ret < 0) {
         close(sock_fd);
         perror("fetch MTU of TAP device");
-        exit(ret);
+        exit(-errno);
     }
 
     close(sock_fd);
@@ -73,17 +74,29 @@ static int tap_vsock_forward(int tun_fd, int vsock_fd, char *tap_name)
         exit(-1);
     }
 
+    // Forward the MTU to the host for it to allocate a corresponding buffer.
+    ret = write(vsock_fd, (void *)&ifr.ifr_mtu, sizeof(int));
+    if (ret < sizeof(int)) {
+        perror("write TAP device MTU to host");
+        exit(-errno);
+    }
+
     pfds[0].fd = vsock_fd;
     pfds[0].events = POLLIN;
 
     pfds[1].fd = tun_fd;
     pfds[1].events = POLLIN;
 
+    pfds[2].fd = shutdown_fd;
+    pfds[2].events = POLLIN;
+
+    // Signal to the parent process that initialization is complete.
     kill(getppid(), SIGUSR1);
 
-    while (poll(pfds, 2, -1) > 0) {
+    while (poll(pfds, 3, -1) > 0) {
+        event_found = false;
+        // Event on vsock. Read the frame and write it to the TAP device.
         if (pfds[0].revents & POLLIN) {
-            unsigned int sz;
             nread = read(vsock_fd, &sz, 4);
             if (nread != 4)
                 exit(0);
@@ -92,16 +105,31 @@ static int tap_vsock_forward(int tun_fd, int vsock_fd, char *tap_name)
 
             nread = read(vsock_fd, buf, len);
             write(tun_fd, buf, nread);
+
+            event_found = true;
         }
 
+        // Event on the TAP device. Read the frame and write it to the vsock.
         if (pfds[1].revents & POLLIN) {
             nread = read(tun_fd, buf, ifr.ifr_mtu);
             if (nread > 0) {
-                unsigned int sz = htonl(nread);
+                sz = htonl(nread);
                 write(vsock_fd, (void *)&sz, 4);
                 write(vsock_fd, buf, nread);
             }
+
+            event_found = true;
         }
+
+        if (event_found)
+            continue;
+
+        /*
+         * No events on network proxy sockets, check shutdown FD and shut down
+         * if event found.
+         */
+        if (pfds[2].revents & POLLIN)
+            break;
     }
 
     close(vsock_fd);
@@ -110,6 +138,9 @@ static int tap_vsock_forward(int tun_fd, int vsock_fd, char *tap_name)
     exit(0);
 }
 
+/*
+ * Initialize the enclave TAP device to route all network traffic to the host.
+ */
 static int tun_init(void)
 {
     struct stat statbuf;
@@ -155,6 +186,9 @@ static int tun_init(void)
     return 0;
 }
 
+/*
+ * Assign IP data to route enclave network traffic to the TAP device.
+ */
 static int tap_assign_ipaddr(char *name)
 {
     struct sockaddr_in *addr;
@@ -174,7 +208,7 @@ static int tap_assign_ipaddr(char *name)
 
     addr = (struct sockaddr_in *)&ifr.ifr_addr;
     addr->sin_family = AF_INET;
-    inet_pton(AF_INET, "10.0.0.1", &addr->sin_addr);
+    inet_pton(AF_INET, "172.31.10.83", &addr->sin_addr);
 
     ret = ioctl(sock_fd, SIOCSIFADDR, &ifr);
     if (ret < 0) {
@@ -239,7 +273,7 @@ static int tap_assign_ipaddr(char *name)
     // Set the gateway IP.
     addr = (struct sockaddr_in *)&route.rt_gateway;
     addr->sin_family = AF_INET;
-    addr->sin_addr.s_addr = inet_addr("10.0.0.1");
+    addr->sin_addr.s_addr = inet_addr("172.31.10.83");
 
     // Set the destination to 0.0.0.0 (default route).
     addr = (struct sockaddr_in *)&route.rt_dst;
@@ -269,6 +303,9 @@ static int tap_assign_ipaddr(char *name)
     return 0;
 }
 
+/*
+ * Allocate a TAP device for enclave network traffic.
+ */
 static int tap_alloc(char *name)
 {
     struct ifreq ifr;
@@ -293,6 +330,7 @@ static int tap_alloc(char *name)
 
     strcpy(name, ifr.ifr_name);
 
+    // Assign the IP data to the TAP device.
     ret = tap_assign_ipaddr(name);
     if (ret < 0)
         return ret;
@@ -300,13 +338,15 @@ static int tap_alloc(char *name)
     return fd;
 }
 
-int tap_afvsock_init(void)
+/*
+ * Initialize a TAP device to route network traffic to/from.
+ */
+int tap_afvsock_init(unsigned int vsock_port, int shutdown_fd)
 {
     int ret, tun_fd, vsock_fd;
     struct sockaddr_vm saddr;
     char tap_name[IFNAMSIZ];
     struct timeval timeval;
-    struct sigaction sa;
     pid_t pid;
 
     // Ensure that /dev/net/tun is initialized. If not, initialize the device.
@@ -320,24 +360,13 @@ int tap_afvsock_init(void)
     if (ret < 0)
         return ret;
 
-    memset(&sa, 0, sizeof(struct sigaction));
-    sa.sa_handler = sig_handler;
-    sigemptyset(&sa.sa_mask);
-    sigaddset(&sa.sa_mask, SIGUSR1);
-    sigprocmask(SIG_UNBLOCK, &sa.sa_mask, NULL);
-
-    ret = sigaction(SIGUSR1, &sa, NULL);
-    if (ret < 0) {
-        perror("sigaction");
-        return -errno;
-    }
-
     pid = fork();
     switch (pid) {
     case -1:
         perror("network proxy process");
         exit(EXIT_FAILURE);
     case 0:
+        // Initialize the vsock used for network proxying.
         vsock_fd = socket(AF_VSOCK, SOCK_STREAM, 0);
         if (vsock_fd < 0) {
             perror("network vsock creation");
@@ -353,11 +382,10 @@ int tap_afvsock_init(void)
             return -errno;
         }
 
-        // Initialize the vsock used for network proxying.
         memset(&saddr, 0, sizeof(struct sockaddr_vm));
         saddr.svm_family = AF_VSOCK;
         saddr.svm_cid = VMADDR_CID_HOST;
-        saddr.svm_port = VSOCK_NET_PORT;
+        saddr.svm_port = vsock_port;
         saddr.svm_reserved1 = 0;
 
         ret = connect(vsock_fd, (struct sockaddr *)&saddr, sizeof(saddr));
@@ -366,12 +394,10 @@ int tap_afvsock_init(void)
             exit(EXIT_FAILURE);
         }
 
-        ret = tap_vsock_forward(tun_fd, vsock_fd, tap_name);
+        // Forward network traffic between the host and TAP device.
+        ret = tap_vsock_forward(tun_fd, vsock_fd, shutdown_fd, tap_name);
         if (ret < 0)
             exit(EXIT_FAILURE);
-    default:
-        while (!proxy_ready)
-            ;
     }
 
     return 0;

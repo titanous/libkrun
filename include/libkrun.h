@@ -327,6 +327,10 @@ int32_t krun_add_virtiofs2(uint32_t ctx_id,
    as required by gvproxy in vfkit mode. */
 #define NET_FLAG_VFKIT 1 << 0
 
+/* TSI (Transparent Socket Impersonation) feature flags for vsock */
+#define KRUN_TSI_HIJACK_INET  (1 << 0)
+#define KRUN_TSI_HIJACK_UNIX  (1 << 1)
+
 /* Taken from uapi/linux/virtio_net.h */
 #define NET_FEATURE_CSUM 1 << 0
 #define NET_FEATURE_GUEST_CSUM 1 << 1
@@ -862,6 +866,27 @@ int32_t krun_add_vsock_port2(uint32_t ctx_id,
                              uint32_t port,
                              const char *c_filepath,
                              bool listen);
+
+/**
+ * Add a vsock device with specified TSI features.
+ *
+ * By default, libkrun creates a vsock device implicitly with TSI hijacking
+ * enabled based on heuristics. To use this function, you must first call
+ * krun_disable_implicit_vsock() to disable the implicit vsock device.
+ *
+ * Currently only one vsock device is supported. Calling this function
+ * multiple times will return an error.
+ *
+ * Arguments:
+ *  "ctx_id"       - the configuration context ID.
+ *  "tsi_features" - bitmask of TSI features (KRUN_TSI_HIJACK_INET, KRUN_TSI_HIJACK_UNIX)
+ *                   Use 0 to add vsock without any TSI hijacking.
+ *
+ * Returns:
+ *  Zero on success or a negative error number on failure.
+ */
+int32_t krun_add_vsock(uint32_t ctx_id, uint32_t tsi_features);
+
 /**
  * Returns the eventfd file descriptor to signal the guest to shut down orderly. This must be
  * called before starting the microVM with "krun_start_event". Only available in libkrun-efi.
@@ -952,6 +977,35 @@ int32_t krun_set_nested_virt(uint32_t ctx_id, bool enabled);
  */
 int32_t krun_check_nested_virt(void);
 
+/* Feature constants for krun_has_feature() */
+#define KRUN_FEATURE_NET 0
+#define KRUN_FEATURE_BLK 1
+#define KRUN_FEATURE_GPU 2
+#define KRUN_FEATURE_SND 3
+#define KRUN_FEATURE_INPUT 4
+#define KRUN_FEATURE_EFI 5
+#define KRUN_FEATURE_TEE 6
+#define KRUN_FEATURE_AMD_SEV 7
+#define KRUN_FEATURE_INTEL_TDX 8
+#define KRUN_FEATURE_AWS_NITRO 9
+#define KRUN_FEATURE_VIRGL_RESOURCE_MAP2 10
+
+/**
+ * Checks if a specific feature was enabled at build time.
+ *
+ * Arguments:
+ *  "feature" - one of the KRUN_FEATURE_* constants.
+ *
+ * Returns:
+ *  1 if the feature is supported, 0 if not supported, or a negative error
+ *  number on failure (e.g., -EINVAL for invalid/unknown feature constant).
+ *
+ * Notes:
+ *  When linking against an older version of libkrun, this function may
+ *  return -EINVAL for feature constants that were added in newer versions.
+ */
+int32_t krun_has_feature(uint64_t feature);
+
 /**
  * Get the maximum number of vCPUs supported by the hypervisor.
  *
@@ -972,29 +1026,6 @@ int32_t krun_get_max_vcpus(void);
 */
 int32_t krun_split_irqchip(uint32_t ctx_id, bool enable);
 
-#define KRUN_NITRO_IMG_TYPE_EIF 1
-/**
- * Configure a Nitro Enclaves image.
- *
- * Arguments:
- *  "ctx_id"     - the configuration context ID.
- *  "image_path" - a null-terminated string representing the path of the image
- *                 in the host.
- *  "image_type" - the type of enclave image being provided.
- */
-int32_t krun_nitro_set_image(uint32_t ctx_id, const char *image_path,
-                             uint32_t image_type);
-
-#define KRUN_NITRO_START_FLAG_DEBUG (1 << 0)
-/**
- * Configure a Nitro Enclave's start flags.
- *
- * Arguments:
- *  "ctx_id" - the configuration context ID.
- *  "start_flags" - Start flags.
- */
-int32_t krun_nitro_set_start_flags(uint32_t ctx_id, uint64_t start_flags);
-
 /*
  * Do not create an implicit console device in the guest. By using this API,
  * libkrun will create zero console devices on behalf of the user. Any
@@ -1008,6 +1039,20 @@ int32_t krun_nitro_set_start_flags(uint32_t ctx_id, uint64_t start_flags);
  *  Zero on success or a negative error number on failure.
  */
 int32_t krun_disable_implicit_console(uint32_t ctx_id);
+
+/**
+ * Disable the implicit vsock device.
+ *
+ * By default, libkrun creates a vsock device automatically. This function
+ * disables that behavior entirely - no vsock device will be created.
+ *
+ * Arguments:
+ *  "ctx_id" - the configuration context ID.
+ *
+ * Returns:
+ *  Zero on success or a negative error number on failure.
+ */
+int32_t krun_disable_implicit_vsock(uint32_t ctx_id);
 
 /*
  * Specify the value of `console=` in the kernel commandline.
@@ -1170,9 +1215,6 @@ int32_t krun_set_root_disk_remount(uint32_t ctx_id, const char *device, const ch
  *  VMM assumes it has full control of the process, and will call to exit() with the workload's exit
  *  code once the microVM shuts down. If an error occurred before running the workload the process
  *  will exit() with an error exit code.
- *
- *  In the nitro flavor, this function always returns. Upon success, this function will return the
- *  CID of the nitro enclave that was started.
  *
  * Error exit codes:
  *  125     - "init" cannot set up the environment inside the microVM.

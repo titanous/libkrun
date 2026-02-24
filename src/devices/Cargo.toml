@@ -16,7 +16,7 @@ gpu = ["rutabaga_gfx", "thiserror", "zerocopy", "krun_display"]
 snd = ["pw", "thiserror"]
 input = ["zerocopy", "krun_input"]
 virgl_resource_map2 = []
-nitro = []
+aws-nitro = []
 test_utils = []
 # Embed the init binary in the library. Disable this if you provide a custom init.
 embedded_init = []
@@ -24,6 +24,7 @@ embedded_init = []
 [dependencies]
 bincode = { version = "1.3", optional = true }
 bitflags = "1.2.0"
+capng = "0.2.3"
 crossbeam-channel = ">=0.5.15"
 libc = ">=0.2.39"
 libloading = "0.8"

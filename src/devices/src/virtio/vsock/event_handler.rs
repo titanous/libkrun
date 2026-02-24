@@ -14,12 +14,6 @@ use super::device::{Vsock, EVQ_INDEX, RXQ_INDEX, TXQ_INDEX};
 use crate::virtio::VirtioDevice;
 
 impl Vsock {
-    fn drain_inactive_queue_event(&self, queue_index: usize) {
-        if let Err(e) = self.queue_events[queue_index].read() {
-            debug!("Failed to drain inactive vsock queue event: {e:?}");
-        }
-    }
-
     pub(crate) fn handle_rxq_event(&mut self, event: &EpollEvent) -> bool {
         debug!("vsock: handle_rxq_event");
 
@@ -86,17 +80,46 @@ impl Vsock {
         if let Err(e) = self.activate_evt.read() {
             error!("Failed to consume vsock activate event: {e:?}");
         }
-        let _ = event_manager;
+
+        let self_subscriber = event_manager
+            .subscriber(self.activate_evt.as_raw_fd())
+            .unwrap();
+
+        // Register queue events with the event manager. On re-activation
+        // (e.g. snapshot restore) the FDs are the same Arc<EventFd>s from the
+        // transport, so duplicate registration is harmless (epoll_ctl EPOLL_CTL_ADD
+        // with an existing fd returns EEXIST, which we ignore).
+        event_manager
+            .register(
+                self.queue_events[RXQ_INDEX].as_raw_fd(),
+                EpollEvent::new(
+                    EventSet::IN,
+                    self.queue_events[RXQ_INDEX].as_raw_fd() as u64,
+                ),
+                self_subscriber.clone(),
+            )
+            .unwrap_or_else(|e| {
+                debug!("vsock rxq register (may be re-register): {e:?}");
+            });
+
+        event_manager
+            .register(
+                self.queue_events[TXQ_INDEX].as_raw_fd(),
+                EpollEvent::new(
+                    EventSet::IN,
+                    self.queue_events[TXQ_INDEX].as_raw_fd() as u64,
+                ),
+                self_subscriber.clone(),
+            )
+            .unwrap_or_else(|e| {
+                debug!("vsock txq register (may be re-register): {e:?}");
+            });
     }
 }
 
 impl Subscriber for Vsock {
     fn process(&mut self, event: &EpollEvent, event_manager: &mut EventManager) {
         let source = event.fd();
-        let rxq = self.queue_events[RXQ_INDEX].as_raw_fd();
-        let txq = self.queue_events[TXQ_INDEX].as_raw_fd();
-        let evq = self.queue_events[EVQ_INDEX].as_raw_fd();
-        //let backend = self.backend.as_raw_fd();
         let activate_evt = self.activate_evt.as_raw_fd();
 
         if source == activate_evt {
@@ -105,16 +128,19 @@ impl Subscriber for Vsock {
         }
 
         if self.is_activated() {
+            let rxq = self.queue_events[RXQ_INDEX].as_raw_fd();
+            let txq = self.queue_events[TXQ_INDEX].as_raw_fd();
+            let evq = self.queue_events[EVQ_INDEX].as_raw_fd();
+
             let mut raise_irq = false;
             match source {
-                _ if source == rxq => raise_irq = self.handle_rxq_event(event),
-                _ if source == txq => raise_irq = self.handle_txq_event(event),
-                _ if source == evq => raise_irq = self.handle_evq_event(event),
-                /*
-                _ if source == backend => {
-                    raise_irq = self.notify_backend(event);
+                _ if source == rxq => {
+                    raise_irq = self.handle_rxq_event(event);
                 }
-                */
+                _ if source == txq => {
+                    raise_irq = self.handle_txq_event(event);
+                }
+                _ if source == evq => raise_irq = self.handle_evq_event(event),
                 _ => warn!("Unexpected vsock event received: {source:?}"),
             }
             if raise_irq {
@@ -122,32 +148,14 @@ impl Subscriber for Vsock {
                 self.device_state.signal_used_queue();
             }
         } else {
-            if source == rxq {
-                self.drain_inactive_queue_event(RXQ_INDEX);
-            } else if source == txq {
-                self.drain_inactive_queue_event(TXQ_INDEX);
-            } else if source == evq {
-                self.drain_inactive_queue_event(EVQ_INDEX);
-            }
             warn!("The device is not yet activated. Spurious event received: {source:?}");
         }
     }
 
     fn interest_list(&self) -> Vec<EpollEvent> {
-        vec![
-            EpollEvent::new(EventSet::IN, self.activate_evt.as_raw_fd() as u64),
-            EpollEvent::new(
-                EventSet::IN,
-                self.queue_events[RXQ_INDEX].as_raw_fd() as u64,
-            ),
-            EpollEvent::new(
-                EventSet::IN,
-                self.queue_events[TXQ_INDEX].as_raw_fd() as u64,
-            ),
-            EpollEvent::new(
-                EventSet::IN,
-                self.queue_events[EVQ_INDEX].as_raw_fd() as u64,
-            ),
-        ]
+        vec![EpollEvent::new(
+            EventSet::IN,
+            self.activate_evt.as_raw_fd() as u64,
+        )]
     }
 }

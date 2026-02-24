@@ -15,10 +15,12 @@ use utils::eventfd::EventFd;
 use vm_memory::GuestMemoryMmap;
 
 use super::super::{
-    ActivateError, ActivateResult, DeviceState, Queue as VirtQueue, VirtioDevice, VsockError,
+    ActivateError, ActivateResult, DeviceQueue, DeviceState, Queue as VirtQueue, QueueConfig,
+    VirtioDevice,
 };
 use super::muxer::VsockMuxer;
 use super::packet::VsockPacket;
+use super::TsiFlags;
 use super::{defs, defs::uapi};
 use crate::snapshot::SnapshotError;
 use crate::virtio::InterruptTransport;
@@ -39,13 +41,13 @@ pub struct Vsock {
     cid: u64,
     host_port_map: Option<HashMap<u16, u16>>,
     unix_ipc_port_map: Option<HashMap<u32, (PathBuf, bool)>>,
-    enable_tsi: bool,
-    enable_tsi_unix: bool,
+    tsi_flags: TsiFlags,
     pub(crate) muxer: VsockMuxer,
-    pub(crate) queue_rx: Arc<Mutex<VirtQueue>>,
-    pub(crate) queue_tx: Arc<Mutex<VirtQueue>>,
+    pub(crate) queue_rx: Option<Arc<Mutex<VirtQueue>>>,
+    pub(crate) queue_tx: Option<Arc<Mutex<VirtQueue>>>,
+    /// Snapshot buffer: holds queue state for save/restore.
     pub(crate) queues: Vec<VirtQueue>,
-    pub(crate) queue_events: Vec<EventFd>,
+    pub(crate) queue_events: Vec<Arc<EventFd>>,
     pub(crate) avail_features: u64,
     pub(crate) acked_features: u64,
     pub(crate) activate_evt: EventFd,
@@ -60,78 +62,42 @@ pub struct Vsock {
 }
 
 impl Vsock {
-    pub(crate) fn with_queues(
-        cid: u64,
-        host_port_map: Option<HashMap<u16, u16>>,
-        queues: Vec<VirtQueue>,
-        unix_ipc_port_map: Option<HashMap<u32, (PathBuf, bool)>>,
-        enable_tsi: bool,
-        enable_tsi_unix: bool,
-    ) -> super::Result<Vsock> {
-        let mut queue_events = Vec::new();
-        for _ in 0..queues.len() {
-            queue_events
-                .push(EventFd::new(utils::eventfd::EFD_NONBLOCK).map_err(VsockError::EventFd)?);
-        }
-
-        let queue_tx = Arc::new(Mutex::new(queues[TXQ_INDEX].clone()));
-        let queue_rx = Arc::new(Mutex::new(queues[RXQ_INDEX].clone()));
-
-        Ok(Vsock {
-            cid,
-            host_port_map: host_port_map.clone(),
-            unix_ipc_port_map: unix_ipc_port_map.clone(),
-            enable_tsi,
-            enable_tsi_unix,
-            muxer: VsockMuxer::new(
-                cid,
-                host_port_map,
-                unix_ipc_port_map,
-                enable_tsi,
-                enable_tsi_unix,
-            ),
-            queue_rx,
-            queue_tx,
-            queues,
-            queue_events,
-            avail_features: AVAIL_FEATURES,
-            acked_features: 0,
-            activate_evt: EventFd::new(utils::eventfd::EFD_NONBLOCK)
-                .map_err(VsockError::EventFd)?,
-            device_state: DeviceState::Inactive,
-            muxer_quiesce_fd: EventFd::new(utils::eventfd::EFD_NONBLOCK)
-                .map_err(VsockError::EventFd)?,
-            muxer_resume_fd: EventFd::new(utils::eventfd::EFD_NONBLOCK)
-                .map_err(VsockError::EventFd)?,
-            muxer_quiesce_ack: Arc::new((Mutex::new(false), Condvar::new())),
-            timesync_quiesce_fd: EventFd::new(utils::eventfd::EFD_NONBLOCK)
-                .map_err(VsockError::EventFd)?,
-            timesync_resume_fd: EventFd::new(utils::eventfd::EFD_NONBLOCK)
-                .map_err(VsockError::EventFd)?,
-            timesync_quiesce_ack: Arc::new((Mutex::new(false), Condvar::new())),
-        })
-    }
-
     /// Create a new virtio-vsock device with the given VM CID.
     pub fn new(
         cid: u64,
         host_port_map: Option<HashMap<u16, u16>>,
         unix_ipc_port_map: Option<HashMap<u32, (PathBuf, bool)>>,
-        enable_tsi: bool,
-        enable_tsi_unix: bool,
+        tsi_flags: TsiFlags,
     ) -> super::Result<Vsock> {
         let queues: Vec<VirtQueue> = defs::QUEUE_SIZES
             .iter()
-            .map(|&max_size| VirtQueue::new(max_size))
+            .map(|&s| VirtQueue::new(s))
             .collect();
-        Self::with_queues(
+
+        Ok(Vsock {
             cid,
-            host_port_map,
+            host_port_map: host_port_map.clone(),
+            unix_ipc_port_map: unix_ipc_port_map.clone(),
+            tsi_flags,
+            muxer: VsockMuxer::new(cid, host_port_map, unix_ipc_port_map, tsi_flags),
+            queue_rx: None,
+            queue_tx: None,
             queues,
-            unix_ipc_port_map,
-            enable_tsi,
-            enable_tsi_unix,
-        )
+            queue_events: Vec::new(),
+            avail_features: AVAIL_FEATURES,
+            acked_features: 0,
+            activate_evt: EventFd::new(utils::eventfd::EFD_NONBLOCK)
+                .map_err(super::VsockError::EventFd)?,
+            device_state: DeviceState::Inactive,
+            muxer_quiesce_fd: EventFd::new(utils::eventfd::EFD_NONBLOCK)
+                .map_err(super::VsockError::EventFd)?,
+            muxer_resume_fd: EventFd::new(0).map_err(super::VsockError::EventFd)?,
+            muxer_quiesce_ack: Arc::new((Mutex::new(false), Condvar::new())),
+            timesync_quiesce_fd: EventFd::new(utils::eventfd::EFD_NONBLOCK)
+                .map_err(super::VsockError::EventFd)?,
+            timesync_resume_fd: EventFd::new(0).map_err(super::VsockError::EventFd)?,
+            timesync_quiesce_ack: Arc::new((Mutex::new(false), Condvar::new())),
+        })
     }
 
     pub fn id(&self) -> &str {
@@ -153,7 +119,11 @@ impl Vsock {
 
         let mut have_used = false;
 
-        let mut queue_rx = self.queue_rx.lock().unwrap();
+        let queue_rx = self
+            .queue_rx
+            .as_ref()
+            .expect("queue_rx should exist when activated");
+        let mut queue_rx = queue_rx.lock().unwrap();
         debug!(
             "vsock: process_stream_rx: next_avail={} next_used={} pending_rx={}",
             queue_rx.next_avail(),
@@ -214,7 +184,11 @@ impl Vsock {
 
         let mut have_used = false;
 
-        let mut queue_tx = self.queue_tx.lock().unwrap();
+        let queue_tx = self
+            .queue_tx
+            .as_ref()
+            .expect("queue_tx should exist when activated");
+        let mut queue_tx = queue_tx.lock().unwrap();
         debug!(
             "vsock: process_stream_tx: next_avail={} next_used={}",
             queue_tx.next_avail(),
@@ -287,16 +261,16 @@ impl VirtioDevice for Vsock {
         "vsock"
     }
 
+    fn queue_config(&self) -> &[QueueConfig] {
+        &defs::QUEUE_CONFIG
+    }
+
     fn queues(&self) -> &[VirtQueue] {
         &self.queues
     }
 
     fn queues_mut(&mut self) -> &mut [VirtQueue] {
         &mut self.queues
-    }
-
-    fn queue_events(&self) -> &[EventFd] {
-        &self.queue_events
     }
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {
@@ -324,16 +298,17 @@ impl VirtioDevice for Vsock {
         );
     }
 
-    fn activate(&mut self, mem: GuestMemoryMmap, interrupt: InterruptTransport) -> ActivateResult {
-        debug!(
-            "vsock: activate called, already_activated={}",
-            self.device_state.is_activated()
-        );
-        if self.queues.len() != defs::NUM_QUEUES {
+    fn activate(
+        &mut self,
+        mem: GuestMemoryMmap,
+        interrupt: InterruptTransport,
+        queues: Vec<DeviceQueue>,
+    ) -> ActivateResult {
+        if queues.len() != defs::NUM_QUEUES {
             error!(
                 "Cannot perform activate. Expected {} queue(s), got {}",
                 defs::NUM_QUEUES,
-                self.queues.len()
+                queues.len()
             );
             return Err(ActivateError::BadActivate);
         }
@@ -343,10 +318,20 @@ impl VirtioDevice for Vsock {
             return Err(ActivateError::BadActivate);
         }
 
-        self.queue_tx = Arc::new(Mutex::new(self.queues[TXQ_INDEX].clone()));
-        self.queue_rx = Arc::new(Mutex::new(self.queues[RXQ_INDEX].clone()));
+        // Store queue events for event handling.
+        self.queue_events = queues.iter().map(|dq| dq.event.clone()).collect();
 
-        let rxq_kick = self.queue_events[RXQ_INDEX]
+        // Extract queues from DeviceQueues and wrap in Arc<Mutex<>>.
+        let mut queues_vec: Vec<VirtQueue> = queues.into_iter().map(|dq| dq.queue).collect();
+        // Note: EVQ (index 2) is currently unused, we just take it to maintain the vec.
+        let _evq = queues_vec.pop().unwrap();
+        let tx_queue = queues_vec.pop().unwrap();
+        let rx_queue = queues_vec.pop().unwrap();
+
+        self.queue_tx = Some(Arc::new(Mutex::new(tx_queue)));
+        self.queue_rx = Some(Arc::new(Mutex::new(rx_queue)));
+
+        let rxq_kick = (*self.queue_events[RXQ_INDEX])
             .try_clone()
             .map_err(|_| ActivateError::BadActivate)?;
         let muxer_quiesce_fd = self
@@ -367,7 +352,7 @@ impl VirtioDevice for Vsock {
             .map_err(|_| ActivateError::BadActivate)?;
         self.muxer.activate(
             mem.clone(),
-            self.queue_rx.clone(),
+            self.queue_rx.clone().unwrap(),
             interrupt.clone(),
             rxq_kick,
             muxer_quiesce_fd,
@@ -387,16 +372,29 @@ impl VirtioDevice for Vsock {
         self.device_state.is_activated()
     }
 
+    fn post_restore_kick(&mut self) {
+        if !self.is_activated() {
+            return;
+        }
+        for (i, (queue, evt)) in self.queues.iter().zip(self.queue_events.iter()).enumerate() {
+            if !queue.ready {
+                continue;
+            }
+            if let Err(e) = evt.write(1) {
+                error!("vsock: post_restore_kick queue {i} failed: {e}");
+            }
+        }
+    }
+
     fn reset(&mut self) -> bool {
         self.device_state = DeviceState::Inactive;
-        self.queue_rx = Arc::new(Mutex::new(self.queues[RXQ_INDEX].clone()));
-        self.queue_tx = Arc::new(Mutex::new(self.queues[TXQ_INDEX].clone()));
+        self.queue_rx = None;
+        self.queue_tx = None;
         self.muxer = VsockMuxer::new(
             self.cid,
             self.host_port_map.clone(),
             self.unix_ipc_port_map.clone(),
-            self.enable_tsi,
-            self.enable_tsi_unix,
+            self.tsi_flags,
         );
         true
     }
@@ -486,8 +484,12 @@ impl VirtioDevice for Vsock {
     }
 
     fn sync_queues_for_snapshot(&mut self) {
-        self.queues[RXQ_INDEX] = self.queue_rx.lock().unwrap().clone();
-        self.queues[TXQ_INDEX] = self.queue_tx.lock().unwrap().clone();
+        if let Some(ref qrx) = self.queue_rx {
+            self.queues[RXQ_INDEX] = qrx.lock().unwrap().clone();
+        }
+        if let Some(ref qtx) = self.queue_tx {
+            self.queues[TXQ_INDEX] = qtx.lock().unwrap().clone();
+        }
         debug!(
             "vsock: sync_queues_for_snapshot: rx(next_avail={}, next_used={}) tx(next_avail={}, next_used={})",
             self.queues[RXQ_INDEX].next_avail(), self.queues[RXQ_INDEX].next_used(),
@@ -496,30 +498,24 @@ impl VirtioDevice for Vsock {
     }
 
     fn post_snapshot_restore(&mut self) {
-        warn!(
+        debug!(
             "vsock: post_snapshot_restore called, activated={}",
             self.device_state.is_activated()
         );
 
         let rx_q = &self.queues[RXQ_INDEX];
         let tx_q = &self.queues[TXQ_INDEX];
-        warn!(
+        debug!(
             "vsock: restore queues from snapshot: rx(ready={}, size={}, next_avail={}, next_used={}) tx(ready={}, size={}, next_avail={}, next_used={})",
             rx_q.ready, rx_q.size, rx_q.next_avail(), rx_q.next_used(),
             tx_q.ready, tx_q.size, tx_q.next_avail(), tx_q.next_used(),
         );
 
-        {
-            let shared_rx = self.queue_rx.lock().unwrap();
-            let shared_tx = self.queue_tx.lock().unwrap();
-            warn!(
-                "vsock: shared queues before restore: rx(next_avail={}, next_used={}) tx(next_avail={}, next_used={})",
-                shared_rx.next_avail(), shared_rx.next_used(),
-                shared_tx.next_avail(), shared_tx.next_used(),
-            );
+        if let Some(ref qrx) = self.queue_rx {
+            *qrx.lock().unwrap() = self.queues[RXQ_INDEX].clone();
         }
-
-        *self.queue_rx.lock().unwrap() = self.queues[RXQ_INDEX].clone();
-        *self.queue_tx.lock().unwrap() = self.queues[TXQ_INDEX].clone();
+        if let Some(ref qtx) = self.queue_tx {
+            *qtx.lock().unwrap() = self.queues[TXQ_INDEX].clone();
+        }
     }
 }

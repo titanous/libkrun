@@ -9,7 +9,7 @@ use utils::eventfd::EventFd;
 use vm_memory::{Address, ByteValued, Bytes, GuestMemoryMmap};
 
 use super::super::{
-    ActivateError, ActivateResult, ConsoleError, DeviceState, Queue as VirtQueue, VirtioDevice,
+    ActivateError, ActivateResult, DeviceQueue, DeviceState, Queue, QueueConfig, VirtioDevice,
 };
 use super::{defs, defs::control_event, defs::uapi};
 use crate::virtio::console::console_control::{
@@ -57,8 +57,13 @@ pub struct Console {
     pub(crate) control: Arc<ConsoleControl>,
     pub(crate) ports: Vec<Port>,
 
-    pub(crate) queues: Vec<VirtQueue>,
-    pub(crate) queue_events: Vec<EventFd>,
+    queue_config: Vec<QueueConfig>,
+    // Queues are stored as Option so individual queues can be taken when ports start.
+    pub(crate) queues: Vec<Option<DeviceQueue>>,
+    // TODO: move the queue event handling to the correct threads!
+    pub(crate) queue_events: Vec<Arc<EventFd>>,
+    /// Snapshot buffer: holds plain Queue state for save/restore via VirtioDevice trait.
+    snapshot_queues: Vec<Queue>,
 
     pub(crate) avail_features: u64,
     pub(crate) acked_features: u64,
@@ -74,13 +79,9 @@ impl Console {
         assert!(!ports.is_empty(), "Expected at least 1 port");
 
         let num_queues = num_queues(ports.len());
-        let queues = vec![VirtQueue::new(QUEUE_SIZE); num_queues];
-
-        let mut queue_events = Vec::new();
-        for _ in 0..queues.len() {
-            queue_events
-                .push(EventFd::new(utils::eventfd::EFD_NONBLOCK).map_err(ConsoleError::EventFd)?);
-        }
+        let queue_config: Vec<QueueConfig> = (0..num_queues)
+            .map(|_| QueueConfig::new(QUEUE_SIZE))
+            .collect();
 
         let ports: Vec<Port> = zip(0u32.., ports)
             .map(|(port_id, description)| Port::new(port_id, description))
@@ -92,17 +93,21 @@ impl Console {
             .unwrap_or((0, 0));
         let config = VirtioConsoleConfig::new(cols, rows, ports.len() as u32);
 
+        let snapshot_queues: Vec<Queue> = (0..num_queues).map(|_| Queue::new(QUEUE_SIZE)).collect();
+
         Ok(Console {
             control: ConsoleControl::new(),
             ports,
-            queues,
-            queue_events,
+            queue_config,
+            queues: Vec::new(),
+            queue_events: Vec::new(),
+            snapshot_queues,
             avail_features: AVAIL_FEATURES,
             acked_features: 0,
             activate_evt: EventFd::new(utils::eventfd::EFD_NONBLOCK)
-                .map_err(ConsoleError::EventFd)?,
+                .map_err(super::ConsoleError::EventFd)?,
             sigwinch_evt: EventFd::new(utils::eventfd::EFD_NONBLOCK)
-                .map_err(ConsoleError::EventFd)?,
+                .map_err(super::ConsoleError::EventFd)?,
             device_state: DeviceState::Inactive,
             config,
         })
@@ -129,12 +134,16 @@ impl Console {
         };
         let mut raise_irq = false;
 
+        let control_rx = self.queues[CONTROL_RXQ_INDEX]
+            .as_mut()
+            .expect("control rx queue should exist");
+
         log::trace!(
             "control_rx queue has buffers: {}",
-            !self.queues[CONTROL_RXQ_INDEX].is_empty(mem)
+            !control_rx.queue.is_empty(mem)
         );
 
-        while let Some(head) = self.queues[CONTROL_RXQ_INDEX].pop(mem) {
+        while let Some(head) = control_rx.queue.pop(mem) {
             if let Some(buf) = self.control.queue_pop() {
                 match mem.write(&buf, head.addr) {
                     Ok(n) => {
@@ -143,9 +152,7 @@ impl Console {
                         }
                         raise_irq = true;
                         log::trace!("process_control_rx wrote {n}");
-                        if let Err(e) =
-                            self.queues[CONTROL_RXQ_INDEX].add_used(mem, head.index, n as u32)
-                        {
+                        if let Err(e) = control_rx.queue.add_used(mem, head.index, n as u32) {
                             error!("failed to add used elements to the queue: {e:?}");
                         }
                     }
@@ -154,7 +161,7 @@ impl Console {
                     }
                 }
             } else {
-                self.queues[CONTROL_RXQ_INDEX].undo_pop();
+                control_rx.queue.undo_pop();
                 break;
             }
         }
@@ -167,12 +174,14 @@ impl Console {
             unreachable!()
         };
 
-        let tx_queue = &mut self.queues[CONTROL_TXQ_INDEX];
+        let control_tx = self.queues[CONTROL_TXQ_INDEX]
+            .as_mut()
+            .expect("control tx queue should exist");
         let mut raise_irq = false;
 
         let mut ports_to_start = Vec::new();
 
-        while let Some(head) = tx_queue.pop(mem) {
+        while let Some(head) = control_tx.queue.pop(mem) {
             raise_irq = true;
 
             let cmd: VirtioConsoleControl = match mem.read_obj(head.addr) {
@@ -186,7 +195,10 @@ impl Console {
                     continue;
                 }
             };
-            if let Err(e) = tx_queue.add_used(mem, head.index, size_of_val(&cmd) as u32) {
+            if let Err(e) = control_tx
+                .queue
+                .add_used(mem, head.index, size_of_val(&cmd) as u32)
+            {
                 error!("failed to add used elements to the queue: {e:?}");
             }
 
@@ -260,10 +272,23 @@ impl Console {
 
         for port_id in ports_to_start {
             log::trace!("Starting port io for port {port_id}");
+            let rx_idx = port_id_to_queue_idx(QueueDirection::Rx, port_id);
+            let tx_idx = port_id_to_queue_idx(QueueDirection::Tx, port_id);
+
+            // Take ownership of port queues - they are moved to the port.
+            let rx_queue = self.queues[rx_idx]
+                .take()
+                .expect("port rx queue should exist")
+                .queue;
+            let tx_queue = self.queues[tx_idx]
+                .take()
+                .expect("port tx queue should exist")
+                .queue;
+
             self.ports[port_id].start(
                 mem.clone(),
-                self.queues[port_id_to_queue_idx(QueueDirection::Rx, port_id)].clone(),
-                self.queues[port_id_to_queue_idx(QueueDirection::Tx, port_id)].clone(),
+                rx_queue,
+                tx_queue,
                 interrupt.clone(),
                 self.control.clone(),
             );
@@ -279,10 +304,15 @@ impl Console {
         };
 
         for port_id in 0..self.ports.len() {
+            let rx_idx = port_id_to_queue_idx(QueueDirection::Rx, port_id);
+            let tx_idx = port_id_to_queue_idx(QueueDirection::Tx, port_id);
+            let (Some(rx_dq), Some(tx_dq)) = (&self.queues[rx_idx], &self.queues[tx_idx]) else {
+                continue;
+            };
             self.ports[port_id].start(
                 mem.clone(),
-                self.queues[port_id_to_queue_idx(QueueDirection::Rx, port_id)].clone(),
-                self.queues[port_id_to_queue_idx(QueueDirection::Tx, port_id)].clone(),
+                rx_dq.queue.clone(),
+                tx_dq.queue.clone(),
                 interrupt.clone(),
                 self.control.clone(),
             );
@@ -311,16 +341,16 @@ impl VirtioDevice for Console {
         "console"
     }
 
-    fn queues(&self) -> &[VirtQueue] {
-        &self.queues
+    fn queue_config(&self) -> &[QueueConfig] {
+        &self.queue_config
     }
 
-    fn queues_mut(&mut self) -> &mut [VirtQueue] {
-        &mut self.queues
+    fn queues(&self) -> &[Queue] {
+        &self.snapshot_queues
     }
 
-    fn queue_events(&self) -> &[EventFd] {
-        &self.queue_events
+    fn queues_mut(&mut self) -> &mut [Queue] {
+        &mut self.snapshot_queues
     }
 
     fn read_config(&self, offset: u64, mut data: &mut [u8]) {
@@ -345,11 +375,32 @@ impl VirtioDevice for Console {
         );
     }
 
-    fn activate(&mut self, mem: GuestMemoryMmap, interrupt: InterruptTransport) -> ActivateResult {
+    fn activate(
+        &mut self,
+        mem: GuestMemoryMmap,
+        interrupt: InterruptTransport,
+        queues: Vec<DeviceQueue>,
+    ) -> ActivateResult {
         if self.activate_evt.write(1).is_err() {
             error!("Cannot write to activate_evt");
             return Err(ActivateError::BadActivate);
         }
+
+        self.queue_events = queues.iter().map(|dq| dq.event.clone()).collect();
+        self.queues = queues.into_iter().map(Some).collect();
+
+        // Populate snapshot_queues with the initial queue configuration (addresses,
+        // ready flags). Port queues are later take()n by port threads, making them
+        // inaccessible to sync_queues_for_snapshot(). By copying here we ensure the
+        // snapshot buffer always has the correct static queue configuration.
+        for (i, opt_dq) in self.queues.iter().enumerate() {
+            if let Some(dq) = opt_dq {
+                if i < self.snapshot_queues.len() {
+                    self.snapshot_queues[i] = dq.queue.clone();
+                }
+            }
+        }
+
         self.device_state = DeviceState::Activated(mem, interrupt);
 
         Ok(())
@@ -360,14 +411,13 @@ impl VirtioDevice for Console {
     }
 
     fn reset(&mut self) -> bool {
-        // Strictly speaking, we should also unsubscribe the queue
-        // events, resubscribe the activate eventfd and deactivate
-        // the device, but we don't support any scenario in which
-        // neither GuestMemory nor the queue events would change,
-        // so let's avoid doing any unnecessary work.
+        // Shutdown ports and clear queues.
         for port in &mut self.ports {
             port.shutdown();
         }
+        self.queues.clear();
+        self.queue_events.clear();
+        self.device_state = DeviceState::Inactive;
         true
     }
 
@@ -376,15 +426,18 @@ impl VirtioDevice for Console {
             return;
         };
 
-        for queue in &mut self.queues {
-            if !queue.ready {
+        for opt_dq in &mut self.queues {
+            let Some(ref mut dq) = opt_dq else {
+                continue;
+            };
+            if !dq.queue.ready {
                 continue;
             }
 
-            let Some(avail_idx_addr) = queue.avail_ring.checked_add(2) else {
+            let Some(avail_idx_addr) = dq.queue.avail_ring.checked_add(2) else {
                 continue;
             };
-            let Some(used_idx_addr) = queue.used_ring.checked_add(2) else {
+            let Some(used_idx_addr) = dq.queue.used_ring.checked_add(2) else {
                 continue;
             };
 
@@ -395,8 +448,39 @@ impl VirtioDevice for Console {
                 continue;
             };
 
-            queue.set_next_avail(avail_idx);
-            queue.set_next_used(used_idx);
+            dq.queue.set_next_avail(avail_idx);
+            dq.queue.set_next_used(used_idx);
+        }
+
+        // Copy live queue state into the snapshot buffer for serialization.
+        for (i, opt_dq) in self.queues.iter().enumerate() {
+            if let Some(dq) = opt_dq {
+                self.snapshot_queues[i] = dq.queue.clone();
+            }
+        }
+
+        // For queues taken by port threads (None in self.queues), the snapshot
+        // buffer already has the correct static config (addresses, ready flag)
+        // from activate(). Sync the dynamic indices from guest memory.
+        for (i, opt_dq) in self.queues.iter().enumerate() {
+            if opt_dq.is_none() {
+                let sq = &mut self.snapshot_queues[i];
+                if !sq.ready {
+                    continue;
+                }
+                let Some(avail_idx_addr) = sq.avail_ring.checked_add(2) else {
+                    continue;
+                };
+                let Some(used_idx_addr) = sq.used_ring.checked_add(2) else {
+                    continue;
+                };
+                if let Ok(avail_idx) = mem.read_obj::<u16>(avail_idx_addr) {
+                    sq.set_next_avail(avail_idx);
+                }
+                if let Ok(used_idx) = mem.read_obj::<u16>(used_idx_addr) {
+                    sq.set_next_used(used_idx);
+                }
+            }
         }
     }
 
@@ -418,7 +502,12 @@ impl VirtioDevice for Console {
             return;
         }
         for (i, evt) in self.queue_events.iter().enumerate() {
-            if !self.queues[i].ready {
+            let ready = self
+                .queues
+                .get(i)
+                .and_then(|opt| opt.as_ref())
+                .is_some_and(|dq| dq.queue.ready);
+            if !ready {
                 continue;
             }
             if let Err(e) = evt.write(1) {

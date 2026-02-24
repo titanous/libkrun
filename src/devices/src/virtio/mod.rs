@@ -21,7 +21,7 @@ pub mod console;
 pub mod descriptor_utils;
 pub mod device;
 pub mod file_traits;
-#[cfg(not(any(feature = "tee", feature = "nitro")))]
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 pub mod fs;
 #[cfg(feature = "gpu")]
 pub mod gpu;
@@ -49,7 +49,7 @@ pub use self::console::*;
 pub use self::device::*;
 #[cfg(feature = "blk")]
 pub use self::file_traits::BlockBackendAdapter;
-#[cfg(not(any(feature = "tee", feature = "nitro")))]
+#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 pub use self::fs::*;
 #[cfg(feature = "gpu")]
 pub use self::gpu::*;
