@@ -5,14 +5,14 @@ Last verified: 2026-02-24
 ## Tech Stack
 - Language: Rust (workspace) + C (init binary)
 - Hypervisor: KVM (Linux), HVF (macOS)
-- Network stack: smoltcp (proxy mode), tokio (async workers)
+- Network stack: tokio (async workers)
 - Serialization: bincode (snapshots)
 - Build: Makefile + Cargo workspace
 
 ## Commands
 - `make` - Build release library (auto-builds init with `embedded_init` feature)
 - `make test FEATURE_FLAGS="--features embedded_init"` - Run integration tests (embedded_init required or init.krun is empty)
-- `cargo test -p devices --features net` - Run devices crate unit tests (net feature needed for proxy/async_worker tests)
+- `cargo test -p devices --features net` - Run devices crate unit tests (net feature needed for async_worker tests)
 - `cargo test -p devices --features net,snapshot` - Devices tests including snapshot-dependent tests
 - `cargo test -p vmm --features snapshot` - VMM crate unit tests (snapshot feature for snapshot.rs tests)
 
@@ -26,7 +26,7 @@ Last verified: 2026-02-24
 
 ## Feature Flags (Cargo)
 - `embedded_init` - Embeds init binary in library; required for tests
-- `net` - Enables virtio-net backends (tokio, smoltcp proxy deps)
+- `net` - Enables virtio-net async backend (tokio, bytes)
 - `blk` - Enables virtio-block backends (tokio, futures)
 - `snapshot` - Enables snapshot/restore (serde, bincode)
 - `efi` - EFI boot support (implies blk + net)

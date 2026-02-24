@@ -31,7 +31,6 @@ Tests are inherently flaky (VM + network timing). 5-6/6 passing is normal.
 - `snapshot-error-*` - Snapshot validation error paths
 - `rust-api-*` - Builder/lifecycle API tests (zero-vcpu, device-info, pause/resume, shutdown)
 - `custom-block-backend` - AsyncBlockBackend with in-memory backend
-- `net-proxy-ping-pong` - ProxyNetWorker TCP round-trip through smoltcp stack
 
 ## Key Files
 - `test_cases/src/lib.rs` - Test case registry
