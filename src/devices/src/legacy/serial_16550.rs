@@ -14,6 +14,7 @@ use utils::eventfd::EventFd;
 
 use crate::bus::BusDevice;
 use crate::legacy::ReadableFd;
+use crate::snapshot::{SnapshotError, Snapshottable};
 
 const LOOP_SIZE: usize = 0x40;
 
@@ -52,6 +53,20 @@ const DEFAULT_LINE_CONTROL: u8 = 0x3; // 8-bits per character
 const DEFAULT_MODEM_CONTROL: u8 = 0x8; // Auxiliary output 2
 const DEFAULT_MODEM_STATUS: u8 = 0x20 | 0x10 | 0x80; // data ready, clear to send, carrier detect
 const DEFAULT_BAUD_DIVISOR: u16 = 12; // 9600 bps
+
+#[cfg_attr(feature = "snapshot", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone)]
+struct Serial16550State {
+    interrupt_enable: u8,
+    interrupt_identification: u8,
+    line_control: u8,
+    line_status: u8,
+    modem_control: u8,
+    modem_status: u8,
+    scratch: u8,
+    baud_divisor: u16,
+    in_buffer: Vec<u8>,
+}
 
 /// Emulates serial COM ports commonly seen on x86 I/O ports 0x3f8/0x2f8/0x3e8/0x2e8.
 ///
@@ -256,6 +271,71 @@ impl BusDevice for Serial {
             error!("Failed the write to serial: {e}");
         }
     }
+
+    fn as_snapshottable(&self) -> Option<&dyn Snapshottable> {
+        Some(self)
+    }
+
+    fn as_snapshottable_mut(&mut self) -> Option<&mut dyn Snapshottable> {
+        Some(self)
+    }
+}
+
+impl Snapshottable for Serial {
+    fn snapshot_id(&self) -> &str {
+        "serial-16550"
+    }
+
+    fn save_state(&self) -> std::result::Result<Vec<u8>, SnapshotError> {
+        let state = Serial16550State {
+            interrupt_enable: self.interrupt_enable,
+            interrupt_identification: self.interrupt_identification,
+            line_control: self.line_control,
+            line_status: self.line_status,
+            modem_control: self.modem_control,
+            modem_status: self.modem_status,
+            scratch: self.scratch,
+            baud_divisor: self.baud_divisor,
+            in_buffer: self.in_buffer.iter().copied().collect(),
+        };
+
+        #[cfg(feature = "snapshot")]
+        {
+            bincode::serialize(&state).map_err(|e| SnapshotError::Serialize(e.to_string()))
+        }
+        #[cfg(not(feature = "snapshot"))]
+        {
+            let _ = state;
+            Err(SnapshotError::Serialize(
+                "snapshot feature not enabled".to_string(),
+            ))
+        }
+    }
+
+    fn restore_state(&mut self, data: &[u8]) -> std::result::Result<(), SnapshotError> {
+        #[cfg(feature = "snapshot")]
+        {
+            let state: Serial16550State = bincode::deserialize(data)
+                .map_err(|e| SnapshotError::Deserialize(e.to_string()))?;
+            self.interrupt_enable = state.interrupt_enable;
+            self.interrupt_identification = state.interrupt_identification;
+            self.line_control = state.line_control;
+            self.line_status = state.line_status;
+            self.modem_control = state.modem_control;
+            self.modem_status = state.modem_status;
+            self.scratch = state.scratch;
+            self.baud_divisor = state.baud_divisor;
+            self.in_buffer = state.in_buffer.into_iter().collect();
+            Ok(())
+        }
+        #[cfg(not(feature = "snapshot"))]
+        {
+            let _ = data;
+            Err(SnapshotError::Deserialize(
+                "snapshot feature not enabled".to_string(),
+            ))
+        }
+    }
 }
 
 impl Subscriber for Serial {
@@ -295,6 +375,83 @@ impl Subscriber for Serial {
             Some(input) => vec![EpollEvent::new(EventSet::IN, input.as_raw_fd() as u64)],
             None => vec![],
         }
+    }
+}
+
+#[cfg(all(test, feature = "snapshot"))]
+mod snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn test_serial_snapshot_register_roundtrip() {
+        let intr_evt = EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap();
+        let mut serial = Serial::new_sink(intr_evt);
+
+        serial.write(0, u64::from(SCR), &[0xAB_u8]);
+        serial.write(0, u64::from(LCR), &[0x43_u8]);
+        serial.write(0, u64::from(MCR), &[0x0F_u8]);
+        serial.write(0, u64::from(IER), &[IER_RECV_BIT]);
+
+        serial.write(0, u64::from(LCR), &[LCR_DLAB_BIT]);
+        serial.write(0, u64::from(DLAB_LOW), &[0x34_u8]);
+        serial.write(0, u64::from(DLAB_HIGH), &[0x12_u8]);
+        serial.write(0, u64::from(LCR), &[0x43_u8]);
+
+        let saved = serial.save_state().unwrap();
+
+        let intr_evt2 = EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap();
+        let mut serial2 = Serial::new_sink(intr_evt2);
+        serial2.restore_state(&saved).unwrap();
+
+        let mut data = [0u8];
+        serial2.read(0, u64::from(SCR), &mut data);
+        assert_eq!(data[0], 0xAB);
+        serial2.read(0, u64::from(LCR), &mut data);
+        assert_eq!(data[0], 0x43);
+        serial2.read(0, u64::from(MCR), &mut data);
+        assert_eq!(data[0], 0x0F);
+        serial2.read(0, u64::from(IER), &mut data);
+        assert_eq!(data[0], IER_RECV_BIT);
+
+        serial2.write(0, u64::from(LCR), &[LCR_DLAB_BIT]);
+        serial2.read(0, u64::from(DLAB_LOW), &mut data);
+        assert_eq!(data[0], 0x34);
+        serial2.read(0, u64::from(DLAB_HIGH), &mut data);
+        assert_eq!(data[0], 0x12);
+    }
+
+    #[test]
+    fn test_serial_snapshot_buffer_roundtrip() {
+        let intr_evt = EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap();
+        let mut serial = Serial::new_sink(intr_evt.try_clone().unwrap());
+
+        serial.write(0, u64::from(MCR), &[MCR_LOOP_BIT]);
+        serial.write(0, u64::from(DATA), &[b'h']);
+        serial.write(0, u64::from(DATA), &[b'i']);
+        serial.write(0, u64::from(DATA), &[b'!']);
+
+        let saved = serial.save_state().unwrap();
+
+        let intr_evt2 = EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap();
+        let mut serial2 = Serial::new_sink(intr_evt2);
+        serial2.restore_state(&saved).unwrap();
+
+        let mut data = [0u8];
+        serial2.read(0, u64::from(DATA), &mut data);
+        assert_eq!(data[0], b'h');
+        serial2.read(0, u64::from(DATA), &mut data);
+        assert_eq!(data[0], b'i');
+        serial2.read(0, u64::from(DATA), &mut data);
+        assert_eq!(data[0], b'!');
+    }
+
+    #[test]
+    fn test_serial_snapshot_corrupted_state() {
+        let intr_evt = EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap();
+        let mut serial = Serial::new_sink(intr_evt);
+
+        let result = serial.restore_state(&[0xFF, 0xFF, 0xFF]);
+        assert!(matches!(result, Err(SnapshotError::Deserialize(_))));
     }
 }
 
