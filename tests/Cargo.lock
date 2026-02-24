@@ -1414,6 +1414,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "krun-sys",
+ "libc",
  "libkrun",
  "macros",
  "nix 0.29.0",

@@ -27,6 +27,8 @@ use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::os::fd::AsRawFd;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 use tracing::{error, info, trace, warn};
@@ -56,8 +58,8 @@ struct VirtualDevice {
     rx_buffer: VecDeque<Bytes>,
     mem: GuestMemoryMmap,
     queues: Vec<Queue>,
-    rx_frame_buf: [u8; MAX_BUFFER_SIZE],
-    tx_frame_buf: [u8; MAX_BUFFER_SIZE],
+    rx_frame_buf: Vec<u8>,
+    tx_frame_buf: Vec<u8>,
 }
 
 impl VirtualDevice {
@@ -293,8 +295,8 @@ impl ProxyNetWorker {
             rx_buffer: VecDeque::new(),
             mem,
             queues,
-            rx_frame_buf: [0; MAX_BUFFER_SIZE],
-            tx_frame_buf: [0; MAX_BUFFER_SIZE],
+            rx_frame_buf: vec![0; MAX_BUFFER_SIZE],
+            tx_frame_buf: vec![0; MAX_BUFFER_SIZE],
         };
 
         let mut iface = Interface::new(
@@ -878,8 +880,16 @@ impl ProxyNetWorker {
 
                                 trace!(from = %guest_addr, to = %dest_socket_addr, "New connection attempt from guest");
 
-                                let real_dest = SocketAddr::new(dest_addr.into(), dest_port);
-                                let stream = match dest_addr.into() {
+                                // Connections to the proxy's own IP (PROXY_IP = 192.168.100.1)
+                                // are treated as connections to the host's loopback, since
+                                // PROXY_IP is the gateway the guest sees as "the host".
+                                let host_dest_ip: IpAddr = if dest_addr == IpAddress::from(PROXY_IP) {
+                                    "127.0.0.1".parse().unwrap()
+                                } else {
+                                    dest_addr.into()
+                                };
+                                let real_dest = SocketAddr::new(host_dest_ip, dest_port);
+                                let stream = match host_dest_ip {
                                     IpAddr::V4(_) => {
                                         Socket::new(Domain::IPV4, socket2::Type::STREAM, None)
                                     }
@@ -944,6 +954,9 @@ impl ProxyNetWorker {
                                         last_activity: Instant::now(),
                                     },
                                 );
+                                // Forward the SYN to smoltcp so it can complete the TCP
+                                // handshake with the guest (send SYN-ACK, then receive ACK).
+                                self.device.rx_buffer.push_back(Bytes::copy_from_slice(data));
                                 return true;
                             }
                         }
@@ -1484,8 +1497,8 @@ mod tests {
             rx_buffer: VecDeque::new(),
             mem: mem.clone(),
             queues,
-            rx_frame_buf: [0u8; MAX_BUFFER_SIZE],
-            tx_frame_buf: [0u8; MAX_BUFFER_SIZE],
+            rx_frame_buf: vec![0u8; MAX_BUFFER_SIZE],
+            tx_frame_buf: vec![0u8; MAX_BUFFER_SIZE],
         }
     }
 

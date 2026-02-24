@@ -84,7 +84,7 @@ pub struct MmioTransport {
 
 struct InterruptTransportInner {
     log_target: String,
-    status: AtomicUsize,
+    status: Arc<AtomicUsize>,
     event: EventFd,
     intc: IrqChip,
     irq_line: Option<u32>,
@@ -97,7 +97,7 @@ impl InterruptTransport {
     pub fn new(intc: IrqChip, log_target: String) -> Result<Self, CreateMmioTransportError> {
         Ok(Self(Arc::new(InterruptTransportInner {
             log_target,
-            status: AtomicUsize::new(0),
+            status: Arc::new(AtomicUsize::new(0)),
             event: EventFd::new(0).map_err(CreateMmioTransportError::CreateInterruptEventFd)?,
             intc,
             irq_line: None,
@@ -105,7 +105,11 @@ impl InterruptTransport {
     }
 
     pub fn status(&self) -> &AtomicUsize {
-        &self.0.status
+        &*self.0.status
+    }
+
+    pub fn status_arc(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.0.status)
     }
 
     pub fn event(&self) -> &EventFd {
@@ -118,22 +122,6 @@ impl InterruptTransport {
 
     pub fn irq_line(&self) -> Option<u32> {
         self.0.irq_line
-    }
-
-    /// SAFETY: This extracts the status Arc from the inner structure.
-    /// The returned Arc points to the same status field in InterruptTransportInner.
-    /// Do not use if InterruptTransportInner layout changes.
-    pub fn status_arc(&self) -> Arc<AtomicUsize> {
-        // SAFETY: We clone the Arc<InterruptTransportInner> and then transmute it to Arc<AtomicUsize>.
-        // This works because AtomicUsize is the second field in InterruptTransportInner (after log_target: String).
-        // The Arc will properly manage the InterruptTransportInner's lifetime, and accessing only the
-        // status field is safe as long as we don't modify InterruptTransportInner's layout.
-        unsafe {
-            let inner = Arc::clone(&self.0);
-            // Transmute Arc<InterruptTransportInner> to Arc<AtomicUsize>
-            // This works because the status field is contiguous in memory
-            std::mem::transmute::<Arc<InterruptTransportInner>, Arc<AtomicUsize>>(inner)
-        }
     }
 
     fn set_irq_line(&mut self, irq_line: u32) {
