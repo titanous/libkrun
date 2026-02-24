@@ -13,6 +13,12 @@ use test_tsi_tcp_guest_listen::TestTsiTcpGuestListen;
 mod test_multiport_console;
 use test_multiport_console::TestMultiportConsole;
 
+mod test_snapshot_restore;
+use test_snapshot_restore::{TestSnapshotRestore, TestSnapshotRestoreIncremental};
+
+mod test_snapshot_errors;
+use test_snapshot_errors::{TestSnapshotWrongMagic, TestSnapshotVcpuMismatch, TestSnapshotNestedMismatch};
+
 pub fn test_cases() -> Vec<TestCase> {
     // Register your test here:
     vec![
@@ -40,6 +46,11 @@ pub fn test_cases() -> Vec<TestCase> {
             Box::new(TestTsiTcpGuestListen::new()),
         ),
         TestCase::new("multiport-console", Box::new(TestMultiportConsole)),
+        TestCase::new("snapshot-restore-full", Box::new(TestSnapshotRestore)),
+        TestCase::new("snapshot-restore-incremental", Box::new(TestSnapshotRestoreIncremental)),
+        TestCase::new("snapshot-error-wrong-magic", Box::new(TestSnapshotWrongMagic)),
+        TestCase::new("snapshot-error-vcpu-mismatch", Box::new(TestSnapshotVcpuMismatch)),
+        TestCase::new("snapshot-error-nested-mismatch", Box::new(TestSnapshotNestedMismatch)),
     ]
 }
 
