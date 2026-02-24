@@ -14,6 +14,7 @@ use crate::virtio::{
 use crate::Error as DeviceError;
 
 use super::backend::{ReadError, WriteError};
+use super::proxy::ProxyNetWorker;
 use super::worker::NetWorker;
 
 use log::{debug, error};
@@ -83,6 +84,9 @@ pub enum VirtioNetBackend {
     /// Custom async backend using factory pattern.
     /// The factory creates the backend inside the worker's tokio runtime.
     CustomAsyncFactory(Box<dyn AsyncNetBackendFactory>),
+    /// Use smoltcp-based ProxyNetWorker as the network backend.
+    /// `listeners` maps VM-side ports to host Unix socket paths for ingress connections.
+    Proxy { listeners: Vec<(u16, String)> },
 }
 
 impl Clone for VirtioNetBackend {
@@ -95,6 +99,7 @@ impl Clone for VirtioNetBackend {
             #[cfg(target_os = "linux")]
             Self::Tap(s) => Self::Tap(s.clone()),
             Self::CustomAsyncFactory(_) => panic!("CustomAsyncFactory cannot be cloned"),
+            Self::Proxy { listeners } => Self::Proxy { listeners: listeners.clone() },
         }
     }
 }
@@ -293,6 +298,34 @@ impl VirtioDevice for Net {
                 worker.run();
                 self.device_state = DeviceState::Activated(mem, interrupt);
                 Ok(())
+            }
+            VirtioNetBackend::Proxy { listeners } => {
+                debug!("virtio-net ({}): starting proxy worker", self.id());
+                let interrupt_status = interrupt.status().clone();
+                let interrupt_evt = interrupt.event().try_clone().unwrap();
+                let intc = Some(interrupt.intc().clone());
+                let irq_line = interrupt.irq_line();
+
+                match ProxyNetWorker::new(
+                    self.queues.clone(),
+                    queue_evts,
+                    interrupt_status,
+                    interrupt_evt,
+                    intc,
+                    irq_line,
+                    mem.clone(),
+                    listeners,
+                ) {
+                    Ok(worker) => {
+                        std::thread::spawn(move || worker.run());
+                        self.device_state = DeviceState::Activated(mem, interrupt);
+                        Ok(())
+                    }
+                    Err(err) => {
+                        error!("Error activating ProxyNetWorker: {err:?}");
+                        Err(ActivateError::BadActivate)
+                    }
+                }
             }
             sync_backend => {
                 // Put the backend back for sync path (it's cloneable)
