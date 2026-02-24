@@ -301,7 +301,7 @@ impl VirtioDevice for Net {
             }
             VirtioNetBackend::Proxy { listeners } => {
                 debug!("virtio-net ({}): starting proxy worker", self.id());
-                let interrupt_status = interrupt.status().clone();
+                let interrupt_status = Arc::clone(interrupt.status());
                 let interrupt_evt = interrupt.event().try_clone().unwrap();
                 let intc = Some(interrupt.intc().clone());
                 let irq_line = interrupt.irq_line();
