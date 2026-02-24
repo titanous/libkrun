@@ -25,6 +25,8 @@ mod kvmgicv3;
 mod kvmioapic;
 #[cfg(target_arch = "aarch64")]
 mod rtc_pl031;
+#[cfg(any(target_arch = "x86_64", target_arch = "riscv64"))]
+mod serial_16550;
 #[cfg(target_os = "macos")]
 mod vcpu;
 #[cfg(target_arch = "x86_64")]
