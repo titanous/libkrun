@@ -1702,6 +1702,13 @@ impl Vcpu {
             }
         }
 
+        // Check if the VMM has requested shutdown (set by Vmm::stop()).
+        // This is checked after Interrupted to allow VcpuHandle::drop() to
+        // kick the vCPU out of KVM_RUN and have it exit cleanly.
+        if self.should_exit.load(Ordering::Acquire) {
+            return self.exit(FC_EXIT_CODE_OK);
+        }
+
         // By default don't change state.
         let mut state = StateMachine::next(Self::running);
 
@@ -2005,6 +2012,13 @@ impl VcpuHandle {
 #[cfg(not(test))]
 impl Drop for VcpuHandle {
     fn drop(&mut self) {
+        // Kick the vCPU thread out of KVM_RUN by sending it a signal.
+        // The signal causes KVM_RUN to return with -EINTR (Interrupted),
+        // and the running() handler will see should_exit and transition
+        // to the exit state.
+        if let Some(ref thread) = self.vcpu_thread {
+            let _ = thread.kill(sigrtmin() + VCPU_RTSIG_OFFSET);
+        }
         if let Some(thread) = self.vcpu_thread.take() {
             if let Err(e) = thread.join() {
                 error!("Failed to join vCPU thread: {e:?}");
