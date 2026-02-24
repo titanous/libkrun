@@ -127,6 +127,11 @@ impl I8042Device {
     }
 
     pub fn trigger_key(&mut self, key: u16) -> Result<()> {
+        // Only fire an interrupt if the buffer was empty (guest doesn't yet know data is available).
+        // If SB_OUT_DATA_AVAIL is already set, the guest will read more data on its own after
+        // each read triggers a follow-up interrupt (see BusDevice::read).
+        let need_interrupt = (self.status & SB_OUT_DATA_AVAIL) == 0;
+
         if key & 0xff00 != 0 {
             // Check if there is enough room in the buffer, before pushing an extended (2-byte) key.
             if BUF_SIZE - self.buf_len() < 2 {
@@ -136,9 +141,13 @@ impl I8042Device {
         }
         self.push_byte((key & 0xff) as u8)?;
 
-        match self.trigger_kbd_interrupt() {
-            Ok(_) | Err(Error::KbdInterruptDisabled) => Ok(()),
-            Err(e) => Err(e),
+        if need_interrupt {
+            match self.trigger_kbd_interrupt() {
+                Ok(_) | Err(Error::KbdInterruptDisabled) => Ok(()),
+                Err(e) => Err(e),
+            }
+        } else {
+            Ok(())
         }
     }
 
