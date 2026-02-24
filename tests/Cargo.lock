@@ -1418,6 +1418,7 @@ dependencies = [
  "macros",
  "nix 0.29.0",
  "tempdir",
+ "tokio",
 ]
 
 [[package]]

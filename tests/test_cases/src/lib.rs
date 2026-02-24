@@ -19,6 +19,15 @@ use test_snapshot_restore::{TestSnapshotRestore, TestSnapshotRestoreIncremental}
 mod test_snapshot_errors;
 use test_snapshot_errors::{TestSnapshotWrongMagic, TestSnapshotVcpuMismatch, TestSnapshotNestedMismatch};
 
+mod test_rust_api;
+use test_rust_api::{TestRustApiZeroVcpu, TestRustApiDeviceInfo, TestRustApiPauseResume, TestRustApiShutdown};
+
+#[cfg(feature = "host")]
+mod mem_block_backend;
+
+mod test_custom_block_backend;
+use test_custom_block_backend::TestCustomBlockBackend;
+
 pub fn test_cases() -> Vec<TestCase> {
     // Register your test here:
     vec![
@@ -51,6 +60,11 @@ pub fn test_cases() -> Vec<TestCase> {
         TestCase::new("snapshot-error-wrong-magic", Box::new(TestSnapshotWrongMagic)),
         TestCase::new("snapshot-error-vcpu-mismatch", Box::new(TestSnapshotVcpuMismatch)),
         TestCase::new("snapshot-error-nested-mismatch", Box::new(TestSnapshotNestedMismatch)),
+        TestCase::new("rust-api-zero-vcpu", Box::new(TestRustApiZeroVcpu)),
+        TestCase::new("rust-api-device-info", Box::new(TestRustApiDeviceInfo)),
+        TestCase::new("rust-api-pause-resume", Box::new(TestRustApiPauseResume)),
+        TestCase::new("rust-api-shutdown", Box::new(TestRustApiShutdown)),
+        TestCase::new("custom-block-backend", Box::new(TestCustomBlockBackend)),
     ]
 }
 
