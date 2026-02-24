@@ -315,3 +315,217 @@ fn hex_suffix(bytes: &[u8], count: usize) -> String {
         .collect::<Vec<_>>()
         .join("")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::virtio::queue::Descriptor;
+    use std::sync::atomic::Ordering;
+    use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
+
+    // Test memory layout constants for virtio queue
+    const TEST_QUEUE_SIZE: u16 = 16;
+    const DESC_TABLE_ADDR: u64 = 0x0000; // 16*16=256 bytes, 16-byte aligned
+    const AVAIL_RING_ADDR: u64 = 0x0100; // 4 + 2*16 + 2 = 38 bytes, 2-byte aligned
+    const USED_RING_ADDR: u64 = 0x0200; // 4 + 8*16 + 2 = 134 bytes, 4-byte aligned
+    const DATA_AREA_ADDR: u64 = 0x1000; // payload data
+
+    /// RecordingPortOutput records all bytes written to it
+    struct RecordingPortOutput {
+        received: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl RecordingPortOutput {
+        fn new() -> (Self, Arc<Mutex<Vec<u8>>>) {
+            let received = Arc::new(Mutex::new(Vec::new()));
+            (RecordingPortOutput { received: received.clone() }, received)
+        }
+    }
+
+    impl PortOutput for RecordingPortOutput {
+        fn write_volatile(&mut self, buf: &VolatileSlice) -> Result<usize, io::Error> {
+            let mut data = vec![0u8; buf.len()];
+            buf.copy_to(&mut data);
+            self.received.lock().unwrap().extend_from_slice(&data);
+            Ok(data.len())
+        }
+
+        fn wait_until_writable(&self) {}
+    }
+
+    /// FailingPortOutput always returns a broken-pipe error
+    struct FailingPortOutput;
+
+    impl PortOutput for FailingPortOutput {
+        fn write_volatile(&mut self, _buf: &VolatileSlice) -> Result<usize, io::Error> {
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "port closed"))
+        }
+
+        fn wait_until_writable(&self) {}
+    }
+
+    /// Helper to create a guest memory region and queue with one descriptor containing the payload
+    fn make_mem_and_queue(payload: &[u8]) -> (GuestMemoryMmap, Queue, u64) {
+        // Create guest memory: 128KB
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x20000)]).unwrap();
+
+        // Initialize avail and used ring headers
+        mem.write_obj(0u16, GuestAddress(AVAIL_RING_ADDR)).unwrap(); // flags
+        mem.write_obj(0u16, GuestAddress(AVAIL_RING_ADDR + 2)).unwrap(); // idx
+        mem.write_obj(0u16, GuestAddress(USED_RING_ADDR)).unwrap(); // flags
+        mem.write_obj(0u16, GuestAddress(USED_RING_ADDR + 2)).unwrap(); // idx
+
+        // Write the payload to guest memory
+        let payload_addr = DATA_AREA_ADDR;
+        if !payload.is_empty() {
+            mem.write_slice(payload, GuestAddress(payload_addr)).unwrap();
+        }
+
+        // Write descriptor at index 0
+        let desc = Descriptor {
+            addr: payload_addr,
+            len: payload.len() as u32,
+            flags: 0, // readable, no NEXT
+            next: 0,
+        };
+        mem.write_obj(desc, GuestAddress(DESC_TABLE_ADDR)).unwrap();
+
+        // Add descriptor 0 to the avail ring
+        let ring_entry_addr = AVAIL_RING_ADDR + 4;
+        mem.write_obj(0u16, GuestAddress(ring_entry_addr)).unwrap(); // avail ring[0] = 0
+
+        // Bump avail idx to 1
+        mem.write_obj(1u16, GuestAddress(AVAIL_RING_ADDR + 2)).unwrap();
+
+        // Create and configure the queue
+        let q = {
+            let mut q = Queue::new(TEST_QUEUE_SIZE);
+            q.size = TEST_QUEUE_SIZE;
+            q.ready = true;
+            q.desc_table = GuestAddress(DESC_TABLE_ADDR);
+            q.avail_ring = GuestAddress(AVAIL_RING_ADDR);
+            q.used_ring = GuestAddress(USED_RING_ADDR);
+            q
+        };
+
+        (mem, q, payload_addr)
+    }
+
+    /// Helper to create an InterruptTransport using DummyIrqChip
+    fn make_interrupt() -> InterruptTransport {
+        use crate::legacy::DummyIrqChip;
+        let irqchip: crate::legacy::IrqChip = DummyIrqChip::new().into();
+        InterruptTransport::new(irqchip, "test-console".into()).unwrap()
+    }
+
+    use vm_memory::VolatileSlice;
+
+    #[test]
+    fn test_tx_data_forwarded_to_output() {
+        let payload = b"hello console";
+        let (mem, queue, _) = make_mem_and_queue(payload);
+        let interrupt = make_interrupt();
+        let (recording_output, received) = RecordingPortOutput::new();
+        let output: Arc<Mutex<Box<dyn PortOutput + Send>>> =
+            Arc::new(Mutex::new(Box::new(recording_output)));
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = stop.clone();
+
+        let handle = std::thread::spawn(move || {
+            process_tx(0, mem, queue, interrupt, output, stop_clone);
+        });
+
+        // Give the thread time to process the single queued descriptor.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Signal the thread to stop (it has parked waiting for more data).
+        stop.store(true, Ordering::SeqCst);
+        handle.thread().unpark();
+
+        handle.join().unwrap();
+
+        assert_eq!(received.lock().unwrap().as_slice(), payload);
+    }
+
+    #[test]
+    fn test_tx_closed_port_no_panic() {
+        // Test that write_desc_to_output handles IO errors without panicking.
+        // We directly test write_desc_to_output with a descriptor and failing output.
+        let payload = b"data to broken port";
+        let (mem, _queue, _payload_addr) = make_mem_and_queue(payload);
+        let interrupt = make_interrupt();
+
+        // Create a descriptor pointing to our payload
+        let desc = {
+            let mut q = Queue::new(TEST_QUEUE_SIZE);
+            q.size = TEST_QUEUE_SIZE;
+            q.ready = true;
+            q.desc_table = GuestAddress(DESC_TABLE_ADDR);
+            q.avail_ring = GuestAddress(AVAIL_RING_ADDR);
+            q.used_ring = GuestAddress(USED_RING_ADDR);
+            q.pop(&mem).unwrap() // Get the descriptor we set up
+        };
+
+        let mut failing_output = FailingPortOutput;
+
+        // Call write_desc_to_output with the failing output.
+        // It should return an error, not panic.
+        let result = write_desc_to_output(
+            desc,
+            &mut failing_output,
+            &interrupt,
+            0,  // port_id
+            0,  // head_index
+            0,  // desc_ordinal
+        );
+
+        // The result should be an error (broken pipe)
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_tx_empty_buffer_no_panic() {
+        // Test with an empty queue (no descriptors available).
+        // This tests that process_tx handles the empty queue case without panicking.
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x20000)]).unwrap();
+
+        // Initialize avail and used ring headers with empty queue
+        mem.write_obj(0u16, GuestAddress(AVAIL_RING_ADDR)).unwrap(); // flags
+        mem.write_obj(0u16, GuestAddress(AVAIL_RING_ADDR + 2)).unwrap(); // idx (empty)
+        mem.write_obj(0u16, GuestAddress(USED_RING_ADDR)).unwrap(); // flags
+        mem.write_obj(0u16, GuestAddress(USED_RING_ADDR + 2)).unwrap(); // idx
+
+        // Create and configure the queue (empty, no descriptors)
+        let queue = {
+            let mut q = Queue::new(TEST_QUEUE_SIZE);
+            q.size = TEST_QUEUE_SIZE;
+            q.ready = true;
+            q.desc_table = GuestAddress(DESC_TABLE_ADDR);
+            q.avail_ring = GuestAddress(AVAIL_RING_ADDR);
+            q.used_ring = GuestAddress(USED_RING_ADDR);
+            q
+        };
+
+        let interrupt = make_interrupt();
+        let (recording_output, received) = RecordingPortOutput::new();
+        let output: Arc<Mutex<Box<dyn PortOutput + Send>>> =
+            Arc::new(Mutex::new(Box::new(recording_output)));
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = stop.clone();
+
+        let handle = std::thread::spawn(move || {
+            process_tx(0, mem, queue, interrupt, output, stop_clone);
+        });
+
+        // Give the thread time to enter the parked state (empty queue).
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Signal the thread to stop (it's parked waiting for data in an empty queue).
+        stop.store(true, Ordering::SeqCst);
+        handle.thread().unpark();
+        handle.join().unwrap(); // no panic
+
+        // No bytes should have been forwarded (empty queue).
+        assert!(received.lock().unwrap().is_empty());
+    }
+}
