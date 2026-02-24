@@ -1786,13 +1786,17 @@ mod tests {
         let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 1024 * 1024)]).unwrap();
         let queues = vec![Queue::new(256), Queue::new(256)];
         let queue_evts = vec![EventFd::new(0).unwrap(), EventFd::new(0).unwrap()];
-        let interrupt = make_test_interrupt();
+        let interrupt_status = Arc::new(AtomicUsize::new(0));
+        let interrupt_evt = EventFd::new(0).unwrap();
 
         // Construct a minimal ProxyNetWorker
         let mut proxy = ProxyNetWorker::new(
             queues,
             queue_evts,
-            interrupt,
+            interrupt_status,
+            interrupt_evt,
+            None,
+            None,
             mem,
             vec![],
         ).expect("ProxyNetWorker::new should succeed in test environment");
@@ -1846,13 +1850,17 @@ mod tests {
         let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 1024 * 1024)]).unwrap();
         let queues = vec![Queue::new(256), Queue::new(256)];
         let queue_evts = vec![EventFd::new(0).unwrap(), EventFd::new(0).unwrap()];
-        let interrupt = make_test_interrupt();
+        let interrupt_status = Arc::new(AtomicUsize::new(0));
+        let interrupt_evt = EventFd::new(0).unwrap();
 
         // Construct a minimal ProxyNetWorker
         let mut proxy = ProxyNetWorker::new(
             queues,
             queue_evts,
-            interrupt,
+            interrupt_status,
+            interrupt_evt,
+            None,
+            None,
             mem,
             vec![],
         ).expect("ProxyNetWorker::new should succeed in test environment");
