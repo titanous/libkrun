@@ -117,10 +117,10 @@ mod guest {
         fn in_guest(self: Box<Self>) {
             configure_eth0();
 
-            // AC3.2: Open ICMP datagram socket (unprivileged, no CAP_NET_RAW)
+            // AC3.2: Open raw ICMP socket (requires CAP_NET_RAW; guest runs as root)
             unsafe {
-                let sock = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, libc::IPPROTO_ICMP);
-                assert!(sock >= 0, "socket(SOCK_DGRAM, IPPROTO_ICMP) failed");
+                let sock = libc::socket(libc::AF_INET, libc::SOCK_RAW, libc::IPPROTO_ICMP);
+                assert!(sock >= 0, "socket(SOCK_RAW, IPPROTO_ICMP) failed");
 
                 // Set receive timeout
                 let tv = libc::timeval { tv_sec: 5, tv_usec: 0 };
@@ -186,12 +186,13 @@ mod guest {
                 );
                 assert!(received > 0, "recvfrom failed or timed out");
 
-                // The kernel strips the IP header for SOCK_DGRAM sockets,
-                // so recv_buf starts with the ICMP header
-                assert_eq!(recv_buf[0], 0, "Expected ICMP type 0 (echo reply)");
-                assert_eq!(recv_buf[1], 0, "Expected ICMP code 0");
+                // SOCK_RAW delivers full IP packet; skip IP header (variable length)
+                let ip_hdr_len = ((recv_buf[0] & 0x0f) as usize) * 4;
+                let icmp = &recv_buf[ip_hdr_len..];
+                assert_eq!(icmp[0], 0, "Expected ICMP type 0 (echo reply)");
+                assert_eq!(icmp[1], 0, "Expected ICMP code 0");
                 // Check sequence matches
-                let reply_seq = ((recv_buf[6] as u16) << 8) | (recv_buf[7] as u16);
+                let reply_seq = ((icmp[6] as u16) << 8) | (icmp[7] as u16);
                 assert_eq!(reply_seq, seq, "ICMP sequence mismatch");
 
                 libc::close(sock);
