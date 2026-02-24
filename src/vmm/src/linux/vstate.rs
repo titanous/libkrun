@@ -2002,6 +2002,17 @@ impl VcpuHandle {
     }
 }
 
+#[cfg(not(test))]
+impl Drop for VcpuHandle {
+    fn drop(&mut self) {
+        if let Some(thread) = self.vcpu_thread.take() {
+            if let Err(e) = thread.join() {
+                error!("Failed to join vCPU thread: {e:?}");
+            }
+        }
+    }
+}
+
 enum VcpuEmulation {
     Handled,
     Interrupted,

@@ -765,6 +765,7 @@ impl Eq for VcpuResponse {}
 pub struct VcpuHandle {
     event_sender: Sender<VcpuEvent>,
     response_receiver: Receiver<VcpuResponse>,
+    vcpu_thread: Option<thread::JoinHandle<()>>,
     hvf_vcpuid: u64,
 }
 
@@ -772,12 +773,13 @@ impl VcpuHandle {
     pub fn new(
         event_sender: Sender<VcpuEvent>,
         response_receiver: Receiver<VcpuResponse>,
-        _vcpu_thread: thread::JoinHandle<()>,
+        vcpu_thread: thread::JoinHandle<()>,
         hvf_vcpuid: u64,
     ) -> Self {
         Self {
             event_sender,
             response_receiver,
+            vcpu_thread: Some(vcpu_thread),
             hvf_vcpuid,
         }
     }
@@ -827,6 +829,17 @@ impl VcpuHandle {
             other => {
                 error!("Unexpected response to RestoreState: {other:?}");
                 Err(Error::VcpuRun)
+            }
+        }
+    }
+}
+
+#[cfg(not(test))]
+impl Drop for VcpuHandle {
+    fn drop(&mut self) {
+        if let Some(thread) = self.vcpu_thread.take() {
+            if let Err(e) = thread.join() {
+                error!("Failed to join vCPU thread: {e:?}");
             }
         }
     }
