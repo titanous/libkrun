@@ -16,7 +16,6 @@ pub static QUEUE_CONFIG: [QueueConfig; NUM_QUEUES] = [QueueConfig::new(QUEUE_SIZ
 
 mod backend;
 pub mod device;
-pub mod proxy;
 #[cfg(target_os = "linux")]
 mod tap;
 mod unixgram;
