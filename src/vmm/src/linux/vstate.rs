@@ -22,7 +22,6 @@ use std::result;
 use std::sync::atomic::{fence, AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
-#[cfg(target_arch = "x86_64")]
 use std::time::Duration;
 
 use super::super::{FC_EXIT_CODE_GENERIC_ERROR, FC_EXIT_CODE_OK, FC_EXIT_CODE_REBOOT};
@@ -995,6 +994,7 @@ pub struct Vcpu {
     #[cfg(feature = "tee")]
     pm_sender: Sender<WorkerMessage>,
 
+    #[cfg_attr(test, allow(dead_code))]
     should_exit: Arc<AtomicBool>,
 }
 
@@ -1830,8 +1830,8 @@ impl Vcpu {
     // This is the main loop of the `Exited` state.
     fn exited(&mut self) -> StateMachine<Self> {
         // Poll the exit flag. Once the VMM sets it, this thread can unwind.
-        while !self.should_exit.load(std::sync::atomic::Ordering::Acquire) {
-            std::thread::sleep(std::time::Duration::from_millis(10));
+        while !self.should_exit.load(Ordering::Acquire) {
+            thread::sleep(Duration::from_millis(10));
         }
         StateMachine::finish()
     }

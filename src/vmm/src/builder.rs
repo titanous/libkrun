@@ -950,7 +950,7 @@ pub fn build_microvm(
     #[cfg(target_os = "linux")]
     let vcpu_exit_flag = Arc::new(AtomicBool::new(false));
     #[cfg(target_os = "macos")]
-    let vcpu_exit_flag = Arc::new(AtomicBool::new(false)); // Placeholder for cross-platform builder
+    let vcpu_exit_flag = Arc::new(AtomicBool::new(false)); // macOS HVF vCPUs exit naturally; flag exists to satisfy Vmm struct but is not polled on this platform.
 
     // For x86_64 we need to create the interrupt controller before calling `KVM_CREATE_VCPUS`
     // while on aarch64 we need to do it the other way around.
