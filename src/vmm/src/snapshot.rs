@@ -735,4 +735,102 @@ mod tests {
             })
         ));
     }
+
+    /// AC5.1: VmSnapshot save/load round-trip
+    #[cfg(feature = "snapshot")]
+    #[test]
+    fn test_vmstate_roundtrip() {
+        let mem = make_memory(&[(0x1000, 0x2000)]);
+        let temp_dir = std::path::PathBuf::from("/tmp");
+        let temp_path = temp_dir.join(format!("libkrun_test_vmstate_roundtrip_{}.bin", std::process::id()));
+
+        // Construct a valid VmSnapshot
+        let original_snapshot = VmSnapshot {
+            header: valid_header(&mem, 2, false),
+            vcpu_states: vec![vec![0x01, 0x02, 0x03], vec![0x04, 0x05, 0x06]],
+            device_states: vec![
+                ("console".to_string(), vec![0x10, 0x20]),
+                ("block".to_string(), vec![0x30, 0x40, 0x50]),
+            ],
+            gic_state: Some(vec![0x60, 0x70]),
+            vm_state: Some(vec![0x80, 0x90, 0xA0]),
+        };
+
+        // Save to file
+        let save_result = save_vmstate(&original_snapshot, &temp_path);
+        assert!(save_result.is_ok(), "Failed to save vmstate: {:?}", save_result);
+
+        // Load from file
+        let load_result = load_vmstate(&temp_path);
+        let _ = std::fs::remove_file(&temp_path);
+        assert!(load_result.is_ok(), "Failed to load vmstate: {:?}", load_result);
+
+        let loaded_snapshot = load_result.unwrap();
+
+        // Verify round-trip succeeded
+        assert_eq!(loaded_snapshot.header.magic, original_snapshot.header.magic);
+        assert_eq!(loaded_snapshot.header.version, original_snapshot.header.version);
+        assert_eq!(loaded_snapshot.header.vcpu_count, original_snapshot.header.vcpu_count);
+        assert_eq!(loaded_snapshot.header.ram_regions, original_snapshot.header.ram_regions);
+        assert_eq!(loaded_snapshot.header.nested_enabled, original_snapshot.header.nested_enabled);
+        assert_eq!(loaded_snapshot.vcpu_states, original_snapshot.vcpu_states);
+        assert_eq!(loaded_snapshot.device_states, original_snapshot.device_states);
+        assert_eq!(loaded_snapshot.gic_state, original_snapshot.gic_state);
+        assert_eq!(loaded_snapshot.vm_state, original_snapshot.vm_state);
+    }
+
+    /// AC5.3: IncrementalSnapshot save/load round-trip
+    #[cfg(feature = "snapshot")]
+    #[test]
+    fn test_incremental_snapshot_roundtrip() {
+        let mem = make_memory(&[(0x1000, 0x2000)]);
+        let temp_dir = std::path::PathBuf::from("/tmp");
+        let temp_path = temp_dir.join(format!("libkrun_test_incr_roundtrip_{}.bin", std::process::id()));
+
+        // Construct a valid IncrementalSnapshot with at least one DirtyPage
+        let original_snapshot = IncrementalSnapshot {
+            header: valid_header(&mem, 1, true),
+            vcpu_states: vec![vec![0xAA, 0xBB, 0xCC]],
+            device_states: vec![("net".to_string(), vec![0x11, 0x22])],
+            dirty_pages: vec![
+                DirtyPage {
+                    guest_addr: 0x1000,
+                    data: vec![0x01, 0x02, 0x03, 0x04],
+                },
+                DirtyPage {
+                    guest_addr: 0x1100,
+                    data: vec![0x05, 0x06],
+                },
+            ],
+            gic_state: Some(vec![0x33, 0x44]),
+            vm_state: Some(vec![0x55, 0x66, 0x77]),
+        };
+
+        // Save to file
+        let save_result = save_incremental_snapshot(&original_snapshot, &temp_path);
+        assert!(save_result.is_ok(), "Failed to save incremental snapshot: {:?}", save_result);
+
+        // Load from file
+        let load_result = load_incremental_snapshot(&temp_path);
+        let _ = std::fs::remove_file(&temp_path);
+        assert!(load_result.is_ok(), "Failed to load incremental snapshot: {:?}", load_result);
+
+        let loaded_snapshot = load_result.unwrap();
+
+        // Verify round-trip succeeded
+        assert_eq!(loaded_snapshot.header.magic, original_snapshot.header.magic);
+        assert_eq!(loaded_snapshot.header.version, original_snapshot.header.version);
+        assert_eq!(loaded_snapshot.header.vcpu_count, original_snapshot.header.vcpu_count);
+        assert_eq!(loaded_snapshot.header.ram_regions, original_snapshot.header.ram_regions);
+        assert_eq!(loaded_snapshot.header.nested_enabled, original_snapshot.header.nested_enabled);
+        assert_eq!(loaded_snapshot.vcpu_states, original_snapshot.vcpu_states);
+        assert_eq!(loaded_snapshot.device_states, original_snapshot.device_states);
+        assert_eq!(loaded_snapshot.dirty_pages.len(), original_snapshot.dirty_pages.len());
+        assert_eq!(loaded_snapshot.dirty_pages[0].guest_addr, original_snapshot.dirty_pages[0].guest_addr);
+        assert_eq!(loaded_snapshot.dirty_pages[0].data, original_snapshot.dirty_pages[0].data);
+        assert_eq!(loaded_snapshot.dirty_pages[1].guest_addr, original_snapshot.dirty_pages[1].guest_addr);
+        assert_eq!(loaded_snapshot.dirty_pages[1].data, original_snapshot.dirty_pages[1].data);
+        assert_eq!(loaded_snapshot.gic_state, original_snapshot.gic_state);
+        assert_eq!(loaded_snapshot.vm_state, original_snapshot.vm_state);
+    }
 }
