@@ -13,6 +13,7 @@ use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use log::warn;
 use vhost::vhost_user::message::VhostUserConfigFlags;
 use vhost::vhost_user::VhostUserFrontend;
+use vhost::VhostBackend;
 use vm_memory::ByteValued;
 
 use crate::virtio::device::{VirtioDevice, VirtioShmRegion};
@@ -41,8 +42,8 @@ struct VhostUserFsState {
     vring_bases: Vec<u16>,
     /// Opaque daemon state blob (from DEVICE_STATE protocol)
     daemon_state: Vec<u8>,
-    /// Config space snapshot
-    config_tag: [u8; 36],
+    /// Config space snapshot (filesystem tag, up to 36 bytes)
+    config_tag: Vec<u8>,
     config_num_request_queues: u32,
 }
 
@@ -220,29 +221,23 @@ impl VirtioDevice for VhostUserFs {
                     mmap_offset: 0,
                     mmap_handle: dax_fd,
                 };
-                self.vhost_user.add_mem_region(&dax_region)
-                    .map_err(|_| ActivateError::BadActivate)?;
+                if self.vhost_user.add_mem_region(&dax_region).is_err() {
+                    self.vhost_user.reset();
+                    return Err(ActivateError::BadActivate);
+                }
             }
         }
 
         // 5. Load daemon state via DEVICE_STATE protocol
         //    (daemon must have memory regions before it can accept state)
-        self.vhost_user.load_device_state(&state.daemon_state)
-            .map_err(|e| {
-                log::error!("Failed to load daemon state: {e}");
-                ActivateError::BadActivate
-            })?;
+        if let Err(e) = self.vhost_user.load_device_state(&state.daemon_state) {
+            log::error!("Failed to load daemon state: {e}");
+            self.vhost_user.reset();
+            return Err(ActivateError::BadActivate);
+        }
 
         // 6. Mark as activated
-        match &self.vhost_user.device_state {
-            crate::virtio::DeviceState::Inactive => {
-                self.vhost_user.device_state = crate::virtio::DeviceState::Activated(mem, interrupt);
-            }
-            _ => {
-                // Already activated, this shouldn't happen
-                log::warn!("VhostUserFs: activate_restore called when device already activated");
-            }
-        }
+        self.vhost_user.mark_activated(mem, interrupt);
 
         Ok(())
     }
@@ -295,7 +290,7 @@ impl VirtioDevice for VhostUserFs {
             acked_protocol_features: self.vhost_user.acked_protocol_features().bits(),
             vring_bases,
             daemon_state,
-            config_tag: self.config.tag,
+            config_tag: self.config.tag.to_vec(),
             config_num_request_queues: self.config.num_request_queues,
         };
 
@@ -319,7 +314,13 @@ impl VirtioDevice for VhostUserFs {
         // 2. Restore local device fields from saved state
         self.tag = state.tag.clone();
         self.socket_path = state.socket_path.clone();
-        self.config.tag = state.config_tag;
+        // Copy tag back from Vec<u8> to [u8; 36]
+        self.config.tag.fill(0);
+        if state.config_tag.len() <= 36 {
+            self.config.tag[..state.config_tag.len()].copy_from_slice(&state.config_tag);
+        } else {
+            self.config.tag.copy_from_slice(&state.config_tag[..36]);
+        }
         self.config.num_request_queues = state.config_num_request_queues;
 
         // 3. Store state for activate() to consume in restore mode.
@@ -410,7 +411,7 @@ impl VhostUserFs {
         };
 
         let num_queues = config.num_request_queues as usize;
-        let queues = (0..1 + num_queues).map(|_| Queue::new()).collect();
+        let queues = (0..1 + num_queues).map(|_| Queue::new(QUEUE_SIZE)).collect();
 
         Ok(VhostUserFs {
             vhost_user,
@@ -574,7 +575,7 @@ mod tests {
             acked_protocol_features: 0x789abc,
             vring_bases: vec![0, 1, 2],
             daemon_state: vec![1, 2, 3, 4, 5],
-            config_tag: [42; 36],
+            config_tag: vec![42; 36],
             config_num_request_queues: 4,
         };
 
@@ -612,7 +613,7 @@ mod tests {
             acked_protocol_features: 0xcafebabe,
             vring_bases: vec![10, 20],
             daemon_state: vec![99, 88, 77],
-            config_tag: [123; 36],
+            config_tag: vec![123; 36],
             config_num_request_queues: 8,
         };
 
@@ -665,7 +666,7 @@ mod tests {
         )]).expect("create guest memory");
 
         let queues = vec![DeviceQueue::new(
-            crate::virtio::Queue::new(),
+            crate::virtio::Queue::new(QUEUE_SIZE),
             Arc::new(EventFd::new(0).expect("create eventfd")),
         )];
 
@@ -675,7 +676,7 @@ mod tests {
         );
 
         // Try to activate_restore - should fail because daemon is unavailable
-        let result = device.activate(&mem, &interrupt, queues);
+        let result = device.activate(mem, interrupt, queues);
         assert!(result.is_err(), "activate_restore should fail when daemon unavailable");
     }
 }
@@ -692,7 +693,7 @@ impl VhostUserFs {
             queue_configs.push(QueueConfig::new(QUEUE_SIZE)); // Request queues
         }
 
-        let queues = (0..1 + num_queues).map(|_| Queue::new()).collect();
+        let queues = (0..1 + num_queues).map(|_| Queue::new(QUEUE_SIZE)).collect();
 
         VhostUserFs {
             vhost_user: VhostUserDevice::new_for_test_unconnected(),

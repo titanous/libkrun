@@ -551,6 +551,17 @@ impl VhostUserDevice {
         Ok(())
     }
 
+    /// Mark device as activated with given memory and interrupt.
+    /// Used by subclasses (like VhostUserFs) that perform custom activation logic
+    /// and need to update the device state afterward.
+    pub(super) fn mark_activated(
+        &mut self,
+        mem: GuestMemoryMmap,
+        interrupt: InterruptTransport,
+    ) {
+        self.device_state = DeviceState::Activated(mem, interrupt);
+    }
+
     /// Replace the Frontend connection for snapshot restore.
     /// Uses saved negotiated features instead of fresh negotiation.
     pub fn reconnect_for_restore(
