@@ -43,6 +43,7 @@ impl Default for VirtioFsConfig {
 // SAFETY: VirtioFsConfig is repr(C, packed) with only primitive fields
 unsafe impl ByteValued for VirtioFsConfig {}
 
+#[derive(Debug)]
 pub struct VhostUserFs {
     vhost_user: VhostUserDevice,
     config: VirtioFsConfig,
@@ -308,11 +309,20 @@ mod tests {
             guest_addr: 0x2000,
             size: 32 * 1024 * 1024,
         };
-        device.set_shm_region(region.clone());
+        device.set_shm_region(region);
 
         let retrieved = device.shm_region().unwrap();
         assert_eq!(retrieved.host_addr, 0x1000);
         assert_eq!(retrieved.guest_addr, 0x2000);
+    }
+
+    #[test]
+    fn test_new_fails_with_unavailable_socket() {
+        let result = VhostUserFs::new("testfs", "/tmp/nonexistent-socket-path-12345", None);
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        // Should be a connection error (NotFound for nonexistent path), not a panic
+        assert!(matches!(error.kind(), ErrorKind::NotFound | ErrorKind::ConnectionRefused));
     }
 }
 

@@ -71,6 +71,19 @@ pub struct VhostUserDevice {
     device_state: DeviceState,
 }
 
+impl std::fmt::Debug for VhostUserDevice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VhostUserDevice")
+            .field("device_type", &self.device_type)
+            .field("device_name", &self.device_name)
+            .field("queue_configs", &self.queue_configs)
+            .field("avail_features", &self.avail_features)
+            .field("backend_features", &self.backend_features)
+            .field("acked_features", &self.acked_features)
+            .finish_non_exhaustive()
+    }
+}
+
 impl VhostUserDevice {
     /// Create a new vhost-user device by connecting to a socket.
     ///

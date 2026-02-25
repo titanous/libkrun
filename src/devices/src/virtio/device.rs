@@ -67,7 +67,7 @@ impl DeviceState {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct VirtioShmRegion {
     pub host_addr: u64,
     pub guest_addr: u64,
