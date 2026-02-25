@@ -435,9 +435,9 @@ impl MMIODeviceManager {
                 }
             }
             if !found {
-                return Err(Error::SnapshotState(format!(
-                    "No matching device found for snapshot state: {id}"
-                )));
+                // Unknown device state — skip silently (forward compat for device manager layering).
+                // This allows PortIO states to coexist in the shared device_states vec.
+                debug!("Skipping unknown MMIO device state: {id}");
             }
         }
         Ok(())

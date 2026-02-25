@@ -10,6 +10,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use devices;
+#[cfg(feature = "snapshot")]
 use devices::BusDevice;
 use utils::eventfd::EventFd;
 
@@ -286,6 +287,10 @@ mod tests {
                 std::io::Error::from_raw_os_error(1)
             )
         );
+        assert_eq!(
+            format!("{}", Error::SnapshotState("test error".to_string())),
+            "Snapshot state error: test error"
+        );
     }
 
     #[test]
@@ -343,5 +348,57 @@ mod tests {
         let unknown_state = vec![("unknown-device".to_string(), vec![1, 2, 3])];
         let result = ldm.restore_all_device_states(&unknown_state);
         assert!(result.is_ok(), "restore_all_device_states should silently skip unknown device IDs");
+    }
+
+    #[test]
+    #[cfg(feature = "snapshot")]
+    fn test_pio_roundtrip_snapshot() {
+        // Create first PortIODeviceManager and save states
+        let serial1 =
+            devices::legacy::Serial::new_sink(EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap());
+        let cmos1 = devices::legacy::Cmos::new(0, 0);
+        let ldm1 = PortIODeviceManager::new(
+            Arc::new(Mutex::new(cmos1)),
+            vec![Arc::new(Mutex::new(serial1))],
+            EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
+        );
+        assert!(ldm1.is_ok());
+        let ldm1 = ldm1.unwrap();
+
+        // Save states from first manager
+        let states1 = ldm1.save_all_device_states();
+        assert!(states1.is_ok());
+        let states1 = states1.unwrap();
+
+        // Create second PortIODeviceManager with fresh state
+        let serial2 =
+            devices::legacy::Serial::new_sink(EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap());
+        let cmos2 = devices::legacy::Cmos::new(0, 0);
+        let ldm2 = PortIODeviceManager::new(
+            Arc::new(Mutex::new(cmos2)),
+            vec![Arc::new(Mutex::new(serial2))],
+            EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
+        );
+        assert!(ldm2.is_ok());
+        let ldm2 = ldm2.unwrap();
+
+        // Restore states into second manager
+        let restore_result = ldm2.restore_all_device_states(&states1);
+        assert!(restore_result.is_ok(), "Restore should succeed");
+
+        // Save states from second manager
+        let states2 = ldm2.save_all_device_states();
+        assert!(states2.is_ok());
+        let states2 = states2.unwrap();
+
+        // Verify roundtrip: both snapshots should have same number of device entries with same IDs
+        assert_eq!(states1.len(), states2.len(), "Roundtrip snapshot should have same number of device entries");
+
+        let ids1: Vec<&String> = states1.iter().map(|(id, _)| id).collect();
+        let ids2: Vec<&String> = states2.iter().map(|(id, _)| id).collect();
+
+        for id in &ids1 {
+            assert!(ids2.contains(id), "Device {} should exist in roundtrip snapshot", id);
+        }
     }
 }
