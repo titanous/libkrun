@@ -362,6 +362,27 @@ impl VhostUserDevice {
     }
 }
 
+impl VhostUserDevice {
+    /// Constructor for unit tests that bypasses socket connection.
+    /// Creates a minimal device with no features or queues.
+    #[cfg(test)]
+    pub(super) fn new_for_test() -> Self {
+        VhostUserDevice {
+            frontend: Arc::new(Mutex::new(Frontend::from_stream(
+                std::io::Cursor::new(vec![]),
+                1,
+            ))),
+            device_type: 0,
+            device_name: String::from("test-device"),
+            queue_configs: vec![],
+            avail_features: 0,
+            backend_features: 0,
+            acked_features: 0,
+            device_state: DeviceState::Inactive,
+        }
+    }
+}
+
 impl VirtioDevice for VhostUserDevice {
     fn device_type(&self) -> u32 {
         self.device_type

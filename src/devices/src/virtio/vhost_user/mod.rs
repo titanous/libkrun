@@ -7,5 +7,7 @@
 //! to run in separate processes for better isolation and flexibility.
 
 mod device;
+pub mod fs;
 
 pub use device::VhostUserDevice;
+pub use fs::VhostUserFs;

@@ -33,3 +33,7 @@ pub mod vsock;
 /// Wrapper for configuring the network devices attached to the microVM.
 #[cfg(feature = "net")]
 pub mod net;
+
+/// Wrapper for configuring vhost-user filesystem devices.
+#[cfg(feature = "vhost-user")]
+pub mod vhost_user_fs;
