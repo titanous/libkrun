@@ -19,7 +19,7 @@ Last verified: 2026-02-24
 ## Project Structure
 - `src/libkrun/` - Public C API (`krun_*` functions) and Rust `Builder` API
 - `src/vmm/` - Virtual machine manager: builder, snapshot/restore, dirty tracking
-- `src/devices/` - Virtio device implementations (net, console, block, vsock, etc.)
+- `src/devices/` - Virtio and legacy device implementations (net, console, block, vsock, serial, CMOS, i8042, RTC)
 - `src/arch/`, `src/kernel/` - Architecture and kernel loading support
 - `tests/` - Integration test workspace (host+guest test cases run inside VMs)
 - `init/` - C init binary compiled for guest (embedded when `embedded_init` feature on)
@@ -34,6 +34,8 @@ Last verified: 2026-02-24
 ## Conventions
 - Platform-specific code gated with `#[cfg(target_os = "...")]`
 - Snapshot format is platform-agnostic (opaque vCPU state bytes)
+- Legacy devices implement `Snapshottable` trait; state serialized with bincode behind `snapshot` feature
+- Platform-specific serial (x86_64, riscv64) re-export shared `serial_16550.rs` implementation
 - Feature flags gate optional dependencies; see `src/devices/Cargo.toml`
 - Integration tests use host/guest split: `#[host]`/`#[guest]` proc macros
 - See domain CLAUDE.md files for crate-specific contracts

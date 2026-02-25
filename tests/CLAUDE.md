@@ -28,6 +28,10 @@ Tests are inherently flaky (VM + network timing). 5-6/6 passing is normal.
 
 ## Test Cases
 - `snapshot-restore-full`, `snapshot-restore-incremental` - Full snapshot cycle
+- `snapshot-serial-scratch` - Verifies serial scratch register survives snapshot/restore
+- `snapshot-block-data` - Verifies block device data survives snapshot/restore
+- `snapshot-incremental-state` - Verifies incremental snapshot preserves guest state after workload
+- `snapshot-net-connectivity` - Verifies network connectivity after snapshot/restore
 - `snapshot-error-*` - Snapshot validation error paths
 - `rust-api-*` - Builder/lifecycle API tests (zero-vcpu, device-info, pause/resume, shutdown)
 - `vm-exit-clean-shutdown` - Verifies `Context::run()` returns `VmExit::Shutdown`, thread/FD/mmap cleanup
@@ -40,4 +44,5 @@ Tests are inherently flaky (VM + network timing). 5-6/6 passing is normal.
 - `test_cases/src/test_vm_exit.rs` - VM exit handling and resource cleanup tests
 - `test_cases/src/mem_block_backend.rs` - In-memory block backend for tests
 - `test_cases/src/loopback_net.rs` - Loopback AsyncNetBackend and factory for net tests (host-only)
+- `test_cases/src/net_helpers.rs` - Shared network config/ICMP helpers for guest-side tests
 - `test_cases/Cargo.toml` - Feature flags and dependency pins
