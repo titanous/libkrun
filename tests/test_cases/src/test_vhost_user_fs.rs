@@ -4,8 +4,7 @@ pub struct TestVhostUserFsDaxRead;
 pub struct TestVhostUserFsDaxWrite;
 pub struct TestVhostUserFsDaxSnapshot;
 
-const DAX_WINDOW_MIB: u32 = 32;
-const FS_TAG: &str = "testfs";
+const VSOCK_PORT: u32 = 5685;
 
 #[host]
 mod host_helpers {
@@ -13,6 +12,9 @@ mod host_helpers {
     use std::path::Path;
     use std::thread;
     use std::time::Duration;
+
+    pub const DAX_WINDOW_MIB: u32 = 32;
+    pub const FS_TAG: &str = "testfs";
 
     /// Start the test daemon and return the child process handle.
     /// Caller must kill the child when done.
@@ -61,7 +63,7 @@ mod dax_read {
             let mut builder = krun::Builder::new();
             builder.vm_config(1, 512)?;
             setup_fs_builder(&mut builder, &test_setup)?;
-            builder.add_virtiofs_vhost_user(FS_TAG, socket_path.to_str().unwrap(), Some(DAX_WINDOW_MIB));
+            builder.add_virtiofs_vhost_user(host_helpers::FS_TAG, socket_path.to_str().unwrap(), Some(host_helpers::DAX_WINDOW_MIB))?;
 
             // 3. Start VM
             let context = builder.build()?;
@@ -151,7 +153,7 @@ mod dax_write {
             let mut builder = krun::Builder::new();
             builder.vm_config(1, 512)?;
             setup_fs_builder(&mut builder, &test_setup)?;
-            builder.add_virtiofs_vhost_user(FS_TAG, socket_path.to_str().unwrap(), Some(DAX_WINDOW_MIB));
+            builder.add_virtiofs_vhost_user(host_helpers::FS_TAG, socket_path.to_str().unwrap(), Some(host_helpers::DAX_WINDOW_MIB))?;
 
             // 3. Start VM
             let context = builder.build()?;
@@ -182,10 +184,11 @@ mod dax_write_guest {
 
             // 1. Mount virtiofs with DAX
             fs::create_dir_all("/mnt/testfs").unwrap();
-            Command::new("mount")
+            let status = Command::new("mount")
                 .args(["-t", "virtiofs", "testfs", "/mnt/testfs", "-o", "dax=inode"])
                 .status()
                 .unwrap();
+            assert!(status.success(), "mount failed");
 
             // 2. Write known pattern to file via DAX
             let write_pattern = vec![0xCC_u8; 4096];
@@ -233,11 +236,11 @@ mod dax_snapshot {
             let mut builder = krun::Builder::new();
             builder.vm_config(1, 512)?;
             setup_fs_builder(&mut builder, &test_setup)?;
-            builder.add_virtiofs_vhost_user(FS_TAG, socket_path.to_str().unwrap(), Some(DAX_WINDOW_MIB));
+            builder.add_virtiofs_vhost_user(host_helpers::FS_TAG, socket_path.to_str().unwrap(), Some(host_helpers::DAX_WINDOW_MIB))?;
 
             // Add vsock for guest synchronization
             let listener = UnixListener::bind(&vsock_path)?;
-            builder.add_vsock_port(5679, vsock_path, false);
+            builder.add_vsock_port(VSOCK_PORT, vsock_path, false);
 
             let context = builder.build()?;
             let handle = context.vm_handle();
@@ -294,10 +297,11 @@ mod dax_snapshot_guest {
 
             // 1. Mount virtiofs with DAX
             fs::create_dir_all("/mnt/testfs").unwrap();
-            Command::new("mount")
+            let status = Command::new("mount")
                 .args(["-t", "virtiofs", "testfs", "/mnt/testfs", "-o", "dax=inode"])
                 .status()
                 .unwrap();
+            assert!(status.success(), "mount failed");
 
             // 2. Read file via DAX, verify 0xBB pattern
             let data = fs::read("/mnt/testfs/hello.txt").unwrap();
@@ -305,7 +309,7 @@ mod dax_snapshot_guest {
 
             // 3. Signal host: READY
             let sock = socket(AddressFamily::Vsock, SockType::Stream, SockFlag::empty(), None).unwrap();
-            connect(sock.as_raw_fd(), &VsockAddr::new(VMADDR_CID_HOST, 5679)).unwrap();
+            connect(sock.as_raw_fd(), &VsockAddr::new(VMADDR_CID_HOST, VSOCK_PORT)).unwrap();
             let mut stream = UnixStream::from(sock);
             stream.write_all(b"READY").unwrap();
 
