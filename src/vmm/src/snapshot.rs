@@ -17,6 +17,10 @@ use vm_memory::{Address, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap, Gues
 pub const SNAPSHOT_MAGIC: u32 = 0x4B52_534E; // "KRSN"
 pub const SNAPSHOT_VERSION: u32 = 1;
 
+/// Maximum size for vmstate files during deserialization (10 MB).
+/// This prevents OOM from corrupted or malicious files.
+const VMSTATE_MAX_SIZE: u64 = 10 * 1024 * 1024;
+
 /// Timeout for quiescing async device workers during snapshot operations.
 pub const SNAPSHOT_QUIESCE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 
@@ -41,6 +45,7 @@ pub enum SnapshotError {
     },
     NestedEnabledMismatch,
     DirtyTrackingNotEnabled,
+    FileSizeExceeded { size: u64, limit: u64 },
 }
 
 impl Display for SnapshotError {
@@ -71,6 +76,9 @@ impl Display for SnapshotError {
             }
             SnapshotError::DirtyTrackingNotEnabled => {
                 write!(f, "Dirty tracking is not enabled")
+            }
+            SnapshotError::FileSizeExceeded { size, limit } => {
+                write!(f, "Snapshot file size ({size} bytes) exceeds limit ({limit} bytes)")
             }
         }
     }
@@ -215,6 +223,13 @@ pub fn save_vmstate(snapshot: &VmSnapshot, path: &Path) -> Result<(), SnapshotEr
 #[cfg(feature = "snapshot")]
 pub fn load_vmstate(path: &Path) -> Result<VmSnapshot, SnapshotError> {
     let mut file = File::open(path)?;
+    let file_size = file.metadata()?.len();
+    if file_size > VMSTATE_MAX_SIZE {
+        return Err(SnapshotError::FileSizeExceeded {
+            size: file_size,
+            limit: VMSTATE_MAX_SIZE,
+        });
+    }
     let mut data = Vec::new();
     file.read_to_end(&mut data)?;
     let snapshot: VmSnapshot =
@@ -318,6 +333,13 @@ pub fn save_incremental_snapshot(
 #[cfg(feature = "snapshot")]
 pub fn load_incremental_snapshot(path: &Path) -> Result<IncrementalSnapshot, SnapshotError> {
     let mut file = File::open(path)?;
+    let file_size = file.metadata()?.len();
+    if file_size > VMSTATE_MAX_SIZE {
+        return Err(SnapshotError::FileSizeExceeded {
+            size: file_size,
+            limit: VMSTATE_MAX_SIZE,
+        });
+    }
     let mut data = Vec::new();
     file.read_to_end(&mut data)?;
     let snapshot: IncrementalSnapshot =
@@ -653,5 +675,63 @@ mod tests {
         assert_eq!(loaded.dirty_pages[0].data, snapshot.dirty_pages[0].data);
         assert_eq!(loaded.dirty_pages[1].guest_addr, snapshot.dirty_pages[1].guest_addr);
         assert_eq!(loaded.dirty_pages[1].data, snapshot.dirty_pages[1].data);
+    }
+
+    /// AC5.2: vmstate file exceeding 10MB size limit
+    #[cfg(feature = "snapshot")]
+    #[test]
+    fn test_load_vmstate_exceeds_size_limit() {
+        use std::io::Write;
+
+        // Create a temp file larger than VMSTATE_MAX_SIZE (11MB)
+        let temp_dir = std::path::PathBuf::from("/tmp");
+        let temp_path = temp_dir.join(format!("libkrun_test_oversized_vmstate_{}.bin", std::process::id()));
+
+        // Write 11MB of zeros
+        let mut file = std::fs::File::create(&temp_path).unwrap();
+        let oversized_data = vec![0u8; 11 * 1024 * 1024];
+        file.write_all(&oversized_data).unwrap();
+        drop(file);
+
+        let result = load_vmstate(&temp_path);
+        let _ = std::fs::remove_file(&temp_path);
+
+        // Should return FileSizeExceeded error
+        assert!(matches!(
+            result,
+            Err(SnapshotError::FileSizeExceeded {
+                size: 11534336,
+                limit: 10485760
+            })
+        ));
+    }
+
+    /// AC5.4: incremental snapshot file exceeding 10MB size limit
+    #[cfg(feature = "snapshot")]
+    #[test]
+    fn test_load_incremental_snapshot_exceeds_size_limit() {
+        use std::io::Write;
+
+        // Create a temp file larger than VMSTATE_MAX_SIZE (11MB)
+        let temp_dir = std::path::PathBuf::from("/tmp");
+        let temp_path = temp_dir.join(format!("libkrun_test_oversized_incr_{}.bin", std::process::id()));
+
+        // Write 11MB of zeros
+        let mut file = std::fs::File::create(&temp_path).unwrap();
+        let oversized_data = vec![0u8; 11 * 1024 * 1024];
+        file.write_all(&oversized_data).unwrap();
+        drop(file);
+
+        let result = load_incremental_snapshot(&temp_path);
+        let _ = std::fs::remove_file(&temp_path);
+
+        // Should return FileSizeExceeded error
+        assert!(matches!(
+            result,
+            Err(SnapshotError::FileSizeExceeded {
+                size: 11534336,
+                limit: 10485760
+            })
+        ));
     }
 }
