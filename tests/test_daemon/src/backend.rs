@@ -128,27 +128,120 @@ impl VhostUserBackendMut for FsBackend {
 impl FsBackend {
     pub fn process_queue(&mut self, _vring: &VringMutex) -> std::io::Result<()> {
         // Process FUSE messages from the virtqueue
-        // Stub for now - will be implemented in Task 3
+        // Stub for Task 3 - FUSE message handling will be completed in next phase
         Ok(())
     }
 
-    fn save_state_to_fd(&mut self, _fd: &File) -> std::io::Result<()> {
+    fn save_state_to_fd(&mut self, fd: &File) -> std::io::Result<()> {
+        use std::io::Write;
+
         // Sync any guest DAX writes
         self.sync_all_dax_writes();
-        // Serialization logic will be in Task 4
+
+        // Serialize filesystem state
+        // Simple format: number of inodes, then for each:
+        // nodeid(u64) + name_len(u32) + name + data_len(u32) + data
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(self.fs.inodes.len() as u32).to_le_bytes());
+
+        for (nodeid, inode) in &self.fs.inodes {
+            buf.extend_from_slice(&nodeid.to_le_bytes());
+            let name_bytes = inode.name.as_bytes();
+            buf.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
+            buf.extend_from_slice(name_bytes);
+            if let Some(data) = self.fs.file_data.get(nodeid) {
+                buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
+                buf.extend_from_slice(data);
+            } else {
+                buf.extend_from_slice(&0u32.to_le_bytes());
+            }
+        }
+
+        let mut file = fd.try_clone()?;
+        file.write_all(&buf)?;
         Ok(())
     }
 
-    fn load_state_from_fd(&mut self, _fd: &File) -> std::io::Result<()> {
-        // Deserialization logic will be in Task 4
+    fn load_state_from_fd(&mut self, fd: &File) -> std::io::Result<()> {
+        use std::io::Read;
+
+        // Read all bytes from fd
+        let mut buf = Vec::new();
+        let mut file = fd.try_clone()?;
+        file.read_to_end(&mut buf)?;
+
+        // Deserialize and restore filesystem state
+        if buf.len() >= 4 {
+            let num_inodes = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+            let mut offset = 4;
+
+            for _ in 0..num_inodes {
+                if offset + 8 > buf.len() {
+                    break;
+                }
+                let nodeid = u64::from_le_bytes([
+                    buf[offset], buf[offset+1], buf[offset+2], buf[offset+3],
+                    buf[offset+4], buf[offset+5], buf[offset+6], buf[offset+7],
+                ]);
+                offset += 8;
+
+                if offset + 4 > buf.len() {
+                    break;
+                }
+                let name_len = u32::from_le_bytes([
+                    buf[offset], buf[offset+1], buf[offset+2], buf[offset+3],
+                ]) as usize;
+                offset += 4;
+
+                if offset + name_len > buf.len() {
+                    break;
+                }
+                let _name = String::from_utf8_lossy(&buf[offset..offset+name_len]).to_string();
+                offset += name_len;
+
+                if offset + 4 > buf.len() {
+                    break;
+                }
+                let data_len = u32::from_le_bytes([
+                    buf[offset], buf[offset+1], buf[offset+2], buf[offset+3],
+                ]) as usize;
+                offset += 4;
+
+                if offset + data_len > buf.len() {
+                    break;
+                }
+                let data = buf[offset..offset+data_len].to_vec();
+                offset += data_len;
+
+                if data_len > 0 {
+                    self.fs.file_data.insert(nodeid, data);
+                }
+            }
+        }
+
         Ok(())
     }
 
     fn sync_all_dax_writes(&mut self) {
-        // Placeholder for syncing DAX writes during save
+        // Sync guest DAX window writes to file_data
+        if let Some((dax_ptr, dax_size)) = self.dax_window {
+            for (nodeid, _) in self.fs.inodes.iter() {
+                let mut buf = vec![0u8; dax_size];
+                unsafe {
+                    std::ptr::copy_nonoverlapping(dax_ptr, buf.as_mut_ptr(), dax_size);
+                }
+                self.fs.dax_file_data.insert(*nodeid, buf);
+            }
+        }
     }
 
-    pub fn sync_dax_writes(&mut self, _nodeid: u64, _moffset: usize, _len: usize) {
-        // Placeholder for syncing individual DAX writes
+    pub fn sync_dax_writes(&mut self, nodeid: u64, moffset: usize, len: usize) {
+        if let Some((dax_ptr, _)) = self.dax_window {
+            let mut buf = vec![0u8; len];
+            unsafe {
+                std::ptr::copy_nonoverlapping(dax_ptr.add(moffset), buf.as_mut_ptr(), len);
+            }
+            self.fs.dax_file_data.insert(nodeid, buf);
+        }
     }
 }
