@@ -16,7 +16,9 @@ use vhost::vhost_user::VhostUserFrontend;
 use vm_memory::ByteValued;
 
 use crate::virtio::device::{VirtioDevice, VirtioShmRegion};
+use crate::virtio::{ActivateError, ActivateResult};
 use crate::virtio::QueueConfig;
+use vhost::VhostUserMemoryRegionInfo;
 
 use super::VhostUserDevice;
 
@@ -107,8 +109,27 @@ impl VirtioDevice for VhostUserFs {
         mem: vm_memory::GuestMemoryMmap,
         interrupt: crate::virtio::InterruptTransport,
         queues: Vec<crate::virtio::DeviceQueue>,
-    ) -> crate::virtio::ActivateResult {
-        self.vhost_user.activate(mem, interrupt, queues)
+    ) -> ActivateResult {
+        // Delegate to generic VhostUserDevice activation
+        // This handles: set_owner, set_mem_table (RAM), set_features,
+        // vring setup, interrupt forwarding
+        self.vhost_user.activate(mem, interrupt, queues)?;
+
+        // Share DAX window as additional memory region (if configured)
+        if let (Some(fd), Some(ref region)) = (self.dax_window_fd(), &self.shm_region) {
+            let dax_region = VhostUserMemoryRegionInfo {
+                guest_phys_addr: region.guest_addr,
+                memory_size: region.size as u64,
+                userspace_addr: region.host_addr,
+                mmap_offset: 0,
+                mmap_handle: fd,
+            };
+            self.vhost_user
+                .add_mem_region(&dax_region)
+                .map_err(|_| ActivateError::BadActivate)?;
+        }
+
+        Ok(())
     }
 
     fn is_activated(&self) -> bool {
