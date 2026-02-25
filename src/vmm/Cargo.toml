@@ -17,6 +17,7 @@ snd = []
 input = ["krun_input"]
 aws-nitro = []
 snapshot = ["serde", "serde_json", "bincode", "devices/snapshot", "hvf?/snapshot"]
+vhost-user = ["devices/vhost-user"]
 
 [dependencies]
 crossbeam-channel = ">=0.5.15"

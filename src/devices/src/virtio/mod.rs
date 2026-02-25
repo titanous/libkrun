@@ -37,6 +37,8 @@ pub mod rng;
 pub mod rtc;
 #[cfg(feature = "snd")]
 pub mod snd;
+#[cfg(feature = "vhost-user")]
+pub mod vhost_user;
 pub mod vsock;
 
 #[cfg(not(feature = "tee"))]
@@ -62,6 +64,8 @@ pub use self::rng::*;
 pub use self::rtc::*;
 #[cfg(feature = "snd")]
 pub use self::snd::Snd;
+#[cfg(feature = "vhost-user")]
+pub use self::vhost_user::VhostUserDevice;
 pub use self::vsock::*;
 
 /// When the driver initializes the device, it lets the device know about the

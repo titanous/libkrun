@@ -1648,6 +1648,7 @@ pub unsafe extern "C" fn krun_set_snd_device(ctx_id: u32, enable: bool) -> i32 {
     })
 }
 
+
 #[allow(unused_assignments)]
 #[no_mangle]
 pub extern "C" fn krun_get_shutdown_eventfd(ctx_id: u32) -> i32 {
@@ -2185,6 +2186,7 @@ pub extern "C" fn krun_disable_implicit_vsock(ctx_id: u32) -> i32 {
         KRUN_SUCCESS
     })
 }
+
 
 #[no_mangle]
 pub extern "C" fn krun_add_vsock(ctx_id: u32, tsi_features: u32) -> i32 {
