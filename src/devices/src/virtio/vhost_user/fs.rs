@@ -186,16 +186,16 @@ impl VhostUserFs {
             let raw_fd = memfd_create("vhost-fs-dax", libc::MFD_CLOEXEC)
                 .map_err(|e| io::Error::other(format!("memfd_create failed: {}", e)))?;
 
+            // SAFETY: raw_fd is valid and exclusively owned after memfd_create success
+            let owned_fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+
             unsafe {
-                if libc::ftruncate(raw_fd, size as libc::off_t) < 0 {
-                    let err = io::Error::last_os_error();
-                    // OwnedFd will be dropped at end of scope, closing the fd automatically
-                    return Err(err);
+                if libc::ftruncate(owned_fd.as_raw_fd(), size as libc::off_t) < 0 {
+                    return Err(io::Error::last_os_error());
+                    // owned_fd is dropped here automatically, closing the fd
                 }
             }
 
-            // SAFETY: raw_fd is valid and owned by this scope
-            let owned_fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
             (Some(owned_fd), Some(size))
         } else {
             (None, None)
