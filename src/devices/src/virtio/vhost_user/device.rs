@@ -7,8 +7,7 @@
 //! adapting it to work with libkrun's VirtioDevice trait.
 
 use std::fs::File;
-use std::io::{self, ErrorKind, Result as IoResult};
-use std::os::unix::io::FromRawFd;
+use std::io::{self, ErrorKind, Read as IoRead, Result as IoResult, Write as IoWrite};
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -16,6 +15,7 @@ use std::thread;
 use log::{debug, error};
 use utils::eventfd::EventFd;
 use vhost::vhost_user::{Frontend, VhostUserFrontend, VhostUserProtocolFeatures};
+use vhost::vhost_user::message::{VhostTransferStateDirection, VhostTransferStatePhase};
 use vhost::{VhostBackend, VhostUserMemoryRegionInfo, VringConfigData};
 use vm_memory::{Address, GuestMemory, GuestMemoryMmap, GuestMemoryRegion};
 
@@ -439,19 +439,16 @@ impl VhostUserDevice {
 
         // 1. Create pipe
         let (read_end, write_end) = nix::unistd::pipe()
-            .map_err(|e| io::Error::new(ErrorKind::Other, format!("pipe: {}", e)))?;
+            .map_err(|e| io::Error::other(format!("pipe: {e}")))?;
 
-        // Safety: wrap in File for RAII cleanup
-        use std::os::unix::io::AsRawFd;
-        let read_file = unsafe { File::from_raw_fd(read_end.as_raw_fd()) };
-        let write_file = unsafe { File::from_raw_fd(write_end.as_raw_fd()) };
+        // Wrap in File which CONSUMES the OwnedFd, transferring ownership
+        let read_file = File::from(read_end);
+        let write_file = File::from(write_end);
 
         // 2. Send SET_DEVICE_STATE_FD with SAVE direction + write end
         //    The daemon will write its state to the pipe.
         //    Frontend may return a replacement fd (or None).
-        use vhost::vhost_user::message::VhostTransferStateDirection;
-        use vhost::vhost_user::message::VhostTransferStatePhase;
-        let _reply_fd = self
+        let reply_fd = self
             .frontend
             .lock()
             .unwrap()
@@ -460,17 +457,23 @@ impl VhostUserDevice {
                 VhostTransferStatePhase::STOPPED,
                 &write_file,
             )
-            .map_err(|e| io::Error::new(ErrorKind::Other, format!("set_device_state_fd: {}", e)))?;
+            .map_err(|e| io::Error::other(format!("set_device_state_fd: {e}")))?;
+
+        // Check if backend returned a replacement fd (not supported)
+        if reply_fd.is_some() {
+            return Err(io::Error::other(
+                "backend returned replacement fd for device state, not supported",
+            ));
+        }
 
         // 3. Drop write end so we see EOF after daemon finishes writing
         drop(write_file);
 
         // 4. Read all data from pipe until EOF
-        use std::io::Read as IoRead;
         let mut state = Vec::new();
         let mut read_file = read_file;
         read_file.read_to_end(&mut state)
-            .map_err(|e| io::Error::new(ErrorKind::Other, format!("read pipe: {}", e)))?;
+            .map_err(|e| io::Error::other(format!("read pipe: {e}")))?;
 
         // 5. CHECK_DEVICE_STATE confirms transfer completed successfully.
         //    Returns Result<()> — Ok(()) on success, Err on failure.
@@ -478,7 +481,7 @@ impl VhostUserDevice {
             .lock()
             .unwrap()
             .check_device_state()
-            .map_err(|e| io::Error::new(ErrorKind::Other, format!("check_device_state: {}", e)))?;
+            .map_err(|e| io::Error::other(format!("check_device_state: {e}")))?;
 
         Ok(state)
     }
@@ -494,18 +497,15 @@ impl VhostUserDevice {
 
         // 1. Create pipe
         let (read_end, write_end) = nix::unistd::pipe()
-            .map_err(|e| io::Error::new(ErrorKind::Other, format!("pipe: {}", e)))?;
+            .map_err(|e| io::Error::other(format!("pipe: {e}")))?;
 
-        // Safety: wrap in File for RAII cleanup
-        use std::os::unix::io::AsRawFd;
-        let read_file = unsafe { File::from_raw_fd(read_end.as_raw_fd()) };
-        let write_file = unsafe { File::from_raw_fd(write_end.as_raw_fd()) };
+        // Wrap in File which CONSUMES the OwnedFd, transferring ownership
+        let read_file = File::from(read_end);
+        let write_file = File::from(write_end);
 
         // 2. Send SET_DEVICE_STATE_FD with LOAD direction + read end
         //    The daemon will read state from the pipe.
-        use vhost::vhost_user::message::VhostTransferStateDirection;
-        use vhost::vhost_user::message::VhostTransferStatePhase;
-        let _reply_fd = self
+        let reply_fd = self
             .frontend
             .lock()
             .unwrap()
@@ -514,17 +514,23 @@ impl VhostUserDevice {
                 VhostTransferStatePhase::STOPPED,
                 &read_file,
             )
-            .map_err(|e| io::Error::new(ErrorKind::Other, format!("set_device_state_fd: {}", e)))?;
+            .map_err(|e| io::Error::other(format!("set_device_state_fd: {e}")))?;
+
+        // Check if backend returned a replacement fd (not supported)
+        if reply_fd.is_some() {
+            return Err(io::Error::other(
+                "backend returned replacement fd for device state, not supported",
+            ));
+        }
 
         // 3. Drop read end (we only write)
         drop(read_file);
 
         // 4. Write state data to pipe, then close to signal EOF
-        use std::io::Write as IoWrite;
         let mut write_file = write_file;
         write_file
             .write_all(data)
-            .map_err(|e| io::Error::new(ErrorKind::Other, format!("write pipe: {}", e)))?;
+            .map_err(|e| io::Error::other(format!("write pipe: {e}")))?;
         drop(write_file); // Signal EOF to daemon
 
         // 5. CHECK_DEVICE_STATE confirms transfer completed successfully.
@@ -533,7 +539,7 @@ impl VhostUserDevice {
             .lock()
             .unwrap()
             .check_device_state()
-            .map_err(|e| io::Error::new(ErrorKind::Other, format!("check_device_state: {}", e)))?;
+            .map_err(|e| io::Error::other(format!("check_device_state: {e}")))?;
 
         Ok(())
     }
