@@ -22,6 +22,12 @@ use test_snapshot_serial::TestSnapshotSerial;
 mod test_snapshot_block;
 use test_snapshot_block::TestSnapshotBlock;
 
+mod test_snapshot_incremental_state;
+use test_snapshot_incremental_state::TestSnapshotIncrementalState;
+
+mod test_snapshot_net;
+use test_snapshot_net::TestSnapshotNet;
+
 mod test_snapshot_errors;
 use test_snapshot_errors::{TestSnapshotWrongMagic, TestSnapshotVcpuMismatch, TestSnapshotNestedMismatch};
 
@@ -74,6 +80,8 @@ pub fn test_cases() -> Vec<TestCase> {
         TestCase::new("snapshot-restore-incremental", Box::new(TestSnapshotRestoreIncremental)),
         TestCase::new("snapshot-serial-scratch", Box::new(TestSnapshotSerial)),
         TestCase::new("snapshot-block-data", Box::new(TestSnapshotBlock)),
+        TestCase::new("snapshot-incremental-state", Box::new(TestSnapshotIncrementalState)),
+        TestCase::new("snapshot-net-connectivity", Box::new(TestSnapshotNet)),
         TestCase::new("snapshot-error-wrong-magic", Box::new(TestSnapshotWrongMagic)),
         TestCase::new("snapshot-error-vcpu-mismatch", Box::new(TestSnapshotVcpuMismatch)),
         TestCase::new("snapshot-error-nested-mismatch", Box::new(TestSnapshotNestedMismatch)),
