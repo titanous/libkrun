@@ -30,12 +30,14 @@ Tests are inherently flaky (VM + network timing). 5-6/6 passing is normal.
 - `snapshot-restore-full`, `snapshot-restore-incremental` - Full snapshot cycle
 - `snapshot-error-*` - Snapshot validation error paths
 - `rust-api-*` - Builder/lifecycle API tests (zero-vcpu, device-info, pause/resume, shutdown)
+- `vm-exit-clean-shutdown` - Verifies `Context::run()` returns `VmExit::Shutdown`, thread/FD/mmap cleanup
 - `custom-block-backend` - AsyncBlockBackend with in-memory backend
 - `net-async-loopback` - AsyncNetBackend loopback ICMP echo through CustomAsyncFactory
 
 ## Key Files
 - `test_cases/src/lib.rs` - Test case registry
 - `test_cases/src/krun_rust.rs` - Rust API test helpers
+- `test_cases/src/test_vm_exit.rs` - VM exit handling and resource cleanup tests
 - `test_cases/src/mem_block_backend.rs` - In-memory block backend for tests
 - `test_cases/src/loopback_net.rs` - Loopback AsyncNetBackend and factory for net tests (host-only)
 - `test_cases/Cargo.toml` - Feature flags and dependency pins
