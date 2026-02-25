@@ -1,5 +1,8 @@
 use clap::Parser;
 
+mod backend;
+mod filesystem;
+
 #[derive(Parser)]
 struct Args {
     #[arg(long)]
@@ -10,7 +13,7 @@ struct Args {
 
 fn main() -> anyhow::Result<()> {
     env_logger::init();
-    let args = Args::parse();
+    let _args = Args::parse();
     // Phase 7 Tasks 2-5 will fill in the daemon logic
     todo!()
 }
