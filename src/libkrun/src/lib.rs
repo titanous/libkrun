@@ -72,6 +72,8 @@ use vmm::vmm_config::machine_config::VmConfig;
 #[cfg(feature = "net")]
 use vmm::vmm_config::net::{NetworkInterfaceConfig, NetworkInterfaceError};
 use vmm::vmm_config::vsock::VsockDeviceConfig;
+#[cfg(feature = "vhost-user")]
+use vmm::vmm_config::vhost_user_fs::VhostUserFsConfig;
 
 #[cfg(feature = "aws-nitro")]
 use aws_nitro::enclave::NitroEnclave;
@@ -2553,6 +2555,30 @@ impl Builder {
         self
     }
 
+    /// Configure a vhost-user filesystem device.
+    ///
+    /// `tag`: filesystem mount tag (max 36 bytes)
+    /// `socket_path`: path to the vhost-user Unix socket
+    /// `dax_window_mib`: DAX window size in MiB, or None to disable DAX
+    #[cfg(not(feature = "tee"))]
+    #[cfg(feature = "vhost-user")]
+    pub fn add_virtiofs_vhost_user(
+        &mut self,
+        tag: &str,
+        socket_path: &str,
+        dax_window_mib: Option<u32>,
+    ) -> Result<&mut Self, StartError> {
+        if tag.len() > 36 {
+            return Err(StartError::TagTooLong(tag.len()));
+        }
+        self.config.vmr.add_vhost_user_fs_device(VhostUserFsConfig {
+            tag: tag.to_string(),
+            socket_path: socket_path.to_string(),
+            dax_window_mib,
+        });
+        Ok(self)
+    }
+
     #[cfg(not(feature = "tee"))]
     pub fn set_rng_backend(&mut self, backend: Box<dyn RngBackend>) -> &mut Self {
         self.config.vmr.rng_backend = Some(backend);
@@ -3057,6 +3083,8 @@ pub enum StartError {
     Setgid(std::io::Error),
     #[error("vcpu_count must be at least 1")]
     ZeroVcpus,
+    #[error("tag too long: {} bytes (max 36)", .0)]
+    TagTooLong(usize),
     #[error(transparent)]
     Microvm(#[from] StartMicrovmError),
     #[error("{0:?}")]
@@ -3256,5 +3284,85 @@ impl VmHandle {
         vmm.resume_vcpus()
             .map_err(|e| StartError::Microvm(vmm::builder::StartMicrovmError::Internal(e)))?;
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg(feature = "vhost-user")]
+    fn test_add_virtiofs_vhost_user_tag_too_long_ac3_3() {
+        // AC3.3: Tag longer than 36 bytes is rejected
+        let mut builder = Builder::new();
+        let long_tag = "x".repeat(37);
+        let result = builder.add_virtiofs_vhost_user(&long_tag, "/tmp/sock", Some(32));
+
+        match result {
+            Err(StartError::TagTooLong(len)) => {
+                assert_eq!(len, 37, "Error should report correct tag length");
+            }
+            _ => panic!("Expected TagTooLong error for 37-byte tag"),
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "vhost-user")]
+    fn test_add_virtiofs_vhost_user_tag_max_length() {
+        // Tag of exactly 36 bytes should succeed
+        let mut builder = Builder::new();
+        let max_tag = "x".repeat(36);
+        let result = builder.add_virtiofs_vhost_user(&max_tag, "/tmp/sock", Some(32));
+
+        assert!(
+            result.is_ok(),
+            "36-byte tag should be accepted"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "vhost-user")]
+    fn test_add_virtiofs_vhost_user_coexistence_ac3_4() {
+        // AC3.4: Coexistence with existing direct FUSE virtio-fs device
+        let mut builder = Builder::new();
+
+        // Add regular virtiofs device
+        builder.add_virtiofs("fs1", "/shared");
+
+        // Add vhost-user FS device - should not conflict
+        let result = builder.add_virtiofs_vhost_user("vhostfs", "/tmp/sock", Some(32));
+
+        assert!(result.is_ok(), "vhost-user FS should coexist with regular FS");
+
+        // Verify both are stored in VmResources
+        assert_eq!(
+            builder.config.vmr.fs.len(),
+            1,
+            "Should have 1 regular FS device"
+        );
+        #[cfg(feature = "vhost-user")]
+        {
+            assert_eq!(
+                builder.config.vmr.vhost_user_fs.len(),
+                1,
+                "Should have 1 vhost-user FS device"
+            );
+            assert_eq!(
+                builder.config.vmr.vhost_user_fs[0].tag,
+                "vhostfs",
+                "vhost-user FS tag should be stored"
+            );
+            assert_eq!(
+                builder.config.vmr.vhost_user_fs[0].socket_path,
+                "/tmp/sock",
+                "vhost-user FS socket path should be stored"
+            );
+            assert_eq!(
+                builder.config.vmr.vhost_user_fs[0].dax_window_mib,
+                Some(32),
+                "vhost-user FS DAX window size should be stored"
+            );
+        }
     }
 }
