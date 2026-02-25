@@ -1469,6 +1469,11 @@ impl Vcpu {
         self.fd
             .set_vcpu_events(&state.vcpu_events)
             .map_err(Error::VcpuSetVcpuEvents)?;
+        // Notify guest of time discontinuity after restore (AC3.1)
+        if let Err(e) = self.fd.kvmclock_ctrl() {
+            // AC3.2: Log warning but do not fail restore
+            warn!("kvmclock_ctrl failed for vCPU {}: {e} (older kernels may not support this)", self.id);
+        }
         Ok(())
     }
 
