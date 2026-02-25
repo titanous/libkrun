@@ -16,6 +16,12 @@ use test_multiport_console::TestMultiportConsole;
 mod test_snapshot_restore;
 use test_snapshot_restore::{TestSnapshotRestore, TestSnapshotRestoreIncremental};
 
+mod test_snapshot_serial;
+use test_snapshot_serial::TestSnapshotSerial;
+
+mod test_snapshot_block;
+use test_snapshot_block::TestSnapshotBlock;
+
 mod test_snapshot_errors;
 use test_snapshot_errors::{TestSnapshotWrongMagic, TestSnapshotVcpuMismatch, TestSnapshotNestedMismatch};
 
@@ -66,6 +72,8 @@ pub fn test_cases() -> Vec<TestCase> {
         TestCase::new("multiport-console", Box::new(TestMultiportConsole)),
         TestCase::new("snapshot-restore-full", Box::new(TestSnapshotRestore)),
         TestCase::new("snapshot-restore-incremental", Box::new(TestSnapshotRestoreIncremental)),
+        TestCase::new("snapshot-serial-scratch", Box::new(TestSnapshotSerial)),
+        TestCase::new("snapshot-block-data", Box::new(TestSnapshotBlock)),
         TestCase::new("snapshot-error-wrong-magic", Box::new(TestSnapshotWrongMagic)),
         TestCase::new("snapshot-error-vcpu-mismatch", Box::new(TestSnapshotVcpuMismatch)),
         TestCase::new("snapshot-error-nested-mismatch", Box::new(TestSnapshotNestedMismatch)),
