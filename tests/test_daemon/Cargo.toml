@@ -1,0 +1,20 @@
+[package]
+name = "test-daemon"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "test-daemon"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+log = "0.4"
+env_logger = "0.10"
+nix = { version = "0.27", features = ["socket", "uio", "fs"] }
+libc = "0.2"
+vhost = { version = "0.15", features = ["vhost-user"] }
+vhost-user-backend = "0.14"
+virtio-queue = "0.13"
+vm-memory = { version = "0.16.2", features = ["backend-mmap"] }
