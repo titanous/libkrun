@@ -52,8 +52,6 @@ use devices::virtio::{port_io, MmioTransport, PortDescription, VirtioDevice, Vso
 use kbs_types::Tee;
 
 use crate::device_manager;
-#[cfg(feature = "vhost-user")]
-use crate::resources::VhostUserDeviceConfig;
 #[cfg(target_os = "linux")]
 use crate::signal_handler::register_sigint_handler;
 #[cfg(target_os = "linux")]
