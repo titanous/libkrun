@@ -177,71 +177,6 @@ impl VirtioDevice for VhostUserFs {
         Ok(())
     }
 
-    #[cfg(feature = "snapshot")]
-    fn activate_restore(
-        &mut self,
-        mem: vm_memory::GuestMemoryMmap,
-        interrupt: crate::virtio::InterruptTransport,
-        queues: Vec<crate::virtio::DeviceQueue>,
-        state: VhostUserFsState,
-    ) -> ActivateResult {
-        use std::os::unix::net::UnixStream;
-
-        // 1. Reconnect to daemon (AC4.6: fails if daemon unavailable)
-        let stream = UnixStream::connect(&self.socket_path)
-            .map_err(|e| {
-                log::error!("Failed to reconnect to daemon at {}: {e}", self.socket_path);
-                ActivateError::BadActivate
-            })?;
-
-        // 2. Replace Frontend, re-negotiate with saved features
-        self.vhost_user.reconnect_for_restore(
-            stream,
-            state.acked_features,
-            state.acked_protocol_features,
-        )?;
-
-        // 3. Share guest memory + set up vrings with SAVED bases
-        //    Uses activate_vhost_user method which handles
-        //    set_mem_table, set_vring_num/addr/base/kick/enable.
-        self.vhost_user.activate_vhost_user(
-            &mem,
-            &interrupt,
-            &queues,
-            Some(&state.vring_bases),
-        ).map_err(|_| ActivateError::BadActivate)?;
-
-        // 4. Share DAX window (add_mem_region) if configured
-        if let Some(ref shm_region) = self.shm_region {
-            if let Some(dax_fd) = self.dax_window_fd() {
-                let dax_region = VhostUserMemoryRegionInfo {
-                    guest_phys_addr: shm_region.guest_addr,
-                    memory_size: shm_region.size as u64,
-                    userspace_addr: shm_region.host_addr,
-                    mmap_offset: 0,
-                    mmap_handle: dax_fd,
-                };
-                if self.vhost_user.add_mem_region(&dax_region).is_err() {
-                    self.vhost_user.reset();
-                    return Err(ActivateError::BadActivate);
-                }
-            }
-        }
-
-        // 5. Load daemon state via DEVICE_STATE protocol
-        //    (daemon must have memory regions before it can accept state)
-        if let Err(e) = self.vhost_user.load_device_state(&state.daemon_state) {
-            log::error!("Failed to load daemon state: {e}");
-            self.vhost_user.reset();
-            return Err(ActivateError::BadActivate);
-        }
-
-        // 6. Mark as activated
-        self.vhost_user.mark_activated(mem, interrupt);
-
-        Ok(())
-    }
-
     fn is_activated(&self) -> bool {
         self.vhost_user.is_activated()
     }
@@ -449,6 +384,75 @@ impl VhostUserFs {
     }
 }
 
+#[cfg(feature = "snapshot")]
+impl VhostUserFs {
+    /// Activate device in restore mode using previously saved state.
+    /// Called by activate() when pending_restore_state is Some.
+    fn activate_restore(
+        &mut self,
+        mem: vm_memory::GuestMemoryMmap,
+        interrupt: crate::virtio::InterruptTransport,
+        queues: Vec<crate::virtio::DeviceQueue>,
+        state: VhostUserFsState,
+    ) -> ActivateResult {
+        use std::os::unix::net::UnixStream;
+
+        // 1. Reconnect to daemon (AC4.6: fails if daemon unavailable)
+        let stream = UnixStream::connect(&self.socket_path)
+            .map_err(|e| {
+                log::error!("Failed to reconnect to daemon at {}: {e}", self.socket_path);
+                ActivateError::BadActivate
+            })?;
+
+        // 2. Replace Frontend, re-negotiate with saved features
+        self.vhost_user.reconnect_for_restore(
+            stream,
+            state.acked_features,
+            state.acked_protocol_features,
+        )?;
+
+        // 3. Share guest memory + set up vrings with SAVED bases
+        //    Uses activate_vhost_user method which handles
+        //    set_mem_table, set_vring_num/addr/base/kick/enable.
+        self.vhost_user.activate_vhost_user(
+            &mem,
+            &interrupt,
+            &queues,
+            Some(&state.vring_bases),
+        ).map_err(|_| ActivateError::BadActivate)?;
+
+        // 4. Share DAX window (add_mem_region) if configured
+        if let Some(ref shm_region) = self.shm_region {
+            if let Some(dax_fd) = self.dax_window_fd() {
+                let dax_region = VhostUserMemoryRegionInfo {
+                    guest_phys_addr: shm_region.guest_addr,
+                    memory_size: shm_region.size as u64,
+                    userspace_addr: shm_region.host_addr,
+                    mmap_offset: 0,
+                    mmap_handle: dax_fd,
+                };
+                if self.vhost_user.add_mem_region(&dax_region).is_err() {
+                    self.vhost_user.reset();
+                    return Err(ActivateError::BadActivate);
+                }
+            }
+        }
+
+        // 5. Load daemon state via DEVICE_STATE protocol
+        //    (daemon must have memory regions before it can accept state)
+        if let Err(e) = self.vhost_user.load_device_state(&state.daemon_state) {
+            log::error!("Failed to load daemon state: {e}");
+            self.vhost_user.reset();
+            return Err(ActivateError::BadActivate);
+        }
+
+        // 6. Mark as activated
+        self.vhost_user.mark_activated(mem, interrupt);
+
+        Ok(())
+    }
+}
+
 /// Wrapper around memfd_create syscall
 fn memfd_create(name: &str, flags: u32) -> io::Result<RawFd> {
     let c_name = std::ffi::CString::new(name)
@@ -638,6 +642,7 @@ mod tests {
     #[cfg(feature = "snapshot")]
     fn test_activate_restore_fails_when_daemon_unavailable() {
         use crate::virtio::DeviceQueue;
+        use crate::legacy::DummyIrqChip;
         use std::sync::Arc;
         use utils::eventfd::EventFd;
 
@@ -653,7 +658,7 @@ mod tests {
             acked_protocol_features: 0,
             vring_bases: vec![],
             daemon_state: vec![],
-            config_tag: [0; 36],
+            config_tag: vec![0; 36],
             config_num_request_queues: 0,
         };
 
@@ -670,10 +675,9 @@ mod tests {
             Arc::new(EventFd::new(0).expect("create eventfd")),
         )];
 
-        let interrupt = crate::virtio::InterruptTransport::new(
-            Arc::new(AtomicUsize::new(0)),
-            Arc::new(EventFd::new(0).expect("create eventfd")),
-        );
+        let irqchip: crate::legacy::IrqChip = DummyIrqChip::new().into();
+        let interrupt = crate::virtio::InterruptTransport::new(irqchip, "test-fs".into())
+            .expect("create interrupt transport");
 
         // Try to activate_restore - should fail because daemon is unavailable
         let result = device.activate(mem, interrupt, queues);
