@@ -39,14 +39,17 @@ fn main() -> Result<(), String> {
     // - Epoll-based event loop for vring kicks
     // - ADD_MEM_REGION for DAX window
     // - SET_DEVICE_STATE_FD / CHECK_DEVICE_STATE dispatch
-    let _daemon = VhostUserDaemon::new(
+    let mut daemon = VhostUserDaemon::new(
         "test-fs-daemon".to_string(),
         backend,
         GuestMemoryAtomic::new(GuestMemoryMmap::new()),
     ).map_err(|e| format!("Failed to create daemon: {:?}", e))?;
 
     log::info!("VhostUserDaemon created successfully");
-    log::info!("Daemon is ready. To start listening on {}, use daemon.start() or start_client()", args.socket_path);
 
+    // 3. Use serve() to listen on the socket and handle connections
+    daemon.serve(&args.socket_path).map_err(|e| format!("Serve error: {}", e))?;
+
+    log::info!("Daemon exiting");
     Ok(())
 }

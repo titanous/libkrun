@@ -1,8 +1,9 @@
 use std::fs::File;
 
-use vhost_user_backend::{VhostUserBackendMut, VringMutex};
-use vm_memory::{GuestMemoryAtomic, GuestMemoryMmap};
+use vhost_user_backend::{VhostUserBackendMut, VringMutex, VringT};
+use vm_memory::{GuestMemoryAtomic, GuestMemoryMmap, GuestAddressSpace, Bytes};
 use vhost::vhost_user::message::{VhostTransferStateDirection, VhostTransferStatePhase, VhostUserProtocolFeatures};
+use virtio_queue::{QueueT, QueueOwnedT};
 
 use crate::filesystem::SyntheticFs;
 use crate::fuse::*;
@@ -126,26 +127,93 @@ impl VhostUserBackendMut for FsBackend {
 }
 
 impl FsBackend {
-    pub fn process_queue(&mut self, _vring: &VringMutex) -> std::io::Result<()> {
-        // Task 3: FUSE message handling implementation
-        // This method processes FUSE requests from the virtqueue and dispatches them to handlers.
-        // Full implementation requires iterating descriptor chains from the vring using QueueT trait methods,
-        // reading FUSE request headers, dispatching based on opcode, and writing responses back to guest memory.
-        //
-        // Handler implementations:
-        // - FUSE_INIT: Responds with FUSE_INIT_OUT including HAS_INODE_DAX flag (AC5.1)
-        // - FUSE_LOOKUP: Returns FUSE_ENTRY_OUT with FUSE_ATTR_DAX flag (AC5.2)
-        // - FUSE_GETATTR: Returns FUSE_ATTR_OUT with FUSE_ATTR_DAX flag (AC5.2)
-        // - FUSE_OPEN: Returns FUSE_OPEN_OUT with fh=nodeid
-        // - FUSE_READ: Returns file_data content (0xAA bytes, not DAX pattern) (AC5.4)
-        // - FUSE_SETUPMAPPING: Writes dax_pattern to DAX window at moffset (AC5.3)
-        // - FUSE_REMOVEMAPPING: No-op success
-        // - FUSE_FORGET/FUSE_BATCH_FORGET: No response
-        // - Other opcodes: Error response
-        //
-        // AC5.6: Guest DAX writes are synced via sync_dax_writes() during DEVICE_STATE save
+    pub fn process_queue(&mut self, vring: &VringMutex) -> std::io::Result<()> {
+        let mut vring_lock = vring.get_mut();
+        let mem_ref = self.mem.as_ref().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::Other, "guest memory not initialized")
+        })?;
+
+        // Get the guest memory guard - this requires dereferencing the Atomic wrapper
+        let guest_mem = mem_ref.memory();
+        let guest_mem_deref = &*guest_mem;  // Dereference to get &GuestMemoryMmap
+
+        // Collect all descriptor chains to process
+        let mut chains_to_process = Vec::new();
+
+        {
+            // Get mutable access to the virtio queue
+            let queue = vring_lock.get_queue_mut();
+
+            // Iterate over all available descriptor chains
+            if let Ok(mut iter) = queue.iter(guest_mem_deref) {
+                while let Some(desc_chain) = iter.next() {
+                    chains_to_process.push(desc_chain);
+                }
+            }
+        }
+
+        // Now process all collected chains
+        for desc_chain in chains_to_process {
+            let head_index = desc_chain.head_index();
+
+            // Read FUSE request from readable descriptors
+            let mut request_bytes = Vec::new();
+            for desc in desc_chain.clone().readable() {
+                let addr = desc.addr();
+                let len = desc.len() as usize;
+                if len > 0 {
+                    let mut buf = vec![0u8; len];
+                    guest_mem_deref.read_slice(&mut buf, addr)
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("failed to read: {}", e)))?;
+                    request_bytes.extend_from_slice(&buf);
+                }
+            }
+
+            // Parse and dispatch FUSE request
+            let response = if request_bytes.len() >= std::mem::size_of::<FuseInHeader>() {
+                let header: FuseInHeader = bytes_to_struct(&request_bytes).unwrap();
+                match header.opcode {
+                    FUSE_INIT => self.handle_init(&header),
+                    FUSE_LOOKUP => self.handle_lookup(&header),
+                    FUSE_GETATTR => self.handle_getattr(&header),
+                    FUSE_OPEN => self.handle_open(&header),
+                    FUSE_READ => self.handle_read(&header),
+                    FUSE_SETUPMAPPING => self.handle_setupmapping(&header),
+                    FUSE_REMOVEMAPPING => self.handle_removemapping(&header),
+                    FUSE_FORGET | FUSE_BATCH_FORGET => {
+                        // No response - just mark as used with 0 bytes
+                        vring_lock.get_queue_mut().add_used(guest_mem_deref, head_index, 0).ok();
+                        continue;
+                    }
+                    _ => vec![],
+                }
+            } else {
+                vec![]
+            };
+
+            // Write response to writable descriptors
+            let mut offset = 0;
+            for desc in desc_chain.clone().writable() {
+                let addr = desc.addr();
+                let len = desc.len() as usize;
+                if len > 0 && offset < response.len() {
+                    let write_len = std::cmp::min(len, response.len() - offset);
+                    guest_mem_deref.write_slice(&response[offset..offset + write_len], addr)
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("failed to write: {}", e)))?;
+                    offset += write_len;
+                }
+            }
+
+            // Mark descriptor as used
+            let response_len = response.len() as u32;
+            vring_lock.get_queue_mut().add_used(guest_mem_deref, head_index, response_len).ok();
+        }
+
+        // Signal the guest
+        vring_lock.signal_used_queue().ok();
         Ok(())
     }
+
 
     fn handle_init(&self, _header: &FuseInHeader) -> Vec<u8> {
         // Respond with FUSE_INIT, include HAS_INODE_DAX flag

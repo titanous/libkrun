@@ -16,6 +16,6 @@ nix = { version = "0.27", features = ["socket", "uio", "fs"] }
 libc = "0.2"
 vhost = { version = "0.14", features = ["vhost-user"] }
 vhost-user-backend = "0.19"
-virtio-queue = "0.13"
+virtio-queue = "0.15"
 vm-memory = { version = "0.16.2", features = ["backend-mmap", "backend-atomic"] }
 vmm-sys-util = "0.14"
