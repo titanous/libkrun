@@ -9,6 +9,7 @@
 use macros::{guest, host};
 
 pub struct TestVmExit;
+pub struct TestVmExitObserver;
 
 #[host]
 mod host {
@@ -87,6 +88,43 @@ mod host {
             Ok(())
         }
     }
+
+    impl Test for TestVmExitObserver {
+        fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
+            // AC3.1: Exit observers fire before run() returns
+            let observer_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let flag = observer_called.clone();
+
+            let mut builder = krun::Builder::new();
+            builder.vm_config(1, 256)?;
+            setup_fs_builder(&mut builder, &test_setup)?;
+            let context = builder.build()?;
+
+            // Register a mock exit observer that sets the flag
+            context.register_exit_observer(std::sync::Arc::new(std::sync::Mutex::new(
+                move || {
+                    flag.store(true, std::sync::atomic::Ordering::Release);
+                },
+            )));
+
+            let vm_exit = context.run()?;
+
+            // Verify observer was called before run() returned
+            assert!(
+                observer_called.load(std::sync::atomic::Ordering::Acquire),
+                "Exit observer was not called before run() returned"
+            );
+
+            assert_eq!(
+                vm_exit,
+                krun::VmExit::Shutdown { exit_code: 0 },
+                "Expected clean shutdown, got {vm_exit:?}"
+            );
+
+            println!("OK");
+            Ok(())
+        }
+    }
 }
 
 #[guest]
@@ -98,6 +136,12 @@ mod guest {
         fn in_guest(self: Box<Self>) {
             // Trivial workload — guest exits cleanly
             println!("OK");
+        }
+    }
+
+    impl Test for TestVmExitObserver {
+        fn in_guest(self: Box<Self>) {
+            // Guest exits cleanly — host prints OK after verifying observer
         }
     }
 }

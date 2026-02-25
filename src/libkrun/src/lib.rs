@@ -29,6 +29,7 @@ pub use devices::virtio::port_io::{self, PortInput, PortOutput};
 #[cfg(not(feature = "tee"))]
 pub use devices::virtio::rng::{OsRngBackend, RngBackend};
 pub use devices::virtio::PortDescription;
+pub use devices::virtio::VmmExitObserver;
 pub use vmm::vm_exit::VmExit;
 use libc::{c_char, c_int, size_t};
 use once_cell::sync::Lazy;
@@ -3077,6 +3078,19 @@ impl Context {
             vmm: self.built_vm.vmm().clone(),
             shutdown_efd: self.shutdown_efd.clone(),
         }
+    }
+
+    /// Registers an exit observer that will be called when the VM exits.
+    /// Must be called before `run()`, since `run()` consumes `self`.
+    pub fn register_exit_observer(
+        &self,
+        observer: std::sync::Arc<std::sync::Mutex<dyn devices::virtio::VmmExitObserver>>,
+    ) {
+        self.built_vm
+            .vmm()
+            .lock()
+            .expect("Poisoned vmm lock")
+            .register_exit_observer(observer);
     }
 
     /// Start the VM and run the event loop. This blocks until the VM exits.

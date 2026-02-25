@@ -1136,6 +1136,11 @@ impl Vmm {
             .map_err(Error::I8042Error)
     }
 
+    /// Registers an exit observer that will be called when the VM exits.
+    pub fn register_exit_observer(&mut self, observer: Arc<Mutex<dyn VmmExitObserver>>) {
+        self.exit_observers.push(observer);
+    }
+
     /// Waits for all vCPUs to exit and stores exit information in shared state.
     pub fn stop(&mut self, vm_exit: crate::vm_exit::VmExit) {
         info!("Vmm is stopping: {vm_exit:?}");
