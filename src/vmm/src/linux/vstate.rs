@@ -1397,6 +1397,13 @@ impl Vcpu {
             .fd
             .get_vcpu_events()
             .map_err(Error::VcpuGetVcpuEvents)?;
+        let tsc_khz = match self.fd.get_tsc_khz() {
+            Ok(khz) => Some(khz),
+            Err(e) => {
+                warn!("Could not get TSC frequency: {e} (host may have unstable TSC)");
+                None // AC4.2: gracefully handle unsupported
+            }
+        };
         Ok(VcpuState {
             cpuid: self.cpuid.clone(),
             msrs,
@@ -1408,6 +1415,7 @@ impl Vcpu {
             vcpu_events,
             xcrs,
             xsave,
+            tsc_khz,
         })
     }
 
@@ -1887,6 +1895,8 @@ pub struct VcpuState {
     vcpu_events: kvm_vcpu_events,
     xcrs: kvm_xcrs,
     xsave: kvm_xsave,
+    #[serde(default)]
+    tsc_khz: Option<u32>,
 }
 
 /// aarch64 vCPU state for snapshot/restore.
