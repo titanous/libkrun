@@ -564,7 +564,7 @@ impl VhostUserDevice {
 
     /// Replace the Frontend connection for snapshot restore.
     /// Uses saved negotiated features instead of fresh negotiation.
-    pub fn reconnect_for_restore(
+    pub(super) fn reconnect_for_restore(
         &mut self,
         stream: UnixStream,
         saved_features: u64,

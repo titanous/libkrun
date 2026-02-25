@@ -470,7 +470,6 @@ fn memfd_create(name: &str, flags: u32) -> io::Result<RawFd> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicUsize;
 
     #[test]
     fn test_device_type_is_fs() {
