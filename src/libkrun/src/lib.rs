@@ -3341,28 +3341,25 @@ mod tests {
             1,
             "Should have 1 regular FS device"
         );
-        #[cfg(feature = "vhost-user")]
-        {
-            assert_eq!(
-                builder.config.vmr.vhost_user_fs.len(),
-                1,
-                "Should have 1 vhost-user FS device"
-            );
-            assert_eq!(
-                builder.config.vmr.vhost_user_fs[0].tag,
-                "vhostfs",
-                "vhost-user FS tag should be stored"
-            );
-            assert_eq!(
-                builder.config.vmr.vhost_user_fs[0].socket_path,
-                "/tmp/sock",
-                "vhost-user FS socket path should be stored"
-            );
-            assert_eq!(
-                builder.config.vmr.vhost_user_fs[0].dax_window_mib,
-                Some(32),
-                "vhost-user FS DAX window size should be stored"
-            );
-        }
+        assert_eq!(
+            builder.config.vmr.vhost_user_fs.len(),
+            1,
+            "Should have 1 vhost-user FS device"
+        );
+        assert_eq!(
+            builder.config.vmr.vhost_user_fs[0].tag,
+            "vhostfs",
+            "vhost-user FS tag should be stored"
+        );
+        assert_eq!(
+            builder.config.vmr.vhost_user_fs[0].socket_path,
+            "/tmp/sock",
+            "vhost-user FS socket path should be stored"
+        );
+        assert_eq!(
+            builder.config.vmr.vhost_user_fs[0].dax_window_mib,
+            Some(32),
+            "vhost-user FS DAX window size should be stored"
+        );
     }
 }

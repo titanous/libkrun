@@ -241,6 +241,9 @@ pub enum StartMicrovmError {
     /// Cannot initialize a vhost-user device.
     #[cfg(feature = "vhost-user")]
     RegisterVhostUserDevice(io::Error),
+    /// Cannot initialize a MMIO vhost-user FS device or add device to the MMIO Bus.
+    #[cfg(feature = "vhost-user")]
+    RegisterVhostUserFsDevice(device_manager::mmio::Error),
 }
 
 /// It's convenient to automatically convert `kernel::cmdline::Error`s
@@ -549,6 +552,10 @@ impl Display for StartMicrovmError {
             #[cfg(feature = "vhost-user")]
             RegisterVhostUserDevice(ref err) => {
                 write!(f, "Failed to initialize vhost-user device: {err}")
+            }
+            #[cfg(feature = "vhost-user")]
+            RegisterVhostUserFsDevice(ref err) => {
+                write!(f, "Failed to initialize vhost-user FS device: {err}")
             }
         }
     }
@@ -2349,6 +2356,8 @@ fn attach_vhost_user_fs_device(
     //    memory IS part of GuestMemoryMmap), the DAX window is a separate
     //    memfd NOT part of guest memory. We mmap it directly and register
     //    with KVM as an additional memory slot.
+    let mut mmap_addr: Option<(usize, usize)> = None;
+
     if let Some(shm_region) = shm_manager.fs_region(shm_index) {
         if let Some(dax_fd) = vhost_fs.dax_window_fd() {
             let dax_size = vhost_fs.dax_window_size().unwrap();
@@ -2370,12 +2379,19 @@ fn attach_vhost_user_fs_device(
                 ));
             }
 
+            // Track the mmap'd address for cleanup on failure
+            mmap_addr = Some((host_addr as usize, dax_size));
+
             // 2b. Register with KVM via Vm's public method
-            vmm.vm.register_memory_region(
+            if let Err(e) = vmm.vm.register_memory_region(
                 shm_region.guest_addr.raw_value(),
                 dax_size as u64,
                 host_addr as u64,
-            ).map_err(RegisterDaxMemoryRegion)?;
+            ) {
+                // Cleanup mmap on KVM registration failure
+                unsafe { libc::munmap(host_addr, dax_size); }
+                return Err(RegisterDaxMemoryRegion(e));
+            }
 
             // 2c. Tell device about the region (for MMIO SHM cap advertisement)
             vhost_fs.set_shm_region(VirtioShmRegion {
@@ -2389,10 +2405,13 @@ fn attach_vhost_user_fs_device(
     // 3. Attach to MMIO bus
     let device = Arc::new(Mutex::new(vhost_fs));
     let id = format!("virtio-fs-vhost-{}", shm_index);
-    attach_mmio_device(vmm, id, intc, device)
-        .map_err(|_| StartMicrovmError::RegisterVhostUserDevice(
-            io::Error::new(io::ErrorKind::Other, "failed to attach to MMIO bus")
-        ))?;
+    if let Err(e) = attach_mmio_device(vmm, id, intc, device) {
+        if let Some((addr, size)) = mmap_addr {
+            // Cleanup mmap on MMIO device attachment failure
+            unsafe { libc::munmap(addr as *mut libc::c_void, size); }
+        }
+        return Err(RegisterVhostUserFsDevice(e));
+    }
 
     Ok(())
 }
