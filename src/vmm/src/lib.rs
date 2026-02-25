@@ -26,6 +26,9 @@ pub mod resources;
 pub mod signal_handler;
 /// VM snapshot and restore support.
 pub mod snapshot;
+/// Snapshot store abstraction for flexible backends.
+#[cfg(feature = "snapshot")]
+pub mod snapshot_store;
 /// VM exit reasons and shared exit state.
 pub mod vm_exit;
 /// Wrappers over structures used to configure the VMM.
