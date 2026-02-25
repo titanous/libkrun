@@ -287,4 +287,61 @@ mod tests {
             )
         );
     }
+
+    #[test]
+    #[cfg(feature = "snapshot")]
+    fn test_pio_save_device_states() {
+        let serial =
+            devices::legacy::Serial::new_sink(EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap());
+        let cmos = devices::legacy::Cmos::new(0, 0);
+        let ldm = PortIODeviceManager::new(
+            Arc::new(Mutex::new(cmos)),
+            vec![Arc::new(Mutex::new(serial))],
+            EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
+        );
+        assert!(ldm.is_ok());
+        let ldm = ldm.unwrap();
+
+        // AC1.6: verify save_all_device_states returns entries for "cmos", "serial-16550:0", "i8042"
+        let states = ldm.save_all_device_states();
+        assert!(states.is_ok());
+        let states = states.unwrap();
+
+        // Collect device IDs for easier checking
+        let ids: Vec<&String> = states.iter().map(|(id, _)| id).collect();
+
+        // Verify expected device entries exist
+        assert!(ids.contains(&&"cmos".to_string()), "Expected 'cmos' device in states");
+        assert!(ids.contains(&&"serial-16550:0".to_string()), "Expected 'serial-16550:0' device in states");
+        assert!(ids.contains(&&"i8042".to_string()), "Expected 'i8042' device in states");
+
+        // Verify each device state has non-empty bytes
+        for (id, data) in &states {
+            assert!(!data.is_empty(), "Device {} should have non-empty state bytes", id);
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "snapshot")]
+    fn test_pio_restore_device_states() {
+        let serial =
+            devices::legacy::Serial::new_sink(EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap());
+        let cmos = devices::legacy::Cmos::new(0, 0);
+        let ldm = PortIODeviceManager::new(
+            Arc::new(Mutex::new(cmos)),
+            vec![Arc::new(Mutex::new(serial))],
+            EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
+        );
+        assert!(ldm.is_ok());
+        let ldm = ldm.unwrap();
+
+        // AC1.8: verify restore_all_device_states with empty slice succeeds
+        let result = ldm.restore_all_device_states(&[]);
+        assert!(result.is_ok(), "restore_all_device_states should succeed with empty slice");
+
+        // AC1.8: verify unknown ID is skipped silently (no error)
+        let unknown_state = vec![("unknown-device".to_string(), vec![1, 2, 3])];
+        let result = ldm.restore_all_device_states(&unknown_state);
+        assert!(result.is_ok(), "restore_all_device_states should silently skip unknown device IDs");
+    }
 }
