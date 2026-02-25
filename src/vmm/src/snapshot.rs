@@ -19,6 +19,7 @@ pub const SNAPSHOT_VERSION: u32 = 1;
 
 /// Maximum size for vmstate files during deserialization (10 MB).
 /// This prevents OOM from corrupted or malicious files.
+#[cfg(feature = "snapshot")]
 const VMSTATE_MAX_SIZE: u64 = 10 * 1024 * 1024;
 
 /// Timeout for quiescing async device workers during snapshot operations.
