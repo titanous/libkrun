@@ -837,6 +837,11 @@ impl VcpuHandle {
 #[cfg(not(test))]
 impl Drop for VcpuHandle {
     fn drop(&mut self) {
+        // Disconnect the event channel so threads blocked in wait_for_resume()
+        // recv() see the disconnect and exit cleanly.
+        let (dummy_sender, _) = crossbeam_channel::unbounded();
+        self.event_sender = dummy_sender;
+
         if let Some(thread) = self.vcpu_thread.take() {
             if let Err(e) = thread.join() {
                 error!("Failed to join vCPU thread: {e:?}");

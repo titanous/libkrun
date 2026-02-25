@@ -1842,12 +1842,10 @@ impl Vcpu {
         // before the event loop starts — nobody processes exit_evt, so should_exit
         // is never set.
         while !self.should_exit.load(Ordering::Acquire) {
-            match self
-                .event_receiver
-                .recv_timeout(Duration::from_millis(10))
+            if let Err(crossbeam_channel::RecvTimeoutError::Disconnected) =
+                self.event_receiver.recv_timeout(Duration::from_millis(10))
             {
-                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
-                _ => {}
+                break;
             }
         }
         StateMachine::finish()
