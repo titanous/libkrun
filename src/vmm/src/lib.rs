@@ -411,12 +411,21 @@ impl Vmm {
         &mut self,
         path: &std::path::Path,
     ) -> std::result::Result<(), snapshot::SnapshotError> {
-        let device_states = self
+        let mut device_states = self
             .mmio_device_manager
             .save_all_device_states()
             .map_err(|e| {
                 snapshot::SnapshotError::Serialize(format!("Failed to save device states: {e}"))
             })?;
+
+        #[cfg(target_arch = "x86_64")]
+        {
+            let pio_states = self.pio_device_manager.save_all_device_states()
+                .map_err(|e| {
+                    snapshot::SnapshotError::Serialize(format!("Failed to save PortIO device states: {e}"))
+                })?;
+            device_states.extend(pio_states);
+        }
 
         let vcpu_states = self.save_vcpu_states().map_err(|e| {
             snapshot::SnapshotError::Serialize(format!("Failed to save vCPU states: {e}"))
@@ -493,6 +502,17 @@ impl Vmm {
                     "Failed to restore device states: {e}"
                 ))
             })?;
+
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.pio_device_manager
+                .restore_all_device_states(&vmstate.device_states)
+                .map_err(|e| {
+                    snapshot::SnapshotError::Deserialize(format!(
+                        "Failed to restore PortIO device states: {e}"
+                    ))
+                })?;
+        }
 
         self.mmio_device_manager
             .complete_all_device_restores()
@@ -1017,12 +1037,21 @@ impl Vmm {
             return Err(snapshot::SnapshotError::DirtyTrackingNotEnabled);
         }
 
-        let device_states = self
+        let mut device_states = self
             .mmio_device_manager
             .save_all_device_states()
             .map_err(|e| {
                 snapshot::SnapshotError::Serialize(format!("Failed to save device states: {e}"))
             })?;
+
+        #[cfg(target_arch = "x86_64")]
+        {
+            let pio_states = self.pio_device_manager.save_all_device_states()
+                .map_err(|e| {
+                    snapshot::SnapshotError::Serialize(format!("Failed to save PortIO device states: {e}"))
+                })?;
+            device_states.extend(pio_states);
+        }
 
         let vcpu_states = self.save_vcpu_states().map_err(|e| {
             snapshot::SnapshotError::Serialize(format!("Failed to save vCPU states: {e}"))
@@ -1108,6 +1137,17 @@ impl Vmm {
                     "Failed to restore device states: {e}"
                 ))
             })?;
+
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.pio_device_manager
+                .restore_all_device_states(&incremental.device_states)
+                .map_err(|e| {
+                    snapshot::SnapshotError::Deserialize(format!(
+                        "Failed to restore PortIO device states: {e}"
+                    ))
+                })?;
+        }
 
         self.mmio_device_manager
             .complete_all_device_restores()
