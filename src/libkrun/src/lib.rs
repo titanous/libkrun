@@ -3284,6 +3284,40 @@ impl VmHandle {
             .map_err(|e| StartError::Microvm(vmm::builder::StartMicrovmError::Internal(e)))?;
         result
     }
+
+    /// Create a full snapshot using a SnapshotStore. Pauses vCPUs, takes snapshot, resumes vCPUs.
+    #[cfg(feature = "snapshot")]
+    pub fn snapshot_to_store(
+        &self,
+        store: Box<dyn vmm::snapshot_store::SnapshotStore>,
+    ) -> Result<(), StartError> {
+        let mut vmm = self.vmm.lock().expect("Poisoned vmm lock");
+        vmm.pause_vcpus()
+            .map_err(|e| StartError::Microvm(vmm::builder::StartMicrovmError::Internal(e)))?;
+        let result = vmm
+            .snapshot_to_store(&*store)
+            .map_err(Self::snapshot_err_to_start_error);
+        vmm.resume_vcpus()
+            .map_err(|e| StartError::Microvm(vmm::builder::StartMicrovmError::Internal(e)))?;
+        result
+    }
+
+    /// Create an incremental snapshot using a SnapshotStore. Pauses vCPUs, takes snapshot, resumes vCPUs.
+    #[cfg(feature = "snapshot")]
+    pub fn incremental_snapshot_to_store(
+        &self,
+        store: Box<dyn vmm::snapshot_store::SnapshotStore>,
+    ) -> Result<(), StartError> {
+        let mut vmm = self.vmm.lock().expect("Poisoned vmm lock");
+        vmm.pause_vcpus()
+            .map_err(|e| StartError::Microvm(vmm::builder::StartMicrovmError::Internal(e)))?;
+        let result = vmm
+            .incremental_snapshot_to_store(&*store)
+            .map_err(Self::snapshot_err_to_start_error);
+        vmm.resume_vcpus()
+            .map_err(|e| StartError::Microvm(vmm::builder::StartMicrovmError::Internal(e)))?;
+        result
+    }
 }
 
 #[cfg(test)]
