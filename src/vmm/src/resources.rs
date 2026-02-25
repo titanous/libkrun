@@ -68,7 +68,7 @@ pub struct VmDeviceInfo {
 /// Configuration for a vhost-user device.
 #[derive(Debug, Clone)]
 pub struct VhostUserDeviceConfig {
-    /// Virtio device type ID (e.g., 4 for RNG, 25 for sound, 36 for CAN)
+    /// Virtio device type ID (e.g., 26 for virtiofs)
     pub device_type: u32,
     /// Path to the vhost-user Unix domain socket
     pub socket_path: String,
