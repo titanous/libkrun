@@ -490,6 +490,8 @@ mod tests {
             snd_device: false,
             #[cfg(feature = "vhost-user")]
             vhost_user_devices: Vec::new(),
+            #[cfg(feature = "vhost-user")]
+            vhost_user_fs: Vec::new(),
             console_output: None,
             smbios_oem_strings: None,
             nested_enabled: false,

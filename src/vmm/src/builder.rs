@@ -1567,7 +1567,8 @@ fn load_payload(
                 };
 
             #[cfg(feature = "vhost-user")]
-            let use_vhost_user = !_vm_resources.vhost_user_devices.is_empty();
+            let use_vhost_user = !_vm_resources.vhost_user_devices.is_empty()
+                || !_vm_resources.vhost_user_fs.is_empty();
             #[cfg(not(feature = "vhost-user"))]
             let use_vhost_user = false;
 
@@ -1807,7 +1808,8 @@ pub fn create_guest_memory(
 
     // For vhost-user devices, we need file-backed memory so the backend can mmap it
     #[cfg(feature = "vhost-user")]
-    let use_vhost_user = !vm_resources.vhost_user_devices.is_empty();
+    let use_vhost_user = !vm_resources.vhost_user_devices.is_empty()
+        || !vm_resources.vhost_user_fs.is_empty();
     #[cfg(not(feature = "vhost-user"))]
     let use_vhost_user = false;
 
@@ -2356,6 +2358,10 @@ fn attach_vhost_user_fs_device(
     //    memory IS part of GuestMemoryMmap), the DAX window is a separate
     //    memfd NOT part of guest memory. We mmap it directly and register
     //    with KVM as an additional memory slot.
+    //
+    //    DAX mmap lifecycle: The mmap is intentionally NOT cleaned up on normal VM exit
+    //    (process exit reclaims it automatically). Cleanup only happens on error paths
+    //    below to avoid resource leaks if initialization fails.
     let mut mmap_addr: Option<(usize, usize)> = None;
 
     if let Some(shm_region) = shm_manager.fs_region(shm_index) {

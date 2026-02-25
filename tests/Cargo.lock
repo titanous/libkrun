@@ -380,6 +380,7 @@ dependencies = [
  "serde",
  "tokio",
  "utils",
+ "vhost",
  "virtio-bindings",
  "vm-fdt",
  "vm-memory 0.18.0",

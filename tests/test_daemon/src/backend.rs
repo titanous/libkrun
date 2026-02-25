@@ -445,7 +445,10 @@ impl FsBackend {
     }
 
     fn sync_all_dax_writes(&mut self) {
-        // Sync guest DAX window writes to file_data
+        // Sync guest DAX window writes to file_data.
+        // NOTE: This implementation copies the entire DAX window for all inodes.
+        // This approach only works for the single-file synthetic filesystem used in testing.
+        // A production implementation would track dirty ranges per inode and copy selectively.
         if let Some((dax_ptr, dax_size)) = self.dax_window {
             for (nodeid, _) in self.fs.inodes.iter() {
                 let mut buf = vec![0u8; dax_size];

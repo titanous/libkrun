@@ -58,8 +58,8 @@ pub struct FuseInitOut {
     pub map_alignment: u16,          // offset 30
     pub flags2: u32,                 // offset 32
     pub max_stack_depth: u32,        // offset 36
-    pub request_timeout: u16,        // offset 38
-    pub unused: [u16; 11],           // offset 40 (22 bytes) -> total 62
+    pub request_timeout: u16,        // offset 40
+    pub unused: [u16; 11],           // offset 42 (22 bytes) -> total 64
 }
 
 #[repr(C)]

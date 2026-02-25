@@ -124,7 +124,7 @@ impl VhostUserDevice {
         // Get available features from backend
         let avail_features = frontend
             .get_features()
-            .map_err(|e| io::Error::new(ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
 
         debug!("{}: backend features: 0x{:x}", device_name, avail_features);
 
@@ -141,11 +141,11 @@ impl VhostUserDevice {
         let acked_protocol_features = if backend_features & VHOST_USER_F_PROTOCOL_FEATURES != 0 {
             frontend
                 .set_features(backend_features)
-                .map_err(|e| io::Error::new(ErrorKind::Other, e))?;
+                .map_err(io::Error::other)?;
 
             let protocol_features = frontend
                 .get_protocol_features()
-                .map_err(|e| io::Error::new(ErrorKind::Other, e))?;
+                .map_err(io::Error::other)?;
 
             let mut our_protocol_features = VhostUserProtocolFeatures::empty();
             if protocol_features.contains(VhostUserProtocolFeatures::CONFIG) {
@@ -163,7 +163,7 @@ impl VhostUserDevice {
 
             frontend
                 .set_protocol_features(our_protocol_features)
-                .map_err(|e| io::Error::new(ErrorKind::Other, e))?;
+                .map_err(io::Error::other)?;
 
             our_protocol_features
         } else {
@@ -174,7 +174,7 @@ impl VhostUserDevice {
             if backend_features & VHOST_USER_F_PROTOCOL_FEATURES != 0 {
                 let backend_queue_num = frontend
                     .get_queue_num()
-                    .map_err(|e| io::Error::new(ErrorKind::Other, e))?;
+                    .map_err(io::Error::other)?;
 
                 debug!(
                     "{}: backend reports {} queues available",
@@ -243,7 +243,7 @@ impl VhostUserDevice {
 
         frontend
             .set_owner()
-            .map_err(|e| io::Error::new(ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
 
         // Only share memory regions that have file backing (memfd)
         let regions: Vec<VhostUserMemoryRegionInfo> = mem
@@ -261,7 +261,7 @@ impl VhostUserDevice {
                     "{}: failed to convert memory regions: {:?}",
                     self.device_name, e
                 );
-                io::Error::new(ErrorKind::Other, e)
+                io::Error::other(e)
             })?;
 
         debug!(
@@ -272,13 +272,13 @@ impl VhostUserDevice {
 
         frontend.set_mem_table(&regions).map_err(|e| {
             error!("{}: set_mem_table failed: {:?}", self.device_name, e);
-            io::Error::new(ErrorKind::Other, e)
+            io::Error::other(e)
         })?;
 
         // If protocol features not negotiated, this triggers automatic ring enabling
         frontend
             .set_features(backend_feature_bits)
-            .map_err(|e| io::Error::new(ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
 
         // Create single vring call event file descriptor (backend->guest interrupt)
         // NOTE: Do NOT use EFD_NONBLOCK here - the monitoring thread needs to block
@@ -291,7 +291,7 @@ impl VhostUserDevice {
 
             frontend
                 .set_vring_num(queue_index, queue.actual_size())
-                .map_err(|e| io::Error::new(ErrorKind::Other, e))?;
+                .map_err(io::Error::other)?;
 
             // Set vring base - use saved value if in restore mode, otherwise 0
             let base = vring_bases
@@ -300,7 +300,7 @@ impl VhostUserDevice {
 
             frontend
                 .set_vring_base(queue_index, base)
-                .map_err(|e| io::Error::new(ErrorKind::Other, e))?;
+                .map_err(io::Error::other)?;
 
             // Vring addresses in queue are GPAs, but vhost-user protocol expects VMM VAs
             let desc_table_gpa = queue.desc_table.0;
@@ -325,21 +325,21 @@ impl VhostUserDevice {
                 .set_vring_addr(queue_index, &vring_config)
                 .map_err(|e| {
                     error!("{}: set_vring_addr failed: {:?}", self.device_name, e);
-                    io::Error::new(ErrorKind::Other, e)
+                    io::Error::other(e)
                 })?;
 
             frontend
                 .set_vring_kick(queue_index, &device_queue.event)
                 .map_err(|e| {
                     error!("{}: set_vring_kick failed: {:?}", self.device_name, e);
-                    io::Error::new(ErrorKind::Other, e)
+                    io::Error::other(e)
                 })?;
 
             frontend
                 .set_vring_call(queue_index, &vring_call_event)
                 .map_err(|e| {
                     error!("{}: set_vring_call failed: {:?}", self.device_name, e);
-                    io::Error::new(ErrorKind::Other, e)
+                    io::Error::other(e)
                 })?;
 
             // Per QEMU vhost.c: when VHOST_USER_F_PROTOCOL_FEATURES is not negotiated,
@@ -347,7 +347,7 @@ impl VhostUserDevice {
             if has_protocol_features {
                 frontend
                     .set_vring_enable(queue_index, true)
-                    .map_err(|e| io::Error::new(ErrorKind::Other, e))?;
+                    .map_err(io::Error::other)?;
             } else {
                 debug!(
                     "{}: vring {} already enabled (protocol features not negotiated)",
@@ -360,8 +360,7 @@ impl VhostUserDevice {
         // All queues share the same vring_call_event, so we only need one thread
         // to monitor it and forward interrupts to the guest
         let vring_call_event = vring_call_event.try_clone().map_err(|e| {
-            io::Error::new(
-                ErrorKind::Other,
+            io::Error::other(
                 format!("Failed to clone vring_call_event: {}", e),
             )
         })?;
@@ -391,8 +390,7 @@ impl VhostUserDevice {
                 debug!("{}: interrupt monitor thread exiting", device_name);
             })
             .map_err(|e| {
-                io::Error::new(
-                    ErrorKind::Other,
+                io::Error::other(
                     format!("Failed to spawn interrupt monitor thread: {}", e),
                 )
             })?;
@@ -582,18 +580,26 @@ impl VhostUserDevice {
         let mut frontend = self.frontend.lock().unwrap();
         frontend.set_owner().map_err(|_| ActivateError::BadActivate)?;
 
+        const VHOST_USER_F_PROTOCOL_FEATURES: u64 = 1 << 30;
+
         // Feature negotiation: get available, intersect with saved, set
         let backend_features = frontend.get_features()
             .map_err(|_| ActivateError::BadActivate)?;
-        frontend.set_features(saved_features & backend_features)
+        let protocol_bit = backend_features & VHOST_USER_F_PROTOCOL_FEATURES;
+        let negotiated_features = saved_features & backend_features;
+        frontend.set_features(negotiated_features)
             .map_err(|_| ActivateError::BadActivate)?;
 
-        // Protocol feature negotiation: get available, intersect with saved, set
-        let backend_proto_features = frontend.get_protocol_features()
-            .map_err(|_| ActivateError::BadActivate)?;
-        let desired_proto = VhostUserProtocolFeatures::from_bits_truncate(saved_protocol_features);
-        frontend.set_protocol_features(desired_proto & backend_proto_features)
-            .map_err(|_| ActivateError::BadActivate)?;
+        // Protocol feature negotiation: The vhost-user protocol requires acknowledging
+        // VHOST_USER_F_PROTOCOL_FEATURES via set_features before calling get_protocol_features.
+        // Only fetch protocol features if the bit is supported.
+        if protocol_bit != 0 {
+            let backend_proto_features = frontend.get_protocol_features()
+                .map_err(|_| ActivateError::BadActivate)?;
+            let desired_proto = VhostUserProtocolFeatures::from_bits_truncate(saved_protocol_features);
+            frontend.set_protocol_features(desired_proto & backend_proto_features)
+                .map_err(|_| ActivateError::BadActivate)?;
+        }
 
         Ok(())
     }
