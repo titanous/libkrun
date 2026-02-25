@@ -347,6 +347,62 @@ mod tests {
         // Should be a connection error (NotFound for nonexistent path), not a panic
         assert!(matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused));
     }
+
+    // AC2.3: Queue layout test with 3 request queues (1 HPQ + 3 request = 4 total)
+    #[test]
+    fn test_queue_layout_ac2_3() {
+        let mut config = VirtioFsConfig::default();
+        config.num_request_queues = 3;
+
+        let device = VhostUserFs::new_for_test(config, None);
+        let queues = device.queue_config();
+
+        // Should have 4 entries: 1 HPQ + 3 request queues
+        assert_eq!(queues.len(), 4, "expected 4 queues (1 HPQ + 3 request)");
+
+        // Each queue should have max_size of 1024
+        for (i, queue_cfg) in queues.iter().enumerate() {
+            assert_eq!(
+                queue_cfg.size, 1024,
+                "queue {} should have size 1024",
+                i
+            );
+        }
+    }
+
+    // AC2.4: shm_region() returns VirtioShmRegion with SHM region ID 0 when DAX configured
+    #[test]
+    fn test_shm_region_with_dax_ac2_4() {
+        let config = VirtioFsConfig::default();
+        let mut device = VhostUserFs::new_for_test(config, Some(32));
+
+        let region = VirtioShmRegion {
+            host_addr: 0x1_0000_0000u64,
+            guest_addr: 0x1_0000_0000u64,
+            size: 32 * 1024 * 1024,
+        };
+        device.set_shm_region(region);
+
+        let retrieved = device.shm_region();
+        assert!(retrieved.is_some(), "shm_region() should return Some when DAX is configured");
+
+        let retrieved = retrieved.unwrap();
+        assert_eq!(retrieved.host_addr, 0x1_0000_0000u64);
+        assert_eq!(retrieved.guest_addr, 0x1_0000_0000u64);
+        assert_eq!(retrieved.size, 32 * 1024 * 1024);
+    }
+
+    // AC2.5: shm_region() returns None when dax_window_mib is None
+    #[test]
+    fn test_shm_region_without_dax_ac2_5() {
+        let config = VirtioFsConfig::default();
+        let device = VhostUserFs::new_for_test(config, None);
+
+        assert!(
+            device.shm_region().is_none(),
+            "shm_region() should return None when DAX is not configured"
+        );
+    }
 }
 
 impl VhostUserFs {
