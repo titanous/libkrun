@@ -70,7 +70,7 @@ use utils::epoll::{EpollEvent, EventSet};
 use utils::eventfd::EventFd;
 #[cfg(target_os = "macos")]
 use vm_memory::Address;
-use vm_memory::{GuestMemory, GuestMemoryMmap};
+use vm_memory::GuestMemoryMmap;
 
 /// Success exit code.
 pub const FC_EXIT_CODE_OK: u8 = 0;
@@ -1041,6 +1041,8 @@ impl Vmm {
         &mut self,
         path: &std::path::Path,
     ) -> std::result::Result<(), snapshot::SnapshotError> {
+        use vm_memory::GuestMemory;
+
         if !self.dirty_tracking_enabled {
             return Err(snapshot::SnapshotError::DirtyTrackingNotEnabled);
         }
