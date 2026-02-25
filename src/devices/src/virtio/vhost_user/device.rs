@@ -405,7 +405,7 @@ impl VhostUserDevice {
             .lock()
             .unwrap()
             .add_mem_region(region_info)
-            .map_err(|e| io::Error::other(e))?;
+            .map_err(io::Error::other)?;
 
         Ok(())
     }

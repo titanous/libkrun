@@ -124,7 +124,7 @@ impl VirtioDevice for VhostUserFs {
                 mmap_offset: 0,
                 mmap_handle: fd,
             };
-            if let Err(_) = self.vhost_user.add_mem_region(&dax_region) {
+            if self.vhost_user.add_mem_region(&dax_region).is_err() {
                 self.vhost_user.reset();
                 return Err(ActivateError::BadActivate);
             }
