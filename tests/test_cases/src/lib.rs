@@ -49,6 +49,9 @@ use test_custom_block_backend::TestCustomBlockBackend;
 mod test_net_async_loopback;
 use test_net_async_loopback::TestNetAsyncLoopback;
 
+#[cfg(feature = "guest")]
+mod net_helpers;
+
 pub fn test_cases() -> Vec<TestCase> {
     // Register your test here:
     vec![
