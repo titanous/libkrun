@@ -796,6 +796,36 @@ impl Vm {
         Ok(())
     }
 
+    /// Register an additional memory region with KVM (e.g., DAX window).
+    /// Allocates a KVM memory slot and maps guest_phys_addr → userspace_addr.
+    ///
+    /// Note: DAX regions are volatile caches and are not preserved across snapshots,
+    /// so this method intentionally does NOT track the slot in mem_slots (unlike
+    /// memory_region_set). If future use cases need dirty tracking for additional
+    /// KVM slots, extend this method to accept an option to track the slot.
+    pub fn register_memory_region(
+        &mut self,
+        guest_phys_addr: u64,
+        memory_size: u64,
+        userspace_addr: u64,
+    ) -> Result<()> {
+        let memory_region = kvm_userspace_memory_region {
+            slot: self.next_mem_slot,
+            guest_phys_addr,
+            memory_size,
+            userspace_addr,
+            flags: 0,
+        };
+        // Safe because we are registering a valid memory region with KVM
+        unsafe {
+            self.fd
+                .set_user_memory_region(memory_region)
+                .map_err(Error::SetUserMemoryRegion)?;
+        };
+        self.next_mem_slot += 1;
+        Ok(())
+    }
+
     #[cfg(feature = "tdx")]
     pub fn tdx_secure_virt_prepare(&self) -> Result<tdx::launch::Launcher> {
         match &self.tdx {

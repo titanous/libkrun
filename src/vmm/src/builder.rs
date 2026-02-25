@@ -47,6 +47,8 @@ use devices::legacy::{IrqChip, IrqChipDevice};
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 use devices::legacy::{KvmGicV2, KvmGicV3};
 use devices::virtio::{port_io, MmioTransport, PortDescription, VirtioDevice, Vsock};
+#[cfg(feature = "vhost-user")]
+use devices::virtio::vhost_user::VhostUserFs;
 
 #[cfg(feature = "tee")]
 use kbs_types::Tee;
@@ -61,6 +63,8 @@ use crate::terminal::{term_restore_mode, term_set_raw_mode};
 use crate::vmm_config::block::BlockBuilder;
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 use crate::vmm_config::fs::FsDeviceConfig;
+#[cfg(feature = "vhost-user")]
+use crate::vmm_config::vhost_user_fs::VhostUserFsConfig;
 use crate::vmm_config::kernel_cmdline::DEFAULT_KERNEL_CMDLINE;
 #[cfg(target_os = "linux")]
 use crate::vstate::KvmContext;
@@ -228,6 +232,15 @@ pub enum StartMicrovmError {
     ShmHostAddr(vm_memory::GuestMemoryError),
     /// The TEE specified is not supported.
     InvalidTee,
+    /// Cannot mmap the DAX window memfd.
+    #[cfg(feature = "vhost-user")]
+    MmapDaxWindow(io::Error),
+    /// Cannot register DAX memory region with KVM.
+    #[cfg(feature = "vhost-user")]
+    RegisterDaxMemoryRegion(VstateError),
+    /// Cannot initialize a vhost-user device.
+    #[cfg(feature = "vhost-user")]
+    RegisterVhostUserDevice(io::Error),
 }
 
 /// It's convenient to automatically convert `kernel::cmdline::Error`s
@@ -524,6 +537,18 @@ impl Display for StartMicrovmError {
             }
             InvalidTee => {
                 write!(f, "TEE selected is not currently supported")
+            }
+            #[cfg(feature = "vhost-user")]
+            MmapDaxWindow(ref err) => {
+                write!(f, "Failed to mmap DAX window: {err}")
+            }
+            #[cfg(feature = "vhost-user")]
+            RegisterDaxMemoryRegion(ref err) => {
+                write!(f, "Failed to register DAX memory region with KVM: {err}")
+            }
+            #[cfg(feature = "vhost-user")]
+            RegisterVhostUserDevice(ref err) => {
+                write!(f, "Failed to initialize vhost-user device: {err}")
             }
         }
     }
@@ -1226,6 +1251,20 @@ pub fn build_microvm(
         #[cfg(target_os = "macos")]
         _sender,
     )?;
+    #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+    #[cfg(feature = "vhost-user")]
+    {
+        let fs_count = vm_resources.fs.len();
+        for (i, vhost_fs_config) in vm_resources.vhost_user_fs.iter().enumerate() {
+            attach_vhost_user_fs_device(
+                &mut vmm,
+                vhost_fs_config,
+                &mut _shm_manager,
+                fs_count + i,
+                intc.clone(),
+            )?;
+        }
+    }
     #[cfg(feature = "blk")]
     attach_block_devices(&mut vmm, &vm_resources.block, intc.clone())?;
 
@@ -1830,6 +1869,21 @@ pub fn create_guest_memory(
             .map_err(StartMicrovmError::GuestMemoryMmap)?
     };
 
+    // AFTER GuestMemoryMmap creation — allocate DAX GPAs without adding to GuestMemoryMmap
+    #[cfg(not(feature = "tee"))]
+    #[cfg(feature = "vhost-user")]
+    {
+        let fs_count = vm_resources.fs.len();  // offset past regular FS regions
+        for (i, vhost_fs_config) in vm_resources.vhost_user_fs.iter().enumerate() {
+            if let Some(dax_mib) = vhost_fs_config.dax_window_mib {
+                let size = (dax_mib as usize) * 1024 * 1024;
+                shm_manager
+                    .create_fs_region(fs_count + i, size)
+                    .map_err(StartMicrovmError::ShmCreate)?;
+            }
+        }
+    }
+
     let (guest_mem, entry_addr, initrd_config, cmdline) =
         load_payload(vm_resources, guest_mem, &arch_mem_info, payload)?;
 
@@ -2261,6 +2315,84 @@ fn attach_fs_devices(
         // The device mutex mustn't be locked here otherwise it will deadlock.
         attach_mmio_device(vmm, id, intc.clone(), fs).map_err(RegisterFsDevice)?;
     }
+
+    Ok(())
+}
+
+#[cfg(not(feature = "tee"))]
+#[cfg(feature = "vhost-user")]
+fn attach_vhost_user_fs_device(
+    vmm: &mut Vmm,
+    config: &VhostUserFsConfig,
+    shm_manager: &mut ShmManager,
+    shm_index: usize,
+    intc: IrqChip,
+) -> std::result::Result<(), StartMicrovmError> {
+    use self::StartMicrovmError::*;
+
+    // 1. Create VhostUserFs device
+    let mut vhost_fs = VhostUserFs::new(
+        &config.tag,
+        &config.socket_path,
+        config.dax_window_mib,
+    ).map_err(RegisterVhostUserDevice)?;
+
+    // 2. Wire up DAX window SHM region (if configured)
+    //    The DAX memfd was created in VhostUserFs::new(). We need to:
+    //    a. Get the GPA range from ShmManager
+    //    b. mmap the memfd into the VMM's host address space
+    //    c. Register the mapping with KVM (so guest GPA accesses hit the memfd)
+    //    d. Tell the device about the region for MMIO capability advertisement
+    //
+    //    NOTE: Unlike the existing attach_fs_devices() which uses
+    //    guest_memory.get_host_address() (because that FS device's backing
+    //    memory IS part of GuestMemoryMmap), the DAX window is a separate
+    //    memfd NOT part of guest memory. We mmap it directly and register
+    //    with KVM as an additional memory slot.
+    if let Some(shm_region) = shm_manager.fs_region(shm_index) {
+        if let Some(dax_fd) = vhost_fs.dax_window_fd() {
+            let dax_size = vhost_fs.dax_window_size().unwrap();
+
+            // 2a. mmap the DAX memfd into VMM host address space
+            let host_addr = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    dax_size,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_SHARED,
+                    dax_fd,
+                    0,
+                )
+            };
+            if host_addr == libc::MAP_FAILED {
+                return Err(MmapDaxWindow(
+                    std::io::Error::last_os_error()
+                ));
+            }
+
+            // 2b. Register with KVM via Vm's public method
+            vmm.vm.register_memory_region(
+                shm_region.guest_addr.raw_value(),
+                dax_size as u64,
+                host_addr as u64,
+            ).map_err(RegisterDaxMemoryRegion)?;
+
+            // 2c. Tell device about the region (for MMIO SHM cap advertisement)
+            vhost_fs.set_shm_region(VirtioShmRegion {
+                host_addr: host_addr as u64,
+                guest_addr: shm_region.guest_addr.raw_value(),
+                size: dax_size,
+            });
+        }
+    }
+
+    // 3. Attach to MMIO bus
+    let device = Arc::new(Mutex::new(vhost_fs));
+    let id = format!("virtio-fs-vhost-{}", shm_index);
+    attach_mmio_device(vmm, id, intc, device)
+        .map_err(|_| StartMicrovmError::RegisterVhostUserDevice(
+            io::Error::new(io::ErrorKind::Other, "failed to attach to MMIO bus")
+        ))?;
 
     Ok(())
 }
