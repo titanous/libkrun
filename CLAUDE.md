@@ -1,6 +1,6 @@
 # libkrun
 
-Last verified: 2026-02-24
+Last verified: 2026-02-25
 
 ## Tech Stack
 - Language: Rust (workspace) + C (init binary)
@@ -19,10 +19,12 @@ Last verified: 2026-02-24
 ## Project Structure
 - `src/libkrun/` - Public C API (`krun_*` functions) and Rust `Builder` API
 - `src/vmm/` - Virtual machine manager: builder, snapshot/restore, dirty tracking
-- `src/devices/` - Virtio and legacy device implementations (net, console, block, vsock, serial, CMOS, i8042, RTC)
+- `src/devices/` - Virtio and legacy device implementations (net, console, block, vsock, vhost-user, serial, CMOS, i8042, RTC)
 - `src/arch/`, `src/kernel/` - Architecture and kernel loading support
 - `tests/` - Integration test workspace (host+guest test cases run inside VMs)
 - `init/` - C init binary compiled for guest (embedded when `embedded_init` feature on)
+- `vendor/vhost/` - Patched vhost 0.14.0 crate (adds DEVICE_STATE protocol methods); used via `[patch.crates-io]`
+- `tests/test_daemon/` - Vhost-user FS test daemon binary (used by integration tests)
 
 ## Feature Flags (Cargo)
 - `embedded_init` - Embeds init binary in library; required for tests
@@ -30,6 +32,7 @@ Last verified: 2026-02-24
 - `blk` - Enables virtio-block backends (tokio, futures)
 - `snapshot` - Enables snapshot/restore (serde, bincode)
 - `efi` - EFI boot support (implies blk + net)
+- `vhost-user` - Enables vhost-user device support (virtio-fs over vhost-user with DAX); build with `VHOST_USER=1 make`
 
 ## Conventions
 - Platform-specific code gated with `#[cfg(target_os = "...")]`
@@ -44,3 +47,4 @@ Last verified: 2026-02-24
 - `tests/Cargo.lock` is separate from root `Cargo.lock` (different workspace)
 - `vm-memory` must be pinned to 0.16.2 in tests workspace (0.17 breaks kernel/arch)
 - `init/init` is a C binary, not part of the Cargo workspace
+- `vendor/vhost/` is patched via `[patch.crates-io]` in root `Cargo.toml`; do not update vhost version without verifying DEVICE_STATE patches are preserved

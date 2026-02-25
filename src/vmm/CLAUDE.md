@@ -1,12 +1,12 @@
 # VMM Crate
 
-Last verified: 2026-02-24
+Last verified: 2026-02-25
 
 ## Purpose
 Core virtual machine manager. Orchestrates VM lifecycle: build, run, snapshot/restore, dirty page tracking.
 
 ## Contracts
-- **Exposes**: `Vmm` struct (VM lifecycle), `build_microvm()`, snapshot/restore functions, `DirtyBitmap`, `VmExit` enum, `SharedVmExit` type
+- **Exposes**: `Vmm` struct (VM lifecycle), `build_microvm()`, snapshot/restore functions, `DirtyBitmap`, `VmExit` enum, `SharedVmExit` type, `VhostUserFsConfig` (behind `vhost-user` feature), `Vm::register_memory_region()`
 - **Guarantees**:
   - `validate_header_for_vm` checks magic, version, RAM layout, vCPU count, and nested_enabled match
   - Incremental snapshots require `dirty_tracking_enabled` (returns `DirtyTrackingNotEnabled` otherwise)
@@ -20,10 +20,15 @@ Core virtual machine manager. Orchestrates VM lifecycle: build, run, snapshot/re
   - `load_vmstate` and `load_incremental_snapshot` reject files larger than 10MB (`FileSizeExceeded`)
   - x86_64 vCPU restore calls `kvmclock_ctrl` to notify guest of time discontinuity (warns on failure)
   - `MMIODeviceManager::restore_all_device_states` silently skips unknown device IDs (forward compat)
+  - `Vm::register_memory_region()` registers additional KVM memory slots (e.g., DAX windows); does NOT track slot in `mem_slots` (DAX is volatile cache)
+  - When `vhost-user` feature is enabled, guest memory regions use memfd backing (file-backed) so vhost-user daemons can mmap them; kernel region also gets memfd backing
+  - `VmResources::vhost_user_fs` stores `VhostUserFsConfig` list; `add_vhost_user_fs_device()` appends to it
+  - `StartMicrovmError` gains `MmapDaxWindow`, `RegisterDaxMemoryRegion`, `RegisterVhostUserDevice`, `RegisterVhostUserFsDevice` variants (behind `vhost-user` feature)
+  - `attach_vhost_user_fs_device` creates VhostUserFs, mmaps DAX memfd, registers DAX region with KVM, attaches to MMIO bus
 - **Expects**: Valid `VmResources` from libkrun crate; KVM/HVF available at runtime
 
 ## Dependencies
-- **Uses**: `devices` (mmio device manager, virtio devices), `arch`, `kernel`, `vm-memory`
+- **Uses**: `devices` (mmio device manager, virtio devices, VhostUserFs), `arch`, `kernel`, `vm-memory`
 - **Used by**: `libkrun` (public API crate)
 - **Boundary**: Does not know about C API; only receives structured `VmResources`
 
@@ -50,6 +55,8 @@ Core virtual machine manager. Orchestrates VM lifecycle: build, run, snapshot/re
 - `exited()` state polls `should_exit` flag + channel disconnect (replaces infinite `Barrier::wait`)
 - PortIO device states are saved/restored alongside MMIO states in every snapshot operation (x86_64)
 - Virtio used ring dirty marking runs before `collect_dirty_pages` in incremental snapshots
+- DAX KVM memory slots are NOT tracked in `mem_slots` (intentionally excluded from dirty tracking; DAX is volatile cache)
+- When `vhost-user` feature is active, `create_guest_memory` creates memfd-backed regions; without the feature, anonymous mmap is used (no behavior change)
 
 ## Key Files
 - `vm_exit.rs` - `VmExit` enum (Shutdown, RebootRequested, Error) and `SharedVmExit` type
@@ -61,7 +68,8 @@ Core virtual machine manager. Orchestrates VM lifecycle: build, run, snapshot/re
 - `device_manager/kvm/mmio.rs` - `MMIODeviceManager`, `get_virtio_used_ring_ranges()`
 - `linux/vstate.rs` - x86_64 vCPU: `tsc_khz`, `kvmclock_ctrl` on restore, `VcpuHandle::drop()`
 - `macos/vstate.rs` - macOS HVF vCPU: `VcpuHandle::drop()` with channel disconnect + join
-- `resources.rs` - `VmResources`, `VmDeviceInfo` configuration types
+- `resources.rs` - `VmResources`, `VmDeviceInfo`, `VhostUserDeviceConfig` configuration types
+- `vmm_config/vhost_user_fs.rs` - `VhostUserFsConfig` (tag, socket_path, dax_window_mib)
 
 ## Gotchas
 - `create_full_snapshot` still hardcodes `nested_enabled: false` (pre-existing TODO)
