@@ -67,6 +67,9 @@ pub struct VhostUserDevice {
     /// Acknowledged features
     acked_features: u64,
 
+    /// Acknowledged protocol features
+    acked_protocol_features: VhostUserProtocolFeatures,
+
     /// Device state
     device_state: DeviceState,
 }
@@ -80,6 +83,7 @@ impl std::fmt::Debug for VhostUserDevice {
             .field("avail_features", &self.avail_features)
             .field("backend_features", &self.backend_features)
             .field("acked_features", &self.acked_features)
+            .field("acked_protocol_features", &self.acked_protocol_features)
             .finish_non_exhaustive()
     }
 }
@@ -128,7 +132,7 @@ impl VhostUserDevice {
         let our_avail_features = avail_features & !VHOST_USER_F_PROTOCOL_FEATURES;
 
         // Determine actual queue count - may require protocol feature negotiation
-        if backend_features & VHOST_USER_F_PROTOCOL_FEATURES != 0 {
+        let acked_protocol_features = if backend_features & VHOST_USER_F_PROTOCOL_FEATURES != 0 {
             frontend
                 .set_features(backend_features)
                 .map_err(|e| io::Error::new(ErrorKind::Other, e))?;
@@ -144,11 +148,18 @@ impl VhostUserDevice {
             if protocol_features.contains(VhostUserProtocolFeatures::MQ) {
                 our_protocol_features |= VhostUserProtocolFeatures::MQ;
             }
+            if protocol_features.contains(VhostUserProtocolFeatures::CONFIGURE_MEM_SLOTS) {
+                our_protocol_features |= VhostUserProtocolFeatures::CONFIGURE_MEM_SLOTS;
+            }
 
             frontend
                 .set_protocol_features(our_protocol_features)
                 .map_err(|e| io::Error::new(ErrorKind::Other, e))?;
-        }
+
+            our_protocol_features
+        } else {
+            VhostUserProtocolFeatures::empty()
+        };
 
         let actual_num_queues = if num_queues == 0 {
             if backend_features & VHOST_USER_F_PROTOCOL_FEATURES != 0 {
@@ -196,6 +207,7 @@ impl VhostUserDevice {
             avail_features: our_avail_features,
             backend_features,
             acked_features: 0,
+            acked_protocol_features,
             device_state: DeviceState::Inactive,
         })
     }
@@ -373,6 +385,30 @@ impl VhostUserDevice {
 
         Ok(())
     }
+
+    /// Get the acknowledged protocol features for this device.
+    pub fn acked_protocol_features(&self) -> VhostUserProtocolFeatures {
+        self.acked_protocol_features
+    }
+
+    /// Share an additional memory region with the daemon.
+    /// Requires CONFIGURE_MEM_SLOTS protocol feature to have been negotiated.
+    pub fn add_mem_region(&self, region_info: &VhostUserMemoryRegionInfo) -> IoResult<()> {
+        if !self.acked_protocol_features.contains(VhostUserProtocolFeatures::CONFIGURE_MEM_SLOTS) {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "CONFIGURE_MEM_SLOTS protocol feature not negotiated",
+            ));
+        }
+
+        self.frontend
+            .lock()
+            .unwrap()
+            .add_mem_region(region_info)
+            .map_err(|e| io::Error::new(ErrorKind::Other, e))?;
+
+        Ok(())
+    }
 }
 
 impl VhostUserDevice {
@@ -402,6 +438,7 @@ impl VhostUserDevice {
             avail_features: 0,
             backend_features: 0,
             acked_features: 0,
+            acked_protocol_features: VhostUserProtocolFeatures::empty(),
             device_state: DeviceState::Inactive,
         }
     }
