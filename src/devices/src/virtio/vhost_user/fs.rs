@@ -7,8 +7,8 @@
 //! VhostUserDevice with filesystem-specific features: device type 26, config space
 //! fetching from daemon, HPQ + request queues, and DAX window allocation.
 
-use std::io::{self, ErrorKind, Result as IoResult};
-use std::os::unix::io::RawFd;
+use std::io::{self, Result as IoResult};
+use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
 use log::warn;
 use vhost::vhost_user::message::VhostUserConfigFlags;
@@ -50,7 +50,7 @@ pub struct VhostUserFs {
     queue_configs: Vec<QueueConfig>,
     shm_region: Option<VirtioShmRegion>,
     dax_window_size: Option<usize>,
-    dax_window_fd: Option<RawFd>,
+    dax_window_fd: Option<OwnedFd>,
     tag: String,
     socket_path: String,
 }
@@ -140,7 +140,7 @@ impl VhostUserFs {
         // Validate tag length
         if tag.len() > 36 {
             return Err(io::Error::new(
-                ErrorKind::InvalidInput,
+                io::ErrorKind::InvalidInput,
                 "filesystem tag length exceeds 36 bytes",
             ));
         }
@@ -157,14 +157,14 @@ impl VhostUserFs {
         // Fetch config from daemon via get_config
         let mut config = {
             let mut frontend = vhost_user.frontend.lock().unwrap();
-            let mut config_buf = [0u8; std::mem::size_of::<VirtioFsConfig>()];
+            let config_buf = [0u8; std::mem::size_of::<VirtioFsConfig>()];
             frontend
-                .get_config(0, std::mem::size_of::<VirtioFsConfig>() as u32, VhostUserConfigFlags::empty(), &mut config_buf)
-                .map_err(|e| io::Error::new(ErrorKind::Other, format!("get_config failed: {}", e)))?;
+                .get_config(0, std::mem::size_of::<VirtioFsConfig>() as u32, VhostUserConfigFlags::empty(), &config_buf)
+                .map_err(|e| io::Error::other(format!("get_config failed: {}", e)))?;
             if let Some(cfg) = VirtioFsConfig::from_slice(&config_buf) {
                 *cfg
             } else {
-                return Err(io::Error::new(ErrorKind::InvalidData, "invalid config from daemon"));
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid config from daemon"));
             }
         };
 
@@ -183,18 +183,20 @@ impl VhostUserFs {
         // Create DAX window if requested
         let (dax_window_fd, dax_window_size) = if let Some(mib) = dax_window_mib {
             let size = (mib as usize) * 1024 * 1024;
-            let fd = memfd_create("vhost-fs-dax", libc::MFD_CLOEXEC as u32)
-                .map_err(|e| io::Error::new(ErrorKind::Other, format!("memfd_create failed: {}", e)))?;
+            let raw_fd = memfd_create("vhost-fs-dax", libc::MFD_CLOEXEC)
+                .map_err(|e| io::Error::other(format!("memfd_create failed: {}", e)))?;
 
             unsafe {
-                if libc::ftruncate(fd, size as libc::off_t) < 0 {
+                if libc::ftruncate(raw_fd, size as libc::off_t) < 0 {
                     let err = io::Error::last_os_error();
-                    libc::close(fd);
+                    // OwnedFd will be dropped at end of scope, closing the fd automatically
                     return Err(err);
                 }
             }
 
-            (Some(fd), Some(size))
+            // SAFETY: raw_fd is valid and owned by this scope
+            let owned_fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+            (Some(owned_fd), Some(size))
         } else {
             (None, None)
         };
@@ -216,7 +218,7 @@ impl VhostUserFs {
     }
 
     pub fn dax_window_fd(&self) -> Option<RawFd> {
-        self.dax_window_fd
+        self.dax_window_fd.as_ref().map(|fd| fd.as_raw_fd())
     }
 
     pub fn dax_window_size(&self) -> Option<usize> {
@@ -235,7 +237,7 @@ impl VhostUserFs {
 /// Wrapper around memfd_create syscall
 fn memfd_create(name: &str, flags: u32) -> io::Result<RawFd> {
     let c_name = std::ffi::CString::new(name)
-        .map_err(|_| io::Error::new(ErrorKind::InvalidInput, "invalid memfd name"))?;
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid memfd name"))?;
 
     let fd = unsafe { libc::memfd_create(c_name.as_ptr(), flags) };
 
@@ -322,7 +324,7 @@ mod tests {
         assert!(result.is_err());
         let error = result.unwrap_err();
         // Should be a connection error (NotFound for nonexistent path), not a panic
-        assert!(matches!(error.kind(), ErrorKind::NotFound | ErrorKind::ConnectionRefused));
+        assert!(matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused));
     }
 }
 
