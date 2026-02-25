@@ -10,6 +10,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use devices;
+use devices::BusDevice;
 use utils::eventfd::EventFd;
 
 /// Errors corresponding to the `PortIODeviceManager`.
@@ -19,6 +20,8 @@ pub enum Error {
     BusError(devices::BusError),
     /// Cannot create EventFd.
     EventFd(std::io::Error),
+    /// Snapshot state error.
+    SnapshotState(String),
 }
 
 impl fmt::Display for Error {
@@ -28,6 +31,7 @@ impl fmt::Display for Error {
         match *self {
             BusError(ref err) => write!(f, "Failed to add legacy device to Bus: {err}"),
             EventFd(ref err) => write!(f, "Failed to create EventFd: {err}"),
+            SnapshotState(ref msg) => write!(f, "Snapshot state error: {msg}"),
         }
     }
 }
@@ -142,6 +146,108 @@ impl PortIODeviceManager {
         self.io_bus
             .insert(self.i8042.clone(), 0x060, 0x5)
             .map_err(Error::BusError)?;
+        Ok(())
+    }
+
+    /// Save all device states for snapshot.
+    #[cfg(feature = "snapshot")]
+    pub fn save_all_device_states(&self) -> std::result::Result<Vec<(String, Vec<u8>)>, Error> {
+        let mut states = Vec::new();
+
+        // Save CMOS state
+        {
+            let device = self.cmos.lock().unwrap();
+            if let Some(snapshottable) = device.as_snapshottable() {
+                let state = snapshottable.save_state().map_err(|e| {
+                    Error::SnapshotState(format!("Failed to save CMOS state: {e}"))
+                })?;
+                states.push((snapshottable.snapshot_id().to_string(), state));
+            }
+        }
+
+        // Save serial states
+        for (i, serial) in self.stdio_serial.iter().enumerate() {
+            let device = serial.lock().unwrap();
+            if let Some(snapshottable) = device.as_snapshottable() {
+                let id = format!("{}:{}", snapshottable.snapshot_id(), i);
+                let state = snapshottable.save_state().map_err(|e| {
+                    Error::SnapshotState(format!("Failed to save serial {i} state: {e}"))
+                })?;
+                states.push((id, state));
+            }
+        }
+
+        // Save i8042 state
+        {
+            let device = self.i8042.lock().unwrap();
+            if let Some(snapshottable) = device.as_snapshottable() {
+                let state = snapshottable.save_state().map_err(|e| {
+                    Error::SnapshotState(format!("Failed to save i8042 state: {e}"))
+                })?;
+                states.push((snapshottable.snapshot_id().to_string(), state));
+            }
+        }
+
+        Ok(states)
+    }
+
+    /// Restore all device states from snapshot.
+    #[cfg(feature = "snapshot")]
+    pub fn restore_all_device_states(&self, states: &[(String, Vec<u8>)]) -> std::result::Result<(), Error> {
+        for (id, data) in states {
+            // Try CMOS
+            {
+                let mut device = self.cmos.lock().unwrap();
+                if let Some(snapshottable) = device.as_snapshottable() {
+                    if snapshottable.snapshot_id() == id {
+                        device.as_snapshottable_mut().unwrap()
+                            .restore_state(data)
+                            .map_err(|e| Error::SnapshotState(format!(
+                                "Failed to restore {id}: {e}"
+                            )))?;
+                        continue;
+                    }
+                }
+            }
+
+            // Try serials (match "serial-16550:N" pattern)
+            let mut matched = false;
+            for (i, serial) in self.stdio_serial.iter().enumerate() {
+                let mut device = serial.lock().unwrap();
+                if let Some(snapshottable) = device.as_snapshottable() {
+                    let expected_id = format!("{}:{}", snapshottable.snapshot_id(), i);
+                    if &expected_id == id {
+                        device.as_snapshottable_mut().unwrap()
+                            .restore_state(data)
+                            .map_err(|e| Error::SnapshotState(format!(
+                                "Failed to restore {id}: {e}"
+                            )))?;
+                        matched = true;
+                        break;
+                    }
+                }
+            }
+            if matched { continue; }
+
+            // Try i8042
+            {
+                let mut device = self.i8042.lock().unwrap();
+                if let Some(snapshottable) = device.as_snapshottable() {
+                    if snapshottable.snapshot_id() == id {
+                        device.as_snapshottable_mut().unwrap()
+                            .restore_state(data)
+                            .map_err(|e| Error::SnapshotState(format!(
+                                "Failed to restore {id}: {e}"
+                            )))?;
+                        continue;
+                    }
+                }
+            }
+
+            // Unknown PortIO device state — skip silently (forward compat)
+            debug!("Skipping unknown PortIO device state: {id}");
+        }
+
         Ok(())
     }
 }
