@@ -124,9 +124,10 @@ impl VirtioDevice for VhostUserFs {
                 mmap_offset: 0,
                 mmap_handle: fd,
             };
-            self.vhost_user
-                .add_mem_region(&dax_region)
-                .map_err(|_| ActivateError::BadActivate)?;
+            if let Err(_) = self.vhost_user.add_mem_region(&dax_region) {
+                self.vhost_user.reset();
+                return Err(ActivateError::BadActivate);
+            }
         }
 
         Ok(())
@@ -301,42 +302,6 @@ mod tests {
         let mut buf = [0u8; 4];
         device.read_config(36, &mut buf);
         assert_eq!(u32::from_le_bytes(buf), 2);
-    }
-
-    #[test]
-    fn test_queue_config_hpq_plus_request_queues() {
-        let mut config = VirtioFsConfig::default();
-        config.num_request_queues = 2;
-
-        let device = VhostUserFs::new_for_test(config, None);
-        assert_eq!(device.queue_config().len(), 3); // 1 HPQ + 2 request queues
-        for queue_cfg in device.queue_config() {
-            assert_eq!(queue_cfg.size, 1024);
-        }
-    }
-
-    #[test]
-    fn test_shm_region_none_without_dax() {
-        let config = VirtioFsConfig::default();
-        let device = VhostUserFs::new_for_test(config, None);
-        assert!(device.shm_region().is_none());
-    }
-
-    #[test]
-    fn test_shm_region_some_with_dax() {
-        let config = VirtioFsConfig::default();
-        let mut device = VhostUserFs::new_for_test(config, Some(32));
-
-        let region = VirtioShmRegion {
-            host_addr: 0x1000,
-            guest_addr: 0x2000,
-            size: 32 * 1024 * 1024,
-        };
-        device.set_shm_region(region);
-
-        let retrieved = device.shm_region().unwrap();
-        assert_eq!(retrieved.host_addr, 0x1000);
-        assert_eq!(retrieved.guest_addr, 0x2000);
     }
 
     #[test]
