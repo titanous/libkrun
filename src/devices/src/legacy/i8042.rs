@@ -475,10 +475,6 @@ mod snapshot_tests {
             EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
         );
 
-        // Save a valid snapshot
-        i8042.push_byte(0x11).unwrap();
-        let mut valid_state = i8042.save_state().unwrap();
-
         // Create a state with a smaller buffer (manually craft invalid snapshot)
         // Create a state with wrong buffer size and serialize it
         let invalid_state = I8042State {
