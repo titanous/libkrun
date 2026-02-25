@@ -442,6 +442,34 @@ impl MMIODeviceManager {
         }
         Ok(())
     }
+
+    /// Collect used ring page ranges for all registered virtio devices.
+    ///
+    /// Iterates through all MMIO devices, downcasts to MmioTransport, and collects
+    /// the used ring page ranges from each active device. Returns a vector of
+    /// (page_addr, page_size) tuples.
+    #[cfg(feature = "snapshot")]
+    pub fn get_virtio_used_ring_ranges(&self) -> Vec<(u64, u64)> {
+        let mut ranges = Vec::new();
+
+        for ((_device_type, _device_id), dev_info) in &self.id_to_dev_info {
+            let Some((_, device)) = self.bus.get_device(dev_info.addr) else {
+                continue;
+            };
+            let Ok(device) = device.lock() else {
+                continue;
+            };
+
+            // Downcast BusDevice to MmioTransport
+            let Some(transport) = device.as_any().downcast_ref::<devices::virtio::MmioTransport>() else {
+                continue;
+            };
+
+            ranges.extend(transport.get_used_ring_ranges());
+        }
+
+        ranges
+    }
 }
 
 /// Private structure for storing information about the MMIO device registered at some address on the bus.

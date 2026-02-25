@@ -70,7 +70,7 @@ use utils::epoll::{EpollEvent, EventSet};
 use utils::eventfd::EventFd;
 #[cfg(target_os = "macos")]
 use vm_memory::Address;
-use vm_memory::GuestMemoryMmap;
+use vm_memory::{GuestMemory, GuestMemoryMmap};
 
 /// Success exit code.
 pub const FC_EXIT_CODE_OK: u8 = 0;
@@ -840,6 +840,14 @@ impl Vmm {
 
         let gic_state = self.save_interrupt_controller_state()?;
 
+        // Mark virtio used ring pages dirty (host writes not tracked by memory protection)
+        let used_ring_ranges = self.mmio_device_manager.get_virtio_used_ring_ranges();
+        for (page_addr, _) in &used_ring_ranges {
+            for bitmap in &self.dirty_bitmaps {
+                bitmap.mark_dirty(*page_addr);
+            }
+        }
+
         let mut dirty_pages = Vec::new();
         for bitmap in &self.dirty_bitmaps {
             let dirty_addrs = bitmap.drain_dirty_pages();
@@ -1072,7 +1080,30 @@ impl Vmm {
         #[cfg(not(target_arch = "x86_64"))]
         let vm_state = None;
 
-        let dirty_pages = self.collect_dirty_pages()?;
+        let mut dirty_pages = self.collect_dirty_pages()?;
+
+        // Mark virtio used ring pages dirty (host writes not tracked by KVM)
+        let used_ring_ranges = self.mmio_device_manager.get_virtio_used_ring_ranges();
+        for (page_addr, page_size) in &used_ring_ranges {
+            // Check if this page is already in the dirty set
+            if !dirty_pages.iter().any(|p| p.guest_addr == *page_addr) {
+                let host_ptr = self
+                    .guest_memory
+                    .get_host_address(vm_memory::GuestAddress(*page_addr))
+                    .map_err(|e| {
+                        snapshot::SnapshotError::Serialize(format!(
+                            "Invalid guest address for used ring page 0x{page_addr:x}: {e}"
+                        ))
+                    })?;
+                let data = unsafe {
+                    std::slice::from_raw_parts(host_ptr, *page_size as usize)
+                };
+                dirty_pages.push(snapshot::DirtyPage {
+                    guest_addr: *page_addr,
+                    data: data.to_vec(),
+                });
+            }
+        }
 
         let incremental = snapshot::IncrementalSnapshot {
             header: snapshot::SnapshotHeader {

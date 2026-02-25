@@ -841,6 +841,50 @@ impl Snapshottable for MmioTransport {
 
 #[cfg(feature = "snapshot")]
 impl MmioTransport {
+    /// Retrieve used ring page ranges for all active virtio queues.
+    ///
+    /// Returns a vector of (page_addr, page_size) tuples for all page-aligned
+    /// regions covering the used ring of each active queue.
+    ///
+    /// After activation, queues are moved to the device backend via `activate()`.
+    /// This method accesses them via `VirtioDevice::queues()`, which snapshot-capable
+    /// devices override to return their queue state.
+    ///
+    /// Inactive/unactivated queues (ready=false or used_ring=0) are skipped.
+    pub fn get_used_ring_ranges(&self) -> Vec<(u64, u64)> {
+        let page_size = 4096u64;
+        let mut ranges = Vec::new();
+
+        // Access queues via VirtioDevice::queues() on the inner device.
+        // After activation, transport.queues is None (moved to backend),
+        // but device.queues() returns the live queue state.
+        let Ok(device) = self.device.lock() else {
+            return ranges;
+        };
+
+        for queue in device.queues() {
+            if !queue.ready || queue.used_ring.raw_value() == 0 {
+                continue; // AC2.3: skip inactive queues
+            }
+
+            let used_ring_addr = queue.used_ring.raw_value();
+            let used_ring_size = 6 + 8 * queue.size as u64;
+
+            // Page-align the range
+            let start_page = used_ring_addr & !(page_size - 1);
+            let end = used_ring_addr + used_ring_size;
+            let end_page = (end + page_size - 1) & !(page_size - 1);
+
+            let mut page = start_page;
+            while page < end_page {
+                ranges.push((page, page_size));
+                page += page_size;
+            }
+        }
+
+        ranges
+    }
+
     /// Activate the device and kick workers after all snapshot state is loaded.
     ///
     /// Must be called after restore_state() and after interrupt controller
