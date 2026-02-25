@@ -15,8 +15,8 @@ mod host {
     use crate::{Test, TestSetup};
     use std::io::{Read, Write};
     use std::os::unix::net::UnixListener;
-    use std::time::Duration;
     use std::thread;
+    use std::time::Duration;
 
     impl Test for TestSnapshotSerial {
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
@@ -38,8 +38,12 @@ mod host {
 
             // Wait for guest to signal WRITTEN (meaning scratch register/memory state is set)
             let (mut stream, _) = listener.accept().unwrap();
-            stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-            stream.set_write_timeout(Some(Duration::from_secs(10))).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
             let mut buf = vec![0u8; 7];
             stream.read_exact(&mut buf).unwrap();
             assert_eq!(&buf, b"WRITTEN");
@@ -88,18 +92,25 @@ mod guest {
 
     impl Test for TestSnapshotSerial {
         fn in_guest(self: Box<Self>) {
-            let sock = socket(AddressFamily::Vsock, SockType::Stream, SockFlag::empty(), None)
-                .unwrap();
+            let sock = socket(
+                AddressFamily::Vsock,
+                SockType::Stream,
+                SockFlag::empty(),
+                None,
+            )
+            .unwrap();
             let addr = VsockAddr::new(VMADDR_CID_HOST, VSOCK_PORT);
             connect(sock.as_raw_fd(), &addr).unwrap();
             let mut stream = UnixStream::from(sock);
-            stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-            stream.set_write_timeout(Some(Duration::from_secs(10))).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
 
             // Try to get I/O port access privilege via iopl(3)
-            let iopl_result = unsafe {
-                libc::iopl(3)
-            };
+            let iopl_result = unsafe { libc::iopl(3) };
 
             if iopl_result == 0 {
                 // iopl succeeded - we have I/O port access
@@ -117,9 +128,7 @@ mod guest {
                 assert_eq!(&buf, b"RESTORED");
 
                 // After restore, verify scratch register value survived
-                let read_val = unsafe {
-                    inb(COM1_SCRATCH_PORT)
-                };
+                let read_val = unsafe { inb(COM1_SCRATCH_PORT) };
 
                 assert_eq!(
                     read_val, SCRATCH_VALUE,

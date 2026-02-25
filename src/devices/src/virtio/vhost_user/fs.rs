@@ -17,8 +17,8 @@ use vhost::VhostBackend;
 use vm_memory::ByteValued;
 
 use crate::virtio::device::{VirtioDevice, VirtioShmRegion};
-use crate::virtio::{ActivateError, ActivateResult, Queue};
 use crate::virtio::QueueConfig;
+use crate::virtio::{ActivateError, ActivateResult, Queue};
 use vhost::VhostUserMemoryRegionInfo;
 
 use super::VhostUserDevice;
@@ -124,7 +124,10 @@ impl VirtioDevice for VhostUserFs {
         let config_slice = self.config.as_slice();
         let config_len = config_slice.len() as u64;
         if offset >= config_len {
-            warn!("VhostUserFs: config read at offset {} beyond config size {}", offset, config_len);
+            warn!(
+                "VhostUserFs: config read at offset {} beyond config size {}",
+                offset, config_len
+            );
             return;
         }
         if let Some(end) = offset.checked_add(data.len() as u64) {
@@ -153,7 +156,22 @@ impl VirtioDevice for VhostUserFs {
             return self.activate_restore(mem, interrupt, queues, state);
         }
 
-        // Normal activation (existing code)
+        // Save queue state for snapshot: MmioTransport's save_state() reads
+        // device.queues() to serialize queue GPAs/sizes. Vhost-user devices
+        // don't have worker threads that update self.queues, so copy the
+        // guest-configured values from DeviceQueues here.
+        for (i, dq) in queues.iter().enumerate() {
+            if let Some(q) = self.queues.get_mut(i) {
+                q.size = dq.queue.size;
+                q.ready = dq.queue.ready;
+                q.desc_table = dq.queue.desc_table;
+                q.avail_ring = dq.queue.avail_ring;
+                q.used_ring = dq.queue.used_ring;
+                q.set_next_avail(dq.queue.next_avail().0);
+                q.set_next_used(dq.queue.next_used().0);
+            }
+        }
+
         // Delegate to generic VhostUserDevice activation
         // This handles: set_owner, set_mem_table (RAM), set_features,
         // vring setup, interrupt forwarding
@@ -204,17 +222,25 @@ impl VirtioDevice for VhostUserFs {
         let num_queues = self.queue_configs.len();
         for i in 0..num_queues {
             // get_vring_base returns the base index directly
-            let base = self.vhost_user.frontend.lock().unwrap()
-                .get_vring_base(i)
-                .map_err(|e| log::error!("get_vring_base({i}): {e}"))
-                .ok()?;
-            vring_bases.push(base as u16);
+            match self.vhost_user.frontend.lock().unwrap().get_vring_base(i) {
+                Ok(base) => {
+                    vring_bases.push(base as u16);
+                }
+                Err(e) => {
+                    log::error!("get_vring_base({i}) failed: {e}");
+                    return None;
+                }
+            }
         }
 
         // 2. Save daemon internal state via DEVICE_STATE protocol
-        let daemon_state = self.vhost_user.save_device_state()
-            .map_err(|e| log::error!("save_device_state: {e}"))
-            .ok()?;
+        let daemon_state = match self.vhost_user.save_device_state() {
+            Ok(state) => state,
+            Err(e) => {
+                log::error!("save_device_state failed: {e}");
+                return None;
+            }
+        };
 
         // 3. Build state struct
         let state = VhostUserFsState {
@@ -258,7 +284,12 @@ impl VirtioDevice for VhostUserFs {
         }
         self.config.num_request_queues = state.config_num_request_queues;
 
-        // 3. Store state for activate() to consume in restore mode.
+        // 3. Mark as inactive so complete_restore() will call activate().
+        //    Without this, is_activated() returns true (from pre-snapshot),
+        //    and complete_restore() skips re-activation.
+        self.vhost_user.mark_inactive();
+
+        // 4. Store state for activate() to consume in restore mode.
         //    We do NOT reconnect or load daemon state here because
         //    activate() has not run yet (restore_backend_state runs
         //    BEFORE complete_restore → activate in the VMM sequence).
@@ -302,13 +333,21 @@ impl VhostUserFs {
         let mut config = {
             let mut frontend = vhost_user.frontend.lock().unwrap();
             let config_buf = [0u8; std::mem::size_of::<VirtioFsConfig>()];
-            frontend
-                .get_config(0, std::mem::size_of::<VirtioFsConfig>() as u32, VhostUserConfigFlags::empty(), &config_buf)
+            let (_hdr, payload) = frontend
+                .get_config(
+                    0,
+                    std::mem::size_of::<VirtioFsConfig>() as u32,
+                    VhostUserConfigFlags::empty(),
+                    &config_buf,
+                )
                 .map_err(|e| io::Error::other(format!("get_config failed: {}", e)))?;
-            if let Some(cfg) = VirtioFsConfig::from_slice(&config_buf) {
+            if let Some(cfg) = VirtioFsConfig::from_slice(payload.as_slice()) {
                 *cfg
             } else {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid config from daemon"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid config from daemon",
+                ));
             }
         };
 
@@ -346,7 +385,9 @@ impl VhostUserFs {
         };
 
         let num_queues = config.num_request_queues as usize;
-        let queues = (0..1 + num_queues).map(|_| Queue::new(QUEUE_SIZE)).collect();
+        let queues = (0..1 + num_queues)
+            .map(|_| Queue::new(QUEUE_SIZE))
+            .collect();
 
         Ok(VhostUserFs {
             vhost_user,
@@ -398,13 +439,13 @@ impl VhostUserFs {
         use std::os::unix::net::UnixStream;
 
         // 1. Reconnect to daemon (AC4.6: fails if daemon unavailable)
-        let stream = UnixStream::connect(&self.socket_path)
-            .map_err(|e| {
-                log::error!("Failed to reconnect to daemon at {}: {e}", self.socket_path);
-                ActivateError::BadActivate
-            })?;
+        let stream = UnixStream::connect(&self.socket_path).map_err(|e| {
+            log::error!("Failed to reconnect to daemon at {}: {e}", self.socket_path);
+            ActivateError::BadActivate
+        })?;
 
-        // 2. Replace Frontend, re-negotiate with saved features
+        // 2. Replace Frontend, re-negotiate features (protocol features use saved set,
+        //    base virtio features are re-negotiated fresh from daemon)
         self.vhost_user.reconnect_for_restore(
             stream,
             state.acked_features,
@@ -412,14 +453,9 @@ impl VhostUserFs {
         )?;
 
         // 3. Share guest memory + set up vrings with SAVED bases
-        //    Uses activate_vhost_user method which handles
-        //    set_mem_table, set_vring_num/addr/base/kick/enable.
-        self.vhost_user.activate_vhost_user(
-            &mem,
-            &interrupt,
-            &queues,
-            Some(&state.vring_bases),
-        ).map_err(|_| ActivateError::BadActivate)?;
+        self.vhost_user
+            .activate_vhost_user(&mem, &interrupt, &queues, Some(&state.vring_bases))
+            .map_err(|_| ActivateError::BadActivate)?;
 
         // 4. Share DAX window (add_mem_region) if configured
         if let Some(ref shm_region) = self.shm_region {
@@ -439,9 +475,11 @@ impl VhostUserFs {
         }
 
         // 5. Load daemon state via DEVICE_STATE protocol
-        //    (daemon must have memory regions before it can accept state)
-        if let Err(e) = self.vhost_user.load_device_state(&state.daemon_state) {
-            log::error!("Failed to load daemon state: {e}");
+        if self
+            .vhost_user
+            .load_device_state(&state.daemon_state)
+            .is_err()
+        {
             self.vhost_user.reset();
             return Err(ActivateError::BadActivate);
         }
@@ -507,7 +545,10 @@ mod tests {
         assert!(result.is_err());
         let error = result.unwrap_err();
         // Should be a connection error (NotFound for nonexistent path), not a panic
-        assert!(matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused));
+        assert!(matches!(
+            error.kind(),
+            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+        ));
     }
 
     // AC2.3: Queue layout test with 3 request queues (1 HPQ + 3 request = 4 total)
@@ -524,11 +565,7 @@ mod tests {
 
         // Each queue should have max_size of 1024
         for (i, queue_cfg) in queues.iter().enumerate() {
-            assert_eq!(
-                queue_cfg.size, 1024,
-                "queue {} should have size 1024",
-                i
-            );
+            assert_eq!(queue_cfg.size, 1024, "queue {} should have size 1024", i);
         }
     }
 
@@ -546,7 +583,10 @@ mod tests {
         device.set_shm_region(region);
 
         let retrieved = device.shm_region();
-        assert!(retrieved.is_some(), "shm_region() should return Some when DAX is configured");
+        assert!(
+            retrieved.is_some(),
+            "shm_region() should return Some when DAX is configured"
+        );
 
         let retrieved = retrieved.unwrap();
         assert_eq!(retrieved.host_addr, 0x1_0000_0000u64);
@@ -586,18 +626,25 @@ mod tests {
         let serialized = bincode::serialize(&state).expect("serialize failed");
 
         // Deserialize
-        let deserialized: VhostUserFsState = bincode::deserialize(&serialized).expect("deserialize failed");
+        let deserialized: VhostUserFsState =
+            bincode::deserialize(&serialized).expect("deserialize failed");
 
         // Verify all fields match
         assert_eq!(deserialized.tag, state.tag);
         assert_eq!(deserialized.socket_path, state.socket_path);
         assert_eq!(deserialized.dax_window_mib, state.dax_window_mib);
         assert_eq!(deserialized.acked_features, state.acked_features);
-        assert_eq!(deserialized.acked_protocol_features, state.acked_protocol_features);
+        assert_eq!(
+            deserialized.acked_protocol_features,
+            state.acked_protocol_features
+        );
         assert_eq!(deserialized.vring_bases, state.vring_bases);
         assert_eq!(deserialized.daemon_state, state.daemon_state);
         assert_eq!(deserialized.config_tag, state.config_tag);
-        assert_eq!(deserialized.config_num_request_queues, state.config_num_request_queues);
+        assert_eq!(
+            deserialized.config_num_request_queues,
+            state.config_num_request_queues
+        );
     }
 
     // AC4.6: restore_backend_state stores pending state
@@ -640,8 +687,8 @@ mod tests {
     #[test]
     #[cfg(feature = "snapshot")]
     fn test_activate_restore_fails_when_daemon_unavailable() {
-        use crate::virtio::DeviceQueue;
         use crate::legacy::DummyIrqChip;
+        use crate::virtio::DeviceQueue;
         use std::sync::Arc;
         use utils::eventfd::EventFd;
 
@@ -667,7 +714,8 @@ mod tests {
         let mem = vm_memory::GuestMemoryMmap::from_ranges(&[(
             vm_memory::GuestAddress(0),
             1024 * 1024, // 1MB
-        )]).expect("create guest memory");
+        )])
+        .expect("create guest memory");
 
         let queues = vec![DeviceQueue::new(
             crate::virtio::Queue::new(QUEUE_SIZE),
@@ -680,7 +728,10 @@ mod tests {
 
         // Try to activate_restore - should fail because daemon is unavailable
         let result = device.activate(mem, interrupt, queues);
-        assert!(result.is_err(), "activate_restore should fail when daemon unavailable");
+        assert!(
+            result.is_err(),
+            "activate_restore should fail when daemon unavailable"
+        );
     }
 }
 
@@ -696,7 +747,9 @@ impl VhostUserFs {
             queue_configs.push(QueueConfig::new(QUEUE_SIZE)); // Request queues
         }
 
-        let queues = (0..1 + num_queues).map(|_| Queue::new(QUEUE_SIZE)).collect();
+        let queues = (0..1 + num_queues)
+            .map(|_| Queue::new(QUEUE_SIZE))
+            .collect();
 
         VhostUserFs {
             vhost_user: VhostUserDevice::new_for_test_unconnected(),

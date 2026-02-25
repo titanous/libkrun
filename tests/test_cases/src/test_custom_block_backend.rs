@@ -76,8 +76,7 @@ mod guest {
 
             // AC7.5: read sector 0 and verify it's 0x5A (pre-filled by backend)
             let mut sector0 = vec![0u8; 512];
-            f.read_exact(&mut sector0)
-                .expect("Failed to read sector 0");
+            f.read_exact(&mut sector0).expect("Failed to read sector 0");
             assert!(
                 sector0.iter().all(|&b| b == 0x5A),
                 "Expected sector 0 to be all 0x5A"

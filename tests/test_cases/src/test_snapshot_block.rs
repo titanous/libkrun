@@ -16,8 +16,8 @@ mod host {
     use crate::{Test, TestSetup};
     use std::io::{Read, Write};
     use std::os::unix::net::UnixListener;
-    use std::time::Duration;
     use std::thread;
+    use std::time::Duration;
 
     impl Test for TestSnapshotBlock {
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
@@ -56,7 +56,9 @@ mod host {
 
             // Wait for guest to signal READY
             let (mut stream, _) = listener.accept().unwrap();
-            stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
             let mut buf = vec![0u8; 5];
             stream.read_exact(&mut buf).unwrap();
             assert_eq!(&buf, b"READY");
@@ -93,13 +95,22 @@ mod guest {
 
     impl Test for TestSnapshotBlock {
         fn in_guest(self: Box<Self>) {
-            let sock = socket(AddressFamily::Vsock, SockType::Stream, SockFlag::empty(), None)
-                .unwrap();
+            let sock = socket(
+                AddressFamily::Vsock,
+                SockType::Stream,
+                SockFlag::empty(),
+                None,
+            )
+            .unwrap();
             let addr = VsockAddr::new(VMADDR_CID_HOST, VSOCK_PORT);
             connect(sock.as_raw_fd(), &addr).unwrap();
             let mut stream = UnixStream::from(sock);
-            stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-            stream.set_write_timeout(Some(Duration::from_secs(10))).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
 
             // Open block device and write known pattern to first sector
             let mut f = OpenOptions::new()
@@ -113,8 +124,7 @@ mod guest {
             sector_data[..TEST_PATTERN.len()].copy_from_slice(TEST_PATTERN);
             f.seek(SeekFrom::Start(0))
                 .expect("Failed to seek to sector 0");
-            f.write_all(&sector_data)
-                .expect("Failed to write sector 0");
+            f.write_all(&sector_data).expect("Failed to write sector 0");
             f.flush().expect("Failed to flush");
 
             // Signal host we have written to block device

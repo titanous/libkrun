@@ -25,11 +25,9 @@ mod host {
 
             // AC3.1: Use CustomAsyncFactory with LoopbackFactory
             builder.add_net_device(
-                krun::VirtioNetBackend::CustomAsyncFactory(
-                    Box::new(LoopbackFactory::new()),
-                ),
+                krun::VirtioNetBackend::CustomAsyncFactory(Box::new(LoopbackFactory::new())),
                 [0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee], // Guest MAC
-                0, // features
+                0,                                    // features
             );
 
             let context = builder.build()?;
@@ -43,8 +41,8 @@ mod host {
 #[guest]
 mod guest {
     use super::*;
-    use crate::Test;
     use crate::net_helpers::{configure_eth0, test_ping};
+    use crate::Test;
 
     impl Test for TestNetAsyncLoopback {
         fn in_guest(self: Box<Self>) {

@@ -25,15 +25,16 @@ fn copy_guest_agent(dir: &Path) -> anyhow::Result<()> {
 ///
 /// Call this before `builder.build()`. The returned `Context` can then be
 /// run with `context.run()` or used with `context.vm_handle()` first.
-pub fn setup_fs_builder(
-    builder: &mut krun::Builder,
-    test_setup: &TestSetup,
-) -> anyhow::Result<()> {
+pub fn setup_fs_builder(builder: &mut krun::Builder, test_setup: &TestSetup) -> anyhow::Result<()> {
     let root_dir = test_setup.tmp_dir.join("root");
     create_dir(&root_dir).context("Failed to create root directory")?;
     copy_guest_agent(&root_dir)?;
 
-    builder.set_root(root_dir.to_str().context("root_dir path is not valid UTF-8")?);
+    builder.set_root(
+        root_dir
+            .to_str()
+            .context("root_dir path is not valid UTF-8")?,
+    );
     builder.workdir("/".to_string());
     builder.exec_path("/guest-agent".to_string());
     builder.args(test_setup.test_case.clone());

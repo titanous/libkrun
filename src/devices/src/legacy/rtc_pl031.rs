@@ -12,8 +12,8 @@ use std::fmt;
 use std::time::{Duration, Instant};
 use std::{io, result};
 
-use crate::BusDevice;
 use crate::snapshot::{SnapshotError, Snapshottable};
+use crate::BusDevice;
 use utils::byte_order;
 use utils::eventfd::EventFd;
 //use bus::Error;
@@ -206,9 +206,7 @@ impl Snapshottable for RTC {
     }
 
     fn save_state(&self) -> std::result::Result<Vec<u8>, SnapshotError> {
-        let elapsed = Instant::now()
-            .duration_since(self.previous_now)
-            .as_nanos() as u64;
+        let elapsed = Instant::now().duration_since(self.previous_now).as_nanos() as u64;
         let state = RtcState {
             tick_offset: self.tick_offset,
             previous_now_elapsed_nanos: elapsed,

@@ -26,9 +26,9 @@ use crate::vmm_config::kernel_cmdline::{KernelCmdlineConfig, KernelCmdlineConfig
 use crate::vmm_config::machine_config::{VmConfig, VmConfigError};
 #[cfg(feature = "net")]
 use crate::vmm_config::net::{NetBuilder, NetworkInterfaceConfig, NetworkInterfaceError};
-use crate::vmm_config::vsock::*;
 #[cfg(feature = "vhost-user")]
 use crate::vmm_config::vhost_user_fs::VhostUserFsConfig;
+use crate::vmm_config::vsock::*;
 use crate::vstate::VcpuConfig;
 #[cfg(feature = "gpu")]
 use devices::virtio::display::DisplayInfo;

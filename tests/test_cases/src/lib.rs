@@ -29,10 +29,14 @@ mod test_snapshot_net;
 use test_snapshot_net::TestSnapshotNet;
 
 mod test_snapshot_errors;
-use test_snapshot_errors::{TestSnapshotWrongMagic, TestSnapshotVcpuMismatch, TestSnapshotNestedMismatch};
+use test_snapshot_errors::{
+    TestSnapshotNestedMismatch, TestSnapshotVcpuMismatch, TestSnapshotWrongMagic,
+};
 
 mod test_rust_api;
-use test_rust_api::{TestRustApiZeroVcpu, TestRustApiDeviceInfo, TestRustApiPauseResume, TestRustApiShutdown};
+use test_rust_api::{
+    TestRustApiDeviceInfo, TestRustApiPauseResume, TestRustApiShutdown, TestRustApiZeroVcpu,
+};
 
 mod test_vm_exit;
 use test_vm_exit::{TestVmExit, TestVmExitObserver};
@@ -50,7 +54,9 @@ mod test_net_async_loopback;
 use test_net_async_loopback::TestNetAsyncLoopback;
 
 mod test_vhost_user_fs;
-use test_vhost_user_fs::{TestVhostUserFsDaxRead, TestVhostUserFsDaxWrite, TestVhostUserFsDaxSnapshot};
+use test_vhost_user_fs::{
+    TestVhostUserFsDaxAlways, TestVhostUserFsDaxInode, TestVhostUserFsDaxNever,
+};
 
 #[cfg(feature = "guest")]
 mod net_helpers;
@@ -83,14 +89,29 @@ pub fn test_cases() -> Vec<TestCase> {
         ),
         TestCase::new("multiport-console", Box::new(TestMultiportConsole)),
         TestCase::new("snapshot-restore-full", Box::new(TestSnapshotRestore)),
-        TestCase::new("snapshot-restore-incremental", Box::new(TestSnapshotRestoreIncremental)),
+        TestCase::new(
+            "snapshot-restore-incremental",
+            Box::new(TestSnapshotRestoreIncremental),
+        ),
         TestCase::new("snapshot-serial-scratch", Box::new(TestSnapshotSerial)),
         TestCase::new("snapshot-block-data", Box::new(TestSnapshotBlock)),
-        TestCase::new("snapshot-incremental-state", Box::new(TestSnapshotIncrementalState)),
+        TestCase::new(
+            "snapshot-incremental-state",
+            Box::new(TestSnapshotIncrementalState),
+        ),
         TestCase::new("snapshot-net-connectivity", Box::new(TestSnapshotNet)),
-        TestCase::new("snapshot-error-wrong-magic", Box::new(TestSnapshotWrongMagic)),
-        TestCase::new("snapshot-error-vcpu-mismatch", Box::new(TestSnapshotVcpuMismatch)),
-        TestCase::new("snapshot-error-nested-mismatch", Box::new(TestSnapshotNestedMismatch)),
+        TestCase::new(
+            "snapshot-error-wrong-magic",
+            Box::new(TestSnapshotWrongMagic),
+        ),
+        TestCase::new(
+            "snapshot-error-vcpu-mismatch",
+            Box::new(TestSnapshotVcpuMismatch),
+        ),
+        TestCase::new(
+            "snapshot-error-nested-mismatch",
+            Box::new(TestSnapshotNestedMismatch),
+        ),
         TestCase::new("rust-api-zero-vcpu", Box::new(TestRustApiZeroVcpu)),
         TestCase::new("rust-api-device-info", Box::new(TestRustApiDeviceInfo)),
         TestCase::new("rust-api-pause-resume", Box::new(TestRustApiPauseResume)),
@@ -99,9 +120,12 @@ pub fn test_cases() -> Vec<TestCase> {
         TestCase::new("vm-exit-observer", Box::new(TestVmExitObserver)),
         TestCase::new("custom-block-backend", Box::new(TestCustomBlockBackend)),
         TestCase::new("net-async-loopback", Box::new(TestNetAsyncLoopback)),
-        TestCase::new("vhost-user-fs-dax-read", Box::new(TestVhostUserFsDaxRead)),
-        TestCase::new("vhost-user-fs-dax-write", Box::new(TestVhostUserFsDaxWrite)),
-        TestCase::new("vhost-user-fs-dax-snapshot", Box::new(TestVhostUserFsDaxSnapshot)),
+        TestCase::new(
+            "vhost-user-fs-dax-always",
+            Box::new(TestVhostUserFsDaxAlways),
+        ),
+        TestCase::new("vhost-user-fs-dax-inode", Box::new(TestVhostUserFsDaxInode)),
+        TestCase::new("vhost-user-fs-dax-never", Box::new(TestVhostUserFsDaxNever)),
     ]
 }
 

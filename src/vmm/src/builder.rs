@@ -46,9 +46,9 @@ use devices::legacy::{IoApic, IrqChipT};
 use devices::legacy::{IrqChip, IrqChipDevice};
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 use devices::legacy::{KvmGicV2, KvmGicV3};
-use devices::virtio::{port_io, MmioTransport, PortDescription, VirtioDevice, Vsock};
 #[cfg(feature = "vhost-user")]
 use devices::virtio::vhost_user::VhostUserFs;
+use devices::virtio::{port_io, MmioTransport, PortDescription, VirtioDevice, Vsock};
 
 #[cfg(feature = "tee")]
 use kbs_types::Tee;
@@ -63,9 +63,9 @@ use crate::terminal::{term_restore_mode, term_set_raw_mode};
 use crate::vmm_config::block::BlockBuilder;
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 use crate::vmm_config::fs::FsDeviceConfig;
+use crate::vmm_config::kernel_cmdline::DEFAULT_KERNEL_CMDLINE;
 #[cfg(feature = "vhost-user")]
 use crate::vmm_config::vhost_user_fs::VhostUserFsConfig;
-use crate::vmm_config::kernel_cmdline::DEFAULT_KERNEL_CMDLINE;
 #[cfg(target_os = "linux")]
 use crate::vstate::KvmContext;
 #[cfg(all(target_os = "linux", feature = "tee"))]
@@ -1808,8 +1808,8 @@ pub fn create_guest_memory(
 
     // For vhost-user devices, we need file-backed memory so the backend can mmap it
     #[cfg(feature = "vhost-user")]
-    let use_vhost_user = !vm_resources.vhost_user_devices.is_empty()
-        || !vm_resources.vhost_user_fs.is_empty();
+    let use_vhost_user =
+        !vm_resources.vhost_user_devices.is_empty() || !vm_resources.vhost_user_fs.is_empty();
     #[cfg(not(feature = "vhost-user"))]
     let use_vhost_user = false;
 
@@ -1882,7 +1882,7 @@ pub fn create_guest_memory(
     #[cfg(not(feature = "tee"))]
     #[cfg(feature = "vhost-user")]
     {
-        let fs_count = vm_resources.fs.len();  // offset past regular FS regions
+        let fs_count = vm_resources.fs.len(); // offset past regular FS regions
         for (i, vhost_fs_config) in vm_resources.vhost_user_fs.iter().enumerate() {
             if let Some(dax_mib) = vhost_fs_config.dax_window_mib {
                 let size = (dax_mib as usize) * 1024 * 1024;
@@ -2340,11 +2340,8 @@ fn attach_vhost_user_fs_device(
     use self::StartMicrovmError::*;
 
     // 1. Create VhostUserFs device
-    let mut vhost_fs = VhostUserFs::new(
-        &config.tag,
-        &config.socket_path,
-        config.dax_window_mib,
-    ).map_err(RegisterVhostUserDevice)?;
+    let mut vhost_fs = VhostUserFs::new(&config.tag, &config.socket_path, config.dax_window_mib)
+        .map_err(RegisterVhostUserDevice)?;
 
     // 2. Wire up DAX window SHM region (if configured)
     //    The DAX memfd was created in VhostUserFs::new(). We need to:
@@ -2380,9 +2377,7 @@ fn attach_vhost_user_fs_device(
                 )
             };
             if host_addr == libc::MAP_FAILED {
-                return Err(MmapDaxWindow(
-                    std::io::Error::last_os_error()
-                ));
+                return Err(MmapDaxWindow(std::io::Error::last_os_error()));
             }
 
             // Track the mmap'd address for cleanup on failure
@@ -2395,7 +2390,9 @@ fn attach_vhost_user_fs_device(
                 host_addr as u64,
             ) {
                 // Cleanup mmap on KVM registration failure
-                unsafe { libc::munmap(host_addr, dax_size); }
+                unsafe {
+                    libc::munmap(host_addr, dax_size);
+                }
                 return Err(RegisterDaxMemoryRegion(e));
             }
 
@@ -2414,7 +2411,9 @@ fn attach_vhost_user_fs_device(
     if let Err(e) = attach_mmio_device(vmm, id, intc, device) {
         if let Some((addr, size)) = mmap_addr {
             // Cleanup mmap on MMIO device attachment failure
-            unsafe { libc::munmap(addr as *mut libc::c_void, size); }
+            unsafe {
+                libc::munmap(addr as *mut libc::c_void, size);
+            }
         }
         return Err(RegisterVhostUserFsDevice(e));
     }

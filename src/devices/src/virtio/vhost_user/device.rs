@@ -14,8 +14,8 @@ use std::thread;
 
 use log::{debug, error};
 use utils::eventfd::EventFd;
-use vhost::vhost_user::{Frontend, VhostUserFrontend, VhostUserProtocolFeatures};
 use vhost::vhost_user::message::{VhostTransferStateDirection, VhostTransferStatePhase};
+use vhost::vhost_user::{Frontend, VhostUserFrontend, VhostUserProtocolFeatures};
 use vhost::{VhostBackend, VhostUserMemoryRegionInfo, VringConfigData};
 use vm_memory::{Address, GuestMemory, GuestMemoryMmap, GuestMemoryRegion};
 
@@ -122,9 +122,7 @@ impl VhostUserDevice {
         let mut frontend = Frontend::from_stream(stream, 1);
 
         // Get available features from backend
-        let avail_features = frontend
-            .get_features()
-            .map_err(io::Error::other)?;
+        let avail_features = frontend.get_features().map_err(io::Error::other)?;
 
         debug!("{}: backend features: 0x{:x}", device_name, avail_features);
 
@@ -143,9 +141,7 @@ impl VhostUserDevice {
                 .set_features(backend_features)
                 .map_err(io::Error::other)?;
 
-            let protocol_features = frontend
-                .get_protocol_features()
-                .map_err(io::Error::other)?;
+            let protocol_features = frontend.get_protocol_features().map_err(io::Error::other)?;
 
             let mut our_protocol_features = VhostUserProtocolFeatures::empty();
             if protocol_features.contains(VhostUserProtocolFeatures::CONFIG) {
@@ -172,9 +168,7 @@ impl VhostUserDevice {
 
         let actual_num_queues = if num_queues == 0 {
             if backend_features & VHOST_USER_F_PROTOCOL_FEATURES != 0 {
-                let backend_queue_num = frontend
-                    .get_queue_num()
-                    .map_err(io::Error::other)?;
+                let backend_queue_num = frontend.get_queue_num().map_err(io::Error::other)?;
 
                 debug!(
                     "{}: backend reports {} queues available",
@@ -208,7 +202,8 @@ impl VhostUserDevice {
             })
             .collect();
 
-        let device_state_supported = acked_protocol_features.contains(VhostUserProtocolFeatures::DEVICE_STATE);
+        let device_state_supported =
+            acked_protocol_features.contains(VhostUserProtocolFeatures::DEVICE_STATE);
 
         Ok(VhostUserDevice {
             frontend: Arc::new(Mutex::new(frontend)),
@@ -241,9 +236,7 @@ impl VhostUserDevice {
         // Combine guest-acked features with backend-only features (QEMU approach)
         let backend_feature_bits = self.acked_features | self.backend_features;
 
-        frontend
-            .set_owner()
-            .map_err(io::Error::other)?;
+        frontend.set_owner().map_err(io::Error::other)?;
 
         // Only share memory regions that have file backing (memfd)
         let regions: Vec<VhostUserMemoryRegionInfo> = mem
@@ -359,11 +352,9 @@ impl VhostUserDevice {
         // Spawn single interrupt monitoring thread
         // All queues share the same vring_call_event, so we only need one thread
         // to monitor it and forward interrupts to the guest
-        let vring_call_event = vring_call_event.try_clone().map_err(|e| {
-            io::Error::other(
-                format!("Failed to clone vring_call_event: {}", e),
-            )
-        })?;
+        let vring_call_event = vring_call_event
+            .try_clone()
+            .map_err(|e| io::Error::other(format!("Failed to clone vring_call_event: {}", e)))?;
         let interrupt_clone = interrupt.clone();
         let device_name = self.device_name.clone();
 
@@ -390,9 +381,7 @@ impl VhostUserDevice {
                 debug!("{}: interrupt monitor thread exiting", device_name);
             })
             .map_err(|e| {
-                io::Error::other(
-                    format!("Failed to spawn interrupt monitor thread: {}", e),
-                )
+                io::Error::other(format!("Failed to spawn interrupt monitor thread: {}", e))
             })?;
 
         debug!(
@@ -416,7 +405,10 @@ impl VhostUserDevice {
     /// Share an additional memory region with the daemon.
     /// Requires CONFIGURE_MEM_SLOTS protocol feature to have been negotiated.
     pub fn add_mem_region(&self, region_info: &VhostUserMemoryRegionInfo) -> IoResult<()> {
-        if !self.acked_protocol_features.contains(VhostUserProtocolFeatures::CONFIGURE_MEM_SLOTS) {
+        if !self
+            .acked_protocol_features
+            .contains(VhostUserProtocolFeatures::CONFIGURE_MEM_SLOTS)
+        {
             return Err(io::Error::new(
                 ErrorKind::InvalidInput,
                 "CONFIGURE_MEM_SLOTS protocol feature not negotiated",
@@ -443,8 +435,8 @@ impl VhostUserDevice {
         }
 
         // 1. Create pipe
-        let (read_end, write_end) = nix::unistd::pipe()
-            .map_err(|e| io::Error::other(format!("pipe: {e}")))?;
+        let (read_end, write_end) =
+            nix::unistd::pipe().map_err(|e| io::Error::other(format!("pipe: {e}")))?;
 
         // Wrap in File which CONSUMES the OwnedFd, transferring ownership
         let read_file = File::from(read_end);
@@ -477,7 +469,8 @@ impl VhostUserDevice {
         // 4. Read all data from pipe until EOF
         let mut state = Vec::new();
         let mut read_file = read_file;
-        read_file.read_to_end(&mut state)
+        read_file
+            .read_to_end(&mut state)
             .map_err(|e| io::Error::other(format!("read pipe: {e}")))?;
 
         // 5. CHECK_DEVICE_STATE confirms transfer completed successfully.
@@ -501,8 +494,8 @@ impl VhostUserDevice {
         }
 
         // 1. Create pipe
-        let (read_end, write_end) = nix::unistd::pipe()
-            .map_err(|e| io::Error::other(format!("pipe: {e}")))?;
+        let (read_end, write_end) =
+            nix::unistd::pipe().map_err(|e| io::Error::other(format!("pipe: {e}")))?;
 
         // Wrap in File which CONSUMES the OwnedFd, transferring ownership
         let read_file = File::from(read_end);
@@ -549,57 +542,70 @@ impl VhostUserDevice {
         Ok(())
     }
 
+    /// Mark device as inactive. Used during snapshot restore to force
+    /// re-activation via complete_restore() → activate() → activate_restore().
+    pub(super) fn mark_inactive(&mut self) {
+        self.device_state = DeviceState::Inactive;
+    }
+
     /// Mark device as activated with given memory and interrupt.
     /// Used by subclasses (like VhostUserFs) that perform custom activation logic
     /// and need to update the device state afterward.
-    pub(super) fn mark_activated(
-        &mut self,
-        mem: GuestMemoryMmap,
-        interrupt: InterruptTransport,
-    ) {
+    pub(super) fn mark_activated(&mut self, mem: GuestMemoryMmap, interrupt: InterruptTransport) {
         self.device_state = DeviceState::Activated(mem, interrupt);
     }
 
     /// Replace the Frontend connection for snapshot restore.
-    /// Uses saved negotiated features instead of fresh negotiation.
+    /// Protocol features use saved set intersected with daemon capabilities;
+    /// base virtio features are re-negotiated fresh from the new daemon.
     pub(super) fn reconnect_for_restore(
         &mut self,
         stream: UnixStream,
-        saved_features: u64,
+        _saved_features: u64,
         saved_protocol_features: u64,
     ) -> ActivateResult {
         let num_queues = self.queue_configs.len() as u64;
         let frontend = Frontend::from_stream(stream, num_queues);
         *self.frontend.lock().unwrap() = frontend;
 
-        // Follow the full vhost-user negotiation handshake, same as VhostUserDevice::new().
-        // The protocol requires get_features/get_protocol_features before set_*, even on restore.
-        // Use saved features as "desired" and intersect with what the (potentially restarted)
-        // daemon actually supports. This handles the case where a restarted daemon has
-        // different capabilities.
+        // Mirror VhostUserDevice::new() negotiation: get features, acknowledge
+        // PROTOCOL_FEATURES bit to enable protocol extensions, then negotiate
+        // protocol features. Do NOT call set_owner() here — activate_vhost_user
+        // does that. Calling it twice is a protocol error.
         let mut frontend = self.frontend.lock().unwrap();
-        frontend.set_owner().map_err(|_| ActivateError::BadActivate)?;
 
         const VHOST_USER_F_PROTOCOL_FEATURES: u64 = 1 << 30;
 
-        // Feature negotiation: get available, intersect with saved, set
-        let backend_features = frontend.get_features()
+        let backend_features = frontend
+            .get_features()
             .map_err(|_| ActivateError::BadActivate)?;
         let protocol_bit = backend_features & VHOST_USER_F_PROTOCOL_FEATURES;
-        let negotiated_features = saved_features & backend_features;
-        frontend.set_features(negotiated_features)
-            .map_err(|_| ActivateError::BadActivate)?;
 
-        // Protocol feature negotiation: The vhost-user protocol requires acknowledging
-        // VHOST_USER_F_PROTOCOL_FEATURES via set_features before calling get_protocol_features.
-        // Only fetch protocol features if the bit is supported.
+        // Acknowledge just the protocol features bit (same as new())
+        // to enable GET_PROTOCOL_FEATURES. Full features are set by activate_vhost_user.
         if protocol_bit != 0 {
-            let backend_proto_features = frontend.get_protocol_features()
+            frontend
+                .set_features(protocol_bit)
                 .map_err(|_| ActivateError::BadActivate)?;
-            let desired_proto = VhostUserProtocolFeatures::from_bits_truncate(saved_protocol_features);
-            frontend.set_protocol_features(desired_proto & backend_proto_features)
+
+            let backend_proto_features = frontend
+                .get_protocol_features()
                 .map_err(|_| ActivateError::BadActivate)?;
+            let desired_proto =
+                VhostUserProtocolFeatures::from_bits_truncate(saved_protocol_features);
+            let negotiated_proto = desired_proto & backend_proto_features;
+            frontend
+                .set_protocol_features(negotiated_proto)
+                .map_err(|_| ActivateError::BadActivate)?;
+
+            self.acked_protocol_features = negotiated_proto;
+            self.device_state_supported =
+                negotiated_proto.contains(VhostUserProtocolFeatures::DEVICE_STATE);
         }
+
+        // Update available features (daemon may have changed)
+        self.avail_features = backend_features & !VHOST_USER_F_PROTOCOL_FEATURES;
+        self.backend_features = protocol_bit;
 
         Ok(())
     }
@@ -614,18 +620,15 @@ impl VhostUserDevice {
             // For tests, we create a placeholder Frontend by connecting to /dev/null.
             // This allows Frontend::from_stream to succeed without a real daemon.
             // Tests should not actually use the frontend.
-            frontend: Arc::new(Mutex::new(
-                Frontend::from_stream(
-                    std::os::unix::net::UnixStream::connect("/dev/null")
-                        .unwrap_or_else(|_| {
-                            // If /dev/null fails, create a dummy pair
-                            let (a, _) = std::os::unix::net::UnixStream::pair()
-                                .expect("failed to create unix socket pair for test");
-                            a
-                        }),
-                    1,
-                )
-            )),
+            frontend: Arc::new(Mutex::new(Frontend::from_stream(
+                std::os::unix::net::UnixStream::connect("/dev/null").unwrap_or_else(|_| {
+                    // If /dev/null fails, create a dummy pair
+                    let (a, _) = std::os::unix::net::UnixStream::pair()
+                        .expect("failed to create unix socket pair for test");
+                    a
+                }),
+                1,
+            ))),
             device_type: 0,
             device_name: String::from("test-device"),
             queue_configs: vec![],

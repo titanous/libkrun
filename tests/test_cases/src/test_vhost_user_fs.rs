@@ -1,15 +1,17 @@
 use macros::{guest, host};
 
-pub struct TestVhostUserFsDaxRead;
-pub struct TestVhostUserFsDaxWrite;
-pub struct TestVhostUserFsDaxSnapshot;
+pub struct TestVhostUserFsDaxAlways;
+pub struct TestVhostUserFsDaxInode;
+pub struct TestVhostUserFsDaxNever;
 
-const VSOCK_PORT: u32 = 5685;
+const VSOCK_PORT_ALWAYS: u32 = 5685;
+const VSOCK_PORT_INODE: u32 = 5686;
+const VSOCK_PORT_NEVER: u32 = 5687;
 
 #[host]
 mod host_helpers {
-    use std::process::{Child, Command};
     use std::path::Path;
+    use std::process::{Child, Command};
     use std::thread;
     use std::time::Duration;
 
@@ -17,16 +19,15 @@ mod host_helpers {
     pub const FS_TAG: &str = "testfs";
 
     /// Start the test daemon and return the child process handle.
-    /// Caller must kill the child when done.
     pub fn start_test_daemon(socket_path: &Path) -> Child {
-        // Find test-daemon binary
-        // Built alongside test_cases in the tests workspace
-        let daemon_path = std::env::var("KRUN_TEST_DAEMON_PATH")
-            .unwrap_or_else(|_| {
-                // Fallback: look relative to current exe
-                let exe = std::env::current_exe().unwrap();
-                exe.parent().unwrap().join("test-daemon").to_string_lossy().to_string()
-            });
+        let daemon_path = std::env::var("KRUN_TEST_DAEMON_PATH").unwrap_or_else(|_| {
+            let exe = std::env::current_exe().unwrap();
+            exe.parent()
+                .unwrap()
+                .join("test-daemon")
+                .to_string_lossy()
+                .to_string()
+        });
 
         let child = Command::new(&daemon_path)
             .arg("--socket-path")
@@ -34,7 +35,6 @@ mod host_helpers {
             .spawn()
             .expect("Failed to start test-daemon");
 
-        // Wait for socket to appear
         for _ in 0..50 {
             if socket_path.exists() {
                 return child;
@@ -43,169 +43,234 @@ mod host_helpers {
         }
         panic!("test-daemon did not create socket within 5 seconds");
     }
+
+    /// Common host-side pattern: start daemon, configure VM with vsock + virtiofs,
+    /// wait for guest READY, snapshot, kill+restart daemon, restore, send CHECK,
+    /// wait for VM exit, clean up.
+    pub fn run_snapshot_test(
+        test_setup: &crate::TestSetup,
+        sock_name: &str,
+        vsock_port: u32,
+        dax_window_mib: Option<u32>,
+    ) -> anyhow::Result<()> {
+        use crate::krun_rust::setup_fs_builder;
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixListener;
+
+        let socket_path = test_setup.tmp_dir.join(format!("{}.sock", sock_name));
+        let snap_dir = test_setup.tmp_dir.join("snapshot");
+        let vsock_path = test_setup
+            .tmp_dir
+            .join(format!("{}_control.sock", sock_name));
+
+        // 1. Start test daemon
+        let mut daemon = start_test_daemon(&socket_path);
+
+        // 2. Configure VM
+        let mut builder = krun::Builder::new();
+        builder.vm_config(1, 512)?;
+        setup_fs_builder(&mut builder, test_setup)?;
+        builder.add_virtiofs_vhost_user(FS_TAG, socket_path.to_str().unwrap(), dax_window_mib)?;
+
+        let listener = UnixListener::bind(&vsock_path)?;
+        builder.add_vsock_port(vsock_port, vsock_path, false);
+
+        let context = builder.build()?;
+        let handle = context.vm_handle();
+        let vm_thread = thread::spawn(move || context.run());
+
+        // 3. Wait for guest READY
+        let (mut stream, _) = listener.accept()?;
+        let mut buf = [0u8; 5];
+        stream.read_exact(&mut buf)?;
+        assert_eq!(&buf, b"READY");
+
+        // 4. Snapshot
+        handle.snapshot(&snap_dir)?;
+
+        // 5. Kill and restart daemon
+        daemon.kill()?;
+        daemon.wait()?;
+        std::fs::remove_file(&socket_path).ok();
+        daemon = start_test_daemon(&socket_path);
+
+        // 6. Restore
+        handle.restore_snapshot(&snap_dir)?;
+
+        // 7. Signal guest to verify
+        stream.write_all(b"CHECK")?;
+
+        // 8. Wait for VM
+        vm_thread.join().ok();
+
+        // 9. Clean up
+        daemon.kill().ok();
+        daemon.wait().ok();
+
+        Ok(())
+    }
 }
 
+#[guest]
+mod guest_helpers {
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    /// Mount virtiofs using libc::mount syscall directly.
+    /// The guest VM has no /bin/mount binary.
+    /// Tries with dax_option first, falls back to no options if EINVAL.
+    pub fn mount_virtiofs(tag: &str, mountpoint: &str, dax_option: &str) {
+        use std::ffi::CString;
+        use std::fs;
+
+        fs::create_dir_all(mountpoint).unwrap();
+
+        let source = CString::new(tag).unwrap();
+        let target = CString::new(mountpoint).unwrap();
+        let fstype = CString::new("virtiofs").unwrap();
+        let options = CString::new(dax_option).unwrap();
+
+        let ret = unsafe {
+            libc::mount(
+                source.as_ptr(),
+                target.as_ptr(),
+                fstype.as_ptr(),
+                0,
+                options.as_ptr() as *const libc::c_void,
+            )
+        };
+        if ret == 0 {
+            return;
+        }
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EINVAL) && !dax_option.is_empty() {
+            println!(
+                "mount with '{}' failed (EINVAL), retrying without dax option",
+                dax_option
+            );
+            let ret = unsafe {
+                libc::mount(
+                    source.as_ptr(),
+                    target.as_ptr(),
+                    fstype.as_ptr(),
+                    0,
+                    std::ptr::null(),
+                )
+            };
+            assert!(
+                ret == 0,
+                "mount without dax option also failed: {}",
+                std::io::Error::last_os_error()
+            );
+            return;
+        }
+        panic!("mount failed with errno {}", err);
+    }
+
+    /// Connect to host via vsock and send READY.
+    pub fn vsock_send_ready(port: u32) -> UnixStream {
+        use nix::libc::VMADDR_CID_HOST;
+        use nix::sys::socket::{connect, socket, AddressFamily, SockFlag, SockType, VsockAddr};
+        use std::io::Write;
+        use std::os::fd::AsRawFd;
+
+        let sock = socket(
+            AddressFamily::Vsock,
+            SockType::Stream,
+            SockFlag::empty(),
+            None,
+        )
+        .unwrap();
+        connect(sock.as_raw_fd(), &VsockAddr::new(VMADDR_CID_HOST, port)).unwrap();
+        let mut stream = UnixStream::from(sock);
+        stream.write_all(b"READY").unwrap();
+        stream
+    }
+
+    /// Wait for host CHECK signal after snapshot/restore.
+    pub fn wait_for_check(stream: &mut UnixStream) {
+        use std::io::Read;
+
+        let mut buf = [0u8; 5];
+        stream
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .unwrap();
+        stream.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf, b"CHECK");
+    }
+}
+
+// =============================================================================
+// dax=always: read (0xBB via DAX) → write (0xCC) → readback → snapshot → read (0xBB)
+// =============================================================================
+
 #[host]
-mod dax_read {
+mod dax_always_host {
     use super::*;
-    use crate::krun_rust::setup_fs_builder;
     use crate::{Test, TestSetup};
-    use std::thread;
 
-    impl Test for TestVhostUserFsDaxRead {
+    impl Test for TestVhostUserFsDaxAlways {
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
-            let socket_path = test_setup.tmp_dir.join("vhost-fs.sock");
-
-            // 1. Start test daemon
-            let mut daemon = host_helpers::start_test_daemon(&socket_path);
-
-            // 2. Configure VM with vhost-user FS + DAX
-            let mut builder = krun::Builder::new();
-            builder.vm_config(1, 512)?;
-            setup_fs_builder(&mut builder, &test_setup)?;
-            builder.add_virtiofs_vhost_user(host_helpers::FS_TAG, socket_path.to_str().unwrap(), Some(host_helpers::DAX_WINDOW_MIB))?;
-
-            // 3. Start VM
-            let context = builder.build()?;
-            let vm_thread = thread::spawn(move || context.run());
-
-            // 4. Wait for VM to finish
-            vm_thread.join().ok();
-
-            // 5. Clean up daemon
-            daemon.kill().ok();
-            daemon.wait().ok();
-
-            Ok(())
+            host_helpers::run_snapshot_test(
+                &test_setup,
+                "dax-always",
+                VSOCK_PORT_ALWAYS,
+                Some(host_helpers::DAX_WINDOW_MIB),
+            )
         }
     }
 }
 
 #[guest]
-mod dax_read_guest {
+mod dax_always_guest {
     use super::*;
     use crate::Test;
 
-    impl Test for TestVhostUserFsDaxRead {
+    impl Test for TestVhostUserFsDaxAlways {
         fn in_guest(self: Box<Self>) {
             use std::fs;
-            use std::process::Command;
+            use std::fs::OpenOptions;
+            use std::io::Write;
 
-            // 1. Create mount point and mount virtiofs
-            fs::create_dir_all("/mnt/testfs").unwrap();
-            let status = Command::new("mount")
-                .args(["-t", "virtiofs", "testfs", "/mnt/testfs", "-o", "dax=inode"])
-                .status()
-                .unwrap();
-            assert!(status.success(), "mount failed");
+            // 1. Mount with dax=always
+            guest_helpers::mount_virtiofs("testfs", "/mnt/testfs", "dax=always");
 
-            // 2. Read file via DAX (mmap)
-            // When DAX is active, reading a file that has FUSE_ATTR_DAX will use
-            // the DAX window instead of FUSE_READ. The daemon writes 0xBB to DAX
-            // but returns 0xAA via FUSE_READ.
+            // 2. Read via DAX — daemon fills DAX window with 0xBB
             let data = fs::read("/mnt/testfs/hello.txt").unwrap();
-
-            // 3. Verify DAX-specific byte pattern (0xBB, not FUSE_READ's 0xAA)
-            // AC6.1: Proves DAX is active
             if data[0] == 0xAA {
-                // Diagnostic: got FUSE_READ content instead of DAX content.
-                // This means the kernel is not using DAX. Common causes:
-                // - Kernel version < 6.2 (no per-file DAX support)
-                // - Missing CONFIG_FUSE_DAX kernel config
-                // - dax=inode mount option not taking effect
-                // Check kernel version for diagnostic output:
-                let uname = std::process::Command::new("uname").arg("-r").output();
-                let kver = uname.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                    .unwrap_or_else(|_| "unknown".to_string());
-                panic!(
-                    "Got FUSE_READ pattern 0xAA instead of DAX pattern 0xBB. \
-                     DAX is not active. Kernel version: {}. \
-                     Requires kernel >= 6.2 with CONFIG_FUSE_DAX.",
-                    kver
-                );
+                panic!("Got FUSE_READ pattern 0xAA instead of DAX pattern 0xBB — DAX not active");
             }
             assert!(
                 data.iter().all(|&b| b == 0xBB),
-                "Expected DAX pattern 0xBB but got mixed content starting with {:02x}",
+                "Expected 0xBB, got {:02x}",
                 data[0]
             );
 
-            println!("OK");
-        }
-    }
-}
-
-#[host]
-mod dax_write {
-    use super::*;
-    use crate::krun_rust::setup_fs_builder;
-    use crate::{Test, TestSetup};
-    use std::thread;
-
-    impl Test for TestVhostUserFsDaxWrite {
-        fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
-            let socket_path = test_setup.tmp_dir.join("vhost-fs-write.sock");
-
-            // 1. Start test daemon
-            let mut daemon = host_helpers::start_test_daemon(&socket_path);
-
-            // 2. Configure VM with vhost-user FS + DAX
-            let mut builder = krun::Builder::new();
-            builder.vm_config(1, 512)?;
-            setup_fs_builder(&mut builder, &test_setup)?;
-            builder.add_virtiofs_vhost_user(host_helpers::FS_TAG, socket_path.to_str().unwrap(), Some(host_helpers::DAX_WINDOW_MIB))?;
-
-            // 3. Start VM
-            let context = builder.build()?;
-            let vm_thread = thread::spawn(move || context.run());
-
-            // 4. Wait for VM to finish
-            vm_thread.join().ok();
-
-            // 5. Clean up daemon
-            daemon.kill().ok();
-            daemon.wait().ok();
-
-            Ok(())
-        }
-    }
-}
-
-#[guest]
-mod dax_write_guest {
-    use super::*;
-    use crate::Test;
-
-    impl Test for TestVhostUserFsDaxWrite {
-        fn in_guest(self: Box<Self>) {
-            use std::fs::{self, OpenOptions};
-            use std::io::{Write};
-            use std::process::Command;
-
-            // 1. Mount virtiofs with DAX
-            fs::create_dir_all("/mnt/testfs").unwrap();
-            let status = Command::new("mount")
-                .args(["-t", "virtiofs", "testfs", "/mnt/testfs", "-o", "dax=inode"])
-                .status()
-                .unwrap();
-            assert!(status.success(), "mount failed");
-
-            // 2. Write known pattern to file via DAX
-            let write_pattern = vec![0xCC_u8; 4096];
+            // 3. Write 0xCC via DAX, read back
             {
                 let mut f = OpenOptions::new()
                     .write(true)
                     .open("/mnt/testfs/hello.txt")
                     .unwrap();
-                f.write_all(&write_pattern).unwrap();
+                f.write_all(&vec![0xCC; 4096]).unwrap();
                 f.flush().unwrap();
             }
-
-            // 3. Read back and verify written content persists
             let data = fs::read("/mnt/testfs/hello.txt").unwrap();
             assert!(
                 data.iter().take(4096).all(|&b| b == 0xCC),
-                "Expected written pattern 0xCC but got {:02x}",
+                "Write readback: expected 0xCC, got {:02x}",
+                data[0]
+            );
+
+            // 4. Signal READY, wait for snapshot/restore
+            let mut stream = guest_helpers::vsock_send_ready(VSOCK_PORT_ALWAYS);
+            guest_helpers::wait_for_check(&mut stream);
+
+            // 5. Post-restore: DAX memfd content survives snapshot (0xCC from write persists)
+            let data = fs::read("/mnt/testfs/hello.txt").unwrap();
+            assert!(
+                data.iter().take(4096).all(|&b| b == 0xCC),
+                "Post-restore: expected 0xCC (written data preserved in DAX memfd), got {:02x}",
                 data[0]
             );
 
@@ -214,124 +279,150 @@ mod dax_write_guest {
     }
 }
 
+// =============================================================================
+// dax=inode: hello.txt (DAX, 0xBB) + nodax.txt (no DAX, 0xAA) → snapshot → both survive
+// =============================================================================
+
 #[host]
-mod dax_snapshot {
+mod dax_inode_host {
     use super::*;
-    use crate::krun_rust::setup_fs_builder;
     use crate::{Test, TestSetup};
-    use std::io::{Read, Write};
-    use std::os::unix::net::UnixListener;
-    use std::thread;
 
-    impl Test for TestVhostUserFsDaxSnapshot {
+    impl Test for TestVhostUserFsDaxInode {
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
-            let socket_path = test_setup.tmp_dir.join("vhost-fs-snap.sock");
-            let snap_dir = test_setup.tmp_dir.join("snapshot");
-            let vsock_path = test_setup.tmp_dir.join("snap_control.sock");
-
-            // 1. Start test daemon
-            let mut daemon = host_helpers::start_test_daemon(&socket_path);
-
-            // 2. Configure VM
-            let mut builder = krun::Builder::new();
-            builder.vm_config(1, 512)?;
-            setup_fs_builder(&mut builder, &test_setup)?;
-            builder.add_virtiofs_vhost_user(host_helpers::FS_TAG, socket_path.to_str().unwrap(), Some(host_helpers::DAX_WINDOW_MIB))?;
-
-            // Add vsock for guest synchronization
-            let listener = UnixListener::bind(&vsock_path)?;
-            builder.add_vsock_port(VSOCK_PORT, vsock_path, false);
-
-            let context = builder.build()?;
-            let handle = context.vm_handle();
-            let vm_thread = thread::spawn(move || context.run());
-
-            // 3. Wait for guest to signal READY (DAX read succeeded)
-            let (mut stream, _) = listener.accept()?;
-            let mut buf = [0u8; 5];
-            stream.read_exact(&mut buf)?;
-            assert_eq!(&buf, b"READY");
-
-            // 4. Snapshot
-            handle.snapshot(&snap_dir)?;
-
-            // 5. Kill and restart daemon
-            daemon.kill()?;
-            daemon.wait()?;
-            std::fs::remove_file(&socket_path).ok();
-            daemon = host_helpers::start_test_daemon(&socket_path);
-
-            // 6. Restore
-            handle.restore_snapshot(&snap_dir)?;
-
-            // 7. Signal guest to verify
-            stream.write_all(b"CHECK")?;
-
-            // 8. Wait for VM
-            vm_thread.join().ok();
-
-            // 9. Clean up
-            daemon.kill().ok();
-            daemon.wait().ok();
-
-            Ok(())
+            host_helpers::run_snapshot_test(
+                &test_setup,
+                "dax-inode",
+                VSOCK_PORT_INODE,
+                Some(host_helpers::DAX_WINDOW_MIB),
+            )
         }
     }
 }
 
 #[guest]
-mod dax_snapshot_guest {
+mod dax_inode_guest {
     use super::*;
     use crate::Test;
 
-    impl Test for TestVhostUserFsDaxSnapshot {
+    impl Test for TestVhostUserFsDaxInode {
         fn in_guest(self: Box<Self>) {
             use std::fs;
-            use std::process::Command;
-            use nix::sys::socket::{connect, socket, AddressFamily, SockFlag, SockType, VsockAddr};
-            use nix::libc::VMADDR_CID_HOST;
-            use std::io::{Read, Write};
-            use std::os::fd::AsRawFd;
-            use std::os::unix::net::UnixStream;
-            use std::time::Duration;
+            use std::fs::OpenOptions;
+            use std::io::Write;
 
-            // 1. Mount virtiofs with DAX
-            fs::create_dir_all("/mnt/testfs").unwrap();
-            let status = Command::new("mount")
-                .args(["-t", "virtiofs", "testfs", "/mnt/testfs", "-o", "dax=inode"])
-                .status()
-                .unwrap();
-            assert!(status.success(), "mount failed");
+            // 1. Mount with dax=inode — per-inode DAX controlled by FUSE_ATTR_DAX
+            guest_helpers::mount_virtiofs("testfs", "/mnt/testfs", "dax=inode");
 
-            // 2. Read file via DAX, verify 0xBB pattern
-            let data = fs::read("/mnt/testfs/hello.txt").unwrap();
-            assert!(data.iter().all(|&b| b == 0xBB), "Pre-snapshot DAX read failed");
+            // 2. Read hello.txt (dax_enabled=true) — should use DAX window → 0xBB
+            let dax_data = fs::read("/mnt/testfs/hello.txt").unwrap();
+            if dax_data[0] == 0xAA {
+                panic!("hello.txt: got FUSE_READ pattern 0xAA, expected DAX pattern 0xBB — per-inode DAX not working");
+            }
+            assert!(
+                dax_data.iter().all(|&b| b == 0xBB),
+                "hello.txt: expected 0xBB, got {:02x}",
+                dax_data[0]
+            );
 
-            // 3. Signal host: READY
-            let sock = socket(AddressFamily::Vsock, SockType::Stream, SockFlag::empty(), None).unwrap();
-            connect(sock.as_raw_fd(), &VsockAddr::new(VMADDR_CID_HOST, VSOCK_PORT)).unwrap();
-            let mut stream = UnixStream::from(sock);
-            stream.write_all(b"READY").unwrap();
+            // 3. Read nodax.txt (dax_enabled=false) — should use FUSE_READ → 0xAA
+            let nodax_data = fs::read("/mnt/testfs/nodax.txt").unwrap();
+            assert!(
+                nodax_data.iter().all(|&b| b == 0xAA),
+                "nodax.txt: expected FUSE_READ pattern 0xAA, got {:02x}",
+                nodax_data[0]
+            );
 
-            // --- SNAPSHOT HAPPENS HERE ---
-            // After restore, guest resumes execution from this point.
-            // The blocking read_exact below will receive the host's "CHECK"
-            // message, matching the existing test_snapshot_restore.rs pattern.
-
-            // 4. Wait for host: CHECK (after restore)
-            let mut buf = [0u8; 5];
-            stream.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
-            stream.read_exact(&mut buf).unwrap();
-            assert_eq!(&buf, b"CHECK");
-
-            // 5. Verify file access works after restore
-            // The DAX window is a cache: after restore the memfd is zeroed,
-            // and the kernel re-faults pages from the daemon (whose state was
-            // restored via DEVICE_STATE). fs::read() triggers this re-population.
+            // 4. Write 0xCC to hello.txt via DAX, read back
+            {
+                let mut f = OpenOptions::new()
+                    .write(true)
+                    .open("/mnt/testfs/hello.txt")
+                    .unwrap();
+                f.write_all(&vec![0xCC; 4096]).unwrap();
+                f.flush().unwrap();
+            }
             let data = fs::read("/mnt/testfs/hello.txt").unwrap();
             assert!(
-                data.iter().all(|&b| b == 0xBB),
-                "Post-restore file read failed: got {:02x}, expected 0xBB (daemon state restore or DAX re-fault failed)",
+                data.iter().take(4096).all(|&b| b == 0xCC),
+                "Write readback: expected 0xCC, got {:02x}",
+                data[0]
+            );
+
+            // 5. Signal READY, wait for snapshot/restore
+            let mut stream = guest_helpers::vsock_send_ready(VSOCK_PORT_INODE);
+            guest_helpers::wait_for_check(&mut stream);
+
+            // 6. Post-restore: hello.txt DAX content survives (0xCC), nodax.txt still via FUSE_READ (0xAA)
+            let data = fs::read("/mnt/testfs/hello.txt").unwrap();
+            assert!(
+                data.iter().take(4096).all(|&b| b == 0xCC),
+                "Post-restore hello.txt: expected 0xCC, got {:02x}",
+                data[0]
+            );
+            let nodax_data = fs::read("/mnt/testfs/nodax.txt").unwrap();
+            assert!(
+                nodax_data.iter().all(|&b| b == 0xAA),
+                "Post-restore nodax.txt: expected 0xAA, got {:02x}",
+                nodax_data[0]
+            );
+
+            println!("OK");
+        }
+    }
+}
+
+// =============================================================================
+// dax=never: all reads via FUSE_READ (0xAA) even with DAX window configured → snapshot → read
+// =============================================================================
+
+#[host]
+mod dax_never_host {
+    use super::*;
+    use crate::{Test, TestSetup};
+
+    impl Test for TestVhostUserFsDaxNever {
+        fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
+            // DAX window is configured but guest mounts with dax=never
+            host_helpers::run_snapshot_test(
+                &test_setup,
+                "dax-never",
+                VSOCK_PORT_NEVER,
+                Some(host_helpers::DAX_WINDOW_MIB),
+            )
+        }
+    }
+}
+
+#[guest]
+mod dax_never_guest {
+    use super::*;
+    use crate::Test;
+
+    impl Test for TestVhostUserFsDaxNever {
+        fn in_guest(self: Box<Self>) {
+            use std::fs;
+
+            // 1. Mount with dax=never — kernel ignores DAX window, uses FUSE_READ
+            guest_helpers::mount_virtiofs("testfs", "/mnt/testfs", "dax=never");
+
+            // 2. Read hello.txt — must get FUSE_READ pattern 0xAA (not DAX 0xBB)
+            let data = fs::read("/mnt/testfs/hello.txt").unwrap();
+            assert!(
+                data.iter().all(|&b| b == 0xAA),
+                "Expected FUSE_READ pattern 0xAA with dax=never, got {:02x}",
+                data[0]
+            );
+
+            // 3. Signal READY, wait for snapshot/restore
+            let mut stream = guest_helpers::vsock_send_ready(VSOCK_PORT_NEVER);
+            guest_helpers::wait_for_check(&mut stream);
+
+            // 4. Post-restore: verify FUSE_READ still works
+            let data = fs::read("/mnt/testfs/hello.txt").unwrap();
+            assert!(
+                data.iter().all(|&b| b == 0xAA),
+                "Post-restore: expected 0xAA, got {:02x}",
                 data[0]
             );
 

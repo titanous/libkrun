@@ -159,9 +159,9 @@ impl PortIODeviceManager {
         {
             let device = self.cmos.lock().unwrap();
             if let Some(snapshottable) = device.as_snapshottable() {
-                let state = snapshottable.save_state().map_err(|e| {
-                    Error::SnapshotState(format!("Failed to save CMOS state: {e}"))
-                })?;
+                let state = snapshottable
+                    .save_state()
+                    .map_err(|e| Error::SnapshotState(format!("Failed to save CMOS state: {e}")))?;
                 states.push((snapshottable.snapshot_id().to_string(), state));
             }
         }
@@ -194,18 +194,23 @@ impl PortIODeviceManager {
 
     /// Restore all device states from snapshot.
     #[cfg(feature = "snapshot")]
-    pub fn restore_all_device_states(&self, states: &[(String, Vec<u8>)]) -> std::result::Result<(), Error> {
+    pub fn restore_all_device_states(
+        &self,
+        states: &[(String, Vec<u8>)],
+    ) -> std::result::Result<(), Error> {
         for (id, data) in states {
             // Try CMOS
             {
                 let mut device = self.cmos.lock().unwrap();
                 if let Some(snapshottable) = device.as_snapshottable() {
                     if snapshottable.snapshot_id() == id {
-                        device.as_snapshottable_mut().unwrap()
+                        device
+                            .as_snapshottable_mut()
+                            .unwrap()
                             .restore_state(data)
-                            .map_err(|e| Error::SnapshotState(format!(
-                                "Failed to restore {id}: {e}"
-                            )))?;
+                            .map_err(|e| {
+                                Error::SnapshotState(format!("Failed to restore {id}: {e}"))
+                            })?;
                         continue;
                     }
                 }
@@ -218,28 +223,34 @@ impl PortIODeviceManager {
                 if let Some(snapshottable) = device.as_snapshottable() {
                     let expected_id = format!("{}:{}", snapshottable.snapshot_id(), i);
                     if &expected_id == id {
-                        device.as_snapshottable_mut().unwrap()
+                        device
+                            .as_snapshottable_mut()
+                            .unwrap()
                             .restore_state(data)
-                            .map_err(|e| Error::SnapshotState(format!(
-                                "Failed to restore {id}: {e}"
-                            )))?;
+                            .map_err(|e| {
+                                Error::SnapshotState(format!("Failed to restore {id}: {e}"))
+                            })?;
                         matched = true;
                         break;
                     }
                 }
             }
-            if matched { continue; }
+            if matched {
+                continue;
+            }
 
             // Try i8042
             {
                 let mut device = self.i8042.lock().unwrap();
                 if let Some(snapshottable) = device.as_snapshottable() {
                     if snapshottable.snapshot_id() == id {
-                        device.as_snapshottable_mut().unwrap()
+                        device
+                            .as_snapshottable_mut()
+                            .unwrap()
                             .restore_state(data)
-                            .map_err(|e| Error::SnapshotState(format!(
-                                "Failed to restore {id}: {e}"
-                            )))?;
+                            .map_err(|e| {
+                                Error::SnapshotState(format!("Failed to restore {id}: {e}"))
+                            })?;
                         continue;
                     }
                 }
@@ -316,13 +327,26 @@ mod tests {
         let ids: Vec<&String> = states.iter().map(|(id, _)| id).collect();
 
         // Verify expected device entries exist
-        assert!(ids.contains(&&"cmos".to_string()), "Expected 'cmos' device in states");
-        assert!(ids.contains(&&"serial-16550:0".to_string()), "Expected 'serial-16550:0' device in states");
-        assert!(ids.contains(&&"i8042".to_string()), "Expected 'i8042' device in states");
+        assert!(
+            ids.contains(&&"cmos".to_string()),
+            "Expected 'cmos' device in states"
+        );
+        assert!(
+            ids.contains(&&"serial-16550:0".to_string()),
+            "Expected 'serial-16550:0' device in states"
+        );
+        assert!(
+            ids.contains(&&"i8042".to_string()),
+            "Expected 'i8042' device in states"
+        );
 
         // Verify each device state has non-empty bytes
         for (id, data) in &states {
-            assert!(!data.is_empty(), "Device {} should have non-empty state bytes", id);
+            assert!(
+                !data.is_empty(),
+                "Device {} should have non-empty state bytes",
+                id
+            );
         }
     }
 
@@ -342,12 +366,18 @@ mod tests {
 
         // AC1.8: verify restore_all_device_states with empty slice succeeds
         let result = ldm.restore_all_device_states(&[]);
-        assert!(result.is_ok(), "restore_all_device_states should succeed with empty slice");
+        assert!(
+            result.is_ok(),
+            "restore_all_device_states should succeed with empty slice"
+        );
 
         // AC1.8: verify unknown ID is skipped silently (no error)
         let unknown_state = vec![("unknown-device".to_string(), vec![1, 2, 3])];
         let result = ldm.restore_all_device_states(&unknown_state);
-        assert!(result.is_ok(), "restore_all_device_states should silently skip unknown device IDs");
+        assert!(
+            result.is_ok(),
+            "restore_all_device_states should silently skip unknown device IDs"
+        );
     }
 
     #[test]
@@ -392,13 +422,21 @@ mod tests {
         let states2 = states2.unwrap();
 
         // Verify roundtrip: both snapshots should have same number of device entries with same IDs
-        assert_eq!(states1.len(), states2.len(), "Roundtrip snapshot should have same number of device entries");
+        assert_eq!(
+            states1.len(),
+            states2.len(),
+            "Roundtrip snapshot should have same number of device entries"
+        );
 
         let ids1: Vec<&String> = states1.iter().map(|(id, _)| id).collect();
         let ids2: Vec<&String> = states2.iter().map(|(id, _)| id).collect();
 
         for id in &ids1 {
-            assert!(ids2.contains(id), "Device {} should exist in roundtrip snapshot", id);
+            assert!(
+                ids2.contains(id),
+                "Device {} should exist in roundtrip snapshot",
+                id
+            );
         }
     }
 }

@@ -46,7 +46,10 @@ pub enum SnapshotError {
     },
     NestedEnabledMismatch,
     DirtyTrackingNotEnabled,
-    FileSizeExceeded { size: u64, limit: u64 },
+    FileSizeExceeded {
+        size: u64,
+        limit: u64,
+    },
 }
 
 impl Display for SnapshotError {
@@ -79,7 +82,10 @@ impl Display for SnapshotError {
                 write!(f, "Dirty tracking is not enabled")
             }
             SnapshotError::FileSizeExceeded { size, limit } => {
-                write!(f, "Snapshot file size ({size} bytes) exceeds limit ({limit} bytes)")
+                write!(
+                    f,
+                    "Snapshot file size ({size} bytes) exceeds limit ({limit} bytes)"
+                )
             }
         }
     }
@@ -672,9 +678,15 @@ mod tests {
         assert_eq!(loaded.device_states.len(), snapshot.device_states.len());
         assert_eq!(loaded.device_states[0], snapshot.device_states[0]);
         assert_eq!(loaded.dirty_pages.len(), snapshot.dirty_pages.len());
-        assert_eq!(loaded.dirty_pages[0].guest_addr, snapshot.dirty_pages[0].guest_addr);
+        assert_eq!(
+            loaded.dirty_pages[0].guest_addr,
+            snapshot.dirty_pages[0].guest_addr
+        );
         assert_eq!(loaded.dirty_pages[0].data, snapshot.dirty_pages[0].data);
-        assert_eq!(loaded.dirty_pages[1].guest_addr, snapshot.dirty_pages[1].guest_addr);
+        assert_eq!(
+            loaded.dirty_pages[1].guest_addr,
+            snapshot.dirty_pages[1].guest_addr
+        );
         assert_eq!(loaded.dirty_pages[1].data, snapshot.dirty_pages[1].data);
     }
 
@@ -686,7 +698,10 @@ mod tests {
 
         // Create a temp file larger than VMSTATE_MAX_SIZE (11MB)
         let temp_dir = std::path::PathBuf::from("/tmp");
-        let temp_path = temp_dir.join(format!("libkrun_test_oversized_vmstate_{}.bin", std::process::id()));
+        let temp_path = temp_dir.join(format!(
+            "libkrun_test_oversized_vmstate_{}.bin",
+            std::process::id()
+        ));
 
         // Write 11MB of zeros
         let mut file = std::fs::File::create(&temp_path).unwrap();
@@ -715,7 +730,10 @@ mod tests {
 
         // Create a temp file larger than VMSTATE_MAX_SIZE (11MB)
         let temp_dir = std::path::PathBuf::from("/tmp");
-        let temp_path = temp_dir.join(format!("libkrun_test_oversized_incr_{}.bin", std::process::id()));
+        let temp_path = temp_dir.join(format!(
+            "libkrun_test_oversized_incr_{}.bin",
+            std::process::id()
+        ));
 
         // Write 11MB of zeros
         let mut file = std::fs::File::create(&temp_path).unwrap();

@@ -16,8 +16,8 @@ mod host {
     use crate::{Test, TestSetup};
     use std::io::{Read, Write};
     use std::os::unix::net::UnixListener;
-    use std::time::Duration;
     use std::thread;
+    use std::time::Duration;
 
     impl Test for TestSnapshotIncrementalState {
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
@@ -55,8 +55,12 @@ mod host {
             let vm_thread = thread::spawn(move || context.run());
 
             let (mut stream, _) = listener.accept().unwrap();
-            stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-            stream.set_write_timeout(Some(Duration::from_secs(10))).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
 
             // Phase 1: Wait for guest to signal READY (initial baseline)
             let mut buf = vec![0u8; 5];
@@ -110,18 +114,26 @@ mod guest {
     impl Test for TestSnapshotIncrementalState {
         fn in_guest(self: Box<Self>) {
             // Use static variables to track state across snapshot/restore
-            static COUNTER: std::sync::atomic::AtomicI32 =
-                std::sync::atomic::AtomicI32::new(0);
+            static COUNTER: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
             static WORKLOAD_DONE: std::sync::atomic::AtomicBool =
                 std::sync::atomic::AtomicBool::new(false);
 
-            let sock = socket(AddressFamily::Vsock, SockType::Stream, SockFlag::empty(), None)
-                .unwrap();
+            let sock = socket(
+                AddressFamily::Vsock,
+                SockType::Stream,
+                SockFlag::empty(),
+                None,
+            )
+            .unwrap();
             let addr = VsockAddr::new(VMADDR_CID_HOST, VSOCK_PORT);
             connect(sock.as_raw_fd(), &addr).unwrap();
             let mut stream = UnixStream::from(sock);
-            stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-            stream.set_write_timeout(Some(Duration::from_secs(10))).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
 
             // Phase 1: Signal ready (baseline state captured at this point)
             stream.write_all(b"READY").unwrap();
@@ -143,8 +155,7 @@ mod guest {
             sector_data[..TEST_PATTERN.len()].copy_from_slice(TEST_PATTERN);
             f.seek(SeekFrom::Start(0))
                 .expect("Failed to seek to sector 0");
-            f.write_all(&sector_data)
-                .expect("Failed to write sector 0");
+            f.write_all(&sector_data).expect("Failed to write sector 0");
             f.flush().expect("Failed to flush");
 
             // Update static variable to track state

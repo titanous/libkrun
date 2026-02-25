@@ -1172,7 +1172,12 @@ impl Vcpu {
     /// * `exit_evt` - An `EventFd` that will be written into when this vcpu exits.
     /// * `create_ts` - A timestamp used by the vcpu to calculate its lifetime.
     #[cfg(target_arch = "aarch64")]
-    pub fn new_aarch64(id: u8, vm_fd: &VmFd, exit_evt: EventFd, should_exit: Arc<AtomicBool>) -> Result<Self> {
+    pub fn new_aarch64(
+        id: u8,
+        vm_fd: &VmFd,
+        exit_evt: EventFd,
+        should_exit: Arc<AtomicBool>,
+    ) -> Result<Self> {
         let kvm_vcpu = vm_fd.create_vcpu(id as u64).map_err(Error::VcpuFd)?;
         let (event_sender, event_receiver) = unbounded();
         let (response_sender, response_receiver) = unbounded();
@@ -1200,7 +1205,12 @@ impl Vcpu {
     /// * `exit_evt` - An `EventFd` that will be written into when this vcpu exits.
     /// * `create_ts` - A timestamp used by the vcpu to calculate its lifetime.
     #[cfg(target_arch = "riscv64")]
-    pub fn new_riscv64(id: u8, vm_fd: &VmFd, exit_evt: EventFd, should_exit: Arc<AtomicBool>) -> Result<Self> {
+    pub fn new_riscv64(
+        id: u8,
+        vm_fd: &VmFd,
+        exit_evt: EventFd,
+        should_exit: Arc<AtomicBool>,
+    ) -> Result<Self> {
         let kvm_vcpu = vm_fd.create_vcpu(id as u64).map_err(Error::VcpuFd)?;
         let (event_sender, event_receiver) = unbounded();
         let (response_sender, response_receiver) = unbounded();
@@ -1502,7 +1512,10 @@ impl Vcpu {
         // Notify guest of time discontinuity after restore (AC3.1)
         if let Err(e) = self.fd.kvmclock_ctrl() {
             // AC3.2: Log warning but do not fail restore
-            warn!("kvmclock_ctrl failed for vCPU {}: {e} (older kernels may not support this)", self.id);
+            warn!(
+                "kvmclock_ctrl failed for vCPU {}: {e} (older kernels may not support this)",
+                self.id
+            );
         }
         Ok(())
     }
@@ -1669,22 +1682,20 @@ impl Vcpu {
                     error!("Received KVM_EXIT_INTERNAL_ERROR signal");
                     Err(Error::VcpuUnhandledKvmExit)
                 }
-                VcpuExit::SystemEvent(event, _reason) => {
-                    match event {
-                        KVM_SYSTEM_EVENT_SHUTDOWN => {
-                            info!("Received KVM_SYSTEM_EVENT_SHUTDOWN");
-                            Ok(VcpuEmulation::Stopped)
-                        }
-                        KVM_SYSTEM_EVENT_RESET => {
-                            info!("Received KVM_SYSTEM_EVENT_RESET");
-                            Ok(VcpuEmulation::Rebooted)
-                        }
-                        _ => {
-                            error!("Received an unexpected System Event: {event}");
-                            Ok(VcpuEmulation::Stopped)
-                        }
+                VcpuExit::SystemEvent(event, _reason) => match event {
+                    KVM_SYSTEM_EVENT_SHUTDOWN => {
+                        info!("Received KVM_SYSTEM_EVENT_SHUTDOWN");
+                        Ok(VcpuEmulation::Stopped)
                     }
-                }
+                    KVM_SYSTEM_EVENT_RESET => {
+                        info!("Received KVM_SYSTEM_EVENT_RESET");
+                        Ok(VcpuEmulation::Rebooted)
+                    }
+                    _ => {
+                        error!("Received an unexpected System Event: {event}");
+                        Ok(VcpuEmulation::Stopped)
+                    }
+                },
                 r => {
                     // TODO: Are we sure we want to finish running a vcpu upon
                     // receiving a vm exit that is not necessarily an error?

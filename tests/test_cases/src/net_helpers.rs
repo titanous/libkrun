@@ -32,7 +32,11 @@ pub fn configure_eth0() {
         (*sin).sin_family = libc::AF_INET as libc::sa_family_t;
         (*sin).sin_addr.s_addr = 0xc0a86402_u32.to_be(); // 192.168.100.2
         let ret = libc::ioctl(sock, SIOCSIFADDR as _, &ifr as *const _);
-        assert!(ret == 0, "SIOCSIFADDR failed: {}", *libc::__errno_location());
+        assert!(
+            ret == 0,
+            "SIOCSIFADDR failed: {}",
+            *libc::__errno_location()
+        );
 
         // Set netmask: 255.255.255.0
         let mut ifr2: libc::ifreq = mem::zeroed();
@@ -41,14 +45,22 @@ pub fn configure_eth0() {
         (*sin2).sin_family = libc::AF_INET as libc::sa_family_t;
         (*sin2).sin_addr.s_addr = 0xffffff00_u32.to_be(); // 255.255.255.0
         let ret = libc::ioctl(sock, SIOCSIFNETMASK as _, &ifr2 as *const _);
-        assert!(ret == 0, "SIOCSIFNETMASK failed: {}", *libc::__errno_location());
+        assert!(
+            ret == 0,
+            "SIOCSIFNETMASK failed: {}",
+            *libc::__errno_location()
+        );
 
         // Bring interface up
         let mut ifr3: libc::ifreq = mem::zeroed();
         ifr3.ifr_name = ifname;
         ifr3.ifr_ifru.ifru_flags = (libc::IFF_UP | libc::IFF_RUNNING) as libc::c_short;
         let ret = libc::ioctl(sock, SIOCSIFFLAGS as _, &ifr3 as *const _);
-        assert!(ret == 0, "SIOCSIFFLAGS failed: {}", *libc::__errno_location());
+        assert!(
+            ret == 0,
+            "SIOCSIFFLAGS failed: {}",
+            *libc::__errno_location()
+        );
 
         libc::close(sock);
     }
@@ -79,7 +91,10 @@ pub fn test_ping() {
         assert!(sock >= 0, "socket(SOCK_RAW, IPPROTO_ICMP) failed");
 
         // Set receive timeout
-        let tv = libc::timeval { tv_sec: 5, tv_usec: 0 };
+        let tv = libc::timeval {
+            tv_sec: 5,
+            tv_usec: 0,
+        };
         let ret = libc::setsockopt(
             sock,
             libc::SOL_SOCKET,
@@ -97,7 +112,7 @@ pub fn test_ping() {
         let mut icmp_buf = vec![0u8; 8 + payload.len()];
         icmp_buf[0] = 8; // type = echo request
         icmp_buf[1] = 0; // code = 0
-        // checksum at [2..4], set to 0 first
+                         // checksum at [2..4], set to 0 first
         icmp_buf[4] = (id >> 8) as u8;
         icmp_buf[5] = (id & 0xff) as u8;
         icmp_buf[6] = (seq >> 8) as u8;

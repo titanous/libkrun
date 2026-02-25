@@ -101,7 +101,12 @@ impl AsyncBlockBackend for MemBlockBackend {
         Box::pin(async { Ok(()) })
     }
 
-    fn write_zeroes(&self, offset: u64, nbytes: u64, _unmap: bool) -> BoxFuture<'_, io::Result<()>> {
+    fn write_zeroes(
+        &self,
+        offset: u64,
+        nbytes: u64,
+        _unmap: bool,
+    ) -> BoxFuture<'_, io::Result<()>> {
         let data = self.data.clone();
         Box::pin(async move {
             let mut buf = data.lock().await;
@@ -141,8 +146,6 @@ impl AsyncBlockBackendFactory for MemBlockBackendFactory {
         mut self: Box<Self>,
     ) -> SendBoxFuture<'static, io::Result<Arc<dyn AsyncBlockBackend + Send + Sync>>> {
         let backend = self.backend.take().expect("Factory already consumed");
-        Box::pin(async move {
-            Ok(Arc::new(backend) as Arc<dyn AsyncBlockBackend + Send + Sync>)
-        })
+        Box::pin(async move { Ok(Arc::new(backend) as Arc<dyn AsyncBlockBackend + Send + Sync>) })
     }
 }

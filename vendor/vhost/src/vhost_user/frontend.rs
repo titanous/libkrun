@@ -622,7 +622,7 @@ impl VhostUserFrontend for Frontend {
         let fds = [fd.as_raw_fd()];
         let hdr = node.send_request_with_body(FrontendReq::SET_DEVICE_STATE_FD, &body, Some(&fds))?;
 
-        let (reply_body, reply_fds) = node.recv_reply_with_files::<VhostUserU64>(&hdr)?;
+        let (reply_body, reply_fds) = node.recv_reply_with_optional_files::<VhostUserU64>(&hdr)?;
         let val = reply_body.value;
 
         // Bits 0-7: error code (0 = success)
@@ -804,6 +804,24 @@ impl FrontendInternal {
 
         let (reply, body, files) = self.main_sock.recv_body::<T>()?;
         if !reply.is_reply_for(hdr) || files.is_none() || !body.is_valid() {
+            return Err(VhostUserError::InvalidMessage);
+        }
+        Ok((body, files))
+    }
+
+    /// Like `recv_reply_with_files` but does not require file descriptors in the reply.
+    /// Used for SET_DEVICE_STATE_FD where the backend may or may not return a pipe fd.
+    fn recv_reply_with_optional_files<T: ByteValued + Sized + VhostUserMsgValidator + Default>(
+        &mut self,
+        hdr: &VhostUserMsgHeader<FrontendReq>,
+    ) -> VhostUserResult<(T, Option<Vec<File>>)> {
+        if mem::size_of::<T>() > MAX_MSG_SIZE || hdr.is_reply() {
+            return Err(VhostUserError::InvalidParam);
+        }
+        self.check_state()?;
+
+        let (reply, body, files) = self.main_sock.recv_body::<T>()?;
+        if !reply.is_reply_for(hdr) || !body.is_valid() {
             return Err(VhostUserError::InvalidMessage);
         }
         Ok((body, files))

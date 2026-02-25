@@ -1,5 +1,5 @@
-use std::sync::{Arc, RwLock};
 use clap::Parser;
+use std::sync::{Arc, RwLock};
 use vhost_user_backend::VhostUserDaemon;
 use vm_memory::{GuestMemoryAtomic, GuestMemoryMmap};
 
@@ -15,7 +15,7 @@ struct Args {
     #[arg(long)]
     socket_path: String,
     #[arg(long, default_value = "/dev/null")]
-    shared_dir: String,  // Ignored, files are synthetic
+    shared_dir: String, // Ignored, files are synthetic
 }
 
 fn main() -> Result<(), String> {
@@ -43,12 +43,15 @@ fn main() -> Result<(), String> {
         "test-fs-daemon".to_string(),
         backend,
         GuestMemoryAtomic::new(GuestMemoryMmap::new()),
-    ).map_err(|e| format!("Failed to create daemon: {:?}", e))?;
+    )
+    .map_err(|e| format!("Failed to create daemon: {:?}", e))?;
 
     log::info!("VhostUserDaemon created successfully");
 
     // 3. Use serve() to listen on the socket and handle connections
-    daemon.serve(&args.socket_path).map_err(|e| format!("Serve error: {}", e))?;
+    daemon
+        .serve(&args.socket_path)
+        .map_err(|e| format!("Serve error: {}", e))?;
 
     log::info!("Daemon exiting");
     Ok(())

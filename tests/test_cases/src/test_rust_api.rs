@@ -22,8 +22,8 @@ mod host {
     use crate::{Test, TestSetup};
     use std::io::{Read, Write};
     use std::os::unix::net::UnixListener;
-    use std::time::Duration;
     use std::thread;
+    use std::time::Duration;
 
     impl Test for TestRustApiZeroVcpu {
         fn start_vm(self: Box<Self>, _test_setup: TestSetup) -> anyhow::Result<()> {
@@ -80,8 +80,12 @@ mod host {
 
             // AC7.3: Wait for guest READY signal
             let (mut stream, _) = listener.accept().unwrap();
-            stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-            stream.set_write_timeout(Some(Duration::from_secs(10))).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
             let mut buf = vec![0u8; 5];
             stream.read_exact(&mut buf).unwrap();
             assert_eq!(&buf, b"READY");
@@ -116,14 +120,13 @@ mod host {
             #[cfg(not(all(target_arch = "aarch64", target_os = "macos")))]
             {
                 // On Linux: verify the function returns a meaningful Err (not panic)
-                assert!(
-                    result.is_err(),
-                    "Expected Err on non-aarch64-mac, got Ok"
-                );
+                assert!(result.is_err(), "Expected Err on non-aarch64-mac, got Ok");
                 // Verify the error message indicates unsupported (not a crash/panic)
                 let msg = result.unwrap_err().to_string();
                 assert!(
-                    msg.contains("unavailable") || msg.contains("Unsupported") || msg.contains("not supported"),
+                    msg.contains("unavailable")
+                        || msg.contains("Unsupported")
+                        || msg.contains("not supported"),
                     "Unexpected error: {msg}"
                 );
                 println!("OK");
@@ -163,13 +166,22 @@ mod guest {
 
     impl Test for TestRustApiPauseResume {
         fn in_guest(self: Box<Self>) {
-            let sock = socket(AddressFamily::Vsock, SockType::Stream, SockFlag::empty(), None)
-                .unwrap();
+            let sock = socket(
+                AddressFamily::Vsock,
+                SockType::Stream,
+                SockFlag::empty(),
+                None,
+            )
+            .unwrap();
             let addr = VsockAddr::new(VMADDR_CID_HOST, VSOCK_PORT_API);
             connect(sock.as_raw_fd(), &addr).unwrap();
             let mut stream = std::os::unix::net::UnixStream::from(sock);
-            stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
-            stream.set_write_timeout(Some(Duration::from_secs(15))).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(15)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(15)))
+                .unwrap();
 
             // AC7.3: Send READY signal
             stream.write_all(b"READY").unwrap();

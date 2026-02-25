@@ -490,7 +490,9 @@ mod snapshot_tests {
 
         // Try to restore with wrong buffer length
         let result = i8042.restore_state(&invalid_bytes);
-        assert!(matches!(result, Err(SnapshotError::Deserialize(msg)) if msg.contains("buf length mismatch")));
+        assert!(
+            matches!(result, Err(SnapshotError::Deserialize(msg)) if msg.contains("buf length mismatch"))
+        );
     }
 }
 

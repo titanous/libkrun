@@ -1,3 +1,6 @@
 [workspace]
 members = ["runner", "guest-agent", "macros", "test_cases", "test_daemon"]
 resolver = "2"
+
+[patch.crates-io]
+vhost = { path = "../vendor/vhost" }

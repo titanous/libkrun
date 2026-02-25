@@ -491,11 +491,11 @@ impl BusDevice for MmioTransport {
                     0xb0..=0xbc => {
                         // For no SHM region or invalid region the kernel looks for length of -1
                         let (shm_base, shm_len) = if self.shm_region_select > 1 {
-                            (0, !0)
+                            (0, !0u64)
                         } else {
                             match self.locked_device().shm_region() {
                                 Some(region) => (region.guest_addr, region.size as u64),
-                                None => (0, !0),
+                                None => (0, !0u64),
                             }
                         };
                         match offset {
@@ -593,7 +593,9 @@ impl BusDevice for MmioTransport {
                     0x94 => self.update_queue_field(|q| hi(&mut q.avail_ring, v)),
                     0xa0 => self.update_queue_field(|q| lo(&mut q.used_ring, v)),
                     0xa4 => self.update_queue_field(|q| hi(&mut q.used_ring, v)),
-                    0xac => self.shm_region_select = v,
+                    0xac => {
+                        self.shm_region_select = v;
+                    }
                     _ => {
                         warn!("unknown virtio mmio register write: 0x{offset:x}");
                     }
@@ -790,8 +792,15 @@ impl Snapshottable for MmioTransport {
                     let _ = device.reset();
                 }
 
-                // Compute whether activation is needed while we hold the lock,
-                // but defer the actual activate() call to complete_restore().
+                if let Some(ref backend_data) = state.backend_state {
+                    device.restore_backend_state(backend_data);
+                }
+
+                device.post_snapshot_restore();
+
+                // Compute whether activation is needed AFTER restore callbacks,
+                // since restore_backend_state() may mark the device inactive
+                // (e.g., vhost-user devices need re-activation to reconnect).
                 let needs_activate =
                     should_reactivate && (!device.is_activated() || force_reactivate);
 
@@ -799,19 +808,6 @@ impl Snapshottable for MmioTransport {
                     "mmio: restore_state '{}': should_reactivate={} is_activated={} force_reactivate={} needs_activate={}",
                     device_name, should_reactivate, device.is_activated(), force_reactivate, needs_activate
                 );
-
-                for (i, qs) in state.queue_states.iter().enumerate() {
-                    debug!(
-                        "mmio: restore_state '{}': queue[{}] size={} ready={} next_avail={} next_used={}",
-                        device_name, i, qs.size, qs.ready, qs.next_avail, qs.next_used
-                    );
-                }
-
-                if let Some(ref backend_data) = state.backend_state {
-                    device.restore_backend_state(backend_data);
-                }
-
-                device.post_snapshot_restore();
 
                 // Drop device lock before writing to self.
                 drop(device);

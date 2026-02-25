@@ -461,7 +461,10 @@ impl MMIODeviceManager {
             };
 
             // Downcast BusDevice to MmioTransport
-            let Some(transport) = device.as_any().downcast_ref::<devices::virtio::MmioTransport>() else {
+            let Some(transport) = device
+                .as_any()
+                .downcast_ref::<devices::virtio::MmioTransport>()
+            else {
                 continue;
             };
 
@@ -820,8 +823,7 @@ mod tests {
         #[test]
         fn test_get_used_ring_ranges_ac21_active_queues() {
             let start_addr = GuestAddress(0x0);
-            let guest_mem =
-                GuestMemoryMmap::from_ranges(&[(start_addr, 0x10000)]).unwrap();
+            let guest_mem = GuestMemoryMmap::from_ranges(&[(start_addr, 0x10000)]).unwrap();
 
             // Create a queue with used_ring at a known address
             // used_ring at 0x5000 (page-aligned)
@@ -834,19 +836,19 @@ mod tests {
             let device: Arc<Mutex<dyn devices::virtio::VirtioDevice>> =
                 Arc::new(Mutex::new(mock_device));
 
-            let mmio_transport = devices::virtio::MmioTransport::new(
-                guest_mem,
-                DummyIrqChip::new().into(),
-                device,
-            )
-            .unwrap();
+            let mmio_transport =
+                devices::virtio::MmioTransport::new(guest_mem, DummyIrqChip::new().into(), device)
+                    .unwrap();
 
             // AC2.1: Active queue should produce correct page-aligned ranges
             let ranges = mmio_transport.get_used_ring_ranges();
 
             // used_ring at 0x5000, size = 6 + 8*64 = 518 bytes
             // 0x5000 to 0x5206 spans one page (0x5000)
-            assert!(!ranges.is_empty(), "Should have at least one range for active queue");
+            assert!(
+                !ranges.is_empty(),
+                "Should have at least one range for active queue"
+            );
             assert_eq!(ranges[0].0, 0x5000, "Range start should be page-aligned");
             assert_eq!(ranges[0].1, 4096, "Range size should be page size");
         }
@@ -854,8 +856,7 @@ mod tests {
         #[test]
         fn test_get_used_ring_ranges_multiple_pages() {
             let start_addr = GuestAddress(0x0);
-            let guest_mem =
-                GuestMemoryMmap::from_ranges(&[(start_addr, 0x10000)]).unwrap();
+            let guest_mem = GuestMemoryMmap::from_ranges(&[(start_addr, 0x10000)]).unwrap();
 
             // Create a queue with used_ring at 0x4f00 with size 64
             // This spans two pages: 0x4000-0x4fff and 0x5000-0x5fff
@@ -868,12 +869,9 @@ mod tests {
             let device: Arc<Mutex<dyn devices::virtio::VirtioDevice>> =
                 Arc::new(Mutex::new(mock_device));
 
-            let mmio_transport = devices::virtio::MmioTransport::new(
-                guest_mem,
-                DummyIrqChip::new().into(),
-                device,
-            )
-            .unwrap();
+            let mmio_transport =
+                devices::virtio::MmioTransport::new(guest_mem, DummyIrqChip::new().into(), device)
+                    .unwrap();
 
             let ranges = mmio_transport.get_used_ring_ranges();
 
@@ -888,8 +886,7 @@ mod tests {
         #[test]
         fn test_get_used_ring_ranges_ac23_inactive_queues() {
             let start_addr = GuestAddress(0x0);
-            let guest_mem =
-                GuestMemoryMmap::from_ranges(&[(start_addr, 0x10000)]).unwrap();
+            let guest_mem = GuestMemoryMmap::from_ranges(&[(start_addr, 0x10000)]).unwrap();
 
             // Create an inactive queue (ready=false)
             let mut queue_inactive = Queue::new(64);
@@ -904,23 +901,22 @@ mod tests {
             let device: Arc<Mutex<dyn devices::virtio::VirtioDevice>> =
                 Arc::new(Mutex::new(mock_device));
 
-            let mmio_transport = devices::virtio::MmioTransport::new(
-                guest_mem,
-                DummyIrqChip::new().into(),
-                device,
-            )
-            .unwrap();
+            let mmio_transport =
+                devices::virtio::MmioTransport::new(guest_mem, DummyIrqChip::new().into(), device)
+                    .unwrap();
 
             // AC2.3: Inactive queues should not appear in ranges, no crash
             let ranges = mmio_transport.get_used_ring_ranges();
-            assert!(ranges.is_empty(), "Inactive queues should not produce ranges");
+            assert!(
+                ranges.is_empty(),
+                "Inactive queues should not produce ranges"
+            );
         }
 
         #[test]
         fn test_get_used_ring_ranges_mixed_active_inactive() {
             let start_addr = GuestAddress(0x0);
-            let guest_mem =
-                GuestMemoryMmap::from_ranges(&[(start_addr, 0x10000)]).unwrap();
+            let guest_mem = GuestMemoryMmap::from_ranges(&[(start_addr, 0x10000)]).unwrap();
 
             // Create active queue
             let mut queue_active = Queue::new(64);
@@ -938,17 +934,18 @@ mod tests {
             let device: Arc<Mutex<dyn devices::virtio::VirtioDevice>> =
                 Arc::new(Mutex::new(mock_device));
 
-            let mmio_transport = devices::virtio::MmioTransport::new(
-                guest_mem,
-                DummyIrqChip::new().into(),
-                device,
-            )
-            .unwrap();
+            let mmio_transport =
+                devices::virtio::MmioTransport::new(guest_mem, DummyIrqChip::new().into(), device)
+                    .unwrap();
 
             let ranges = mmio_transport.get_used_ring_ranges();
 
             // Should only have range for active queue at 0x3000
-            assert_eq!(ranges.len(), 1, "Should only have one range for active queue");
+            assert_eq!(
+                ranges.len(),
+                1,
+                "Should only have one range for active queue"
+            );
             assert_eq!(ranges[0].0, 0x3000, "Range should be for active queue");
             assert_eq!(ranges[0].1, 4096);
         }

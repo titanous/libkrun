@@ -101,11 +101,9 @@ mod host {
             let context = builder.build()?;
 
             // Register a mock exit observer that sets the flag
-            context.register_exit_observer(std::sync::Arc::new(std::sync::Mutex::new(
-                move || {
-                    flag.store(true, std::sync::atomic::Ordering::Release);
-                },
-            )));
+            context.register_exit_observer(std::sync::Arc::new(std::sync::Mutex::new(move || {
+                flag.store(true, std::sync::atomic::Ordering::Release);
+            })));
 
             let vm_exit = context.run()?;
 

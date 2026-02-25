@@ -30,7 +30,6 @@ pub use devices::virtio::port_io::{self, PortInput, PortOutput};
 pub use devices::virtio::rng::{OsRngBackend, RngBackend};
 pub use devices::virtio::PortDescription;
 pub use devices::virtio::VmmExitObserver;
-pub use vmm::vm_exit::VmExit;
 use libc::{c_char, c_int, size_t};
 use once_cell::sync::Lazy;
 use polly::event_manager::EventManager;
@@ -56,6 +55,7 @@ pub use vmm::resources::VirtioConsoleConfigMode;
 use vmm::resources::{
     DefaultVirtioConsoleConfig, PortConfig, SerialConsoleConfig, TsiFlags, VmResources, VsockConfig,
 };
+pub use vmm::vm_exit::VmExit;
 #[cfg(feature = "blk")]
 pub use vmm::vmm_config::block::{BlockConfigError, BlockDeviceConfig, BlockRootConfig};
 #[cfg(not(feature = "tee"))]
@@ -71,9 +71,9 @@ use vmm::vmm_config::kernel_cmdline::{KernelCmdlineConfig, DEFAULT_KERNEL_CMDLIN
 use vmm::vmm_config::machine_config::VmConfig;
 #[cfg(feature = "net")]
 use vmm::vmm_config::net::{NetworkInterfaceConfig, NetworkInterfaceError};
-use vmm::vmm_config::vsock::VsockDeviceConfig;
 #[cfg(feature = "vhost-user")]
 use vmm::vmm_config::vhost_user_fs::VhostUserFsConfig;
+use vmm::vmm_config::vsock::VsockDeviceConfig;
 
 #[cfg(feature = "aws-nitro")]
 use aws_nitro::enclave::NitroEnclave;
@@ -279,7 +279,6 @@ impl ContextConfig {
     fn set_nitro_start_flags(&mut self, start_flags: StartFlags) {
         self.nitro_start_flags = start_flags;
     }
-
 }
 
 #[cfg(feature = "aws-nitro")]
@@ -3315,10 +3314,7 @@ mod tests {
         let max_tag = "x".repeat(36);
         let result = builder.add_virtiofs_vhost_user(&max_tag, "/tmp/sock", Some(32));
 
-        assert!(
-            result.is_ok(),
-            "36-byte tag should be accepted"
-        );
+        assert!(result.is_ok(), "36-byte tag should be accepted");
     }
 
     #[test]
@@ -3333,7 +3329,10 @@ mod tests {
         // Add vhost-user FS device - should not conflict
         let result = builder.add_virtiofs_vhost_user("vhostfs", "/tmp/sock", Some(32));
 
-        assert!(result.is_ok(), "vhost-user FS should coexist with regular FS");
+        assert!(
+            result.is_ok(),
+            "vhost-user FS should coexist with regular FS"
+        );
 
         // Verify both are stored in VmResources
         assert_eq!(
@@ -3347,13 +3346,11 @@ mod tests {
             "Should have 1 vhost-user FS device"
         );
         assert_eq!(
-            builder.config.vmr.vhost_user_fs[0].tag,
-            "vhostfs",
+            builder.config.vmr.vhost_user_fs[0].tag, "vhostfs",
             "vhost-user FS tag should be stored"
         );
         assert_eq!(
-            builder.config.vmr.vhost_user_fs[0].socket_path,
-            "/tmp/sock",
+            builder.config.vmr.vhost_user_fs[0].socket_path, "/tmp/sock",
             "vhost-user FS socket path should be stored"
         );
         assert_eq!(

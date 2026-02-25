@@ -16,8 +16,8 @@ mod host {
     use crate::{Test, TestSetup};
     use std::io::{Read, Write};
     use std::os::unix::net::UnixListener;
-    use std::time::Duration;
     use std::thread;
+    use std::time::Duration;
 
     impl Test for TestSnapshotNet {
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
@@ -32,11 +32,9 @@ mod host {
 
             // Add loopback network backend
             builder.add_net_device(
-                krun::VirtioNetBackend::CustomAsyncFactory(
-                    Box::new(LoopbackFactory::new()),
-                ),
+                krun::VirtioNetBackend::CustomAsyncFactory(Box::new(LoopbackFactory::new())),
                 [0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee], // Guest MAC
-                0, // features
+                0,                                    // features
             );
 
             builder.add_vsock_port(VSOCK_PORT, sock_path, false);
@@ -47,8 +45,12 @@ mod host {
             let vm_thread = thread::spawn(move || context.run());
 
             let (mut stream, _) = listener.accept().unwrap();
-            stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-            stream.set_write_timeout(Some(Duration::from_secs(10))).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
 
             // Phase 1: Wait for guest to confirm networking works pre-snapshot
             let mut buf = vec![0u8; 6];
@@ -78,8 +80,8 @@ mod host {
 #[guest]
 mod guest {
     use super::*;
-    use crate::Test;
     use crate::net_helpers::{configure_eth0, test_ping};
+    use crate::Test;
     use nix::libc::VMADDR_CID_HOST;
     use nix::sys::socket::{connect, socket, AddressFamily, SockFlag, SockType, VsockAddr};
     use std::io::{Read, Write};
@@ -87,19 +89,27 @@ mod guest {
     use std::os::unix::net::UnixStream;
     use std::time::Duration;
 
-
     impl Test for TestSnapshotNet {
         fn in_guest(self: Box<Self>) {
             // Configure network interface
             configure_eth0();
 
-            let sock = socket(AddressFamily::Vsock, SockType::Stream, SockFlag::empty(), None)
-                .unwrap();
+            let sock = socket(
+                AddressFamily::Vsock,
+                SockType::Stream,
+                SockFlag::empty(),
+                None,
+            )
+            .unwrap();
             let addr = VsockAddr::new(VMADDR_CID_HOST, VSOCK_PORT);
             connect(sock.as_raw_fd(), &addr).unwrap();
             let mut stream = UnixStream::from(sock);
-            stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-            stream.set_write_timeout(Some(Duration::from_secs(10))).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
 
             // Phase 1: Test networking pre-snapshot
             test_ping();

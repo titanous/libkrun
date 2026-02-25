@@ -11,8 +11,8 @@ mod host {
     use crate::{Test, TestSetup};
     use std::io::{Read, Write};
     use std::os::unix::net::UnixListener;
-    use std::time::Duration;
     use std::thread;
+    use std::time::Duration;
 
     impl Test for TestSnapshotRestore {
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
@@ -34,7 +34,9 @@ mod host {
 
             // Wait for guest to signal READY (guest has set counter to 42)
             let (mut stream, _) = listener.accept().unwrap();
-            stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
             let mut buf = vec![0u8; 5];
             stream.read_exact(&mut buf).unwrap();
             assert_eq!(&buf, b"READY");
@@ -69,19 +71,27 @@ mod guest {
     impl Test for TestSnapshotRestore {
         fn in_guest(self: Box<Self>) {
             // Use a static variable to survive snapshot/restore
-            static COUNTER: std::sync::atomic::AtomicI32 =
-                std::sync::atomic::AtomicI32::new(0);
+            static COUNTER: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
             // Set counter to 42 — this value must be preserved after restore
             COUNTER.store(42, std::sync::atomic::Ordering::SeqCst);
 
-            let sock = socket(AddressFamily::Vsock, SockType::Stream, SockFlag::empty(), None)
-                .unwrap();
+            let sock = socket(
+                AddressFamily::Vsock,
+                SockType::Stream,
+                SockFlag::empty(),
+                None,
+            )
+            .unwrap();
             let addr = VsockAddr::new(VMADDR_CID_HOST, VSOCK_PORT);
             connect(sock.as_raw_fd(), &addr).unwrap();
             let mut stream = UnixStream::from(sock);
-            stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-            stream.set_write_timeout(Some(Duration::from_secs(10))).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
 
             // Signal host we are ready
             stream.write_all(b"READY").unwrap();
@@ -111,8 +121,8 @@ mod host_incr {
     use crate::{Test, TestSetup};
     use std::io::{Read, Write};
     use std::os::unix::net::UnixListener;
-    use std::time::Duration;
     use std::thread;
+    use std::time::Duration;
 
     impl Test for TestSnapshotRestoreIncremental {
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
@@ -133,8 +143,12 @@ mod host_incr {
             let vm_thread = thread::spawn(move || context.run());
 
             let (mut stream, _) = listener.accept().unwrap();
-            stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-            stream.set_write_timeout(Some(Duration::from_secs(10))).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
 
             // Phase 1: guest writes initial data, signals READY
             let mut buf = vec![0u8; 5];
@@ -187,13 +201,22 @@ mod guest_incr {
 
     impl Test for TestSnapshotRestoreIncremental {
         fn in_guest(self: Box<Self>) {
-            let sock = socket(AddressFamily::Vsock, SockType::Stream, SockFlag::empty(), None)
-                .unwrap();
+            let sock = socket(
+                AddressFamily::Vsock,
+                SockType::Stream,
+                SockFlag::empty(),
+                None,
+            )
+            .unwrap();
             let addr = VsockAddr::new(VMADDR_CID_HOST, VSOCK_PORT_INCR);
             connect(sock.as_raw_fd(), &addr).unwrap();
             let mut stream = UnixStream::from(sock);
-            stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-            stream.set_write_timeout(Some(Duration::from_secs(10))).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
 
             // Phase 1: signal ready with initial region state (zeros)
             stream.write_all(b"READY").unwrap();
@@ -205,7 +228,9 @@ mod guest_incr {
 
             // Write known pattern into the region
             #[allow(static_mut_refs)]
-            unsafe { TEST_REGION.fill(EXPECTED_PATTERN); }
+            unsafe {
+                TEST_REGION.fill(EXPECTED_PATTERN);
+            }
 
             stream.write_all(b"WRITTEN").unwrap();
 

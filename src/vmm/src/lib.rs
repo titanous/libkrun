@@ -16,8 +16,6 @@ extern crate log;
 /// Handles setup and initialization a `Vmm` object.
 pub mod builder;
 pub(crate) mod device_manager;
-/// VM exit reasons and shared exit state.
-pub mod vm_exit;
 /// Dirty page bitmap for incremental snapshots.
 #[cfg(target_os = "macos")]
 pub mod dirty_bitmap;
@@ -28,6 +26,8 @@ pub mod resources;
 pub mod signal_handler;
 /// VM snapshot and restore support.
 pub mod snapshot;
+/// VM exit reasons and shared exit state.
+pub mod vm_exit;
 /// Wrappers over structures used to configure the VMM.
 pub mod vmm_config;
 
@@ -420,9 +420,13 @@ impl Vmm {
 
         #[cfg(target_arch = "x86_64")]
         {
-            let pio_states = self.pio_device_manager.save_all_device_states()
+            let pio_states = self
+                .pio_device_manager
+                .save_all_device_states()
                 .map_err(|e| {
-                    snapshot::SnapshotError::Serialize(format!("Failed to save PortIO device states: {e}"))
+                    snapshot::SnapshotError::Serialize(format!(
+                        "Failed to save PortIO device states: {e}"
+                    ))
                 })?;
             device_states.extend(pio_states);
         }
@@ -1056,9 +1060,13 @@ impl Vmm {
 
         #[cfg(target_arch = "x86_64")]
         {
-            let pio_states = self.pio_device_manager.save_all_device_states()
+            let pio_states = self
+                .pio_device_manager
+                .save_all_device_states()
                 .map_err(|e| {
-                    snapshot::SnapshotError::Serialize(format!("Failed to save PortIO device states: {e}"))
+                    snapshot::SnapshotError::Serialize(format!(
+                        "Failed to save PortIO device states: {e}"
+                    ))
                 })?;
             device_states.extend(pio_states);
         }
@@ -1097,9 +1105,7 @@ impl Vmm {
                             "Invalid guest address for used ring page 0x{page_addr:x}: {e}"
                         ))
                     })?;
-                let data = unsafe {
-                    std::slice::from_raw_parts(host_ptr, *page_size as usize)
-                };
+                let data = unsafe { std::slice::from_raw_parts(host_ptr, *page_size as usize) };
                 dirty_pages.push(snapshot::DirtyPage {
                     guest_addr: *page_addr,
                     data: data.to_vec(),
@@ -1383,10 +1389,7 @@ mod tests {
     #[test]
     fn test_shutdown_with_zero_exit_code() {
         let vm_exit = resolve_vm_exit(FC_EXIT_CODE_OK, i32::MAX);
-        assert_eq!(
-            vm_exit,
-            crate::vm_exit::VmExit::Shutdown { exit_code: 0 }
-        );
+        assert_eq!(vm_exit, crate::vm_exit::VmExit::Shutdown { exit_code: 0 });
     }
 
     /// Test vm-exit.AC1.2: Guest-set exit code is returned in Shutdown variant
@@ -1394,10 +1397,7 @@ mod tests {
     fn test_shutdown_with_guest_exit_code() {
         // Guest set exit code via vmm_exit_code (virtio-fs ioctl)
         let vm_exit = resolve_vm_exit(FC_EXIT_CODE_OK, 42);
-        assert_eq!(
-            vm_exit,
-            crate::vm_exit::VmExit::Shutdown { exit_code: 42 }
-        );
+        assert_eq!(vm_exit, crate::vm_exit::VmExit::Shutdown { exit_code: 42 });
     }
 
     /// Test vm-exit.AC1.3: KVM_SYSTEM_EVENT_RESET returns RebootRequested
@@ -1422,8 +1422,7 @@ mod tests {
     /// Test shared exit state storage contract
     #[test]
     fn test_shared_vm_exit_storage() {
-        let vm_exit: crate::vm_exit::SharedVmExit =
-            Arc::new(Mutex::new(None));
+        let vm_exit: crate::vm_exit::SharedVmExit = Arc::new(Mutex::new(None));
 
         // Initially should be None
         {

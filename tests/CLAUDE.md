@@ -37,9 +37,9 @@ Tests are inherently flaky (VM + network timing). 5-6/6 passing is normal.
 - `vm-exit-clean-shutdown` - Verifies `Context::run()` returns `VmExit::Shutdown`, thread/FD/mmap cleanup
 - `custom-block-backend` - AsyncBlockBackend with in-memory backend
 - `net-async-loopback` - AsyncNetBackend loopback ICMP echo through CustomAsyncFactory
-- `vhost-user-fs-dax-read` - Vhost-user FS DAX read (mounts virtio-fs, reads file via DAX window)
-- `vhost-user-fs-dax-write` - Vhost-user FS DAX write (writes file via DAX window, verifies content)
-- `vhost-user-fs-dax-snapshot` - Vhost-user FS snapshot/restore (verifies file content survives snapshot cycle)
+- `vhost-user-fs-dax-always` - Vhost-user FS with dax=always: DAX read (0xBB), DAX write (0xCC), snapshot/restore cycle
+- `vhost-user-fs-dax-inode` - Vhost-user FS with dax=inode: per-inode DAX (hello.txt=DAX/0xBB, nodax.txt=FUSE_READ/0xAA), write, snapshot/restore
+- `vhost-user-fs-dax-never` - Vhost-user FS with dax=never: FUSE_READ path (0xAA), snapshot/restore cycle
 
 ## Key Files
 - `test_cases/src/lib.rs` - Test case registry

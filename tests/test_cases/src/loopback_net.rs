@@ -1,17 +1,15 @@
-use std::io;
 use bytes::Bytes;
-use pnet::packet::ethernet::{EthernetPacket, EtherTypes, MutableEthernetPacket};
-use pnet::packet::ipv4::{Ipv4Packet, MutableIpv4Packet};
-use pnet::packet::arp::{ArpPacket, MutableArpPacket, ArpOperations};
+use pnet::packet::arp::{ArpOperations, ArpPacket, MutableArpPacket};
+use pnet::packet::ethernet::{EtherTypes, EthernetPacket, MutableEthernetPacket};
 use pnet::packet::icmp::{IcmpPacket, IcmpTypes, MutableIcmpPacket};
+use pnet::packet::ipv4::{Ipv4Packet, MutableIpv4Packet};
 use pnet::packet::Packet;
 use pnet::util::MacAddr;
+use std::io;
 use std::net::Ipv4Addr;
 use tokio::sync::mpsc;
 
-use krun::{
-    AsyncNetBackend, AsyncNetBackendFactory, NetBackendHandle, NetSendBoxFuture,
-};
+use krun::{AsyncNetBackend, AsyncNetBackendFactory, NetBackendHandle, NetSendBoxFuture};
 
 pub struct LoopbackFactory;
 
@@ -82,8 +80,8 @@ impl AsyncNetBackend for LoopbackBackend {
 
                                 // Ethernet header
                                 {
-                                    let mut eth_reply = MutableEthernetPacket::new(&mut reply_buf[..14])
-                                        .unwrap();
+                                    let mut eth_reply =
+                                        MutableEthernetPacket::new(&mut reply_buf[..14]).unwrap();
                                     eth_reply.set_destination(eth.get_source());
                                     eth_reply.set_source(Self::backend_mac());
                                     eth_reply.set_ethertype(EtherTypes::Arp);
@@ -91,8 +89,8 @@ impl AsyncNetBackend for LoopbackBackend {
 
                                 // ARP payload
                                 {
-                                    let mut arp_reply = MutableArpPacket::new(&mut reply_buf[14..])
-                                        .unwrap();
+                                    let mut arp_reply =
+                                        MutableArpPacket::new(&mut reply_buf[14..]).unwrap();
                                     arp_reply.set_hardware_type(arp.get_hardware_type());
                                     arp_reply.set_protocol_type(arp.get_protocol_type());
                                     arp_reply.set_hw_addr_len(arp.get_hw_addr_len());
@@ -112,7 +110,8 @@ impl AsyncNetBackend for LoopbackBackend {
                 EtherTypes::Ipv4 => {
                     // Handle ICMP echo requests
                     if let Some(ipv4) = Ipv4Packet::new(eth.payload()) {
-                        if ipv4.get_next_level_protocol() == pnet::packet::ip::IpNextHeaderProtocols::Icmp
+                        if ipv4.get_next_level_protocol()
+                            == pnet::packet::ip::IpNextHeaderProtocols::Icmp
                             && ipv4.get_destination() == Self::BACKEND_IP
                         {
                             if let Some(icmp) = IcmpPacket::new(ipv4.payload()) {
@@ -143,7 +142,8 @@ impl AsyncNetBackend for LoopbackBackend {
                                         ipv4_reply.set_checksum(0);
                                     }
                                     // Compute IPv4 checksum on a copy
-                                    let ipv4_cksum = Self::internet_checksum(&reply_buf[14..14 + ipv4_len]);
+                                    let ipv4_cksum =
+                                        Self::internet_checksum(&reply_buf[14..14 + ipv4_len]);
                                     {
                                         let mut ipv4_reply =
                                             MutableIpv4Packet::new(&mut reply_buf[14..]).unwrap();
@@ -160,7 +160,8 @@ impl AsyncNetBackend for LoopbackBackend {
                                         icmp_reply.set_checksum(0);
                                     }
                                     // Compute ICMP checksum on a copy
-                                    let icmp_cksum = Self::internet_checksum(&reply_buf[icmp_offset..]);
+                                    let icmp_cksum =
+                                        Self::internet_checksum(&reply_buf[icmp_offset..]);
                                     {
                                         let mut icmp_reply =
                                             MutableIcmpPacket::new(&mut reply_buf[icmp_offset..])

@@ -13,11 +13,24 @@ pub const FUSE_SETUPMAPPING: u32 = 48;
 pub const FUSE_REMOVEMAPPING: u32 = 49;
 
 // FUSE flags
-pub const FUSE_ATTR_DAX: u32 = 2;  // bit 1 in fuse_attr.flags
+pub const FUSE_ATTR_DAX: u32 = 2; // bit 1 in fuse_attr.flags
+pub const FUSE_MAP_ALIGNMENT: u32 = 1 << 26; // server reports map_alignment field
+pub const FUSE_INIT_EXT: u32 = 1 << 30; // server supports extended init (flags2)
 
 // FUSE_INIT defaults
 pub const FUSE_MAJOR: u32 = 7;
-pub const FUSE_MINOR: u32 = 36;
+pub const FUSE_MINOR: u32 = 41;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct FuseInitIn {
+    pub major: u32,
+    pub minor: u32,
+    pub max_readahead: u32,
+    pub flags: u32,
+    pub flags2: u32,
+    pub unused: [u32; 11],
+}
 
 // FUSE request/response header structures (repr(C) for C compatibility)
 
@@ -42,24 +55,23 @@ pub struct FuseOutHeader {
     pub unique: u64,
 }
 
-
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct FuseInitOut {
-    pub major: u32,                  // offset 0
-    pub minor: u32,                  // offset 4
-    pub max_readahead: u32,          // offset 8
-    pub flags: u32,                  // offset 12 (NOT u64!)
-    pub max_background: u16,         // offset 16
-    pub congestion_threshold: u16,   // offset 18
-    pub max_write: u32,              // offset 20
-    pub time_gran: u32,              // offset 24
-    pub max_pages: u16,              // offset 28
-    pub map_alignment: u16,          // offset 30
-    pub flags2: u32,                 // offset 32
-    pub max_stack_depth: u32,        // offset 36
-    pub request_timeout: u16,        // offset 40
-    pub unused: [u16; 11],           // offset 42 (22 bytes) -> total 64
+    pub major: u32,                // offset 0
+    pub minor: u32,                // offset 4
+    pub max_readahead: u32,        // offset 8
+    pub flags: u32,                // offset 12 (NOT u64!)
+    pub max_background: u16,       // offset 16
+    pub congestion_threshold: u16, // offset 18
+    pub max_write: u32,            // offset 20
+    pub time_gran: u32,            // offset 24
+    pub max_pages: u16,            // offset 28
+    pub map_alignment: u16,        // offset 30
+    pub flags2: u32,               // offset 32
+    pub max_stack_depth: u32,      // offset 36
+    pub request_timeout: u16,      // offset 40
+    pub unused: [u16; 11],         // offset 42 (22 bytes) -> total 64
 }
 
 #[repr(C)]
@@ -134,7 +146,6 @@ pub struct FuseSetupmappingIn {
     pub padding: u32,
     pub moffset: u64,
 }
-
 
 // Helper function to serialize a structure to bytes
 pub fn struct_to_bytes<T: Sized>(s: &T) -> Vec<u8> {

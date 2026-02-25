@@ -1,25 +1,39 @@
+use std::cell::RefCell;
 use std::fs::File;
 
+use vhost::vhost_user::message::{
+    VhostTransferStateDirection, VhostTransferStatePhase, VhostUserProtocolFeatures,
+};
 use vhost_user_backend::{VhostUserBackendMut, VringMutex, VringT};
-use vm_memory::{GuestMemoryAtomic, GuestMemoryMmap, GuestAddressSpace, Bytes};
-use vhost::vhost_user::message::{VhostTransferStateDirection, VhostTransferStatePhase, VhostUserProtocolFeatures};
-use virtio_queue::{QueueT, QueueOwnedT};
+use virtio_queue::{QueueOwnedT, QueueT};
+use vm_memory::{
+    Bytes, GuestAddressSpace, GuestMemory, GuestMemoryAtomic, GuestMemoryMmap, GuestMemoryRegion,
+    MemoryRegionAddress,
+};
 
 use crate::filesystem::SyntheticFs;
 use crate::fuse::*;
 
-const NUM_QUEUES: usize = 2;  // HPQ + 1 request queue
+const NUM_QUEUES: usize = 2; // HPQ + 1 request queue
 const QUEUE_SIZE: usize = 1024;
 
 pub struct FsBackend {
-    /// Synthetic filesystem state
-    fs: SyntheticFs,
+    /// Synthetic filesystem state.
+    /// RefCell because check_device_state(&self) must deserialize into it.
+    /// SAFETY: FsBackend is always behind a Mutex in vhost-user-backend, so
+    /// the RefCell is only accessed from one thread at a time.
+    fs: RefCell<SyntheticFs>,
     /// DAX window pointer (set when ADD_MEM_REGION shares the memfd)
     dax_window: Option<(*mut u8, usize)>,
-    /// Pending DEVICE_STATE transfer state
-    device_state_result: Option<std::io::Result<()>>,
+    /// Pending DEVICE_STATE transfer result
+    device_state_result: RefCell<Option<std::io::Result<()>>>,
+    /// Deferred LOAD fd: read_to_end must happen AFTER set_device_state_fd replies,
+    /// because the frontend writes to the pipe only after receiving our reply.
+    pending_load_fd: RefCell<Option<File>>,
     /// Guest memory reference (set by update_memory)
     mem: Option<GuestMemoryAtomic<GuestMemoryMmap>>,
+    /// Number of memory regions seen (used to detect DAX window addition)
+    region_count: usize,
 }
 
 // SAFETY: FsBackend is only accessed from single-threaded daemon context.
@@ -31,10 +45,12 @@ unsafe impl Sync for FsBackend {}
 impl FsBackend {
     pub fn new(fs: SyntheticFs) -> Self {
         Self {
-            fs,
+            fs: RefCell::new(fs),
             dax_window: None,
-            device_state_result: None,
+            device_state_result: RefCell::new(None),
+            pending_load_fd: RefCell::new(None),
             mem: None,
+            region_count: 0,
         }
     }
 }
@@ -43,15 +59,19 @@ impl VhostUserBackendMut for FsBackend {
     type Bitmap = ();
     type Vring = VringMutex;
 
-    fn num_queues(&self) -> usize { NUM_QUEUES }
+    fn num_queues(&self) -> usize {
+        NUM_QUEUES
+    }
 
-    fn max_queue_size(&self) -> usize { QUEUE_SIZE }
+    fn max_queue_size(&self) -> usize {
+        QUEUE_SIZE
+    }
 
     fn set_event_idx(&mut self, _enabled: bool) {}
 
     fn features(&self) -> u64 {
-        // Virtio features: VIRTIO_F_VERSION_1
-        1u64 << 32
+        // VIRTIO_F_VERSION_1 (bit 32) | VHOST_USER_F_PROTOCOL_FEATURES (bit 30)
+        (1u64 << 32) | (1u64 << 30)
     }
 
     fn protocol_features(&self) -> VhostUserProtocolFeatures {
@@ -63,7 +83,7 @@ impl VhostUserBackendMut for FsBackend {
 
     fn get_config(&self, offset: u32, size: u32) -> Vec<u8> {
         // Return VirtioFsConfig: tag="testfs" + num_request_queues=1
-        let mut config = [0u8; 40];  // 36-byte tag + 4-byte u32
+        let mut config = [0u8; 40]; // 36-byte tag + 4-byte u32
         let tag = b"testfs";
         config[..tag.len()].copy_from_slice(tag);
         config[36..40].copy_from_slice(&1u32.to_le_bytes());
@@ -71,9 +91,32 @@ impl VhostUserBackendMut for FsBackend {
         config[offset as usize..end].to_vec()
     }
 
-    fn update_memory(&mut self, mem: GuestMemoryAtomic<GuestMemoryMmap>)
-        -> std::io::Result<()>
-    {
+    fn update_memory(&mut self, mem: GuestMemoryAtomic<GuestMemoryMmap>) -> std::io::Result<()> {
+        let guard = mem.memory();
+        let new_count = guard.num_regions();
+
+        // When ADD_MEM_REGION adds the DAX memfd, region count increases.
+        // The new region is the DAX window — grab its host pointer.
+        eprintln!(
+            "[test-daemon] update_memory: prev_regions={} new_regions={}",
+            self.region_count, new_count
+        );
+        if new_count > self.region_count && self.region_count > 0 {
+            if let Some(region) = guard.iter().last() {
+                let ptr = region
+                    .get_host_address(MemoryRegionAddress(0))
+                    .map_err(|e| std::io::Error::other(format!("DAX region address: {:?}", e)))?;
+                let size = region.len() as usize;
+                eprintln!(
+                    "[test-daemon] DAX window detected: ptr={:?} size={}",
+                    ptr, size
+                );
+                self.dax_window = Some((ptr, size));
+            }
+        }
+
+        self.region_count = new_count;
+        drop(guard);
         self.mem = Some(mem);
         Ok(())
     }
@@ -102,20 +145,40 @@ impl VhostUserBackendMut for FsBackend {
         _phase: VhostTransferStatePhase,
         fd: File,
     ) -> std::io::Result<Option<File>> {
-        // Handle in background, store result for check_device_state
         match direction {
             VhostTransferStateDirection::SAVE => {
-                self.device_state_result = Some(self.save_state_to_fd(&fd));
+                *self.device_state_result.get_mut() = Some(self.save_state_to_fd(&fd));
             }
             VhostTransferStateDirection::LOAD => {
-                self.device_state_result = Some(self.load_state_from_fd(&fd));
+                // Defer read to check_device_state: the frontend writes to the
+                // pipe only AFTER receiving our reply, so reading here deadlocks.
+                *self.pending_load_fd.get_mut() = Some(fd);
+                *self.device_state_result.get_mut() = None;
             }
         }
-        Ok(None)  // No fd to return
+        Ok(None) // No fd to return
     }
 
     fn check_device_state(&self) -> std::io::Result<()> {
-        match &self.device_state_result {
+        // Complete deferred LOAD if pending
+        if let Some(fd) = self.pending_load_fd.borrow_mut().take() {
+            use std::io::Read;
+            let mut buf = Vec::new();
+            let mut file = fd.try_clone()?;
+            file.read_to_end(&mut buf)?;
+            let result = SyntheticFs::deserialize(&buf);
+            match result {
+                Ok(fs) => {
+                    *self.fs.borrow_mut() = fs;
+                    *self.device_state_result.borrow_mut() = Some(Ok(()));
+                }
+                Err(e) => {
+                    *self.device_state_result.borrow_mut() = Some(Err(e));
+                }
+            }
+        }
+        let result = self.device_state_result.borrow();
+        match result.as_ref() {
             Some(Ok(())) => Ok(()),
             Some(Err(e)) => Err(std::io::Error::new(e.kind(), e.to_string())),
             None => Err(std::io::Error::other("no state transfer in progress")),
@@ -126,13 +189,14 @@ impl VhostUserBackendMut for FsBackend {
 impl FsBackend {
     pub fn process_queue(&mut self, vring: &VringMutex) -> std::io::Result<()> {
         let mut vring_lock = vring.get_mut();
-        let mem_ref = self.mem.as_ref().ok_or_else(|| {
-            std::io::Error::other("guest memory not initialized")
-        })?;
+        let mem_ref = self
+            .mem
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("guest memory not initialized"))?;
 
         // Get the guest memory guard - this requires dereferencing the Atomic wrapper
         let guest_mem = mem_ref.memory();
-        let guest_mem_deref = &*guest_mem;  // Dereference to get &GuestMemoryMmap
+        let guest_mem_deref = &*guest_mem; // Dereference to get &GuestMemoryMmap
 
         // Collect all descriptor chains to process
         let mut chains_to_process = Vec::new();
@@ -160,7 +224,8 @@ impl FsBackend {
                 let len = desc.len() as usize;
                 if len > 0 {
                     let mut buf = vec![0u8; len];
-                    guest_mem_deref.read_slice(&mut buf, addr)
+                    guest_mem_deref
+                        .read_slice(&mut buf, addr)
                         .map_err(|e| std::io::Error::other(format!("failed to read: {}", e)))?;
                     request_bytes.extend_from_slice(&buf);
                 }
@@ -169,6 +234,10 @@ impl FsBackend {
             // Parse and dispatch FUSE request
             let response = if request_bytes.len() >= std::mem::size_of::<FuseInHeader>() {
                 let header: FuseInHeader = bytes_to_struct(&request_bytes).unwrap();
+                eprintln!(
+                    "[test-daemon] FUSE opcode={} nodeid={} unique={} len={}",
+                    header.opcode, header.nodeid, header.unique, header.len
+                );
                 let response_body = match header.opcode {
                     FUSE_INIT => self.handle_init(&header, &request_bytes),
                     FUSE_LOOKUP => self.handle_lookup(&header, &request_bytes),
@@ -179,7 +248,10 @@ impl FsBackend {
                     FUSE_REMOVEMAPPING => self.handle_removemapping(&header, &request_bytes),
                     FUSE_FORGET | FUSE_BATCH_FORGET => {
                         // No response - just mark as used with 0 bytes
-                        vring_lock.get_queue_mut().add_used(guest_mem_deref, head_index, 0).ok();
+                        vring_lock
+                            .get_queue_mut()
+                            .add_used(guest_mem_deref, head_index, 0)
+                            .ok();
                         continue;
                     }
                     _ => vec![],
@@ -205,7 +277,8 @@ impl FsBackend {
                 let len = desc.len() as usize;
                 if len > 0 && offset < response.len() {
                     let write_len = std::cmp::min(len, response.len() - offset);
-                    guest_mem_deref.write_slice(&response[offset..offset + write_len], addr)
+                    guest_mem_deref
+                        .write_slice(&response[offset..offset + write_len], addr)
                         .map_err(|e| std::io::Error::other(format!("failed to write: {}", e)))?;
                     offset += write_len;
                 }
@@ -213,7 +286,10 @@ impl FsBackend {
 
             // Mark descriptor as used
             let response_len = response.len() as u32;
-            vring_lock.get_queue_mut().add_used(guest_mem_deref, head_index, response_len).ok();
+            vring_lock
+                .get_queue_mut()
+                .add_used(guest_mem_deref, head_index, response_len)
+                .ok();
         }
 
         // Signal the guest
@@ -221,26 +297,34 @@ impl FsBackend {
         Ok(())
     }
 
-
-    fn handle_init(&self, _header: &FuseInHeader, _request_bytes: &[u8]) -> Vec<u8> {
-        // Respond with FUSE_INIT, include HAS_INODE_DAX flag
+    fn handle_init(&self, _header: &FuseInHeader, request_bytes: &[u8]) -> Vec<u8> {
+        if let Some(init_in) =
+            bytes_to_struct::<FuseInitIn>(&request_bytes[std::mem::size_of::<FuseInHeader>()..])
+        {
+            eprintln!(
+                "[test-daemon] FUSE_INIT request: major={} minor={} flags=0x{:08x} flags2=0x{:08x}",
+                init_in.major, init_in.minor, init_in.flags, init_in.flags2
+            );
+        }
+        // FUSE_INIT_EXT is required for the kernel to read flags2 at all.
+        // Without it, FUSE_HAS_INODE_DAX (bit 33 = bit 1 of flags2) is ignored
+        // and per-inode DAX won't work.
         let response = FuseInitOut {
             major: FUSE_MAJOR,
             minor: FUSE_MINOR,
             max_readahead: 0x20000,
-            flags: 0,  // flags field is now u32, HAS_INODE_DAX goes in flags2
+            flags: FUSE_MAP_ALIGNMENT | FUSE_INIT_EXT,
             max_background: 0,
             congestion_threshold: 0,
             max_write: 4096,
             time_gran: 1,
             max_pages: 256,
-            map_alignment: 0,
-            flags2: 2,  // bit 1 = FUSE_HAS_INODE_DAX (0x200000000 >> 32 = bit 1 in flags2)
+            map_alignment: 12, // 2^12 = 4096 (PAGE_SIZE alignment)
+            flags2: 2,         // HAS_INODE_DAX (bit 1 of flags2 = bit 33 of combined flags)
             max_stack_depth: 0,
             request_timeout: 0,
             unused: [0; 11],
         };
-        // AC5.1: negotiates MAP_ALIGNMENT and HAS_INODE_DAX
         struct_to_bytes(&response)
     }
 
@@ -260,7 +344,8 @@ impl FsBackend {
         };
 
         // Find inode by name
-        let found_inode = self.fs.inodes.values().find(|inode| inode.name == filename);
+        let fs = self.fs.borrow();
+        let found_inode = fs.inodes.values().find(|inode| inode.name == filename);
 
         if let Some(inode) = found_inode {
             let response = FuseEntryOut {
@@ -286,10 +371,23 @@ impl FsBackend {
                     gid: 0,
                     rdev: 0,
                     blksize: 4096,
-                    flags: FUSE_ATTR_DAX,  // AC5.2: set FUSE_ATTR_DAX flag
+                    flags: if inode.dax_enabled { FUSE_ATTR_DAX } else { 0 },
                 },
             };
-            struct_to_bytes(&response)
+            let bytes = struct_to_bytes(&response);
+            // Debug: verify flags field position (should be at offset 124 of FuseEntryOut)
+            if bytes.len() >= 128 {
+                let flags_bytes = &bytes[124..128];
+                let flags_val = u32::from_le_bytes([
+                    flags_bytes[0],
+                    flags_bytes[1],
+                    flags_bytes[2],
+                    flags_bytes[3],
+                ]);
+                eprintln!("[test-daemon] LOOKUP response: nodeid={} dax_enabled={} attr.flags={:#x} response_len={}",
+                    inode.nodeid, inode.dax_enabled, flags_val, bytes.len());
+            }
+            bytes
         } else {
             // ENOENT - return empty body with error in header
             vec![]
@@ -297,8 +395,9 @@ impl FsBackend {
     }
 
     fn handle_getattr(&self, header: &FuseInHeader, _request_bytes: &[u8]) -> Vec<u8> {
+        let fs = self.fs.borrow();
         // Look up by nodeid
-        if let Some(inode) = self.fs.inodes.get(&header.nodeid) {
+        if let Some(inode) = fs.inodes.get(&header.nodeid) {
             let response = FuseAttrOut {
                 attr_valid: 600,
                 attr_valid_nsec: 0,
@@ -319,7 +418,7 @@ impl FsBackend {
                     gid: 0,
                     rdev: 0,
                     blksize: 4096,
-                    flags: FUSE_ATTR_DAX,  // AC5.2: set FUSE_ATTR_DAX flag
+                    flags: if inode.dax_enabled { FUSE_ATTR_DAX } else { 0 },
                 },
             };
             struct_to_bytes(&response)
@@ -340,16 +439,19 @@ impl FsBackend {
 
     fn handle_read(&self, header: &FuseInHeader, request_bytes: &[u8]) -> Vec<u8> {
         // Parse FuseReadIn from request to get offset and size
-        let read_in: Option<FuseReadIn> = if request_bytes.len() >= std::mem::size_of::<FuseInHeader>() + std::mem::size_of::<FuseReadIn>() {
+        let read_in: Option<FuseReadIn> = if request_bytes.len()
+            >= std::mem::size_of::<FuseInHeader>() + std::mem::size_of::<FuseReadIn>()
+        {
             bytes_to_struct(&request_bytes[std::mem::size_of::<FuseInHeader>()..])
         } else {
             None
         };
 
+        let fs = self.fs.borrow();
         if let Some(read_in) = read_in {
             // Return file data (0xAA pattern, not DAX pattern)
             // AC5.4: READ returns different content than DAX path
-            if let Some(data) = self.fs.file_data.get(&read_in.fh) {
+            if let Some(data) = fs.file_data.get(&read_in.fh) {
                 let offset = read_in.offset as usize;
                 let size = read_in.size as usize;
                 let start = std::cmp::min(offset, data.len());
@@ -360,7 +462,7 @@ impl FsBackend {
             }
         } else {
             // Fallback if parsing fails
-            if let Some(data) = self.fs.file_data.get(&header.nodeid) {
+            if let Some(data) = fs.file_data.get(&header.nodeid) {
                 data[..std::cmp::min(4096, data.len())].to_vec()
             } else {
                 vec![]
@@ -370,19 +472,25 @@ impl FsBackend {
 
     fn handle_setupmapping(&mut self, _header: &FuseInHeader, request_bytes: &[u8]) -> Vec<u8> {
         // Parse FuseSetupmappingIn from request
-        let setupmapping_in: Option<FuseSetupmappingIn> = if request_bytes.len() >= std::mem::size_of::<FuseInHeader>() + std::mem::size_of::<FuseSetupmappingIn>() {
+        let setupmapping_in: Option<FuseSetupmappingIn> = if request_bytes.len()
+            >= std::mem::size_of::<FuseInHeader>() + std::mem::size_of::<FuseSetupmappingIn>()
+        {
             bytes_to_struct(&request_bytes[std::mem::size_of::<FuseInHeader>()..])
         } else {
             None
         };
 
         if let Some(setupmapping) = setupmapping_in {
+            let fs = self.fs.get_mut();
+            eprintln!("[test-daemon] SETUPMAPPING: fh={} foffset={} len={} moffset={} flags={} dax_window={:?}",
+                setupmapping.fh, setupmapping.foffset, setupmapping.len, setupmapping.moffset, setupmapping.flags,
+                self.dax_window.map(|(_, sz)| sz));
             if let Some((dax_ptr, dax_size)) = self.dax_window {
                 let moffset = setupmapping.moffset as usize;
                 let len = setupmapping.len as usize;
                 if moffset + len <= dax_size {
                     unsafe {
-                        std::ptr::write_bytes(dax_ptr.add(moffset), self.fs.dax_pattern, len);
+                        std::ptr::write_bytes(dax_ptr.add(moffset), fs.dax_pattern, len);
                     }
                 }
             }
@@ -404,13 +512,15 @@ impl FsBackend {
         // Sync any guest DAX writes
         self.sync_all_dax_writes();
 
+        let fs = self.fs.get_mut();
+
         // Serialize filesystem state
         // Simple format: number of inodes, then for each:
         // nodeid(u64) + name_len(u32) + name + mode(u32) + size(u64) + nlink(u32) + data_len(u32) + data
         let mut buf = Vec::new();
-        buf.extend_from_slice(&(self.fs.inodes.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&(fs.inodes.len() as u32).to_le_bytes());
 
-        for (nodeid, inode) in &self.fs.inodes {
+        for (nodeid, inode) in &fs.inodes {
             buf.extend_from_slice(&nodeid.to_le_bytes());
             let name_bytes = inode.name.as_bytes();
             buf.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
@@ -418,7 +528,8 @@ impl FsBackend {
             buf.extend_from_slice(&inode.mode.to_le_bytes());
             buf.extend_from_slice(&inode.size.to_le_bytes());
             buf.extend_from_slice(&inode.nlink.to_le_bytes());
-            if let Some(data) = self.fs.file_data.get(nodeid) {
+            buf.push(if inode.dax_enabled { 1 } else { 0 });
+            if let Some(data) = fs.file_data.get(nodeid) {
                 buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
                 buf.extend_from_slice(data);
             } else {
@@ -431,35 +542,22 @@ impl FsBackend {
         Ok(())
     }
 
-    fn load_state_from_fd(&mut self, fd: &File) -> std::io::Result<()> {
-        use std::io::Read;
-
-        // Read all bytes from fd
-        let mut buf = Vec::new();
-        let mut file = fd.try_clone()?;
-        file.read_to_end(&mut buf)?;
-
-        // Deserialize and restore filesystem state
-        self.fs = SyntheticFs::deserialize(&buf)?;
-        Ok(())
-    }
-
     fn sync_all_dax_writes(&mut self) {
         // Sync guest DAX window writes to file_data.
         // NOTE: This implementation copies the entire DAX window for all inodes.
         // This approach only works for the single-file synthetic filesystem used in testing.
         // A production implementation would track dirty ranges per inode and copy selectively.
         if let Some((dax_ptr, dax_size)) = self.dax_window {
-            for (nodeid, _) in self.fs.inodes.iter() {
+            let fs = self.fs.get_mut();
+            for (nodeid, _) in fs.inodes.iter() {
                 let mut buf = vec![0u8; dax_size];
                 unsafe {
                     std::ptr::copy_nonoverlapping(dax_ptr, buf.as_mut_ptr(), dax_size);
                 }
-                self.fs.dax_file_data.insert(*nodeid, buf);
+                fs.dax_file_data.insert(*nodeid, buf);
             }
         }
     }
-
 }
 
 #[cfg(test)]
@@ -469,9 +567,21 @@ mod tests {
     #[test]
     fn test_fuse_struct_sizes() {
         // Verify FUSE struct sizes match protocol
-        assert_eq!(std::mem::size_of::<FuseInitOut>(), 64, "FuseInitOut must be 64 bytes");
-        assert_eq!(std::mem::size_of::<FuseInHeader>(), 40, "FuseInHeader must be 40 bytes");
-        assert_eq!(std::mem::size_of::<FuseOutHeader>(), 16, "FuseOutHeader must be 16 bytes");
+        assert_eq!(
+            std::mem::size_of::<FuseInitOut>(),
+            64,
+            "FuseInitOut must be 64 bytes"
+        );
+        assert_eq!(
+            std::mem::size_of::<FuseInHeader>(),
+            40,
+            "FuseInHeader must be 40 bytes"
+        );
+        assert_eq!(
+            std::mem::size_of::<FuseOutHeader>(),
+            16,
+            "FuseOutHeader must be 16 bytes"
+        );
     }
 
     #[test]
@@ -506,10 +616,11 @@ mod tests {
         // Save to buffer
         // Manually serialize like save_state_to_fd does
         let save_buffer = {
+            let fs = backend.fs.borrow();
             let mut buf = Vec::new();
-            buf.extend_from_slice(&(backend.fs.inodes.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&(fs.inodes.len() as u32).to_le_bytes());
 
-            for (nodeid, inode) in &backend.fs.inodes {
+            for (nodeid, inode) in &fs.inodes {
                 buf.extend_from_slice(&nodeid.to_le_bytes());
                 let name_bytes = inode.name.as_bytes();
                 buf.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
@@ -517,7 +628,8 @@ mod tests {
                 buf.extend_from_slice(&inode.mode.to_le_bytes());
                 buf.extend_from_slice(&inode.size.to_le_bytes());
                 buf.extend_from_slice(&inode.nlink.to_le_bytes());
-                if let Some(data) = backend.fs.file_data.get(nodeid) {
+                buf.push(if inode.dax_enabled { 1 } else { 0 });
+                if let Some(data) = fs.file_data.get(nodeid) {
                     buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
                     buf.extend_from_slice(data);
                 } else {
@@ -529,14 +641,22 @@ mod tests {
 
         // Create new backend and load
         let mut fresh_backend = FsBackend::new(SyntheticFs::new());
-        fresh_backend.fs = SyntheticFs::deserialize(&save_buffer)
-            .expect("should deserialize");
+        *fresh_backend.fs.get_mut() =
+            SyntheticFs::deserialize(&save_buffer).expect("should deserialize");
 
         // Verify inodes match
-        assert_eq!(backend.fs.inodes.len(), fresh_backend.fs.inodes.len(), "inode count mismatch");
+        let orig_fs = backend.fs.borrow();
+        let loaded_fs = fresh_backend.fs.borrow();
+        assert_eq!(
+            orig_fs.inodes.len(),
+            loaded_fs.inodes.len(),
+            "inode count mismatch"
+        );
 
-        for (nodeid, original_inode) in &backend.fs.inodes {
-            let loaded_inode = fresh_backend.fs.inodes.get(nodeid)
+        for (nodeid, original_inode) in &orig_fs.inodes {
+            let loaded_inode = loaded_fs
+                .inodes
+                .get(nodeid)
                 .expect(&format!("nodeid {} missing", nodeid));
             assert_eq!(original_inode.name, loaded_inode.name, "name mismatch");
             assert_eq!(original_inode.mode, loaded_inode.mode, "mode mismatch");
@@ -545,13 +665,28 @@ mod tests {
         }
 
         // Verify file data matches
-        assert_eq!(backend.fs.file_data.len(), fresh_backend.fs.file_data.len(), "file_data count mismatch");
+        assert_eq!(
+            orig_fs.file_data.len(),
+            loaded_fs.file_data.len(),
+            "file_data count mismatch"
+        );
 
-        for (nodeid, original_data) in &backend.fs.file_data {
-            let loaded_data = fresh_backend.fs.file_data.get(nodeid)
+        for (nodeid, original_data) in &orig_fs.file_data {
+            let loaded_data = loaded_fs
+                .file_data
+                .get(nodeid)
                 .expect(&format!("nodeid {} data missing", nodeid));
-            assert_eq!(original_data.len(), loaded_data.len(), "data len mismatch for nodeid {}", nodeid);
-            assert_eq!(original_data, loaded_data, "data content mismatch for nodeid {}", nodeid);
+            assert_eq!(
+                original_data.len(),
+                loaded_data.len(),
+                "data len mismatch for nodeid {}",
+                nodeid
+            );
+            assert_eq!(
+                original_data, loaded_data,
+                "data content mismatch for nodeid {}",
+                nodeid
+            );
         }
     }
 }

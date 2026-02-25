@@ -43,16 +43,16 @@ mod host {
         let mut data = Vec::new();
 
         // SnapshotHeader
-        data.extend_from_slice(&magic.to_le_bytes());       // magic: u32
-        data.extend_from_slice(&version.to_le_bytes());      // version: u32
-        data.extend_from_slice(&vcpu_count.to_le_bytes());   // vcpu_count: u32
-        // ram_regions: Vec<(u64,u64)>
+        data.extend_from_slice(&magic.to_le_bytes()); // magic: u32
+        data.extend_from_slice(&version.to_le_bytes()); // version: u32
+        data.extend_from_slice(&vcpu_count.to_le_bytes()); // vcpu_count: u32
+                                                           // ram_regions: Vec<(u64,u64)>
         data.extend_from_slice(&(ram_regions.len() as u64).to_le_bytes()); // Vec length
         for (base, size) in &ram_regions {
             data.extend_from_slice(&base.to_le_bytes());
             data.extend_from_slice(&size.to_le_bytes());
         }
-        data.push(nested as u8);                             // nested_enabled: bool
+        data.push(nested as u8); // nested_enabled: bool
 
         // vcpu_states: Vec<Vec<u8>> with vcpu_count entries (each empty)
         data.extend_from_slice(&(vcpu_count as u64).to_le_bytes()); // Vec length = vcpu_count
