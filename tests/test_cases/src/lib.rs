@@ -49,6 +49,9 @@ use test_custom_block_backend::TestCustomBlockBackend;
 mod test_net_async_loopback;
 use test_net_async_loopback::TestNetAsyncLoopback;
 
+mod test_vhost_user_fs;
+use test_vhost_user_fs::{TestVhostUserFsDaxRead, TestVhostUserFsDaxWrite, TestVhostUserFsDaxSnapshot};
+
 #[cfg(feature = "guest")]
 mod net_helpers;
 
@@ -96,6 +99,9 @@ pub fn test_cases() -> Vec<TestCase> {
         TestCase::new("vm-exit-observer", Box::new(TestVmExitObserver)),
         TestCase::new("custom-block-backend", Box::new(TestCustomBlockBackend)),
         TestCase::new("net-async-loopback", Box::new(TestNetAsyncLoopback)),
+        TestCase::new("vhost-user-fs-dax-read", Box::new(TestVhostUserFsDaxRead)),
+        TestCase::new("vhost-user-fs-dax-write", Box::new(TestVhostUserFsDaxWrite)),
+        TestCase::new("vhost-user-fs-dax-snapshot", Box::new(TestVhostUserFsDaxSnapshot)),
     ]
 }
 
