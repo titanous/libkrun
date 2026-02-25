@@ -535,4 +535,123 @@ mod tests {
         let result = validate_header_for_vm(&header, &mem, 4, true);
         assert!(result.is_ok());
     }
+
+    /// AC5.1: VmSnapshot save/load round-trip with valid snapshot under 10MB
+    #[cfg(feature = "snapshot")]
+    #[test]
+    fn test_vmstate_roundtrip() {
+        let mem = make_memory(&[(0x1000, 0x2000)]);
+        let header = valid_header(&mem, 2, false);
+
+        // Create a valid VmSnapshot with minimal content
+        let snapshot = VmSnapshot {
+            header,
+            vcpu_states: vec![vec![0xAA; 256], vec![0xBB; 256]], // 2 vCPUs with state data
+            device_states: vec![("test_device".to_string(), vec![0xCC; 512])], // One device
+            gic_state: None,
+            vm_state: None,
+        };
+
+        // Create a temp file for vmstate
+        let temp_dir = std::path::PathBuf::from("/tmp");
+        let temp_path = temp_dir.join(format!(
+            "libkrun_test_vmstate_roundtrip_{}.bin",
+            std::process::id()
+        ));
+
+        // Save snapshot
+        let save_result = save_vmstate(&snapshot, &temp_path);
+        assert!(save_result.is_ok());
+
+        // Verify file exists and is under 10MB
+        let file_size = std::fs::metadata(&temp_path).unwrap().len();
+        assert!(file_size < 10 * 1024 * 1024);
+
+        // Load snapshot back
+        let load_result = load_vmstate(&temp_path);
+        let _ = std::fs::remove_file(&temp_path);
+        assert!(load_result.is_ok());
+
+        let loaded = load_result.unwrap();
+
+        // Verify round-trip: header, vcpu_states, and device_states are preserved
+        assert_eq!(loaded.header.magic, snapshot.header.magic);
+        assert_eq!(loaded.header.version, snapshot.header.version);
+        assert_eq!(loaded.header.vcpu_count, snapshot.header.vcpu_count);
+        assert_eq!(loaded.header.ram_regions, snapshot.header.ram_regions);
+        assert_eq!(loaded.header.nested_enabled, snapshot.header.nested_enabled);
+        assert_eq!(loaded.vcpu_states.len(), snapshot.vcpu_states.len());
+        assert_eq!(loaded.vcpu_states[0], snapshot.vcpu_states[0]);
+        assert_eq!(loaded.vcpu_states[1], snapshot.vcpu_states[1]);
+        assert_eq!(loaded.device_states.len(), snapshot.device_states.len());
+        assert_eq!(loaded.device_states[0], snapshot.device_states[0]);
+    }
+
+    /// AC5.3: IncrementalSnapshot save/load round-trip with valid snapshot under 10MB
+    #[cfg(feature = "snapshot")]
+    #[test]
+    fn test_incremental_snapshot_roundtrip() {
+        let mem = make_memory(&[(0x1000, 0x2000)]);
+        let header = valid_header(&mem, 2, false);
+
+        // Create a valid IncrementalSnapshot with minimal content
+        let dirty_pages = vec![
+            DirtyPage {
+                guest_addr: 0x1000,
+                data: vec![0xAA; 256],
+            },
+            DirtyPage {
+                guest_addr: 0x2000,
+                data: vec![0xBB; 256],
+            },
+        ];
+
+        let snapshot = IncrementalSnapshot {
+            header,
+            vcpu_states: vec![vec![0xCC; 256], vec![0xDD; 256]], // 2 vCPUs with state data
+            device_states: vec![("test_device".to_string(), vec![0xEE; 512])], // One device
+            dirty_pages,
+            gic_state: None,
+            vm_state: None,
+        };
+
+        // Create a temp file for incremental snapshot
+        let temp_dir = std::path::PathBuf::from("/tmp");
+        let temp_path = temp_dir.join(format!(
+            "libkrun_test_incremental_roundtrip_{}.bin",
+            std::process::id()
+        ));
+
+        // Save incremental snapshot
+        let save_result = save_incremental_snapshot(&snapshot, &temp_path);
+        assert!(save_result.is_ok());
+
+        // Verify file exists and is under 10MB
+        let file_size = std::fs::metadata(&temp_path).unwrap().len();
+        assert!(file_size < 10 * 1024 * 1024);
+
+        // Load incremental snapshot back
+        let load_result = load_incremental_snapshot(&temp_path);
+        let _ = std::fs::remove_file(&temp_path);
+        assert!(load_result.is_ok());
+
+        let loaded = load_result.unwrap();
+
+        // Verify round-trip: header, vcpu_states, device_states, and dirty_pages are preserved
+        assert_eq!(loaded.header.magic, snapshot.header.magic);
+        assert_eq!(loaded.header.version, snapshot.header.version);
+        assert_eq!(loaded.header.vcpu_count, snapshot.header.vcpu_count);
+        assert_eq!(loaded.header.ram_regions, snapshot.header.ram_regions);
+        assert_eq!(loaded.header.nested_enabled, snapshot.header.nested_enabled);
+        assert_eq!(loaded.vcpu_states.len(), snapshot.vcpu_states.len());
+        assert_eq!(loaded.vcpu_states[0], snapshot.vcpu_states[0]);
+        assert_eq!(loaded.vcpu_states[1], snapshot.vcpu_states[1]);
+        assert_eq!(loaded.device_states.len(), snapshot.device_states.len());
+        assert_eq!(loaded.device_states[0], snapshot.device_states[0]);
+        assert_eq!(loaded.dirty_pages.len(), snapshot.dirty_pages.len());
+        assert_eq!(loaded.dirty_pages[0].guest_addr, snapshot.dirty_pages[0].guest_addr);
+        assert_eq!(loaded.dirty_pages[0].data, snapshot.dirty_pages[0].data);
+        assert_eq!(loaded.dirty_pages[1].guest_addr, snapshot.dirty_pages[1].guest_addr);
+        assert_eq!(loaded.dirty_pages[1].data, snapshot.dirty_pages[1].data);
+    }
 }
