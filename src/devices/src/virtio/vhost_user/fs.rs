@@ -7,10 +7,12 @@
 //! VhostUserDevice with filesystem-specific features: device type 26, config space
 //! fetching from daemon, HPQ + request queues, and DAX window allocation.
 
-#[cfg(feature = "vhost-user")]
+use std::io::{self, ErrorKind, Result as IoResult};
 use std::os::unix::io::RawFd;
 
 use log::warn;
+use vhost::vhost_user::message::VhostUserConfigFlags;
+use vhost::vhost_user::VhostUserFrontend;
 use vm_memory::ByteValued;
 
 use crate::virtio::device::{VirtioDevice, VirtioShmRegion};
@@ -122,6 +124,92 @@ impl VirtioDevice for VhostUserFs {
 }
 
 impl VhostUserFs {
+    /// Create a new VhostUserFs device connected to a vhost-user daemon.
+    ///
+    /// # Arguments
+    ///
+    /// * `tag` - Filesystem tag (must be <= 36 bytes)
+    /// * `socket_path` - Path to the vhost-user Unix domain socket
+    /// * `dax_window_mib` - Optional DAX window size in MiB
+    ///
+    /// # Returns
+    ///
+    /// A new VhostUserFs device or an error if connection/config fails.
+    pub fn new(tag: &str, socket_path: &str, dax_window_mib: Option<u32>) -> IoResult<Self> {
+        // Validate tag length
+        if tag.len() > 36 {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "filesystem tag length exceeds 36 bytes",
+            ));
+        }
+
+        // Create inner VhostUserDevice with auto-detect queue count (num_queues=0)
+        let vhost_user = VhostUserDevice::new(
+            socket_path,
+            VIRTIO_ID_FS,
+            "virtio-fs-vhost".to_string(),
+            0,
+            &[],
+        )?;
+
+        // Fetch config from daemon via get_config
+        let mut config = {
+            let mut frontend = vhost_user.frontend.lock().unwrap();
+            let mut config_buf = [0u8; std::mem::size_of::<VirtioFsConfig>()];
+            frontend
+                .get_config(0, std::mem::size_of::<VirtioFsConfig>() as u32, VhostUserConfigFlags::empty(), &mut config_buf)
+                .map_err(|e| io::Error::new(ErrorKind::Other, format!("get_config failed: {}", e)))?;
+            if let Some(cfg) = VirtioFsConfig::from_slice(&config_buf) {
+                *cfg
+            } else {
+                return Err(io::Error::new(ErrorKind::InvalidData, "invalid config from daemon"));
+            }
+        };
+
+        // Copy tag into config
+        let tag_bytes = tag.as_bytes();
+        config.tag[..tag_bytes.len()].copy_from_slice(tag_bytes);
+
+        // Build queue configs: 1 HPQ + num_request_queues request queues
+        let num_queues = config.num_request_queues as usize;
+        let mut queue_configs = Vec::with_capacity(1 + num_queues);
+        queue_configs.push(QueueConfig::new(QUEUE_SIZE)); // HPQ
+        for _ in 0..num_queues {
+            queue_configs.push(QueueConfig::new(QUEUE_SIZE)); // Request queues
+        }
+
+        // Create DAX window if requested
+        let (dax_window_fd, dax_window_size) = if let Some(mib) = dax_window_mib {
+            let size = (mib as usize) * 1024 * 1024;
+            let fd = memfd_create("vhost-fs-dax", libc::MFD_CLOEXEC as u32)
+                .map_err(|e| io::Error::new(ErrorKind::Other, format!("memfd_create failed: {}", e)))?;
+
+            unsafe {
+                if libc::ftruncate(fd, size as libc::off_t) < 0 {
+                    let err = io::Error::last_os_error();
+                    libc::close(fd);
+                    return Err(err);
+                }
+            }
+
+            (Some(fd), Some(size))
+        } else {
+            (None, None)
+        };
+
+        Ok(VhostUserFs {
+            vhost_user,
+            config,
+            queue_configs,
+            shm_region: None,
+            dax_window_size,
+            dax_window_fd,
+            tag: tag.to_string(),
+            socket_path: socket_path.to_string(),
+        })
+    }
+
     pub fn set_shm_region(&mut self, region: VirtioShmRegion) {
         self.shm_region = Some(region);
     }
@@ -143,6 +231,20 @@ impl VhostUserFs {
     }
 }
 
+/// Wrapper around memfd_create syscall
+fn memfd_create(name: &str, flags: u32) -> io::Result<RawFd> {
+    let c_name = std::ffi::CString::new(name)
+        .map_err(|_| io::Error::new(ErrorKind::InvalidInput, "invalid memfd name"))?;
+
+    let fd = unsafe { libc::memfd_create(c_name.as_ptr(), flags) };
+
+    if fd < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(fd)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,7 +252,7 @@ mod tests {
     #[test]
     fn test_device_type_is_fs() {
         let config = VirtioFsConfig::default();
-        let device = Self::new_for_test(config, None);
+        let device = VhostUserFs::new_for_test(config, None);
         assert_eq!(device.device_type(), 26);
     }
 
@@ -160,7 +262,7 @@ mod tests {
         let tag = b"testfs";
         config.tag[..tag.len()].copy_from_slice(tag);
 
-        let device = Self::new_for_test(config, None);
+        let device = VhostUserFs::new_for_test(config, None);
         let mut buf = [0u8; 36];
         device.read_config(0, &mut buf);
         assert_eq!(&buf[..6], tag);
@@ -171,7 +273,7 @@ mod tests {
         let mut config = VirtioFsConfig::default();
         config.num_request_queues = 2;
 
-        let device = Self::new_for_test(config, None);
+        let device = VhostUserFs::new_for_test(config, None);
         let mut buf = [0u8; 4];
         device.read_config(36, &mut buf);
         assert_eq!(u32::from_le_bytes(buf), 2);
@@ -182,7 +284,7 @@ mod tests {
         let mut config = VirtioFsConfig::default();
         config.num_request_queues = 2;
 
-        let device = Self::new_for_test(config, None);
+        let device = VhostUserFs::new_for_test(config, None);
         assert_eq!(device.queue_config().len(), 3); // 1 HPQ + 2 request queues
         for queue_cfg in device.queue_config() {
             assert_eq!(queue_cfg.size, 1024);
@@ -192,14 +294,14 @@ mod tests {
     #[test]
     fn test_shm_region_none_without_dax() {
         let config = VirtioFsConfig::default();
-        let device = Self::new_for_test(config, None);
+        let device = VhostUserFs::new_for_test(config, None);
         assert!(device.shm_region().is_none());
     }
 
     #[test]
     fn test_shm_region_some_with_dax() {
         let config = VirtioFsConfig::default();
-        let mut device = Self::new_for_test(config, Some(32));
+        let mut device = VhostUserFs::new_for_test(config, Some(32));
 
         let region = VirtioShmRegion {
             host_addr: 0x1000,
@@ -212,28 +314,29 @@ mod tests {
         assert_eq!(retrieved.host_addr, 0x1000);
         assert_eq!(retrieved.guest_addr, 0x2000);
     }
+}
 
-    impl VhostUserFs {
-        /// Constructor for unit tests that bypasses socket connection.
-        #[cfg(test)]
-        fn new_for_test(config: VirtioFsConfig, dax_window_mib: Option<u32>) -> Self {
-            let num_queues = config.num_request_queues as usize;
-            let mut queue_configs = Vec::with_capacity(1 + num_queues);
-            queue_configs.push(QueueConfig::new(QUEUE_SIZE)); // HPQ
-            for _ in 0..num_queues {
-                queue_configs.push(QueueConfig::new(QUEUE_SIZE)); // Request queues
-            }
+impl VhostUserFs {
+    /// Constructor for unit tests that bypasses socket connection.
+    /// Builds a VhostUserFs with test values without connecting to a daemon.
+    #[cfg(test)]
+    fn new_for_test(config: VirtioFsConfig, dax_window_mib: Option<u32>) -> Self {
+        let num_queues = config.num_request_queues as usize;
+        let mut queue_configs = Vec::with_capacity(1 + num_queues);
+        queue_configs.push(QueueConfig::new(QUEUE_SIZE)); // HPQ
+        for _ in 0..num_queues {
+            queue_configs.push(QueueConfig::new(QUEUE_SIZE)); // Request queues
+        }
 
-            VhostUserFs {
-                vhost_user: VhostUserDevice::new_for_test(),
-                config,
-                queue_configs,
-                shm_region: None,
-                dax_window_size: dax_window_mib.map(|mib| (mib as usize) * 1024 * 1024),
-                dax_window_fd: None,
-                tag: String::new(),
-                socket_path: String::new(),
-            }
+        VhostUserFs {
+            vhost_user: VhostUserDevice::new_for_test_unconnected(),
+            config,
+            queue_configs,
+            shm_region: None,
+            dax_window_size: dax_window_mib.map(|mib| (mib as usize) * 1024 * 1024),
+            dax_window_fd: None,
+            tag: String::new(),
+            socket_path: String::new(),
         }
     }
 }
