@@ -363,15 +363,17 @@ impl Snapshottable for I8042Device {
         {
             let state: I8042State = bincode::deserialize(data)
                 .map_err(|e| SnapshotError::Deserialize(e.to_string()))?;
+            if state.buf.len() != BUF_SIZE {
+                return Err(SnapshotError::Deserialize(format!(
+                    "i8042 buf length mismatch: expected {BUF_SIZE}, got {}",
+                    state.buf.len()
+                )));
+            }
             self.status = state.status;
             self.control = state.control;
             self.outp = state.outp;
             self.cmd = state.cmd;
-            for (i, &byte) in state.buf.iter().enumerate() {
-                if i < BUF_SIZE {
-                    self.buf[i] = byte;
-                }
-            }
+            self.buf.copy_from_slice(&state.buf);
             self.bhead = Wrapping(state.bhead);
             self.btail = Wrapping(state.btail);
             Ok(())
@@ -464,6 +466,35 @@ mod snapshot_tests {
 
         let result = i8042.restore_state(&[0xFF, 0xFF, 0xFF]);
         assert!(matches!(result, Err(SnapshotError::Deserialize(_))));
+    }
+
+    #[test]
+    fn test_i8042_snapshot_invalid_buf_length() {
+        let mut i8042 = I8042Device::new(
+            EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
+            EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
+        );
+
+        // Save a valid snapshot
+        i8042.push_byte(0x11).unwrap();
+        let mut valid_state = i8042.save_state().unwrap();
+
+        // Create a state with a smaller buffer (manually craft invalid snapshot)
+        // Create a state with wrong buffer size and serialize it
+        let invalid_state = I8042State {
+            status: 0x10,
+            control: 0x04,
+            outp: 0,
+            cmd: 0,
+            buf: vec![0x11, 0x22], // Wrong size - should be BUF_SIZE (16)
+            bhead: 0,
+            btail: 1,
+        };
+        let invalid_bytes = bincode::serialize(&invalid_state).unwrap();
+
+        // Try to restore with wrong buffer length
+        let result = i8042.restore_state(&invalid_bytes);
+        assert!(matches!(result, Err(SnapshotError::Deserialize(msg)) if msg.contains("buf length mismatch")));
     }
 }
 
