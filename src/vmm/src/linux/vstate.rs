@@ -1836,9 +1836,19 @@ impl Vcpu {
     #[cfg(not(test))]
     // This is the main loop of the `Exited` state.
     fn exited(&mut self) -> StateMachine<Self> {
-        // Poll the exit flag. Once the VMM sets it, this thread can unwind.
+        // Wait for the VMM to set the exit flag (via Vmm::stop()), or for the
+        // event channel to disconnect (VcpuHandle dropped without Vmm::stop()).
+        // The channel disconnect case happens when restore_from_snapshot() fails
+        // before the event loop starts — nobody processes exit_evt, so should_exit
+        // is never set.
         while !self.should_exit.load(Ordering::Acquire) {
-            thread::sleep(Duration::from_millis(10));
+            match self
+                .event_receiver
+                .recv_timeout(Duration::from_millis(10))
+            {
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                _ => {}
+            }
         }
         StateMachine::finish()
     }
@@ -2019,6 +2029,12 @@ impl Drop for VcpuHandle {
         if let Some(ref thread) = self.vcpu_thread {
             let _ = thread.kill(sigrtmin() + VCPU_RTSIG_OFFSET);
         }
+
+        // Disconnect the event channel so threads blocked in paused() recv()
+        // see the disconnect and transition through exit → exited → finish.
+        let (dummy_sender, _) = crossbeam_channel::unbounded();
+        self.event_sender = dummy_sender;
+
         if let Some(thread) = self.vcpu_thread.take() {
             if let Err(e) = thread.join() {
                 error!("Failed to join vCPU thread: {e:?}");
