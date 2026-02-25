@@ -27,6 +27,8 @@ use crate::vmm_config::machine_config::{VmConfig, VmConfigError};
 #[cfg(feature = "net")]
 use crate::vmm_config::net::{NetBuilder, NetworkInterfaceConfig, NetworkInterfaceError};
 use crate::vmm_config::vsock::*;
+#[cfg(feature = "vhost-user")]
+use crate::vmm_config::vhost_user_fs::VhostUserFsConfig;
 use crate::vstate::VcpuConfig;
 #[cfg(feature = "gpu")]
 use devices::virtio::display::DisplayInfo;
@@ -226,6 +228,9 @@ pub struct VmResources {
     #[cfg(feature = "vhost-user")]
     /// Vhost-user device configurations
     pub vhost_user_devices: Vec<VhostUserDeviceConfig>,
+    #[cfg(feature = "vhost-user")]
+    /// Vhost-user filesystem device configurations
+    pub vhost_user_fs: Vec<VhostUserFsConfig>,
     /// File to send console output.
     pub console_output: Option<PathBuf>,
     /// SMBIOS OEM Strings
@@ -374,6 +379,11 @@ impl VmResources {
     #[cfg(not(feature = "tee"))]
     pub fn add_fs_device(&mut self, config: FsDeviceConfig) {
         self.fs.push(config)
+    }
+
+    #[cfg(feature = "vhost-user")]
+    pub fn add_vhost_user_fs_device(&mut self, config: VhostUserFsConfig) {
+        self.vhost_user_fs.push(config);
     }
 
     #[cfg(feature = "blk")]
