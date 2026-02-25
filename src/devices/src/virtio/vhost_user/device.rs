@@ -225,11 +225,14 @@ impl VhostUserDevice {
     }
 
     /// Activate the vhost-user device by setting up memory and vrings.
-    fn activate_vhost_user(
+    /// `vring_bases`: if Some, use saved vring bases (restore mode).
+    ///                if None, use 0 (normal activation).
+    pub(super) fn activate_vhost_user(
         &mut self,
         mem: &GuestMemoryMmap,
         interrupt: &InterruptTransport,
         queues: &[DeviceQueue],
+        vring_bases: Option<&[u16]>,
     ) -> IoResult<()> {
         let mut frontend = self.frontend.lock().unwrap();
 
@@ -290,9 +293,13 @@ impl VhostUserDevice {
                 .set_vring_num(queue_index, queue.actual_size())
                 .map_err(|e| io::Error::new(ErrorKind::Other, e))?;
 
-            // Set vring base
+            // Set vring base - use saved value if in restore mode, otherwise 0
+            let base = vring_bases
+                .and_then(|bases| bases.get(queue_index).copied())
+                .unwrap_or(0);
+
             frontend
-                .set_vring_base(queue_index, 0)
+                .set_vring_base(queue_index, base)
                 .map_err(|e| io::Error::new(ErrorKind::Other, e))?;
 
             // Vring addresses in queue are GPAs, but vhost-user protocol expects VMM VAs
@@ -543,6 +550,42 @@ impl VhostUserDevice {
 
         Ok(())
     }
+
+    /// Replace the Frontend connection for snapshot restore.
+    /// Uses saved negotiated features instead of fresh negotiation.
+    pub fn reconnect_for_restore(
+        &mut self,
+        stream: UnixStream,
+        saved_features: u64,
+        saved_protocol_features: u64,
+    ) -> ActivateResult {
+        let num_queues = self.queue_configs.len() as u64;
+        let frontend = Frontend::from_stream(stream, num_queues);
+        *self.frontend.lock().unwrap() = frontend;
+
+        // Follow the full vhost-user negotiation handshake, same as VhostUserDevice::new().
+        // The protocol requires get_features/get_protocol_features before set_*, even on restore.
+        // Use saved features as "desired" and intersect with what the (potentially restarted)
+        // daemon actually supports. This handles the case where a restarted daemon has
+        // different capabilities.
+        let mut frontend = self.frontend.lock().unwrap();
+        frontend.set_owner().map_err(|_| ActivateError::BadActivate)?;
+
+        // Feature negotiation: get available, intersect with saved, set
+        let backend_features = frontend.get_features()
+            .map_err(|_| ActivateError::BadActivate)?;
+        frontend.set_features(saved_features & backend_features)
+            .map_err(|_| ActivateError::BadActivate)?;
+
+        // Protocol feature negotiation: get available, intersect with saved, set
+        let backend_proto_features = frontend.get_protocol_features()
+            .map_err(|_| ActivateError::BadActivate)?;
+        let desired_proto = VhostUserProtocolFeatures::from_bits_truncate(saved_protocol_features);
+        frontend.set_protocol_features(desired_proto & backend_proto_features)
+            .map_err(|_| ActivateError::BadActivate)?;
+
+        Ok(())
+    }
 }
 
 impl VhostUserDevice {
@@ -629,7 +672,7 @@ impl VirtioDevice for VhostUserDevice {
         interrupt: InterruptTransport,
         queues: Vec<DeviceQueue>,
     ) -> ActivateResult {
-        if let Err(e) = self.activate_vhost_user(&mem, &interrupt, &queues) {
+        if let Err(e) = self.activate_vhost_user(&mem, &interrupt, &queues, None) {
             error!(
                 "{}: failed to activate vhost-user device: {}",
                 self.device_name, e
