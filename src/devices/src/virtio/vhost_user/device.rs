@@ -6,7 +6,9 @@
 //! This module provides a wrapper around the vhost crate's Frontend,
 //! adapting it to work with libkrun's VirtioDevice trait.
 
+use std::fs::File;
 use std::io::{self, ErrorKind, Result as IoResult};
+use std::os::unix::io::FromRawFd;
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -70,6 +72,9 @@ pub struct VhostUserDevice {
     /// Acknowledged protocol features
     acked_protocol_features: VhostUserProtocolFeatures,
 
+    /// Whether DEVICE_STATE protocol feature is supported by the backend
+    device_state_supported: bool,
+
     /// Device state
     device_state: DeviceState,
 }
@@ -84,6 +89,7 @@ impl std::fmt::Debug for VhostUserDevice {
             .field("backend_features", &self.backend_features)
             .field("acked_features", &self.acked_features)
             .field("acked_protocol_features", &self.acked_protocol_features)
+            .field("device_state_supported", &self.device_state_supported)
             .finish_non_exhaustive()
     }
 }
@@ -151,6 +157,9 @@ impl VhostUserDevice {
             if protocol_features.contains(VhostUserProtocolFeatures::CONFIGURE_MEM_SLOTS) {
                 our_protocol_features |= VhostUserProtocolFeatures::CONFIGURE_MEM_SLOTS;
             }
+            if protocol_features.contains(VhostUserProtocolFeatures::DEVICE_STATE) {
+                our_protocol_features |= VhostUserProtocolFeatures::DEVICE_STATE;
+            }
 
             frontend
                 .set_protocol_features(our_protocol_features)
@@ -199,6 +208,8 @@ impl VhostUserDevice {
             })
             .collect();
 
+        let device_state_supported = acked_protocol_features.contains(VhostUserProtocolFeatures::DEVICE_STATE);
+
         Ok(VhostUserDevice {
             frontend: Arc::new(Mutex::new(frontend)),
             device_type,
@@ -208,6 +219,7 @@ impl VhostUserDevice {
             backend_features,
             acked_features: 0,
             acked_protocol_features,
+            device_state_supported,
             device_state: DeviceState::Inactive,
         })
     }
@@ -391,6 +403,11 @@ impl VhostUserDevice {
         self.acked_protocol_features
     }
 
+    /// Check if DEVICE_STATE protocol feature is supported.
+    pub fn device_state_supported(&self) -> bool {
+        self.device_state_supported
+    }
+
     /// Share an additional memory region with the daemon.
     /// Requires CONFIGURE_MEM_SLOTS protocol feature to have been negotiated.
     pub fn add_mem_region(&self, region_info: &VhostUserMemoryRegionInfo) -> IoResult<()> {
@@ -406,6 +423,117 @@ impl VhostUserDevice {
             .unwrap()
             .add_mem_region(region_info)
             .map_err(io::Error::other)?;
+
+        Ok(())
+    }
+
+    /// Save daemon internal state via DEVICE_STATE protocol.
+    /// Returns the serialized state blob.
+    pub fn save_device_state(&self) -> IoResult<Vec<u8>> {
+        if !self.device_state_supported {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "DEVICE_STATE protocol feature not negotiated",
+            ));
+        }
+
+        // 1. Create pipe
+        let (read_end, write_end) = nix::unistd::pipe()
+            .map_err(|e| io::Error::new(ErrorKind::Other, format!("pipe: {}", e)))?;
+
+        // Safety: wrap in File for RAII cleanup
+        use std::os::unix::io::AsRawFd;
+        let read_file = unsafe { File::from_raw_fd(read_end.as_raw_fd()) };
+        let write_file = unsafe { File::from_raw_fd(write_end.as_raw_fd()) };
+
+        // 2. Send SET_DEVICE_STATE_FD with SAVE direction + write end
+        //    The daemon will write its state to the pipe.
+        //    Frontend may return a replacement fd (or None).
+        use vhost::vhost_user::message::VhostTransferStateDirection;
+        use vhost::vhost_user::message::VhostTransferStatePhase;
+        let _reply_fd = self
+            .frontend
+            .lock()
+            .unwrap()
+            .set_device_state_fd(
+                VhostTransferStateDirection::SAVE,
+                VhostTransferStatePhase::STOPPED,
+                &write_file,
+            )
+            .map_err(|e| io::Error::new(ErrorKind::Other, format!("set_device_state_fd: {}", e)))?;
+
+        // 3. Drop write end so we see EOF after daemon finishes writing
+        drop(write_file);
+
+        // 4. Read all data from pipe until EOF
+        use std::io::Read as IoRead;
+        let mut state = Vec::new();
+        let mut read_file = read_file;
+        read_file.read_to_end(&mut state)
+            .map_err(|e| io::Error::new(ErrorKind::Other, format!("read pipe: {}", e)))?;
+
+        // 5. CHECK_DEVICE_STATE confirms transfer completed successfully.
+        //    Returns Result<()> — Ok(()) on success, Err on failure.
+        self.frontend
+            .lock()
+            .unwrap()
+            .check_device_state()
+            .map_err(|e| io::Error::new(ErrorKind::Other, format!("check_device_state: {}", e)))?;
+
+        Ok(state)
+    }
+
+    /// Load daemon internal state via DEVICE_STATE protocol.
+    pub fn load_device_state(&self, data: &[u8]) -> IoResult<()> {
+        if !self.device_state_supported {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "DEVICE_STATE protocol feature not negotiated",
+            ));
+        }
+
+        // 1. Create pipe
+        let (read_end, write_end) = nix::unistd::pipe()
+            .map_err(|e| io::Error::new(ErrorKind::Other, format!("pipe: {}", e)))?;
+
+        // Safety: wrap in File for RAII cleanup
+        use std::os::unix::io::AsRawFd;
+        let read_file = unsafe { File::from_raw_fd(read_end.as_raw_fd()) };
+        let write_file = unsafe { File::from_raw_fd(write_end.as_raw_fd()) };
+
+        // 2. Send SET_DEVICE_STATE_FD with LOAD direction + read end
+        //    The daemon will read state from the pipe.
+        use vhost::vhost_user::message::VhostTransferStateDirection;
+        use vhost::vhost_user::message::VhostTransferStatePhase;
+        let _reply_fd = self
+            .frontend
+            .lock()
+            .unwrap()
+            .set_device_state_fd(
+                VhostTransferStateDirection::LOAD,
+                VhostTransferStatePhase::STOPPED,
+                &read_file,
+            )
+            .map_err(|e| io::Error::new(ErrorKind::Other, format!("set_device_state_fd: {}", e)))?;
+
+        // 3. Drop read end (we only write)
+        drop(read_file);
+
+        // 4. Write state data to pipe, then close to signal EOF
+        use std::io::Write as IoWrite;
+        let mut write_file = write_file;
+        write_file
+            .write_all(data)
+            .map_err(|e| io::Error::new(ErrorKind::Other, format!("write pipe: {}", e)))?;
+        drop(write_file); // Signal EOF to daemon
+
+        // 5. CHECK_DEVICE_STATE confirms transfer completed successfully.
+        //    Returns Result<()> — Ok(()) on success, Err on failure.
+        self.frontend
+            .lock()
+            .unwrap()
+            .check_device_state()
+            .map_err(|e| io::Error::new(ErrorKind::Other, format!("check_device_state: {}", e)))?;
 
         Ok(())
     }
@@ -439,6 +567,7 @@ impl VhostUserDevice {
             backend_features: 0,
             acked_features: 0,
             acked_protocol_features: VhostUserProtocolFeatures::empty(),
+            device_state_supported: false,
             device_state: DeviceState::Inactive,
         }
     }
@@ -528,5 +657,32 @@ impl VirtioDevice for VhostUserDevice {
 
         self.device_state = DeviceState::Inactive;
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test that save_device_state returns error when DEVICE_STATE not supported
+    #[test]
+    fn test_save_device_state_not_supported() {
+        let device = VhostUserDevice::new_for_test_unconnected();
+        assert!(!device.device_state_supported());
+
+        let result = device.save_device_state();
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::InvalidInput);
+    }
+
+    /// Test that load_device_state returns error when DEVICE_STATE not supported
+    #[test]
+    fn test_load_device_state_not_supported() {
+        let device = VhostUserDevice::new_for_test_unconnected();
+        assert!(!device.device_state_supported());
+
+        let result = device.load_device_state(b"test data");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::InvalidInput);
     }
 }
