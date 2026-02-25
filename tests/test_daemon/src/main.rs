@@ -5,6 +5,7 @@ use vm_memory::{GuestMemoryAtomic, GuestMemoryMmap};
 
 mod backend;
 mod filesystem;
+mod fuse;
 
 use backend::FsBackend;
 use filesystem::SyntheticFs;
