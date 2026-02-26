@@ -47,6 +47,9 @@ mod mem_block_backend;
 #[cfg(feature = "host")]
 mod loopback_net;
 
+#[cfg(feature = "host")]
+mod mock_snapshot_store;
+
 mod test_custom_block_backend;
 use test_custom_block_backend::TestCustomBlockBackend;
 
@@ -60,6 +63,14 @@ use test_vhost_user_fs::{
 
 #[cfg(feature = "guest")]
 mod net_helpers;
+
+// UFFD integration test placeholders (implemented in Phase 6 tasks 2-7)
+pub struct TestUffdDemandPageOnly;
+pub struct TestUffdPreloadFull;
+pub struct TestUffdPreloadPartial;
+pub struct TestUffdIncrementalChain;
+pub struct TestUffdErrorHandling;
+pub struct TestUffdParallelFaults;
 
 pub fn test_cases() -> Vec<TestCase> {
     // Register your test here:
@@ -126,6 +137,12 @@ pub fn test_cases() -> Vec<TestCase> {
         ),
         TestCase::new("vhost-user-fs-dax-inode", Box::new(TestVhostUserFsDaxInode)),
         TestCase::new("vhost-user-fs-dax-never", Box::new(TestVhostUserFsDaxNever)),
+        TestCase::new("uffd-demand-page-only", Box::new(TestUffdDemandPageOnly)),
+        TestCase::new("uffd-preload-full", Box::new(TestUffdPreloadFull)),
+        TestCase::new("uffd-preload-partial", Box::new(TestUffdPreloadPartial)),
+        TestCase::new("uffd-incremental-chain", Box::new(TestUffdIncrementalChain)),
+        TestCase::new("uffd-error-handling", Box::new(TestUffdErrorHandling)),
+        TestCase::new("uffd-parallel-faults", Box::new(TestUffdParallelFaults)),
     ]
 }
 
@@ -218,5 +235,56 @@ mod tests {
                 panic!("test_cases() contains test named {name}, but the name is reseved")
             }
         }
+    }
+}
+
+// Test trait implementations for UFFD placeholder tests
+// These will be fully implemented in Phase 6 tasks 2-7
+
+#[host]
+impl Test for TestUffdDemandPageOnly {
+    fn start_vm(self: Box<Self>, _test_setup: TestSetup) -> anyhow::Result<()> {
+        // Implemented in Task 2
+        unimplemented!("Task 2: Test demand-page-only")
+    }
+}
+
+#[host]
+impl Test for TestUffdPreloadFull {
+    fn start_vm(self: Box<Self>, _test_setup: TestSetup) -> anyhow::Result<()> {
+        // Implemented in Task 3
+        unimplemented!("Task 3: Test preload-full")
+    }
+}
+
+#[host]
+impl Test for TestUffdPreloadPartial {
+    fn start_vm(self: Box<Self>, _test_setup: TestSetup) -> anyhow::Result<()> {
+        // Implemented in Task 4
+        unimplemented!("Task 4: Test preload-partial")
+    }
+}
+
+#[host]
+impl Test for TestUffdIncrementalChain {
+    fn start_vm(self: Box<Self>, _test_setup: TestSetup) -> anyhow::Result<()> {
+        // Implemented in Task 5
+        unimplemented!("Task 5: Test incremental-chain")
+    }
+}
+
+#[host]
+impl Test for TestUffdErrorHandling {
+    fn start_vm(self: Box<Self>, _test_setup: TestSetup) -> anyhow::Result<()> {
+        // Implemented in Task 6
+        unimplemented!("Task 6: Test error-handling")
+    }
+}
+
+#[host]
+impl Test for TestUffdParallelFaults {
+    fn start_vm(self: Box<Self>, _test_setup: TestSetup) -> anyhow::Result<()> {
+        // Implemented in Task 7
+        unimplemented!("Task 7: Test parallel-faults")
     }
 }

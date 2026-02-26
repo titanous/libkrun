@@ -11,12 +11,12 @@ name = "test_cases"
 
 [dependencies]
 krun-sys = { path = "../../krun-sys", optional = true }
-libkrun = { path = "../../src/libkrun", optional = true, features = ["embedded_init", "net", "blk", "snapshot", "vhost-user"] }
+libkrun = { path = "../../src/libkrun", optional = true, features = ["embedded_init", "net", "blk", "snapshot", "vhost-user", "uffd"] }
 macros = { path = "../macros" }
 nix = { version = "0.29.0", features = ["socket"] }
 libc = "0.2"
 anyhow = "1.0.95"
 tempdir = "0.3.7"
-tokio = { version = "1", features = ["sync"] }
+tokio = { version = "1", features = ["sync", "time"] }
 bytes = "1"
 pnet = "0.35"
