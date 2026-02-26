@@ -6,7 +6,7 @@ Last verified: 2026-02-25
 Public API crate providing both C FFI (`krun_*` functions) and Rust `Builder` API for configuring and starting microVMs.
 
 ## Contracts
-- **Exposes**: C API (`krun_set_vm_config`, `krun_start_enter`, etc.), Rust `Builder` struct, `Context` struct, `StartError` enum, `VmExit` enum (re-exported from vmm), `Builder::add_virtiofs_vhost_user()` (behind `vhost-user` feature)
+- **Exposes**: C API (`krun_set_vm_config`, `krun_start_enter`, etc.), Rust `Builder` struct, `Context` struct, `StartError` enum, `VmExit` enum (re-exported from vmm), `Builder::add_virtiofs_vhost_user()` (behind `vhost-user` feature), `vmm::snapshot_store` re-export (behind `snapshot` feature), `VmHandle::snapshot_to_store()`, `VmHandle::incremental_snapshot_to_store()` (behind `snapshot` feature)
 - **Guarantees**:
   - `krun_set_vm_config` returns `-EINVAL` when `num_vcpus == 0`
   - `Builder::vm_config()` returns `Result<&mut Self, StartError>` (was infallible before)
@@ -14,7 +14,9 @@ Public API crate providing both C FFI (`krun_*` functions) and Rust `Builder` AP
   - `StartError::TagTooLong(usize)` variant for filesystem tag > 36 bytes
   - `Builder::add_virtiofs_vhost_user(tag, socket_path, dax_window_mib)` returns `Err(TagTooLong)` if tag > 36 bytes; gated behind `vhost-user` + `not(tee)` features
   - `Context::run()` returns `Result<VmExit, StartError>` -- process stays alive after VM exits
-  - `Context::restore_and_run()` returns `Result<VmExit, StartError>` -- same contract as `run()`
+  - `Context::restore_and_run()` returns `Result<VmExit, StartError>` -- same contract as `run()`; on Linux delegates to `restore_and_run_with_store`
+  - `Context::restore_and_run_with_store(factory)` accepts `Box<dyn SnapshotStoreFactory>`; Linux-only (returns error on other platforms)
+  - `VmHandle::snapshot_to_store(store)` and `VmHandle::incremental_snapshot_to_store(store)` pause vCPUs, snapshot via store, resume vCPUs
   - `VmExit::Shutdown { exit_code }` for normal guest shutdown, `VmExit::RebootRequested` for reboot, `VmExit::Error { message }` for fatal errors
 - **Expects**: Callers set vm_config before start; valid feature flags at compile time
 
@@ -29,6 +31,8 @@ Public API crate providing both C FFI (`krun_*` functions) and Rust `Builder` AP
 - `Context::run()` polls `SharedVmExit` after each event loop tick to detect VM exit
 - `Context` takes ownership of `SharedVmExit` from `BuiltVm` at construction time
 - `VmExit` is re-exported as `pub use vmm::vm_exit::VmExit` for consumer convenience
+- `vmm::snapshot_store` re-exported so consumers can implement custom `SnapshotStore` backends
+- `restore_and_run` on Linux now delegates to `restore_and_run_with_store` with `FsSnapshotStoreFactory` (backward compatible)
 
 ## Key Files
 - `lib.rs` - All API functions, Builder struct, Context struct, StartError enum (single-file crate)

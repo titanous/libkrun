@@ -30,13 +30,14 @@ Last verified: 2026-02-25
 - `embedded_init` - Embeds init binary in library; required for tests
 - `net` - Enables virtio-net async backend (tokio, bytes)
 - `blk` - Enables virtio-block backends (tokio, futures)
-- `snapshot` - Enables snapshot/restore (serde, bincode)
+- `snapshot` - Enables snapshot/restore (serde, bincode, futures, tokio); includes `SnapshotStore` trait and `FsSnapshotStore`
 - `efi` - EFI boot support (implies blk + net)
 - `vhost-user` - Enables vhost-user device support (virtio-fs over vhost-user with DAX); build with `VHOST_USER=1 make`
+- `uffd` - Enables userfaultfd demand-paging for snapshot restore (implies `snapshot`; Linux-only; adds `userfaultfd` crate)
 
 ## Conventions
 - Platform-specific code gated with `#[cfg(target_os = "...")]`
-- Snapshot format is platform-agnostic (opaque vCPU state bytes)
+- Snapshot format is platform-agnostic (opaque vCPU state bytes); directory-based layout (`vmstate` + `memory` files per snapshot directory)
 - Legacy devices implement `Snapshottable` trait; state serialized with bincode behind `snapshot` feature
 - Platform-specific serial (x86_64, riscv64) re-export shared `serial_16550.rs` implementation
 - Feature flags gate optional dependencies; see `src/devices/Cargo.toml`

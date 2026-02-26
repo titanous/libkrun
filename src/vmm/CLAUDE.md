@@ -6,7 +6,7 @@ Last verified: 2026-02-25
 Core virtual machine manager. Orchestrates VM lifecycle: build, run, snapshot/restore, dirty page tracking.
 
 ## Contracts
-- **Exposes**: `Vmm` struct (VM lifecycle), `build_microvm()`, snapshot/restore functions, `DirtyBitmap`, `VmExit` enum, `SharedVmExit` type, `VhostUserFsConfig` (behind `vhost-user` feature), `Vm::register_memory_region()`
+- **Exposes**: `Vmm` struct (VM lifecycle), `build_microvm()`, snapshot/restore functions, `DirtyBitmap`, `VmExit` enum, `SharedVmExit` type, `VhostUserFsConfig` (behind `vhost-user` feature), `Vm::register_memory_region()`, `snapshot_store` module (`SnapshotStore` trait, `SnapshotStoreFactory` trait, `FsSnapshotStore`, `FsSnapshotStoreFactory`) behind `snapshot` feature, `uffd` module (`UffdHandler`, `PageTracker`, `PageTrackerStats`, `LoadSource`) behind `uffd` feature
 - **Guarantees**:
   - `validate_header_for_vm` checks magic, version, RAM layout, vCPU count, and nested_enabled match
   - Incremental snapshots require `dirty_tracking_enabled` (returns `DirtyTrackingNotEnabled` otherwise)
@@ -25,10 +25,24 @@ Core virtual machine manager. Orchestrates VM lifecycle: build, run, snapshot/re
   - `VmResources::vhost_user_fs` stores `VhostUserFsConfig` list; `add_vhost_user_fs_device()` appends to it
   - `StartMicrovmError` gains `MmapDaxWindow`, `RegisterDaxMemoryRegion`, `RegisterVhostUserDevice`, `RegisterVhostUserFsDevice` variants (behind `vhost-user` feature)
   - `attach_vhost_user_fs_device` creates VhostUserFs, mmaps DAX memfd, registers DAX region with KVM, attaches to MMIO bus
+  - `SnapshotStore` trait is object-safe (`dyn SnapshotStore`), `Send + Sync + 'static`; all async methods return `SendBoxFuture` (Send futures for tokio::spawn)
+  - `SnapshotStoreFactory::create` consumes `Box<Self>` (factory is single-use)
+  - `FsSnapshotStore` reads from directory-based layout: `base_path/vmstate`, `base_path/memory`, with ordered incremental directories each containing `vmstate`
+  - `FsSnapshotStore::read_vmstate` with incrementals merges base header + latest incremental state (vcpu_states, device_states, gic_state, vm_state)
+  - `FsSnapshotStore::read_page` checks dirty_page_index (newest-first) before falling back to base memory file
+  - `FsSnapshotStore::preload` yields 4MB chunks with dirty pages overlaid from incrementals
+  - `Vmm::restore_from_store` drains preload stream to eagerly populate guest memory (Linux-only)
+  - `Vmm::restore_from_store_with_uffd` creates UFFD handler, registers memory regions, exchanges vmstate via oneshot channels, returns handler thread handle (Linux + `uffd` feature)
+  - `Vmm::snapshot_to_store` and `Vmm::incremental_snapshot_to_store` write via `SnapshotStore` trait (both platforms)
+  - `UffdHandler` runs on dedicated thread with single-threaded tokio runtime; preload and fault loop run concurrently via `futures::join!`
+  - `UffdHandler` page fault resolution: reads page from store, copies via `uffd.copy()`, handles EEXIST races silently
+  - `PageTracker` uses atomic bitmap (`AtomicU64` words) for lock-free page tracking; `mark_loaded` deduplicates via atomic OR
+  - `BuiltVm::restore_from_store` starts vCPUs paused, restores memory+state, then resumes (Linux-only)
+  - `restore_incremental_snapshot` now reads from `path.join("vmstate")` (directory-based format, not flat file)
 - **Expects**: Valid `VmResources` from libkrun crate; KVM/HVF available at runtime
 
 ## Dependencies
-- **Uses**: `devices` (mmio device manager, virtio devices, VhostUserFs), `arch`, `kernel`, `vm-memory`
+- **Uses**: `devices` (mmio device manager, virtio devices, VhostUserFs), `arch`, `kernel`, `vm-memory`, `userfaultfd` (behind `uffd` feature), `tokio` + `futures` (behind `snapshot` feature)
 - **Used by**: `libkrun` (public API crate)
 - **Boundary**: Does not know about C API; only receives structured `VmResources`
 
@@ -45,6 +59,9 @@ Core virtual machine manager. Orchestrates VM lifecycle: build, run, snapshot/re
 - PortIO and MMIO device states share the `device_states` vec; both managers skip unknown IDs silently
 - x86_64 `VcpuState` includes `tsc_khz: Option<u32>` with `#[serde(default)]` for backward compat
 - `VMSTATE_MAX_SIZE` (10MB) caps deserialization to prevent OOM from corrupted files
+- Snapshot save/restore refactored to use `SnapshotStore` trait internally; `create_full_snapshot`/`restore_from_snapshot` delegate to store-based methods
+- `restore_device_and_vcpu_states` extracted as shared helper for both eager and UFFD restore paths
+- UFFD handler thread communicates vmstate to main thread via `tokio::sync::oneshot` channel; main thread signals readiness back via second oneshot
 
 ## Invariants
 - `validate_header_for_vm` is called before every snapshot restore (full and incremental)
@@ -57,13 +74,17 @@ Core virtual machine manager. Orchestrates VM lifecycle: build, run, snapshot/re
 - Virtio used ring dirty marking runs before `collect_dirty_pages` in incremental snapshots
 - DAX KVM memory slots are NOT tracked in `mem_slots` (intentionally excluded from dirty tracking; DAX is volatile cache)
 - When `vhost-user` feature is active, `create_guest_memory` creates memfd-backed regions; without the feature, anonymous mmap is used (no behavior change)
+- UFFD handler signals `VmExit::Error` on fatal page fault errors (store read failure, copy failure); EEXIST is non-fatal
+- Preload errors are non-fatal; remaining pages are demand-paged via fault handler
 
 ## Key Files
 - `vm_exit.rs` - `VmExit` enum (Shutdown, RebootRequested, Error) and `SharedVmExit` type
 - `snapshot.rs` - Snapshot format, validation, save/load functions, `VMSTATE_MAX_SIZE` limit
 - `dirty_bitmap.rs` - Lock-free dirty page tracking for incremental snapshots
 - `builder.rs` - `build_microvm()` VM construction, creates `SharedVmExit` and `vcpu_exit_flag`
-- `lib.rs` - `Vmm` struct, `stop()`, `resolve_vm_exit()`, snapshot orchestration, used ring dirty marking
+- `snapshot_store.rs` - `SnapshotStore` trait, `SnapshotStoreFactory` trait, `FsSnapshotStore`, `FsSnapshotStoreFactory`; directory-based snapshot I/O with incremental overlay support
+- `uffd.rs` - `UffdHandler` (UFFD demand-paging), `PageTracker` (atomic bitmap), `LoadSource`, `PageTrackerStats`; behind `uffd` feature
+- `lib.rs` - `Vmm` struct, `stop()`, `resolve_vm_exit()`, snapshot orchestration (store-based), `restore_device_and_vcpu_states`, used ring dirty marking
 - `device_manager/legacy.rs` - `PortIODeviceManager` with snapshot save/restore (x86_64)
 - `device_manager/kvm/mmio.rs` - `MMIODeviceManager`, `get_virtio_used_ring_ranges()`
 - `linux/vstate.rs` - x86_64 vCPU: `tsc_khz`, `kvmclock_ctrl` on restore, `VcpuHandle::drop()`
@@ -75,3 +96,5 @@ Core virtual machine manager. Orchestrates VM lifecycle: build, run, snapshot/re
 - `create_full_snapshot` still hardcodes `nested_enabled: false` (pre-existing TODO)
 - Vsock timesync quiesce is macOS-only; on Linux the timesync thread is not started
 - `VcpuHandle::Drop` is `#[cfg(not(test))]` -- tests do not get automatic thread cleanup
+- UFFD handler creates its own single-threaded tokio runtime; TODO to consolidate with Context's runtime
+- `restore_incremental_snapshot` changed to directory-based path (`path.join("vmstate")`) -- callers must pass directory path, not file path
