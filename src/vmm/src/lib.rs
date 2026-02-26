@@ -598,6 +598,147 @@ impl Vmm {
         Ok(())
     }
 
+    /// Restore a full snapshot using UFFD for demand paging.
+    ///
+    /// When the `uffd` feature is enabled, this method:
+    /// 1. Creates UFFD handler and registers memory regions
+    /// 2. Spawns handler on dedicated thread
+    /// 3. Exchanges vmstate with handler via oneshot channel
+    /// 4. Restores device and vCPU states
+    /// 5. Starts the UFFD fault loop while vCPUs run
+    ///
+    /// Returns the UFFD handler thread handle.
+    /// Page faults are resolved on-demand as vCPUs access memory.
+    #[cfg(all(target_os = "linux", feature = "uffd"))]
+    pub fn restore_from_store_with_uffd(
+        &mut self,
+        store: Box<dyn snapshot_store::SnapshotStore>,
+    ) -> std::result::Result<std::thread::JoinHandle<()>, snapshot::SnapshotError> {
+        // Create channels for vmstate exchange
+        let (vmstate_tx, vmstate_rx) = tokio::sync::oneshot::channel();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+
+        self.mmio_device_manager
+            .quiesce_all_device_workers(snapshot::SNAPSHOT_QUIESCE_TIMEOUT)
+            .map_err(|e| {
+                snapshot::SnapshotError::Deserialize(format!(
+                    "Failed to quiesce device workers before restore: {e}"
+                ))
+            })?;
+
+        // Get memory regions for UFFD registration (guest_addr, host_addr, size)
+        let regions = snapshot::ram_layout(&self.guest_memory);
+        let mut uffd_regions = Vec::new();
+
+        // Iterate over guest memory regions and get their host addresses
+        use vm_memory::{GuestAddress, GuestMemory};
+        for (guest_addr, size) in regions {
+            // Get host address for this guest address range
+            if let Ok(host_addr) = self.guest_memory.get_host_address(GuestAddress(guest_addr)) {
+                uffd_regions.push((guest_addr, host_addr as u64, size));
+            }
+        }
+
+        // Convert store Box to Arc for sharing with UFFD handler
+        let store_arc: Arc<dyn snapshot_store::SnapshotStore> = Arc::from(store);
+
+        // Create and spawn UFFD handler on dedicated thread
+        let handler = uffd::UffdHandler::new(
+            store_arc.clone(),
+            self.vm_exit.clone(),
+            uffd_regions,
+            vmstate_tx,
+            ready_rx,
+        )
+        .map_err(|e| snapshot::SnapshotError::Deserialize(format!("Failed to create UFFD handler: {e}")))?;
+
+        let handler_thread = handler.run();
+
+        // Receive vmstate from handler
+        let vmstate_bytes = std::thread::spawn(move || {
+            // Block until handler sends vmstate
+            match vmstate_rx.blocking_recv() {
+                Ok(Ok(bytes)) => Ok::<_, snapshot::SnapshotError>(bytes),
+                Ok(Err(e)) => Err(snapshot::SnapshotError::Deserialize(format!(
+                    "Handler failed to read vmstate: {e}"
+                ))),
+                Err(_) => Err(snapshot::SnapshotError::Deserialize(
+                    "Handler vmstate channel closed".to_string(),
+                )),
+            }
+        })
+        .join()
+        .map_err(|_| {
+            snapshot::SnapshotError::Deserialize(
+                "Failed to join vmstate thread".to_string(),
+            )
+        })?
+        .map_err(|e| e)?;
+
+        // Deserialize and validate vmstate
+        let vmstate: snapshot::VmSnapshot = bincode::deserialize(&vmstate_bytes)
+            .map_err(|e| snapshot::SnapshotError::Deserialize(e.to_string()))?;
+
+        snapshot::validate_header_for_vm(
+            &vmstate.header,
+            &self.guest_memory,
+            self.vcpus_handles.len(),
+            self.nested_enabled,
+        )?;
+
+        // Restore device and vCPU states
+        #[cfg(target_arch = "aarch64")]
+        if let Some(gic_data) = &vmstate.gic_state {
+            self.restore_interrupt_controller_state(gic_data)?;
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        if let Some(data) = &vmstate.vm_state {
+            let state: vstate::VmState = bincode::deserialize(data)
+                .map_err(|e| snapshot::SnapshotError::Deserialize(e.to_string()))?;
+            self.vm.restore_state(&state).map_err(|e| {
+                snapshot::SnapshotError::Deserialize(format!("Failed to restore VM state: {e}"))
+            })?;
+        }
+
+        self.mmio_device_manager
+            .restore_all_device_states(&vmstate.device_states)
+            .map_err(|e| {
+                snapshot::SnapshotError::Deserialize(format!(
+                    "Failed to restore device states: {e}"
+                ))
+            })?;
+
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.pio_device_manager
+                .restore_all_device_states(&vmstate.device_states)
+                .map_err(|e| {
+                    snapshot::SnapshotError::Deserialize(format!(
+                        "Failed to restore PortIO device states: {e}"
+                    ))
+                })?;
+        }
+
+        self.mmio_device_manager
+            .complete_all_device_restores()
+            .map_err(|e| {
+                snapshot::SnapshotError::Deserialize(format!(
+                    "Failed to complete device restores: {e}"
+                ))
+            })?;
+        self.mmio_device_manager.resume_all_device_workers();
+
+        self.restore_vcpu_states(vmstate.vcpu_states).map_err(|e| {
+            snapshot::SnapshotError::Deserialize(format!("Failed to restore vCPU states: {e}"))
+        })?;
+
+        // Signal handler that main thread is ready; handler will start fault loop
+        let _ = ready_tx.send(());
+
+        Ok(handler_thread)
+    }
+
     /// Sends a resume command to the vcpus.
     pub fn resume_vcpus(&mut self) -> Result<()> {
         for handle in self.vcpus_handles.iter() {
