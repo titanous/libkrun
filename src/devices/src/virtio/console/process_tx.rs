@@ -119,20 +119,24 @@ fn write_desc_to_output(
     let mut total = 0;
     for slice_result in desc.mem.get_slices(desc.addr, desc.len as usize) {
         let src = slice_result.map_err(|e| io::Error::other(e))?;
-        let len = src.len();
+        let slice_len = src.len();
         let diagnostics = if console_tx_diag_enabled() {
-            Some(sample_tx_slice_diagnostics(len, &src))
+            Some(sample_tx_slice_diagnostics(slice_len, &src))
         } else {
             None
         };
 
+        let mut written_in_slice = 0;
         loop {
-            log::trace!("Tx {src:?}, write_volatile {len} bytes");
-            match output.write_volatile(&src) {
+            let remaining = src
+                .offset(written_in_slice)
+                .map_err(|e| io::Error::other(e))?;
+            log::trace!("Tx {remaining:?}, write_volatile {} bytes", remaining.len());
+            match output.write_volatile(&remaining) {
                 Ok(n) => {
                     if let Some(diag) = diagnostics.as_ref() {
-                        let post_diag = if diag.suspicious() || n != len {
-                            Some(sample_tx_slice_diagnostics(len, &src))
+                        let post_diag = if diag.suspicious() || n != remaining.len() {
+                            Some(sample_tx_slice_diagnostics(slice_len, &src))
                         } else {
                             None
                         };
@@ -140,7 +144,7 @@ fn write_desc_to_output(
                             .as_ref()
                             .map(|post| post.hash64 != diag.hash64)
                             .unwrap_or(false);
-                        let suspicious = diag.suspicious() || n != len || post_changed;
+                        let suspicious = diag.suspicious() || n != remaining.len() || post_changed;
                         if should_emit_console_tx_diag(suspicious) {
                             let tx_diag_seq = next_console_tx_diag_seq();
                             log::warn!(
@@ -171,8 +175,12 @@ fn write_desc_to_output(
                             );
                         }
                     }
+                    written_in_slice += n;
                     total += n;
-                    break;
+                    if written_in_slice >= slice_len {
+                        break;
+                    }
+                    // Partial write: retry with remaining bytes in this slice
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                     log::trace!("Tx wait for output (would block)");
