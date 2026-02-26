@@ -518,6 +518,7 @@ impl Vmm {
         &mut self,
         vmstate_bytes: Vec<u8>,
         store: Box<dyn snapshot_store::SnapshotStore>,
+        rt: &tokio::runtime::Runtime,
     ) -> std::result::Result<(), snapshot::SnapshotError> {
         // Deserialize vmstate
         let vmstate: snapshot::VmSnapshot = bincode::deserialize(&vmstate_bytes)
@@ -540,13 +541,6 @@ impl Vmm {
 
         // Drain preload stream to populate memory (eager restore)
         let regions = snapshot::ram_layout(&self.guest_memory);
-        // TODO: Phase 3+ — consolidate runtimes: Context creates one at restore_and_run_with_store,
-        // then Vmm creates another here. Single runtime should be created by Context and passed down.
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .map_err(|e| {
-                snapshot::SnapshotError::Deserialize(format!("Failed to create runtime: {e}"))
-            })?;
 
         rt.block_on(async {
             use futures::stream::StreamExt;
@@ -591,6 +585,7 @@ impl Vmm {
         &mut self,
         vmstate_bytes: Vec<u8>,
         store: Box<dyn snapshot_store::SnapshotStore>,
+        rt: tokio::runtime::Runtime,
     ) -> std::result::Result<std::thread::JoinHandle<()>, snapshot::SnapshotError> {
         // Deserialize and validate vmstate BEFORE creating UFFD handler or starting threads.
         // If validation fails, no cleanup is needed.
@@ -643,7 +638,7 @@ impl Vmm {
                     ))
                 })?;
 
-        let handler_thread = handler.run();
+        let handler_thread = handler.run(rt);
 
         // Restore device and vCPU states
         self.restore_device_and_vcpu_states(vmstate)?;

@@ -725,6 +725,7 @@ impl BuiltVm {
         &mut self,
         vmstate_bytes: Vec<u8>,
         store: Box<dyn super::snapshot_store::SnapshotStore>,
+        rt: &tokio::runtime::Runtime,
     ) -> std::result::Result<Arc<Mutex<Vmm>>, StartMicrovmError> {
         let mut vcpus = self
             .vcpus
@@ -748,7 +749,7 @@ impl BuiltVm {
         };
 
         // Step 3: Restore using store (eager restore, drains preload to populate memory)
-        vmm.restore_from_store(vmstate_bytes, store)
+        vmm.restore_from_store(vmstate_bytes, store, rt)
             .map_err(snapshot_err)?;
 
         // Step 4: Resume all vCPUs — they leave the initial event loop and
@@ -768,6 +769,7 @@ impl BuiltVm {
         &mut self,
         vmstate_bytes: Vec<u8>,
         store: Box<dyn super::snapshot_store::SnapshotStore>,
+        rt: tokio::runtime::Runtime,
     ) -> std::result::Result<std::thread::JoinHandle<()>, StartMicrovmError> {
         let mut vmm = self.vmm.lock().expect("Poisoned vmm lock");
 
@@ -803,7 +805,7 @@ impl BuiltVm {
 
         // Step 3: Set up UFFD handler, restore device/vCPU states
         let handler_thread = vmm
-            .restore_from_store_with_uffd(vmstate_bytes, store)
+            .restore_from_store_with_uffd(vmstate_bytes, store, rt)
             .map_err(snapshot_err)?;
 
         // Step 4: Resume all vCPUs — page faults will be resolved by the UFFD handler

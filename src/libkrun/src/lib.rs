@@ -3157,6 +3157,7 @@ impl Context {
         #[cfg(target_os = "linux")]
         {
             let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
                 .build()
                 .map_err(|e| {
                     StartError::Microvm(vmm::builder::StartMicrovmError::Internal(
@@ -3184,9 +3185,9 @@ impl Context {
                     })
                 })?;
 
-                let handler = self
-                    .built_vm
-                    .restore_from_store_with_uffd(vmstate_bytes, store)?;
+                let handler =
+                    self.built_vm
+                        .restore_from_store_with_uffd(vmstate_bytes, store, rt)?;
                 Some(handler)
             };
 
@@ -3200,7 +3201,8 @@ impl Context {
                     })
                 })?;
 
-                self.built_vm.restore_from_store(vmstate_bytes, store)?;
+                self.built_vm
+                    .restore_from_store(vmstate_bytes, store, &rt)?;
                 None
             };
 

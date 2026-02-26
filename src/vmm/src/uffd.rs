@@ -251,19 +251,17 @@ impl UffdHandler {
         self.tracker.stats()
     }
 
-    /// Spawn the handler on a dedicated thread with tokio runtime.
+    /// Spawn the handler on a dedicated thread using the provided tokio runtime.
+    ///
+    /// The runtime is moved to the handler thread. The caller must ensure
+    /// `enable_all()` was used when building the runtime (UFFD handler needs
+    /// the I/O driver for `AsyncFd` and the timer driver).
     ///
     /// Returns a `JoinHandle` to await the handler's completion.
-    pub fn run(self) -> thread::JoinHandle<()> {
+    pub fn run(self, rt: tokio::runtime::Runtime) -> thread::JoinHandle<()> {
         thread::Builder::new()
             .name("uffd-handler".into())
             .spawn(move || {
-                // TODO: consolidate with Context's tokio runtime instead of creating a
-                // separate single-threaded runtime for the UFFD handler thread.
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("failed to create uffd tokio runtime");
                 rt.block_on(self.run_handler());
             })
             .expect("failed to spawn uffd handler thread")
