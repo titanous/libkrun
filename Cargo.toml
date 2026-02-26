@@ -16,4 +16,6 @@ debug = true
 lto = false
 
 [patch.crates-io]
+linux-loader = { git = "https://github.com/theoparis/linux-loader", rev = "af90928dcfa1666d47a5269061ef77857eff46d3" }
 vhost = { path = "vendor/vhost" }
+tdx = { path = "vendor/tdx" }
