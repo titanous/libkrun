@@ -16,7 +16,7 @@ use std::os::unix::io::{AsRawFd, RawFd};
 
 use libc::{c_void, ssize_t, write};
 
-use vm_memory::{Address, GuestAddress, GuestAddressSpace, GuestMemory, GuestUsize};
+use vm_memory::{Address, GuestAddress, GuestAddressSpace, GuestMemoryBackend, GuestUsize};
 use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::ioctl::{ioctl, ioctl_with_mut_ref, ioctl_with_ptr, ioctl_with_ref};
 
