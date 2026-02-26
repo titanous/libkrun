@@ -7,7 +7,7 @@ use std::ops::Deref;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use vm_memory::GuestMemory;
+use vm_memory::GuestMemoryBackend as GuestMemory;
 
 use crate::{DescriptorChain, Error, Queue, QueueGuard, QueueT};
 

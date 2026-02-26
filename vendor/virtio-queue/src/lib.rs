@@ -20,7 +20,7 @@ use std::ops::{Deref, DerefMut};
 use std::sync::atomic::Ordering;
 
 use log::error;
-use vm_memory::{GuestMemory, GuestMemoryError, VolatileMemoryError};
+use vm_memory::{GuestMemoryBackend as GuestMemory, GuestMemoryError, VolatileMemoryError};
 
 pub use self::chain::{DescriptorChain, DescriptorChainRwIter};
 pub use self::descriptor_utils::{Reader, Writer};

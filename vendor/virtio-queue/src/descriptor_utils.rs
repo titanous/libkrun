@@ -16,7 +16,7 @@ use std::{cmp, result};
 use crate::{DescriptorChain, Error};
 use vm_memory::bitmap::{BitmapSlice, WithBitmapSlice};
 use vm_memory::{
-    Address, ByteValued, GuestMemory, GuestMemoryRegion, MemoryRegionAddress, VolatileSlice,
+    Address, ByteValued, GuestMemoryBackend as GuestMemory, GuestMemoryRegion, MemoryRegionAddress, VolatileSlice,
 };
 
 pub type Result<T> = result::Result<T, Error>;

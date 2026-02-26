@@ -12,7 +12,7 @@ use std::num::Wrapping;
 use std::ops::Deref;
 use std::sync::atomic::{fence, Ordering};
 
-use vm_memory::{Address, Bytes, GuestAddress, GuestMemory};
+use vm_memory::{Address, Bytes, GuestAddress, GuestMemoryBackend as GuestMemory};
 
 use crate::defs::{
     DEFAULT_AVAIL_RING_ADDR, DEFAULT_DESC_TABLE_ADDR, DEFAULT_USED_RING_ADDR,

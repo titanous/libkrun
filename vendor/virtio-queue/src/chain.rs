@@ -15,7 +15,7 @@ use std::mem::size_of;
 use std::ops::Deref;
 
 use vm_memory::bitmap::{BitmapSlice, WithBitmapSlice};
-use vm_memory::{Address, Bytes, GuestAddress, GuestMemory, GuestMemoryRegion};
+use vm_memory::{Address, Bytes, GuestAddress, GuestMemoryBackend as GuestMemory, GuestMemoryRegion};
 
 use crate::{desc::split::Descriptor, Error, Reader, Writer};
 use virtio_bindings::bindings::virtio_ring::VRING_DESC_ALIGN_SIZE;
