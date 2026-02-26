@@ -64,13 +64,20 @@ use test_vhost_user_fs::{
 #[cfg(feature = "guest")]
 mod net_helpers;
 
-// UFFD integration test placeholders (implemented in Phase 6 tasks 2-7)
-pub struct TestUffdDemandPageOnly;
-pub struct TestUffdPreloadFull;
-pub struct TestUffdPreloadPartial;
-pub struct TestUffdIncrementalChain;
-pub struct TestUffdErrorHandling;
-pub struct TestUffdParallelFaults;
+mod test_uffd_demand_page;
+use test_uffd_demand_page::TestUffdDemandPageOnly;
+
+mod test_uffd_preload;
+use test_uffd_preload::{TestUffdPreloadFull, TestUffdPreloadPartial};
+
+mod test_uffd_incremental;
+use test_uffd_incremental::TestUffdIncrementalChain;
+
+mod test_uffd_error;
+use test_uffd_error::TestUffdErrorHandling;
+
+mod test_uffd_parallel;
+use test_uffd_parallel::TestUffdParallelFaults;
 
 pub fn test_cases() -> Vec<TestCase> {
     // Register your test here:
@@ -238,53 +245,3 @@ mod tests {
     }
 }
 
-// Test trait implementations for UFFD placeholder tests
-// These will be fully implemented in Phase 6 tasks 2-7
-
-#[host]
-impl Test for TestUffdDemandPageOnly {
-    fn start_vm(self: Box<Self>, _test_setup: TestSetup) -> anyhow::Result<()> {
-        // Implemented in Task 2
-        unimplemented!("Task 2: Test demand-page-only")
-    }
-}
-
-#[host]
-impl Test for TestUffdPreloadFull {
-    fn start_vm(self: Box<Self>, _test_setup: TestSetup) -> anyhow::Result<()> {
-        // Implemented in Task 3
-        unimplemented!("Task 3: Test preload-full")
-    }
-}
-
-#[host]
-impl Test for TestUffdPreloadPartial {
-    fn start_vm(self: Box<Self>, _test_setup: TestSetup) -> anyhow::Result<()> {
-        // Implemented in Task 4
-        unimplemented!("Task 4: Test preload-partial")
-    }
-}
-
-#[host]
-impl Test for TestUffdIncrementalChain {
-    fn start_vm(self: Box<Self>, _test_setup: TestSetup) -> anyhow::Result<()> {
-        // Implemented in Task 5
-        unimplemented!("Task 5: Test incremental-chain")
-    }
-}
-
-#[host]
-impl Test for TestUffdErrorHandling {
-    fn start_vm(self: Box<Self>, _test_setup: TestSetup) -> anyhow::Result<()> {
-        // Implemented in Task 6
-        unimplemented!("Task 6: Test error-handling")
-    }
-}
-
-#[host]
-impl Test for TestUffdParallelFaults {
-    fn start_vm(self: Box<Self>, _test_setup: TestSetup) -> anyhow::Result<()> {
-        // Implemented in Task 7
-        unimplemented!("Task 7: Test parallel-faults")
-    }
-}
