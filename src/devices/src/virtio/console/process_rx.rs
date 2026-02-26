@@ -97,7 +97,7 @@ fn read_to_desc(
 ) -> Result<usize, io::Error> {
     let mut total = 0;
     for slice_result in desc.mem.get_slices(desc.addr, desc.len as usize) {
-        let mut target = slice_result.map_err(|e| io::Error::other(e))?;
+        let mut target = slice_result.map_err(io::Error::other)?;
         match input.read_volatile(&mut target) {
             Ok(0) => {
                 *eof = true;

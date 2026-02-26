@@ -118,7 +118,7 @@ fn write_desc_to_output(
 ) -> Result<usize, io::Error> {
     let mut total = 0;
     for slice_result in desc.mem.get_slices(desc.addr, desc.len as usize) {
-        let src = slice_result.map_err(|e| io::Error::other(e))?;
+        let src = slice_result.map_err(io::Error::other)?;
         let slice_len = src.len();
         let diagnostics = if console_tx_diag_enabled() {
             Some(sample_tx_slice_diagnostics(slice_len, &src))
@@ -130,7 +130,7 @@ fn write_desc_to_output(
         loop {
             let remaining = src
                 .offset(written_in_slice)
-                .map_err(|e| io::Error::other(e))?;
+                .map_err(io::Error::other)?;
             log::trace!("Tx {remaining:?}, write_volatile {} bytes", remaining.len());
             match output.write_volatile(&remaining) {
                 Ok(n) => {
@@ -544,5 +544,86 @@ mod tests {
 
         // Should succeed with 0 bytes written (zero-length descriptor)
         assert!(matches!(result, Ok(0)));
+    }
+
+    /// PartialWritePortOutput accepts only `chunk_size` bytes per write_volatile call,
+    /// forcing the retry loop to handle short writes.
+    struct PartialWritePortOutput {
+        chunk_size: usize,
+        received: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl PartialWritePortOutput {
+        fn new(chunk_size: usize) -> (Self, Arc<Mutex<Vec<u8>>>) {
+            let received = Arc::new(Mutex::new(Vec::new()));
+            (
+                PartialWritePortOutput {
+                    chunk_size,
+                    received: received.clone(),
+                },
+                received,
+            )
+        }
+    }
+
+    impl PortOutput for PartialWritePortOutput {
+        fn write_volatile(&mut self, buf: &VolatileSlice) -> Result<usize, io::Error> {
+            let n = buf.len().min(self.chunk_size);
+            let mut data = vec![0u8; n];
+            buf.subslice(0, n).unwrap().copy_to(&mut data);
+            self.received.lock().unwrap().extend_from_slice(&data);
+            Ok(n)
+        }
+
+        fn wait_until_writable(&self) {}
+    }
+
+    #[test]
+    fn test_tx_partial_write_retries() {
+        // Verify that write_desc_to_output retries short writes within a slice,
+        // delivering all bytes even when write_volatile accepts only 1 byte at a time.
+        let payload = b"hello partial writes!";
+        let (mem, _queue, _) = make_mem_and_queue(payload);
+        let interrupt = make_interrupt();
+        let (mut partial_output, received) = PartialWritePortOutput::new(1);
+
+        let desc = {
+            let mut q = Queue::new(TEST_QUEUE_SIZE);
+            q.size = TEST_QUEUE_SIZE;
+            q.ready = true;
+            q.desc_table = GuestAddress(DESC_TABLE_ADDR);
+            q.avail_ring = GuestAddress(AVAIL_RING_ADDR);
+            q.used_ring = GuestAddress(USED_RING_ADDR);
+            q.pop(&mem).unwrap()
+        };
+
+        let result = write_desc_to_output(desc, &mut partial_output, &interrupt, 0, 0, 0);
+
+        assert_eq!(result.unwrap(), payload.len());
+        assert_eq!(received.lock().unwrap().as_slice(), payload);
+    }
+
+    #[test]
+    fn test_tx_partial_write_multi_byte_chunks() {
+        // Verify retry with chunk_size > 1 that doesn't evenly divide the payload.
+        let payload = b"abcdefghijklm"; // 13 bytes, chunk_size=5 -> 5+5+3
+        let (mem, _queue, _) = make_mem_and_queue(payload);
+        let interrupt = make_interrupt();
+        let (mut partial_output, received) = PartialWritePortOutput::new(5);
+
+        let desc = {
+            let mut q = Queue::new(TEST_QUEUE_SIZE);
+            q.size = TEST_QUEUE_SIZE;
+            q.ready = true;
+            q.desc_table = GuestAddress(DESC_TABLE_ADDR);
+            q.avail_ring = GuestAddress(AVAIL_RING_ADDR);
+            q.used_ring = GuestAddress(USED_RING_ADDR);
+            q.pop(&mem).unwrap()
+        };
+
+        let result = write_desc_to_output(desc, &mut partial_output, &interrupt, 0, 0, 0);
+
+        assert_eq!(result.unwrap(), payload.len());
+        assert_eq!(received.lock().unwrap().as_slice(), payload);
     }
 }
