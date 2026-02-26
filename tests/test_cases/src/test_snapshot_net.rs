@@ -81,35 +81,16 @@ mod host {
 mod guest {
     use super::*;
     use crate::net_helpers::{configure_eth0, test_ping};
+    use crate::vsock_helpers::vsock_connect;
     use crate::Test;
-    use nix::libc::VMADDR_CID_HOST;
-    use nix::sys::socket::{connect, socket, AddressFamily, SockFlag, SockType, VsockAddr};
     use std::io::{Read, Write};
-    use std::os::fd::AsRawFd;
-    use std::os::unix::net::UnixStream;
-    use std::time::Duration;
 
     impl Test for TestSnapshotNet {
         fn in_guest(self: Box<Self>) {
             // Configure network interface
             configure_eth0();
 
-            let sock = socket(
-                AddressFamily::Vsock,
-                SockType::Stream,
-                SockFlag::empty(),
-                None,
-            )
-            .unwrap();
-            let addr = VsockAddr::new(VMADDR_CID_HOST, VSOCK_PORT);
-            connect(sock.as_raw_fd(), &addr).unwrap();
-            let mut stream = UnixStream::from(sock);
-            stream
-                .set_read_timeout(Some(Duration::from_secs(10)))
-                .unwrap();
-            stream
-                .set_write_timeout(Some(Duration::from_secs(10)))
-                .unwrap();
+            let mut stream = vsock_connect(VSOCK_PORT);
 
             // Phase 1: Test networking pre-snapshot
             test_ping();

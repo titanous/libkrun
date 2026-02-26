@@ -60,13 +60,9 @@ mod host {
 #[guest]
 mod guest {
     use super::*;
+    use crate::vsock_helpers::vsock_connect;
     use crate::Test;
-    use nix::libc::VMADDR_CID_HOST;
-    use nix::sys::socket::{connect, socket, AddressFamily, SockFlag, SockType, VsockAddr};
     use std::io::{Read, Write};
-    use std::os::fd::AsRawFd;
-    use std::os::unix::net::UnixStream;
-    use std::time::Duration;
 
     impl Test for TestSnapshotRestore {
         fn in_guest(self: Box<Self>) {
@@ -76,22 +72,7 @@ mod guest {
             // Set counter to 42 — this value must be preserved after restore
             COUNTER.store(42, std::sync::atomic::Ordering::SeqCst);
 
-            let sock = socket(
-                AddressFamily::Vsock,
-                SockType::Stream,
-                SockFlag::empty(),
-                None,
-            )
-            .unwrap();
-            let addr = VsockAddr::new(VMADDR_CID_HOST, VSOCK_PORT);
-            connect(sock.as_raw_fd(), &addr).unwrap();
-            let mut stream = UnixStream::from(sock);
-            stream
-                .set_read_timeout(Some(Duration::from_secs(10)))
-                .unwrap();
-            stream
-                .set_write_timeout(Some(Duration::from_secs(10)))
-                .unwrap();
+            let mut stream = vsock_connect(VSOCK_PORT);
 
             // Signal host we are ready
             stream.write_all(b"READY").unwrap();
@@ -186,13 +167,9 @@ mod host_incr {
 #[guest]
 mod guest_incr {
     use super::*;
+    use crate::vsock_helpers::vsock_connect;
     use crate::Test;
-    use nix::libc::VMADDR_CID_HOST;
-    use nix::sys::socket::{connect, socket, AddressFamily, SockFlag, SockType, VsockAddr};
     use std::io::{Read, Write};
-    use std::os::fd::AsRawFd;
-    use std::os::unix::net::UnixStream;
-    use std::time::Duration;
 
     // A fixed-size buffer in data segment — this memory will be tracked as dirty.
     // SAFETY: guest code is single-threaded, so no concurrent access is possible.
@@ -201,22 +178,7 @@ mod guest_incr {
 
     impl Test for TestSnapshotRestoreIncremental {
         fn in_guest(self: Box<Self>) {
-            let sock = socket(
-                AddressFamily::Vsock,
-                SockType::Stream,
-                SockFlag::empty(),
-                None,
-            )
-            .unwrap();
-            let addr = VsockAddr::new(VMADDR_CID_HOST, VSOCK_PORT_INCR);
-            connect(sock.as_raw_fd(), &addr).unwrap();
-            let mut stream = UnixStream::from(sock);
-            stream
-                .set_read_timeout(Some(Duration::from_secs(10)))
-                .unwrap();
-            stream
-                .set_write_timeout(Some(Duration::from_secs(10)))
-                .unwrap();
+            let mut stream = vsock_connect(VSOCK_PORT_INCR);
 
             // Phase 1: signal ready with initial region state (zeros)
             stream.write_all(b"READY").unwrap();

@@ -82,35 +82,16 @@ mod host {
 #[guest]
 mod guest {
     use super::*;
+    use crate::vsock_helpers::vsock_connect;
     use crate::Test;
-    use nix::libc::VMADDR_CID_HOST;
-    use nix::sys::socket::{connect, socket, AddressFamily, SockFlag, SockType, VsockAddr};
     use std::fs::OpenOptions;
     use std::io::{Read, Seek, SeekFrom, Write};
-    use std::os::fd::AsRawFd;
-    use std::os::unix::net::UnixStream;
-    use std::time::Duration;
 
     const TEST_PATTERN: &[u8] = b"SNAPSHOT_TEST_DATA";
 
     impl Test for TestSnapshotBlock {
         fn in_guest(self: Box<Self>) {
-            let sock = socket(
-                AddressFamily::Vsock,
-                SockType::Stream,
-                SockFlag::empty(),
-                None,
-            )
-            .unwrap();
-            let addr = VsockAddr::new(VMADDR_CID_HOST, VSOCK_PORT);
-            connect(sock.as_raw_fd(), &addr).unwrap();
-            let mut stream = UnixStream::from(sock);
-            stream
-                .set_read_timeout(Some(Duration::from_secs(10)))
-                .unwrap();
-            stream
-                .set_write_timeout(Some(Duration::from_secs(10)))
-                .unwrap();
+            let mut stream = vsock_connect(VSOCK_PORT);
 
             // Open block device and write known pattern to first sector
             let mut f = OpenOptions::new()

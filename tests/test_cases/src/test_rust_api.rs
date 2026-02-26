@@ -145,12 +145,9 @@ mod host {
 #[guest]
 mod guest {
     use super::*;
+    use crate::vsock_helpers::vsock_connect;
     use crate::Test;
-    use nix::libc::VMADDR_CID_HOST;
-    use nix::sys::socket::{connect, socket, AddressFamily, SockFlag, SockType, VsockAddr};
     use std::io::{Read, Write};
-    use std::os::fd::AsRawFd;
-    use std::time::Duration;
 
     impl Test for TestRustApiZeroVcpu {
         fn in_guest(self: Box<Self>) {
@@ -166,22 +163,7 @@ mod guest {
 
     impl Test for TestRustApiPauseResume {
         fn in_guest(self: Box<Self>) {
-            let sock = socket(
-                AddressFamily::Vsock,
-                SockType::Stream,
-                SockFlag::empty(),
-                None,
-            )
-            .unwrap();
-            let addr = VsockAddr::new(VMADDR_CID_HOST, VSOCK_PORT_API);
-            connect(sock.as_raw_fd(), &addr).unwrap();
-            let mut stream = std::os::unix::net::UnixStream::from(sock);
-            stream
-                .set_read_timeout(Some(Duration::from_secs(15)))
-                .unwrap();
-            stream
-                .set_write_timeout(Some(Duration::from_secs(15)))
-                .unwrap();
+            let mut stream = vsock_connect(VSOCK_PORT_API);
 
             // AC7.3: Send READY signal
             stream.write_all(b"READY").unwrap();

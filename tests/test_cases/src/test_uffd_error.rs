@@ -102,30 +102,14 @@ mod host {
 #[guest]
 mod guest {
     use super::*;
+    use crate::vsock_helpers::vsock_connect;
     use crate::Test;
-    use nix::libc::VMADDR_CID_HOST;
-    use nix::sys::socket::{connect, socket, AddressFamily, SockFlag, SockType, VsockAddr};
     use std::io::Write;
-    use std::os::fd::AsRawFd;
-    use std::os::unix::net::UnixStream;
-    use std::time::Duration;
 
     impl Test for TestUffdErrorHandling {
         fn in_guest(self: Box<Self>) {
             // Phase 1: Signal READY for snapshot
-            let sock = socket(
-                AddressFamily::Vsock,
-                SockType::Stream,
-                SockFlag::empty(),
-                None,
-            )
-            .unwrap();
-            let addr = VsockAddr::new(VMADDR_CID_HOST, VSOCK_PORT);
-            connect(sock.as_raw_fd(), &addr).unwrap();
-            let mut stream = UnixStream::from(sock);
-            stream
-                .set_write_timeout(Some(Duration::from_secs(10)))
-                .unwrap();
+            let mut stream = vsock_connect(VSOCK_PORT);
 
             // Signal host we are ready
             stream.write_all(b"READY").unwrap();

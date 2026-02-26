@@ -100,14 +100,10 @@ mod host {
 #[guest]
 mod guest {
     use super::*;
+    use crate::vsock_helpers::vsock_connect;
     use crate::Test;
-    use nix::libc::VMADDR_CID_HOST;
-    use nix::sys::socket::{connect, socket, AddressFamily, SockFlag, SockType, VsockAddr};
     use std::fs::OpenOptions;
     use std::io::{Read, Seek, SeekFrom, Write};
-    use std::os::fd::AsRawFd;
-    use std::os::unix::net::UnixStream;
-    use std::time::Duration;
 
     const TEST_PATTERN: &[u8] = b"WORKLOAD_TEST_PATTERN";
 
@@ -118,22 +114,7 @@ mod guest {
             static WORKLOAD_DONE: std::sync::atomic::AtomicBool =
                 std::sync::atomic::AtomicBool::new(false);
 
-            let sock = socket(
-                AddressFamily::Vsock,
-                SockType::Stream,
-                SockFlag::empty(),
-                None,
-            )
-            .unwrap();
-            let addr = VsockAddr::new(VMADDR_CID_HOST, VSOCK_PORT);
-            connect(sock.as_raw_fd(), &addr).unwrap();
-            let mut stream = UnixStream::from(sock);
-            stream
-                .set_read_timeout(Some(Duration::from_secs(10)))
-                .unwrap();
-            stream
-                .set_write_timeout(Some(Duration::from_secs(10)))
-                .unwrap();
+            let mut stream = vsock_connect(VSOCK_PORT);
 
             // Phase 1: Signal ready (baseline state captured at this point)
             stream.write_all(b"READY").unwrap();

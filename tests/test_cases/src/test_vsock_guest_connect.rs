@@ -81,25 +81,13 @@ mod host {
 #[guest]
 mod guest {
     use super::*;
+    use crate::vsock_helpers::vsock_connect;
     use crate::Test;
-
-    use nix::libc::VMADDR_CID_HOST;
-    use nix::sys::socket::{connect, socket, AddressFamily, SockFlag, SockType, VsockAddr};
     use std::io::Write;
-    use std::os::fd::AsRawFd;
 
     impl Test for TestVsockGuestConnect {
         fn in_guest(self: Box<Self>) {
-            let sock = socket(
-                AddressFamily::Vsock,
-                SockType::Stream,
-                SockFlag::empty(),
-                None,
-            )
-            .unwrap();
-            let addr = VsockAddr::new(VMADDR_CID_HOST, VSOCK_PORT);
-            connect(sock.as_raw_fd(), &addr).unwrap();
-            let mut stream = UnixStream::from(sock);
+            let mut stream = vsock_connect(VSOCK_PORT);
             stream_set_timeouts(&mut stream);
 
             stream_expect_msg(&mut stream, b"ping!");
