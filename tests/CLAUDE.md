@@ -11,7 +11,7 @@ Host/guest integration test workspace. Tests run inside real microVMs to verify 
 - **Expects**: `embedded_init` feature enabled; libkrunfw available at runtime (symlinked in test-prefix)
 
 ## Dependencies
-- **Uses**: `libkrun` crate (Rust API, with features: embedded_init, net, blk, snapshot, vhost-user), `krun-sys` (C API)
+- **Uses**: `libkrun` crate (Rust API, with features: embedded_init, net, blk, snapshot, vhost-user, uffd), `krun-sys` (C API)
 - **Boundary**: `vm-memory` pinned to 0.16.2 in workspace deps (0.17 breaks upstream crates)
 
 ## Running Tests
@@ -40,6 +40,12 @@ Tests are inherently flaky (VM + network timing). 5-6/6 passing is normal.
 - `vhost-user-fs-dax-always` - Vhost-user FS with dax=always: DAX read (0xBB), DAX write (0xCC), snapshot/restore cycle
 - `vhost-user-fs-dax-inode` - Vhost-user FS with dax=inode: per-inode DAX (hello.txt=DAX/0xBB, nodax.txt=FUSE_READ/0xAA), write, snapshot/restore
 - `vhost-user-fs-dax-never` - Vhost-user FS with dax=never: FUSE_READ path (0xAA), snapshot/restore cycle
+- `uffd-demand-page-only` - UFFD demand-paging: snapshot, restore via MockSnapshotStore with UFFD, verify guest state
+- `uffd-preload-full` - UFFD with full preload: all pages preloaded before vCPU resume, zero faults expected
+- `uffd-preload-partial` - UFFD with partial preload: some pages preloaded, remaining demand-paged
+- `uffd-incremental-chain` - UFFD restore from incremental snapshot chain (base + incremental overlay)
+- `uffd-error-handling` - UFFD error paths: store read failures during demand-paging
+- `uffd-parallel-faults` - UFFD concurrent fault resolution: multiple vCPUs faulting simultaneously
 
 ## Key Files
 - `test_cases/src/lib.rs` - Test case registry
@@ -50,4 +56,10 @@ Tests are inherently flaky (VM + network timing). 5-6/6 passing is normal.
 - `test_cases/src/net_helpers.rs` - Shared network config/ICMP helpers for guest-side tests
 - `test_cases/src/test_vhost_user_fs.rs` - Vhost-user FS integration tests (DAX read, write, snapshot)
 - `test_daemon/` - Standalone vhost-user FS daemon binary for integration testing
+- `test_cases/src/mock_snapshot_store.rs` - In-memory MockSnapshotStore and MockSnapshotStoreFactory for UFFD tests (host-only)
+- `test_cases/src/test_uffd_demand_page.rs` - UFFD demand-page-only test
+- `test_cases/src/test_uffd_preload.rs` - UFFD preload-full and preload-partial tests
+- `test_cases/src/test_uffd_incremental.rs` - UFFD incremental chain test
+- `test_cases/src/test_uffd_error.rs` - UFFD error handling test
+- `test_cases/src/test_uffd_parallel.rs` - UFFD parallel faults test
 - `test_cases/Cargo.toml` - Feature flags and dependency pins

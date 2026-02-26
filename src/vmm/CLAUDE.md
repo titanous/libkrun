@@ -32,12 +32,13 @@ Core virtual machine manager. Orchestrates VM lifecycle: build, run, snapshot/re
   - `FsSnapshotStore::read_page` checks dirty_page_index (newest-first) before falling back to base memory file
   - `FsSnapshotStore::preload` yields 4MB chunks with dirty pages overlaid from incrementals
   - `Vmm::restore_from_store` drains preload stream to eagerly populate guest memory (Linux-only)
-  - `Vmm::restore_from_store_with_uffd` creates UFFD handler, registers memory regions, exchanges vmstate via oneshot channels, returns handler thread handle (Linux + `uffd` feature)
+  - `Vmm::restore_from_store_with_uffd(vmstate_bytes, store, rt)` creates UFFD handler, registers memory regions, restores device/vCPU states, signals handler ready, returns handler thread handle (Linux + `uffd` feature)
   - `Vmm::snapshot_to_store` and `Vmm::incremental_snapshot_to_store` write via `SnapshotStore` trait (both platforms)
-  - `UffdHandler` runs on dedicated thread with single-threaded tokio runtime; preload and fault loop run concurrently via `futures::join!`
+  - `UffdHandler` runs on a dedicated thread; the caller passes in a `tokio::runtime::Runtime` via `UffdHandler::run(rt)`; preload and fault loop run concurrently via `futures::join!`
   - `UffdHandler` page fault resolution: reads page from store, copies via `uffd.copy()`, handles EEXIST races silently
   - `PageTracker` uses atomic bitmap (`AtomicU64` words) for lock-free page tracking; `mark_loaded` deduplicates via atomic OR
-  - `BuiltVm::restore_from_store` starts vCPUs paused, restores memory+state, then resumes (Linux-only)
+  - `BuiltVm::restore_from_store(vmstate_bytes, store, &rt)` starts vCPUs paused, restores memory+state via eager preload, then resumes (Linux-only)
+  - `BuiltVm::restore_from_store_with_uffd(vmstate_bytes, store, rt)` pre-validates vmstate at `BuiltVm` level (defense-in-depth), starts vCPUs paused, delegates to `Vmm::restore_from_store_with_uffd`, returns handler thread handle (Linux + `uffd` feature)
   - `restore_incremental_snapshot` now reads from `path.join("vmstate")` (directory-based format, not flat file)
 - **Expects**: Valid `VmResources` from libkrun crate; KVM/HVF available at runtime
 
@@ -61,7 +62,8 @@ Core virtual machine manager. Orchestrates VM lifecycle: build, run, snapshot/re
 - `VMSTATE_MAX_SIZE` (10MB) caps deserialization to prevent OOM from corrupted files
 - Snapshot save/restore refactored to use `SnapshotStore` trait internally; `create_full_snapshot`/`restore_from_snapshot` delegate to store-based methods
 - `restore_device_and_vcpu_states` extracted as shared helper for both eager and UFFD restore paths
-- UFFD handler thread communicates vmstate to main thread via `tokio::sync::oneshot` channel; main thread signals readiness back via second oneshot
+- Vmstate bytes are read in `Context`/`BuiltVm` and passed directly to `Vmm::restore_from_store_with_uffd`; a single `tokio::sync::oneshot` channel signals the UFFD handler that the main thread is ready for faults
+- `Error::Snapshot(String)` variant on `vmm::Error` (behind `snapshot` feature) used for store/runtime errors in restore paths
 
 ## Invariants
 - `validate_header_for_vm` is called before every snapshot restore (full and incremental)
@@ -96,5 +98,5 @@ Core virtual machine manager. Orchestrates VM lifecycle: build, run, snapshot/re
 - `create_full_snapshot` still hardcodes `nested_enabled: false` (pre-existing TODO)
 - Vsock timesync quiesce is macOS-only; on Linux the timesync thread is not started
 - `VcpuHandle::Drop` is `#[cfg(not(test))]` -- tests do not get automatic thread cleanup
-- UFFD handler creates its own single-threaded tokio runtime; TODO to consolidate with Context's runtime
+- UFFD handler receives its tokio runtime from the caller (`Context` creates it, passes through `BuiltVm` to `Vmm` to `UffdHandler::run`)
 - `restore_incremental_snapshot` changed to directory-based path (`path.join("vmstate")`) -- callers must pass directory path, not file path
