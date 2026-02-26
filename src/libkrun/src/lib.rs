@@ -3142,10 +3142,13 @@ impl Context {
 
     /// Restore a VM from a SnapshotStore and run the event loop.
     ///
-    /// On Linux: Creates a store from the factory, loads vmstate, drains the preload
-    /// stream to eagerly populate memory, then resumes vCPUs and runs the event loop.
+    /// On Linux with `uffd` feature: Creates a store from the factory, sets up UFFD
+    /// demand-paging, then resumes vCPUs. Page faults are resolved on-demand.
     ///
-    /// On other platforms: Delegates to `restore_and_run` for backward compatibility.
+    /// On Linux without `uffd`: Creates a store, reads vmstate, drains the preload
+    /// stream to eagerly populate memory, then resumes vCPUs.
+    ///
+    /// On other platforms: Returns error (use `restore_and_run` instead).
     #[cfg(feature = "snapshot")]
     pub fn restore_and_run_with_store(
         mut self,
@@ -3161,24 +3164,45 @@ impl Context {
                     ))
                 })?;
 
-            let (vmstate_bytes, store): (Vec<u8>, Box<dyn vmm::snapshot_store::SnapshotStore>) = rt
-                .block_on(async {
-                    let store = factory.create().await.map_err(|e| {
+            let store: Box<dyn vmm::snapshot_store::SnapshotStore> = rt.block_on(async {
+                factory.create().await.map_err(|e| {
+                    StartError::Microvm(vmm::builder::StartMicrovmError::Internal(
+                        vmm::Error::EventFd(std::io::Error::other(e.to_string())),
+                    ))
+                })
+            })?;
+
+            // When uffd feature is enabled, use demand-paging; otherwise eager restore
+            #[cfg(feature = "uffd")]
+            let uffd_thread = {
+                // Read vmstate up front so it can be validated before UFFD/vCPU setup
+                let vmstate_bytes = rt.block_on(async {
+                    store.read_vmstate().await.map_err(|e| {
                         StartError::Microvm(vmm::builder::StartMicrovmError::Internal(
                             vmm::Error::EventFd(std::io::Error::other(e.to_string())),
                         ))
-                    })?;
-
-                    let vmstate_bytes = store.read_vmstate().await.map_err(|e| {
-                        StartError::Microvm(vmm::builder::StartMicrovmError::Internal(
-                            vmm::Error::EventFd(std::io::Error::other(e.to_string())),
-                        ))
-                    })?;
-
-                    Ok::<_, StartError>((vmstate_bytes, store))
+                    })
                 })?;
 
-            self.built_vm.restore_from_store(vmstate_bytes, store)?;
+                let handler = self
+                    .built_vm
+                    .restore_from_store_with_uffd(vmstate_bytes, store)?;
+                Some(handler)
+            };
+
+            #[cfg(not(feature = "uffd"))]
+            let uffd_thread: Option<std::thread::JoinHandle<()>> = {
+                let vmstate_bytes = rt.block_on(async {
+                    store.read_vmstate().await.map_err(|e| {
+                        StartError::Microvm(vmm::builder::StartMicrovmError::Internal(
+                            vmm::Error::EventFd(std::io::Error::other(e.to_string())),
+                        ))
+                    })
+                })?;
+
+                self.built_vm.restore_from_store(vmstate_bytes, store)?;
+                None
+            };
 
             loop {
                 self.event_manager
@@ -3187,6 +3211,9 @@ impl Context {
 
                 // Check if the VM has exited
                 if let Some(vm_exit) = self.vm_exit.lock().expect("Poisoned vm_exit lock").take() {
+                    if let Some(handler) = uffd_thread {
+                        handler.join().ok();
+                    }
                     return Ok(vm_exit);
                 }
             }

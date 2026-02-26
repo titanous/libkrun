@@ -615,22 +615,33 @@ impl Vmm {
     /// Restore a full snapshot using UFFD for demand paging.
     ///
     /// When the `uffd` feature is enabled, this method:
-    /// 1. Creates UFFD handler and registers memory regions
-    /// 2. Spawns handler on dedicated thread
-    /// 3. Exchanges vmstate with handler via oneshot channel
+    /// 1. Deserializes and validates vmstate (before any UFFD/thread setup)
+    /// 2. Creates UFFD handler and registers memory regions
+    /// 3. Spawns handler on dedicated thread (preload + fault handling)
     /// 4. Restores device and vCPU states
-    /// 5. Starts the UFFD fault loop while vCPUs run
+    /// 5. Signals handler to start fault loop
+    ///
+    /// The caller must read vmstate from the store before calling this method.
+    /// Validation happens before UFFD setup so failures don't leave dangling threads.
     ///
     /// Returns the UFFD handler thread handle.
-    /// Page faults are resolved on-demand as vCPUs access memory.
     #[cfg(all(target_os = "linux", feature = "uffd"))]
     pub fn restore_from_store_with_uffd(
         &mut self,
+        vmstate_bytes: Vec<u8>,
         store: Box<dyn snapshot_store::SnapshotStore>,
     ) -> std::result::Result<std::thread::JoinHandle<()>, snapshot::SnapshotError> {
-        // Create channels for vmstate exchange
-        let (vmstate_tx, vmstate_rx) = tokio::sync::oneshot::channel();
-        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        // Deserialize and validate vmstate BEFORE creating UFFD handler or starting threads.
+        // If validation fails, no cleanup is needed.
+        let vmstate: snapshot::VmSnapshot = bincode::deserialize(&vmstate_bytes)
+            .map_err(|e| snapshot::SnapshotError::Deserialize(e.to_string()))?;
+
+        snapshot::validate_header_for_vm(
+            &vmstate.header,
+            &self.guest_memory,
+            self.vcpus_handles.len(),
+            self.nested_enabled,
+        )?;
 
         self.mmio_device_manager
             .quiesce_all_device_workers(snapshot::SNAPSHOT_QUIESCE_TIMEOUT)
@@ -644,10 +655,8 @@ impl Vmm {
         let regions = snapshot::ram_layout(&self.guest_memory);
         let mut uffd_regions = Vec::new();
 
-        // Iterate over guest memory regions and get their host addresses
         use vm_memory::{GuestAddress, GuestMemory};
         for (guest_addr, size) in regions {
-            // Get host address for this guest address range
             let host_addr = self
                 .guest_memory
                 .get_host_address(GuestAddress(guest_addr))
@@ -662,45 +671,18 @@ impl Vmm {
         // Convert store Box to Arc for sharing with UFFD handler
         let store_arc: Arc<dyn snapshot_store::SnapshotStore> = Arc::from(store);
 
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+
         // Create and spawn UFFD handler on dedicated thread
-        let handler = uffd::UffdHandler::new(
-            store_arc,
-            self.vm_exit.clone(),
-            uffd_regions,
-            vmstate_tx,
-            ready_rx,
-        )
-        .map_err(|e| {
-            snapshot::SnapshotError::Deserialize(format!("Failed to create UFFD handler: {e}"))
-        })?;
+        let handler =
+            uffd::UffdHandler::new(store_arc, self.vm_exit.clone(), uffd_regions, ready_rx)
+                .map_err(|e| {
+                    snapshot::SnapshotError::Deserialize(format!(
+                        "Failed to create UFFD handler: {e}"
+                    ))
+                })?;
 
         let handler_thread = handler.run();
-
-        // Receive vmstate from handler
-        let vmstate_bytes = match vmstate_rx.blocking_recv() {
-            Ok(Ok(bytes)) => bytes,
-            Ok(Err(e)) => {
-                return Err(snapshot::SnapshotError::Deserialize(format!(
-                    "Handler failed to read vmstate: {e}"
-                )))
-            }
-            Err(_) => {
-                return Err(snapshot::SnapshotError::Deserialize(
-                    "Handler vmstate channel closed".to_string(),
-                ))
-            }
-        };
-
-        // Deserialize and validate vmstate
-        let vmstate: snapshot::VmSnapshot = bincode::deserialize(&vmstate_bytes)
-            .map_err(|e| snapshot::SnapshotError::Deserialize(e.to_string()))?;
-
-        snapshot::validate_header_for_vm(
-            &vmstate.header,
-            &self.guest_memory,
-            self.vcpus_handles.len(),
-            self.nested_enabled,
-        )?;
 
         // Restore device and vCPU states
         self.restore_device_and_vcpu_states(vmstate)?;

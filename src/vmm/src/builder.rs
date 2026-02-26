@@ -758,6 +758,60 @@ impl BuiltVm {
         drop(vmm);
         Ok(self.vmm.clone())
     }
+
+    /// Restore from a SnapshotStore using UFFD demand-paging.
+    /// vCPUs must not yet be started. Vmstate is validated before starting vCPU threads
+    /// or UFFD handler, so validation failures have no cleanup cost.
+    /// Returns the UFFD handler thread handle.
+    #[cfg(all(target_os = "linux", feature = "uffd"))]
+    pub fn restore_from_store_with_uffd(
+        &mut self,
+        vmstate_bytes: Vec<u8>,
+        store: Box<dyn super::snapshot_store::SnapshotStore>,
+    ) -> std::result::Result<std::thread::JoinHandle<()>, StartMicrovmError> {
+        let mut vmm = self.vmm.lock().expect("Poisoned vmm lock");
+
+        let snapshot_err = |e: super::snapshot::SnapshotError| {
+            StartMicrovmError::Internal(super::Error::EventFd(std::io::Error::other(e.to_string())))
+        };
+
+        // Step 1: Pre-validate vmstate before starting any threads or UFFD.
+        // Use vcpus.len() since vcpus_handles isn't populated until start_vcpus_paused.
+        let vcpu_count = self.vcpus.as_ref().map(|v| v.len()).unwrap_or(0);
+        let vmstate: super::snapshot::VmSnapshot =
+            bincode::deserialize(&vmstate_bytes).map_err(|e| {
+                snapshot_err(super::snapshot::SnapshotError::Deserialize(e.to_string()))
+            })?;
+        super::snapshot::validate_header_for_vm(
+            &vmstate.header,
+            &vmm.guest_memory,
+            vcpu_count,
+            vmm.nested_enabled,
+        )
+        .map_err(snapshot_err)?;
+        // Validation passed — vmstate will be validated again inside Vmm for defense-in-depth.
+        // Re-serialize is wasteful, so pass the bytes through.
+
+        // Step 2: Start vCPU threads — they park in the initial event loop
+        // waiting for Resume or RestoreState.
+        let mut vcpus = self
+            .vcpus
+            .take()
+            .ok_or(StartMicrovmError::MicroVMAlreadyRunning)?;
+        vmm.start_vcpus_paused(&mut vcpus)
+            .map_err(StartMicrovmError::Internal)?;
+
+        // Step 3: Set up UFFD handler, restore device/vCPU states
+        let handler_thread = vmm
+            .restore_from_store_with_uffd(vmstate_bytes, store)
+            .map_err(snapshot_err)?;
+
+        // Step 4: Resume all vCPUs — page faults will be resolved by the UFFD handler
+        vmm.resume_vcpus().map_err(StartMicrovmError::Internal)?;
+
+        drop(vmm);
+        Ok(handler_thread)
+    }
 }
 
 pub fn build_microvm(

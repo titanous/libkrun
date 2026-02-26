@@ -63,7 +63,7 @@ fn guest_addr_to_page_index(regions: &[UffdRegion], guest_addr: u64) -> Option<u
 /// - Creates the UFFD fd
 /// - Registers guest memory regions
 /// - Runs on a dedicated thread with its own tokio runtime
-/// - Exchanges vmstate with main thread via oneshot channel
+/// - Waits for main thread ready signal via oneshot channel
 pub struct UffdHandler {
     /// Shared UFFD file descriptor
     uffd: Arc<Uffd>,
@@ -73,8 +73,6 @@ pub struct UffdHandler {
     vm_exit: SharedVmExit,
     /// Memory region mappings for guest_addr <-> host_addr translation
     regions: Vec<UffdRegion>,
-    /// Sender for vmstate bytes from handler to main thread
-    vmstate_tx: Option<oneshot::Sender<std::io::Result<Vec<u8>>>>,
     /// Receiver to signal that main thread is ready for faults
     ready_rx: Option<oneshot::Receiver<()>>,
     /// Page tracker for monitoring restore progress (preload vs fault)
@@ -170,7 +168,6 @@ impl UffdHandler {
     /// * `store` - Snapshot store for reading pages
     /// * `vm_exit` - Shared VM exit state for signaling errors
     /// * `regions` - Memory regions to register (guest_addr, host_addr, size)
-    /// * `vmstate_tx` - Sender for vmstate bytes (handler sends to main thread)
     /// * `ready_rx` - Receiver to signal handler when main thread is ready
     ///
     /// # Returns
@@ -180,7 +177,6 @@ impl UffdHandler {
         store: Arc<dyn SnapshotStore>,
         vm_exit: SharedVmExit,
         regions: Vec<(u64, u64, u64)>,
-        vmstate_tx: oneshot::Sender<std::io::Result<Vec<u8>>>,
         ready_rx: oneshot::Receiver<()>,
     ) -> std::io::Result<Self> {
         // Create UFFD fd with non-blocking mode for AsyncFd integration
@@ -227,7 +223,6 @@ impl UffdHandler {
             store,
             vm_exit,
             regions: uffd_regions,
-            vmstate_tx: Some(vmstate_tx),
             ready_rx: Some(ready_rx),
             tracker,
         })
@@ -301,23 +296,9 @@ impl UffdHandler {
 
     /// Main async fault loop.
     ///
-    /// First exchanges vmstate with main thread via oneshot channel.
-    /// Then waits for UFFD events and spawns tasks to resolve page faults asynchronously.
+    /// Waits for main thread ready signal, then handles UFFD page faults.
     async fn fault_loop(mut self) {
-        // Read vmstate from store and send to main thread
-        if let Some(vmstate_tx) = self.vmstate_tx.take() {
-            match self.store.read_vmstate().await {
-                Ok(vmstate_bytes) => {
-                    let _ = vmstate_tx.send(Ok(vmstate_bytes));
-                }
-                Err(e) => {
-                    let _ = vmstate_tx.send(Err(e));
-                    return;
-                }
-            }
-        }
-
-        // Wait for main thread to signal ready
+        // Wait for main thread to signal ready (device/vCPU states restored)
         if let Some(ready_rx) = self.ready_rx.take() {
             if ready_rx.await.is_err() {
                 // Main thread dropped the channel (error occurred)
@@ -670,10 +651,9 @@ mod tests {
         let vm_exit = Arc::new(Mutex::new(None));
         let regions = vec![(0x0u64, host_addr as u64, size as u64)];
 
-        let (vmstate_tx, _vmstate_rx) = oneshot::channel();
         let (_ready_tx, ready_rx) = oneshot::channel();
 
-        let result = UffdHandler::new(store, vm_exit, regions, vmstate_tx, ready_rx);
+        let result = UffdHandler::new(store, vm_exit, regions, ready_rx);
         // UFFD creation may fail due to insufficient permissions in test environment
         // Only assert success if no permission error
         if let Err(e) = &result {
@@ -709,10 +689,9 @@ mod tests {
         let vm_exit = Arc::new(Mutex::new(None));
         let regions = vec![(0x1000u64, host_addr as u64, size as u64)];
 
-        let (vmstate_tx, _vmstate_rx) = oneshot::channel();
         let (_ready_tx, ready_rx) = oneshot::channel();
 
-        match UffdHandler::new(store, vm_exit, regions, vmstate_tx, ready_rx) {
+        match UffdHandler::new(store, vm_exit, regions, ready_rx) {
             Ok(handler) => {
                 // Test address translation
                 let translated = handler.host_to_guest(host_addr as u64);
@@ -848,10 +827,9 @@ mod tests {
         let vm_exit = Arc::new(Mutex::new(None));
         let regions = vec![(0x1000u64, host_addr as u64, size as u64)];
 
-        let (vmstate_tx, _vmstate_rx) = oneshot::channel();
         let (_ready_tx, ready_rx) = oneshot::channel();
 
-        match UffdHandler::new(store, vm_exit, regions, vmstate_tx, ready_rx) {
+        match UffdHandler::new(store, vm_exit, regions, ready_rx) {
             Ok(handler) => {
                 // Test guest to host translation using the handler's regions
                 let result = guest_to_host(&handler.regions, 0x1000);
@@ -1010,11 +988,9 @@ mod tests {
             (0x10000u64, region2_addr as u64, region2_size as u64),
         ];
 
-        let (vmstate_tx, _vmstate_rx) = oneshot::channel();
         let (_ready_tx, ready_rx) = oneshot::channel();
 
-        let handler = match UffdHandler::new(store.clone(), vm_exit, regions, vmstate_tx, ready_rx)
-        {
+        let handler = match UffdHandler::new(store.clone(), vm_exit, regions, ready_rx) {
             Ok(h) => h,
             Err(e) => {
                 let error_msg = e.to_string();
@@ -1395,10 +1371,9 @@ mod tests {
         let vm_exit = Arc::new(Mutex::new(None));
         let regions = vec![(0x0u64, host_addr as u64, size as u64)];
 
-        let (vmstate_tx, _vmstate_rx) = oneshot::channel();
         let (_ready_tx, ready_rx) = oneshot::channel();
 
-        match UffdHandler::new(store, vm_exit, regions, vmstate_tx, ready_rx) {
+        match UffdHandler::new(store, vm_exit, regions, ready_rx) {
             Ok(handler) => {
                 // Verify tracker was initialized
                 let stats = handler.tracker_stats();
@@ -1458,10 +1433,9 @@ mod tests {
             (0x100000u64, region2_addr as u64, region2_size as u64),
         ];
 
-        let (vmstate_tx, _vmstate_rx) = oneshot::channel();
         let (_ready_tx, ready_rx) = oneshot::channel();
 
-        match UffdHandler::new(store, vm_exit, regions, vmstate_tx, ready_rx) {
+        match UffdHandler::new(store, vm_exit, regions, ready_rx) {
             Ok(handler) => {
                 let stats = handler.tracker_stats();
                 // Total should be sum of both regions: 50 + 30 = 80 pages
@@ -1531,11 +1505,9 @@ mod tests {
         let vm_exit = Arc::new(Mutex::new(None));
         let regions = vec![(0x0u64, host_addr as u64, size as u64)];
 
-        let (vmstate_tx, _vmstate_rx) = oneshot::channel();
         let (_ready_tx, ready_rx) = oneshot::channel();
 
-        let handler = match UffdHandler::new(store.clone(), vm_exit, regions, vmstate_tx, ready_rx)
-        {
+        let handler = match UffdHandler::new(store.clone(), vm_exit, regions, ready_rx) {
             Ok(h) => h,
             Err(e) => {
                 let error_msg = e.to_string();
