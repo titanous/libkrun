@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use futures::stream::{self, StreamExt};
 
@@ -259,12 +260,31 @@ impl SnapshotStore for FsSnapshotStore {
             }
         }
 
+        // Open the memory file once, outside the stream, and share it via Arc<Mutex>.
+        // This avoids opening a new file handle for each 4MB chunk.
+        let memory_path = base_path.join("memory");
+        let file = match std::fs::File::open(&memory_path) {
+            Ok(f) => Arc::new(Mutex::new(f)),
+            Err(e) => {
+                // If we can't open the file, return an error stream
+                let e = io::Error::new(e.kind(), e.to_string());
+                return Box::pin(
+                    stream::iter(chunks).then(move |_| {
+                        let err = e.kind();
+                        async move {
+                            Err(io::Error::new(err, "Failed to open memory file"))
+                        }
+                    })
+                );
+            }
+        };
+
         // Stream each chunk with dirty pages overlaid
         let stream = stream::iter(chunks).then(move |(chunk_addr, chunk_size)| {
-            let base_path = base_path.clone();
             let header = header.clone();
             let incremental_snapshots = incremental_snapshots.clone();
             let dirty_page_index = dirty_page_index.clone();
+            let file = file.clone();
 
             async move {
                 let mut chunk_data = vec![0u8; chunk_size as usize];
@@ -274,7 +294,6 @@ impl SnapshotStore for FsSnapshotStore {
                 ))?;
 
                 // Validate chunk_addr against ram_regions (consistent with read_page)
-                let memory_path = base_path.join("memory");
                 let mut offset = 0u64;
                 let mut found = false;
                 for (region_addr, region_size) in &header.ram_regions {
@@ -293,9 +312,11 @@ impl SnapshotStore for FsSnapshotStore {
                     ));
                 }
 
-                let mut file = std::fs::File::open(&memory_path)?;
-                file.seek(SeekFrom::Start(offset))?;
-                file.read_exact(&mut chunk_data)?;
+                // Seek and read from the shared file handle
+                let mut f = file.lock().expect("Poisoned file lock");
+                f.seek(SeekFrom::Start(offset))?;
+                f.read_exact(&mut chunk_data)?;
+                drop(f); // Release lock before overlaying dirty pages
 
                 // Overlay dirty pages from incrementals
                 let page_size = system_page_size() as usize;

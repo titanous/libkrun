@@ -738,15 +738,10 @@ impl BuiltVm {
         vmm.start_vcpus_paused(&mut vcpus)
             .map_err(StartMicrovmError::Internal)?;
 
-        // Step 2 (macOS only): Unblock secondary vCPUs. On HVF they block on
-        // boot_receiver.recv() waiting for PSCI CPU_ON from the kernel. Since
-        // we're skipping boot, send a dummy entry address to unblock them.
-        // On KVM, secondary vCPUs are powered off via KVM_ARM_VCPU_POWER_OFF
-        // and don't need unblocking — they go straight to the paused state.
-        #[cfg(target_os = "macos")]
-        for sender in self.boot_senders.drain(..) {
-            let _ = sender.send(0);
-        }
+        // Note: Step 2 (macOS secondary vCPU unblocking) is not needed here because
+        // this method is only available on Linux (gated by #[cfg(all(target_os = "linux", ...))]).
+        // For reference: on macOS we would unblock secondary vCPUs that block on boot_receiver.recv(),
+        // but on KVM they are powered off via KVM_ARM_VCPU_POWER_OFF and don't need unblocking.
 
         let snapshot_err = |e: super::snapshot::SnapshotError| {
             StartMicrovmError::Internal(super::Error::EventFd(std::io::Error::other(e.to_string())))

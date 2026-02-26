@@ -3205,8 +3205,9 @@ impl Context {
     /// This delegates to `restore_and_run_with_store` on Linux, or uses the
     /// backward-compatible `restore_from_snapshot` path on other platforms.
     #[cfg(feature = "snapshot")]
+    #[allow(unused_mut)]
     pub fn restore_and_run(
-        self,
+        mut self,
         base_path: &std::path::Path,
         incremental_paths: &[&std::path::Path],
     ) -> Result<vmm::vm_exit::VmExit, StartError> {
