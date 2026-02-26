@@ -9,6 +9,7 @@
 use crate::snapshot_store::SnapshotStore;
 use crate::vm_exit::SharedVmExit;
 use futures::StreamExt;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 use tokio::sync::oneshot;
@@ -23,6 +24,8 @@ struct UffdRegion {
     host_addr: u64,
     /// Size in bytes
     size: u64,
+    /// Offset into the global page index bitmap for this region (sum of pages in prior regions)
+    page_offset: usize,
 }
 
 /// Translate a guest address to a host address using the registered regions.
@@ -32,6 +35,23 @@ fn guest_to_host(regions: &[UffdRegion], guest_addr: u64) -> Option<u64> {
     for region in regions {
         if guest_addr >= region.guest_addr && guest_addr < region.guest_addr + region.size {
             return Some(region.host_addr + (guest_addr - region.guest_addr));
+        }
+    }
+    None
+}
+
+/// Translate a guest address to a page index in the global page bitmap.
+///
+/// Uses region-relative indexing: finds the region containing the guest address,
+/// calculates the page offset within that region, and adds the region's base page offset.
+///
+/// Returns `None` if the guest address is not found in any region.
+fn guest_addr_to_page_index(regions: &[UffdRegion], guest_addr: u64) -> Option<usize> {
+    for region in regions {
+        if guest_addr >= region.guest_addr && guest_addr < region.guest_addr + region.size {
+            let region_offset = guest_addr - region.guest_addr;
+            let page_in_region = (region_offset / 4096) as usize;
+            return Some(region.page_offset + page_in_region);
         }
     }
     None
@@ -105,10 +125,11 @@ async fn preload_task(
                     Ok(_) => {
                         // Successfully copied chunk. Mark all pages in the chunk as loaded via preload.
                         // Chunk is typically multi-page (e.g., 4MB chunks from FsSnapshotStore).
-                        let chunk_pages = (data.len() + 4095) / 4096; // Round up to pages
-                        let start_page_index = (guest_addr / 4096) as usize;
-                        for i in 0..chunk_pages {
-                            tracker.mark_loaded(start_page_index + i, LoadSource::Preload);
+                        let chunk_pages = data.len().div_ceil(4096); // Round up to pages
+                        if let Some(start_page_index) = guest_addr_to_page_index(&regions, guest_addr) {
+                            for i in 0..chunk_pages {
+                                tracker.mark_loaded(start_page_index + i, LoadSource::Preload);
+                            }
                         }
                     }
                     Err(e) if is_eexist(&e) => {
@@ -119,6 +140,9 @@ async fn preload_task(
                         // existing one were NOT copied. The fault handler will
                         // serve any missed pages on demand, so this is safe to
                         // ignore and continue with the next preload chunk.
+                        //
+                        // Stats will undercount preloaded pages on EEXIST.
+                        // This is acceptable since PageTracker is monitoring-only.
                     }
                     Err(e) => {
                         // Non-fatal preload error — log and stop preloading.
@@ -184,7 +208,8 @@ impl UffdHandler {
                 })?;
 
             // Calculate number of 4KB pages in this region
-            let num_pages = (size + 4095) / 4096;
+            let num_pages = size.div_ceil(4096);
+            let page_offset = total_pages;
             total_pages = total_pages
                 .checked_add(num_pages as usize)
                 .ok_or_else(|| {
@@ -195,6 +220,7 @@ impl UffdHandler {
                 guest_addr,
                 host_addr,
                 size,
+                page_offset,
             });
         }
 
@@ -325,6 +351,7 @@ impl UffdHandler {
                     let host_addr = addr as u64;
                     let vm_exit = self.vm_exit.clone();
                     let tracker_clone = self.tracker.clone();
+                    let regions_clone = self.regions.clone();
 
                     tokio::spawn(async move {
                         match store_clone.read_page(guest_addr).await {
@@ -340,8 +367,9 @@ impl UffdHandler {
                                 match result {
                                     Ok(_) => {
                                         // Successfully copied page data. Mark page as loaded via fault.
-                                        let page_index = (guest_addr / 4096) as usize;
-                                        tracker_clone.mark_loaded(page_index, LoadSource::Fault);
+                                        if let Some(page_index) = guest_addr_to_page_index(&regions_clone, guest_addr) {
+                                            tracker_clone.mark_loaded(page_index, LoadSource::Fault);
+                                        }
                                     }
                                     Err(e) => {
                                         // Check for EEXIST (page already mapped, race condition)
@@ -440,13 +468,13 @@ pub struct PageTracker {
     /// Total number of pages tracked
     total_pages: usize,
     /// Bitmap stored as AtomicU64 words (each covers 64 pages)
-    bitmap: Vec<std::sync::atomic::AtomicU64>,
+    bitmap: Vec<AtomicU64>,
     /// Number of pages loaded via preload stream
-    preload_count: std::sync::atomic::AtomicUsize,
+    preload_count: AtomicUsize,
     /// Number of pages loaded via fault handler
-    fault_count: std::sync::atomic::AtomicUsize,
+    fault_count: AtomicUsize,
     /// Total faults received (including EEXIST)
-    total_faults: std::sync::atomic::AtomicUsize,
+    total_faults: AtomicUsize,
 }
 
 impl PageTracker {
@@ -454,18 +482,18 @@ impl PageTracker {
     ///
     /// Allocates and zeroes the bitmap.
     pub fn new(total_pages: usize) -> Self {
-        let num_words = (total_pages + 63) / 64;
-        let bitmap: Vec<std::sync::atomic::AtomicU64> =
+        let num_words = total_pages.div_ceil(64);
+        let bitmap: Vec<AtomicU64> =
             (0..num_words)
-                .map(|_| std::sync::atomic::AtomicU64::new(0))
+                .map(|_| AtomicU64::new(0))
                 .collect();
 
         PageTracker {
             total_pages,
             bitmap,
-            preload_count: std::sync::atomic::AtomicUsize::new(0),
-            fault_count: std::sync::atomic::AtomicUsize::new(0),
-            total_faults: std::sync::atomic::AtomicUsize::new(0),
+            preload_count: AtomicUsize::new(0),
+            fault_count: AtomicUsize::new(0),
+            total_faults: AtomicUsize::new(0),
         }
     }
 
@@ -484,18 +512,18 @@ impl PageTracker {
 
         // Use fetch_or to atomically set the bit. It returns the old value.
         let old_word = self.bitmap[word_idx]
-            .fetch_or(1u64 << bit_idx, std::sync::atomic::Ordering::Relaxed);
+            .fetch_or(1u64 << bit_idx, Ordering::Relaxed);
 
         // Only increment counter if bit was not already set
         if (old_word >> bit_idx) & 1 == 0 {
             match source {
                 LoadSource::Preload => {
                     self.preload_count
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        .fetch_add(1, Ordering::Relaxed);
                 }
                 LoadSource::Fault => {
                     self.fault_count
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        .fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
@@ -506,7 +534,7 @@ impl PageTracker {
     /// Called on every fault event, regardless of outcome (including EEXIST).
     pub fn record_fault(&self) {
         self.total_faults
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Check whether a page has been loaded.
@@ -518,7 +546,7 @@ impl PageTracker {
         let word_idx = page_index / 64;
         let bit_idx = page_index % 64;
 
-        (self.bitmap[word_idx].load(std::sync::atomic::Ordering::Relaxed) >> bit_idx) & 1 != 0
+        (self.bitmap[word_idx].load(Ordering::Relaxed) >> bit_idx) & 1 != 0
     }
 
     /// Get a snapshot of current statistics.
@@ -528,19 +556,19 @@ impl PageTracker {
         // Count set bits across all words
         let mut loaded_pages = 0;
         for word in &self.bitmap {
-            let w = word.load(std::sync::atomic::Ordering::Relaxed);
+            let w = word.load(Ordering::Relaxed);
             loaded_pages += w.count_ones() as usize;
         }
 
         let preload_pages = self
             .preload_count
-            .load(std::sync::atomic::Ordering::Relaxed);
+            .load(Ordering::Relaxed);
         let fault_pages = self
             .fault_count
-            .load(std::sync::atomic::Ordering::Relaxed);
+            .load(Ordering::Relaxed);
         let total_faults = self
             .total_faults
-            .load(std::sync::atomic::Ordering::Relaxed);
+            .load(Ordering::Relaxed);
 
         let progress_pct = if self.total_pages > 0 {
             (loaded_pages as f64 / self.total_pages as f64) * 100.0
@@ -778,6 +806,7 @@ mod tests {
                 guest_addr: 0x0,
                 host_addr: 0x7f0000000000u64,
                 size: 0x100000000,
+                page_offset: 0,
             }
         ];
 
@@ -853,11 +882,13 @@ mod tests {
                 guest_addr: 0x1000,
                 host_addr: 0x7f0000000000u64,
                 size: 0x100000,
+                page_offset: 0,
             },
             UffdRegion {
                 guest_addr: 0x200000,
                 host_addr: 0x7f0001000000u64,
                 size: 0x100000,
+                page_offset: (0x100000 / 4096),
             }
         ];
 
@@ -1340,7 +1371,7 @@ mod tests {
 
     #[test]
     fn test_uffd_handler_tracks_multiple_regions() {
-        // Verify that tracker accounts for multiple memory regions
+        // Verify that tracker accounts for multiple memory regions with proper region-relative indexing
         let region1_size = 4096 * 50;
         let region2_size = 4096 * 30;
 
@@ -1383,6 +1414,19 @@ mod tests {
                 let stats = handler.tracker_stats();
                 // Total should be sum of both regions: 50 + 30 = 80 pages
                 assert_eq!(stats.total_pages, 80, "Tracker should account for both regions");
+
+                // Verify region-relative indexing: page_offset for region 2 should be 50
+                assert_eq!(handler.regions[0].page_offset, 0, "Region 1 page_offset should be 0");
+                assert_eq!(handler.regions[1].page_offset, 50, "Region 2 page_offset should be 50");
+
+                // Verify guest_addr_to_page_index works correctly for region 2
+                // Guest address 0x100000 (start of region 2) should map to page index 50
+                let page_idx = guest_addr_to_page_index(&handler.regions, 0x100000);
+                assert_eq!(page_idx, Some(50), "Guest 0x100000 should map to page index 50");
+
+                // Guest address 0x101000 (page 1 of region 2) should map to page index 51
+                let page_idx = guest_addr_to_page_index(&handler.regions, 0x101000);
+                assert_eq!(page_idx, Some(51), "Guest 0x101000 should map to page index 51");
             }
             Err(e) => {
                 let error_msg = e.to_string();
