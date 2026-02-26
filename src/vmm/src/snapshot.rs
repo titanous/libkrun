@@ -12,7 +12,9 @@ use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::Path;
 
-use vm_memory::{Address, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap, GuestMemoryRegion};
+use vm_memory::{
+    Address, Bytes, GuestAddress, GuestMemoryBackend, GuestMemoryMmap, GuestMemoryRegion,
+};
 
 pub const SNAPSHOT_MAGIC: u32 = 0x4B52_534E; // "KRSN"
 pub const SNAPSHOT_VERSION: u32 = 1;

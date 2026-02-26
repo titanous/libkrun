@@ -3,4 +3,7 @@ members = ["runner", "guest-agent", "macros", "test_cases", "test_daemon"]
 resolver = "2"
 
 [patch.crates-io]
+linux-loader = { git = "https://github.com/theoparis/linux-loader", rev = "af90928dcfa1666d47a5269061ef77857eff46d3" }
 vhost = { path = "../vendor/vhost" }
+vhost-user-backend = { path = "../vendor/vhost-user-backend" }
+virtio-queue = { path = "../vendor/virtio-queue" }

@@ -7,8 +7,8 @@ use vhost::vhost_user::message::{
 use vhost_user_backend::{VhostUserBackendMut, VringMutex, VringT};
 use virtio_queue::{QueueOwnedT, QueueT};
 use vm_memory::{
-    Bytes, GuestAddressSpace, GuestMemory, GuestMemoryAtomic, GuestMemoryMmap, GuestMemoryRegion,
-    MemoryRegionAddress,
+    Bytes, GuestAddressSpace, GuestMemoryAtomic, GuestMemoryBackend, GuestMemoryMmap,
+    GuestMemoryRegion, MemoryRegionAddress,
 };
 
 use crate::filesystem::SyntheticFs;

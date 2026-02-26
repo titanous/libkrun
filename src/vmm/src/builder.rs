@@ -101,7 +101,7 @@ use vm_memory::Bytes;
 #[cfg(feature = "vhost-user")]
 use vm_memory::FileOffset;
 #[cfg(not(feature = "aws-nitro"))]
-use vm_memory::GuestMemory;
+use vm_memory::GuestMemoryBackend;
 #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
 use vm_memory::GuestRegionMmap;
 use vm_memory::{GuestAddress, GuestMemoryMmap};
@@ -132,7 +132,7 @@ pub enum StartMicrovmError {
     /// Cannot read firmware contents from file.
     FirmwareRead(io::Error),
     /// Memory regions are overlapping or mmap fails.
-    GuestMemoryMmap(vm_memory::Error),
+    GuestMemoryMmap(String),
     /// The BZIP2 decoder couldn't decompress the kernel.
     ImageBz2Decoder(io::Error),
     /// Cannot find compressed kernel in file.
@@ -1688,11 +1688,9 @@ fn load_payload(
                                 "Failed to create memfd for kernel: {:?}",
                                 io::Error::last_os_error()
                             );
-                            return Err(io::Error::last_os_error()).map_err(|e| {
-                                StartMicrovmError::GuestMemoryMmap(vm_memory::Error::MmapRegion(
-                                    vm_memory::mmap::MmapRegionError::Mmap(e),
-                                ))
-                            })?;
+                            return Err(StartMicrovmError::GuestMemoryMmap(
+                                io::Error::last_os_error().to_string(),
+                            ));
                         }
                         if libc::ftruncate(fd, kernel_size as i64) < 0 {
                             error!(
@@ -1700,11 +1698,9 @@ fn load_payload(
                                 io::Error::last_os_error()
                             );
                             libc::close(fd);
-                            return Err(io::Error::last_os_error()).map_err(|e| {
-                                StartMicrovmError::GuestMemoryMmap(vm_memory::Error::MmapRegion(
-                                    vm_memory::mmap::MmapRegionError::Mmap(e),
-                                ))
-                            })?;
+                            return Err(StartMicrovmError::GuestMemoryMmap(
+                                io::Error::last_os_error().to_string(),
+                            ));
                         }
                         debug!("Created kernel memfd with fd={}", fd);
                         File::from_raw_fd(fd)
@@ -1745,9 +1741,13 @@ fn load_payload(
                 guest_mem
                     .insert_region(Arc::new(
                         GuestRegionMmap::new(kernel_region, GuestAddress(kernel_guest_addr))
-                            .map_err(StartMicrovmError::GuestMemoryMmap)?,
+                            .ok_or_else(|| {
+                                StartMicrovmError::GuestMemoryMmap(
+                                    "guest region address overflow".into(),
+                                )
+                            })?,
                     ))
-                    .map_err(StartMicrovmError::GuestMemoryMmap)?,
+                    .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?,
                 GuestAddress(kernel_entry_addr),
                 None,
                 None,
@@ -1955,24 +1955,20 @@ pub fn create_guest_memory(
                     Ok((*addr, *size, Some(file_offset)))
                 })
                 .collect::<Result<Vec<_>, io::Error>>()
-                .map_err(|e| {
-                    StartMicrovmError::GuestMemoryMmap(vm_memory::Error::MmapRegion(
-                        vm_memory::mmap::MmapRegionError::Mmap(e),
-                    ))
-                })?;
+                .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
 
             debug!(
                 "Created {} file-backed memory regions",
                 regions_with_files.len()
             );
             GuestMemoryMmap::from_ranges_with_files(&regions_with_files)
-                .map_err(StartMicrovmError::GuestMemoryMmap)?
+                .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?
         }
         #[cfg(not(feature = "vhost-user"))]
         unreachable!()
     } else {
         GuestMemoryMmap::from_ranges(&arch_mem_regions)
-            .map_err(StartMicrovmError::GuestMemoryMmap)?
+            .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?
     };
 
     // AFTER GuestMemoryMmap creation — allocate DAX GPAs without adding to GuestMemoryMmap

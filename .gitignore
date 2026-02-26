@@ -20,3 +20,4 @@ examples/rootfs_debian
 test-prefix
 /linux-sysroot
 .worktrees/
+.reference/

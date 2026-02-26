@@ -14,8 +14,8 @@ log = "0.4"
 env_logger = "0.10"
 nix = { version = "0.27", features = ["socket", "uio", "fs"] }
 libc = "0.2"
-vhost = { version = "0.14", features = ["vhost-user"] }
-vhost-user-backend = "0.19"
-virtio-queue = "0.15"
-vm-memory = { version = "0.16.2", features = ["backend-mmap", "backend-atomic"] }
-vmm-sys-util = "0.14"
+vhost = { version = "0.15", features = ["vhost-user"] }
+vhost-user-backend = "0.21"
+virtio-queue = "0.17"
+vm-memory = { version = "0.18", features = ["backend-mmap", "backend-atomic"] }
+vmm-sys-util = ">=0.14"

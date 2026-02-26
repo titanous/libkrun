@@ -3,7 +3,7 @@ use std::sync::{atomic::AtomicU64, OnceLock};
 use std::sync::{Arc, Mutex};
 use std::{io, thread};
 
-use vm_memory::{GuestMemory, GuestMemoryError, GuestMemoryMmap, GuestMemoryRegion};
+use vm_memory::{GuestMemoryBackend, GuestMemoryMmap};
 
 use crate::virtio::console::port_io::PortOutput;
 use crate::virtio::{DescriptorChain, InterruptTransport, Queue};
@@ -115,74 +115,75 @@ fn write_desc_to_output(
     port_id: u32,
     head_index: u16,
     desc_ordinal: usize,
-) -> Result<usize, GuestMemoryError> {
-    desc.mem
-        .try_access(desc.len as usize, desc.addr, |_, len, addr, region| {
-            let src = region.get_slice(addr, len).unwrap();
-            let diagnostics = if console_tx_diag_enabled() {
-                Some(sample_tx_slice_diagnostics(len, &src))
-            } else {
-                None
-            };
+) -> Result<usize, io::Error> {
+    let mut total = 0;
+    for slice_result in desc.mem.get_slices(desc.addr, desc.len as usize) {
+        let src = slice_result.map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let len = src.len();
+        let diagnostics = if console_tx_diag_enabled() {
+            Some(sample_tx_slice_diagnostics(len, &src))
+        } else {
+            None
+        };
 
-            loop {
-                log::trace!("Tx {src:?}, write_volatile {len} bytes");
-                match output.write_volatile(&src) {
-                    // try_access seem to handle partial write for us (we will be invoked again with an offset)
-                    Ok(n) => {
-                        if let Some(diag) = diagnostics.as_ref() {
-                            let post_diag = if diag.suspicious() || n != len {
-                                Some(sample_tx_slice_diagnostics(len, &src))
-                            } else {
-                                None
-                            };
-                            let post_changed = post_diag
-                                .as_ref()
-                                .map(|post| post.hash64 != diag.hash64)
-                                .unwrap_or(false);
-                            let suspicious = diag.suspicious() || n != len || post_changed;
-                            if should_emit_console_tx_diag(suspicious) {
-                                let tx_diag_seq = next_console_tx_diag_seq();
-                                log::warn!(
-                                    "console_tx_diag seq={} port_id={} head_index={} desc_ordinal={} desc_len={} written={} sampled_len={} nul_bytes={} invalid_utf8_bytes={} elf_markers={} control_bytes={} high_bytes={} hash64={:016x} head_hex={} tail_hex={} post_changed={} post_nul_bytes={} post_invalid_utf8_bytes={} post_elf_markers={} post_hash64={:016x}",
-                                    tx_diag_seq,
-                                    port_id,
-                                    head_index,
-                                    desc_ordinal,
-                                    diag.original_len,
-                                    n,
-                                    diag.sampled_len,
-                                    diag.nul_bytes,
-                                    diag.invalid_utf8_bytes,
-                                    diag.elf_markers,
-                                    diag.control_bytes,
-                                    diag.high_bytes,
-                                    diag.hash64,
-                                    diag.head_hex,
-                                    diag.tail_hex,
-                                    post_changed,
-                                    post_diag.as_ref().map(|post| post.nul_bytes).unwrap_or(0),
-                                    post_diag
-                                        .as_ref()
-                                        .map(|post| post.invalid_utf8_bytes)
-                                        .unwrap_or(0),
-                                    post_diag.as_ref().map(|post| post.elf_markers).unwrap_or(0),
-                                    post_diag.as_ref().map(|post| post.hash64).unwrap_or(0),
-                                );
-                            }
+        loop {
+            log::trace!("Tx {src:?}, write_volatile {len} bytes");
+            match output.write_volatile(&src) {
+                Ok(n) => {
+                    if let Some(diag) = diagnostics.as_ref() {
+                        let post_diag = if diag.suspicious() || n != len {
+                            Some(sample_tx_slice_diagnostics(len, &src))
+                        } else {
+                            None
+                        };
+                        let post_changed = post_diag
+                            .as_ref()
+                            .map(|post| post.hash64 != diag.hash64)
+                            .unwrap_or(false);
+                        let suspicious = diag.suspicious() || n != len || post_changed;
+                        if should_emit_console_tx_diag(suspicious) {
+                            let tx_diag_seq = next_console_tx_diag_seq();
+                            log::warn!(
+                                "console_tx_diag seq={} port_id={} head_index={} desc_ordinal={} desc_len={} written={} sampled_len={} nul_bytes={} invalid_utf8_bytes={} elf_markers={} control_bytes={} high_bytes={} hash64={:016x} head_hex={} tail_hex={} post_changed={} post_nul_bytes={} post_invalid_utf8_bytes={} post_elf_markers={} post_hash64={:016x}",
+                                tx_diag_seq,
+                                port_id,
+                                head_index,
+                                desc_ordinal,
+                                diag.original_len,
+                                n,
+                                diag.sampled_len,
+                                diag.nul_bytes,
+                                diag.invalid_utf8_bytes,
+                                diag.elf_markers,
+                                diag.control_bytes,
+                                diag.high_bytes,
+                                diag.hash64,
+                                diag.head_hex,
+                                diag.tail_hex,
+                                post_changed,
+                                post_diag.as_ref().map(|post| post.nul_bytes).unwrap_or(0),
+                                post_diag
+                                    .as_ref()
+                                    .map(|post| post.invalid_utf8_bytes)
+                                    .unwrap_or(0),
+                                post_diag.as_ref().map(|post| post.elf_markers).unwrap_or(0),
+                                post_diag.as_ref().map(|post| post.hash64).unwrap_or(0),
+                            );
                         }
-                        break Ok(n);
                     }
-                    // We can't return an error otherwise we would not know how many bytes were processed before WouldBlock
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        log::trace!("Tx wait for output (would block)");
-                        interrupt.signal_used_queue();
-                        output.wait_until_writable();
-                    }
-                    Err(e) => break Err(GuestMemoryError::IOError(e)),
+                    total += n;
+                    break;
                 }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    log::trace!("Tx wait for output (would block)");
+                    interrupt.signal_used_queue();
+                    output.wait_until_writable();
+                }
+                Err(e) => return Err(e),
             }
-        })
+        }
+    }
+    Ok(total)
 }
 
 fn next_console_tx_diag_seq() -> u64 {

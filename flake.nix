@@ -54,13 +54,13 @@
             # VM firmware bundled as a shared library; loaded at runtime by libkrun
             libkrunfw
 
-            # Optional: uncomment for --features snd
-            # pipewire
+            # for --features snd (virtio-snd pipewire backend)
+            pipewire.dev
 
-            # Optional: uncomment for --features gpu
-            # virglrenderer
-            # libdrm
-            # mesa  # provides epoxy
+            # for --features gpu (virtio-gpu with virglrenderer)
+            virglrenderer
+            libepoxy.dev
+            libdrm.dev
           ];
 
           # Point Rust's pkg_config crate at the shim so PKG_CONFIG_PATH set by
@@ -69,7 +69,7 @@
 
           # NixOS has no /usr/include; tell clang where glibc headers live.
           LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
-          BINDGEN_EXTRA_CLANG_ARGS = "-isystem ${pkgs.glibc.dev}/include";
+          BINDGEN_EXTRA_CLANG_ARGS = "-isystem ${pkgs.glibc.dev}/include -isystem ${pkgs.pipewire.dev}/include";
 
           # Force gcc as the host linker. The rust-overlay toolchain defaults to
           # its bundled LLD, which cannot resolve glibc's open64/stat64 compat

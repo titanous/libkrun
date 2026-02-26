@@ -611,7 +611,7 @@ impl Vmm {
         let regions = snapshot::ram_layout(&self.guest_memory);
         let mut uffd_regions = Vec::new();
 
-        use vm_memory::{GuestAddress, GuestMemory};
+        use vm_memory::{GuestAddress, GuestMemoryBackend};
         for (guest_addr, size) in regions {
             let host_addr = self
                 .guest_memory
@@ -832,7 +832,7 @@ impl Vmm {
     /// After this call, all RAM writes will be tracked via write-protect faults.
     #[cfg(target_os = "macos")]
     pub fn enable_dirty_tracking(&mut self) -> Result<()> {
-        use vm_memory::{GuestMemory, GuestMemoryRegion};
+        use vm_memory::{GuestMemoryBackend, GuestMemoryRegion};
 
         self.dirty_bitmaps.clear();
         let mut ram_regions = Vec::new();
@@ -880,7 +880,7 @@ impl Vmm {
     /// Disable dirty page tracking. vCPUs must be paused.
     #[cfg(target_os = "macos")]
     pub fn disable_dirty_tracking(&mut self) -> Result<()> {
-        use vm_memory::{GuestMemory, GuestMemoryRegion};
+        use vm_memory::{GuestMemoryBackend, GuestMemoryRegion};
 
         for region in self.guest_memory.iter() {
             let base = region.start_addr().raw_value();
@@ -1001,7 +1001,7 @@ impl Vmm {
     fn collect_dirty_pages(
         &self,
     ) -> std::result::Result<Vec<snapshot::DirtyPage>, snapshot::SnapshotError> {
-        use vm_memory::{GuestAddress, GuestMemory};
+        use vm_memory::{GuestAddress, GuestMemoryBackend};
 
         let page_size = 4096u64;
         let mut pages = Vec::new();
@@ -1098,7 +1098,7 @@ impl Vmm {
         store: &dyn snapshot_store::SnapshotStore,
         vmstate_data: Vec<u8>,
     ) -> std::result::Result<(), snapshot::SnapshotError> {
-        use vm_memory::{Address, GuestMemory, GuestMemoryRegion};
+        use vm_memory::{Address, GuestMemoryBackend, GuestMemoryRegion};
 
         // Serialize vmstate
         futures::executor::block_on(store.write_vmstate(vmstate_data))
@@ -1254,7 +1254,7 @@ impl Vmm {
         &mut self,
         store: &dyn snapshot_store::SnapshotStore,
     ) -> std::result::Result<(), snapshot::SnapshotError> {
-        use vm_memory::GuestMemory;
+        use vm_memory::GuestMemoryBackend;
 
         if !self.dirty_tracking_enabled {
             return Err(snapshot::SnapshotError::DirtyTrackingNotEnabled);
@@ -1361,7 +1361,7 @@ impl Vmm {
         &mut self,
         store: &dyn snapshot_store::SnapshotStore,
     ) -> std::result::Result<(), snapshot::SnapshotError> {
-        use vm_memory::{GuestAddress, GuestMemory, GuestMemoryRegion};
+        use vm_memory::{GuestAddress, GuestMemoryBackend, GuestMemoryRegion};
 
         if !self.dirty_tracking_enabled {
             return Err(snapshot::SnapshotError::DirtyTrackingNotEnabled);

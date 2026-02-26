@@ -17,7 +17,7 @@ use utils::eventfd::EventFd;
 use vhost::vhost_user::message::{VhostTransferStateDirection, VhostTransferStatePhase};
 use vhost::vhost_user::{Frontend, VhostUserFrontend, VhostUserProtocolFeatures};
 use vhost::{VhostBackend, VhostUserMemoryRegionInfo, VringConfigData};
-use vm_memory::{Address, GuestMemory, GuestMemoryMmap, GuestMemoryRegion};
+use vm_memory::{Address, GuestMemoryBackend, GuestMemoryMmap, GuestMemoryRegion};
 
 use crate::virtio::{
     ActivateError, ActivateResult, DeviceQueue, DeviceState, InterruptTransport, QueueConfig,
