@@ -258,6 +258,8 @@ impl UffdHandler {
         thread::Builder::new()
             .name("uffd-handler".into())
             .spawn(move || {
+                // TODO: consolidate with Context's tokio runtime instead of creating a
+                // separate single-threaded runtime for the UFFD handler thread.
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()

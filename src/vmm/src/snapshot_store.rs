@@ -107,11 +107,8 @@ pub trait SnapshotStoreFactory: Send + 'static {
 /// Read path supports base + incremental overlays:
 /// - `base_path/vmstate`: base snapshot
 /// - `base_path/memory`: base memory file
-/// - `incremental_paths`: ordered list of incremental snapshot files (each contains VmSnapshot with dirty pages)
 pub struct FsSnapshotStore {
     base_path: PathBuf,
-    #[allow(dead_code)]
-    incremental_paths: Vec<PathBuf>,
     header: Option<SnapshotHeader>,
     incremental_snapshots: Vec<IncrementalSnapshot>,
     /// Map: guest_addr -> (incremental_index, dirty_page_index) for O(1) lookup (newest-first)
@@ -124,7 +121,6 @@ impl FsSnapshotStore {
     pub fn new(path: impl AsRef<Path>) -> Self {
         FsSnapshotStore {
             base_path: path.as_ref().to_path_buf(),
-            incremental_paths: Vec::new(),
             header: None,
             incremental_snapshots: Vec::new(),
             dirty_page_index: HashMap::new(),
@@ -135,14 +131,12 @@ impl FsSnapshotStore {
     /// Populated by FsSnapshotStoreFactory::create().
     fn new_for_read(
         base_path: impl AsRef<Path>,
-        incremental_paths: Vec<PathBuf>,
         header: SnapshotHeader,
         incremental_snapshots: Vec<IncrementalSnapshot>,
         dirty_page_index: HashMap<u64, (usize, usize)>,
     ) -> Self {
         FsSnapshotStore {
             base_path: base_path.as_ref().to_path_buf(),
-            incremental_paths,
             header: Some(header),
             incremental_snapshots,
             dirty_page_index,
@@ -438,7 +432,6 @@ impl SnapshotStoreFactory for FsSnapshotStoreFactory {
 
             let store = FsSnapshotStore::new_for_read(
                 self.base_path,
-                self.incremental_paths,
                 header,
                 incremental_snapshots,
                 dirty_page_index,

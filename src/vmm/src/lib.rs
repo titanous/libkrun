@@ -128,6 +128,9 @@ pub enum Error {
     RegisterMMIODevice(device_manager::mmio::Error),
     /// Write to the serial console failed.
     Serial(io::Error),
+    /// Snapshot error.
+    #[cfg(feature = "snapshot")]
+    Snapshot(String),
     #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
     /// Cannot generate or write FDT
     SetupFDT(devices::fdt::Error),
@@ -171,6 +174,8 @@ impl Display for Error {
             LoadCommandline(e) => write!(f, "Cannot load command line: {e}"),
             RegisterMMIODevice(e) => write!(f, "Cannot add a device to the MMIO Bus. {e}"),
             Serial(e) => write!(f, "Error writing to the serial console: {e:?}"),
+            #[cfg(feature = "snapshot")]
+            Snapshot(e) => write!(f, "Snapshot error: {e}"),
             #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
             SetupFDT(e) => write!(f, "Error generating or writing FDT: {e:?}"),
             TimerFd(e) => write!(f, "Error creating timer fd: {e}"),

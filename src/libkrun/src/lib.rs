@@ -3160,14 +3160,14 @@ impl Context {
                 .build()
                 .map_err(|e| {
                     StartError::Microvm(vmm::builder::StartMicrovmError::Internal(
-                        vmm::Error::EventFd(std::io::Error::other(e.to_string())),
+                        vmm::Error::Snapshot(e.to_string()),
                     ))
                 })?;
 
             let store: Box<dyn vmm::snapshot_store::SnapshotStore> = rt.block_on(async {
                 factory.create().await.map_err(|e| {
                     StartError::Microvm(vmm::builder::StartMicrovmError::Internal(
-                        vmm::Error::EventFd(std::io::Error::other(e.to_string())),
+                        vmm::Error::Snapshot(e.to_string()),
                     ))
                 })
             })?;
@@ -3179,7 +3179,7 @@ impl Context {
                 let vmstate_bytes = rt.block_on(async {
                     store.read_vmstate().await.map_err(|e| {
                         StartError::Microvm(vmm::builder::StartMicrovmError::Internal(
-                            vmm::Error::EventFd(std::io::Error::other(e.to_string())),
+                            vmm::Error::Snapshot(e.to_string()),
                         ))
                     })
                 })?;
@@ -3195,7 +3195,7 @@ impl Context {
                 let vmstate_bytes = rt.block_on(async {
                     store.read_vmstate().await.map_err(|e| {
                         StartError::Microvm(vmm::builder::StartMicrovmError::Internal(
-                            vmm::Error::EventFd(std::io::Error::other(e.to_string())),
+                            vmm::Error::Snapshot(e.to_string()),
                         ))
                     })
                 })?;
@@ -3225,9 +3225,9 @@ impl Context {
             // On other platforms, use the backward-compatible restore_from_snapshot path.
             // TODO: Extend restore_from_store to all platforms in Phase 3+.
             Err(StartError::Microvm(vmm::builder::StartMicrovmError::Internal(
-                vmm::Error::EventFd(std::io::Error::other(
+                vmm::Error::Snapshot(
                     "restore_and_run_with_store is not available on this platform; use restore_and_run instead".to_string()
-                ))
+                )
             )))
         }
     }
@@ -3283,7 +3283,7 @@ impl VmHandle {
     #[cfg(feature = "snapshot")]
     fn snapshot_err_to_start_error(e: vmm::snapshot::SnapshotError) -> StartError {
         StartError::Microvm(vmm::builder::StartMicrovmError::Internal(
-            vmm::Error::EventFd(std::io::Error::other(e.to_string())),
+            vmm::Error::Snapshot(e.to_string()),
         ))
     }
 

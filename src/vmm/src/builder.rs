@@ -694,7 +694,7 @@ impl BuiltVm {
         }
 
         let snapshot_err = |e: super::snapshot::SnapshotError| {
-            StartMicrovmError::Internal(super::Error::EventFd(std::io::Error::other(e.to_string())))
+            StartMicrovmError::Internal(super::Error::Snapshot(e.to_string()))
         };
 
         // Step 3: Load the full base snapshot (memory, devices, interrupts, vCPU state).
@@ -744,7 +744,7 @@ impl BuiltVm {
         // but on KVM they are powered off via KVM_ARM_VCPU_POWER_OFF and don't need unblocking.
 
         let snapshot_err = |e: super::snapshot::SnapshotError| {
-            StartMicrovmError::Internal(super::Error::EventFd(std::io::Error::other(e.to_string())))
+            StartMicrovmError::Internal(super::Error::Snapshot(e.to_string()))
         };
 
         // Step 3: Restore using store (eager restore, drains preload to populate memory)
@@ -772,7 +772,7 @@ impl BuiltVm {
         let mut vmm = self.vmm.lock().expect("Poisoned vmm lock");
 
         let snapshot_err = |e: super::snapshot::SnapshotError| {
-            StartMicrovmError::Internal(super::Error::EventFd(std::io::Error::other(e.to_string())))
+            StartMicrovmError::Internal(super::Error::Snapshot(e.to_string()))
         };
 
         // Step 1: Pre-validate vmstate before starting any threads or UFFD.
