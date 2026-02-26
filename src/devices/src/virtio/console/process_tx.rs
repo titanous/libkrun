@@ -118,7 +118,7 @@ fn write_desc_to_output(
 ) -> Result<usize, io::Error> {
     let mut total = 0;
     for slice_result in desc.mem.get_slices(desc.addr, desc.len as usize) {
-        let src = slice_result.map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let src = slice_result.map_err(|e| io::Error::other(e))?;
         let len = src.len();
         let diagnostics = if console_tx_diag_enabled() {
             Some(sample_tx_slice_diagnostics(len, &src))
