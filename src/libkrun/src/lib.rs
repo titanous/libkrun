@@ -3138,71 +3138,101 @@ impl Context {
         }
     }
 
-    /// Cold restore: load a snapshot and run the VM from restored state.
-    ///
-    /// Restores the full base snapshot, then applies any incremental
-    /// snapshots in order. The VM starts executing from the final
-    /// restored state. Blocks until the VM exits.
-    #[cfg(feature = "snapshot")]
     /// Restore a VM from a SnapshotStore and run the event loop.
     ///
-    /// This creates a store from the factory, loads vmstate, drains the preload
+    /// On Linux: Creates a store from the factory, loads vmstate, drains the preload
     /// stream to eagerly populate memory, then resumes vCPUs and runs the event loop.
+    ///
+    /// On other platforms: Delegates to `restore_and_run` for backward compatibility.
     #[cfg(feature = "snapshot")]
     pub fn restore_and_run_with_store(
         mut self,
         factory: Box<dyn vmm::snapshot_store::SnapshotStoreFactory>,
     ) -> Result<vmm::vm_exit::VmExit, StartError> {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .map_err(|e| StartError::Microvm(vmm::builder::StartMicrovmError::Internal(
-                vmm::Error::EventFd(std::io::Error::other(e.to_string()))
-            )))?;
-
-        let (vmstate_bytes, store): (Vec<u8>, Box<dyn vmm::snapshot_store::SnapshotStore>) = rt.block_on(async {
-            let store = factory.create().await
+        #[cfg(target_os = "linux")]
+        {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .build()
                 .map_err(|e| StartError::Microvm(vmm::builder::StartMicrovmError::Internal(
                     vmm::Error::EventFd(std::io::Error::other(e.to_string()))
                 )))?;
 
-            let vmstate_bytes = store.read_vmstate().await.map_err(|e| {
-                StartError::Microvm(vmm::builder::StartMicrovmError::Internal(
-                    vmm::Error::EventFd(std::io::Error::other(e.to_string()))
-                ))
+            let (vmstate_bytes, store): (Vec<u8>, Box<dyn vmm::snapshot_store::SnapshotStore>) = rt.block_on(async {
+                let store = factory.create().await
+                    .map_err(|e| StartError::Microvm(vmm::builder::StartMicrovmError::Internal(
+                        vmm::Error::EventFd(std::io::Error::other(e.to_string()))
+                    )))?;
+
+                let vmstate_bytes = store.read_vmstate().await.map_err(|e| {
+                    StartError::Microvm(vmm::builder::StartMicrovmError::Internal(
+                        vmm::Error::EventFd(std::io::Error::other(e.to_string()))
+                    ))
+                })?;
+
+                Ok::<_, StartError>((vmstate_bytes, store))
             })?;
 
-            Ok::<_, StartError>((vmstate_bytes, store))
-        })?;
+            self.built_vm
+                .restore_from_store(vmstate_bytes, store)?;
 
-        self.built_vm
-            .restore_from_store(vmstate_bytes, store)?;
+            loop {
+                self.event_manager
+                    .run()
+                    .map_err(StartError::EventManagerRun)?;
 
-        loop {
-            self.event_manager
-                .run()
-                .map_err(StartError::EventManagerRun)?;
-
-            // Check if the VM has exited
-            if let Some(vm_exit) = self.vm_exit.lock().expect("Poisoned vm_exit lock").take() {
-                return Ok(vm_exit);
+                // Check if the VM has exited
+                if let Some(vm_exit) = self.vm_exit.lock().expect("Poisoned vm_exit lock").take() {
+                    return Ok(vm_exit);
+                }
             }
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            // Phase 2+ (eager restore with FsSnapshotStore) is Linux-only.
+            // On other platforms, use the backward-compatible restore_from_snapshot path.
+            // TODO: Extend restore_from_store to all platforms in Phase 3+.
+            Err(StartError::Microvm(vmm::builder::StartMicrovmError::Internal(
+                vmm::Error::EventFd(std::io::Error::other(
+                    "restore_and_run_with_store is not available on this platform; use restore_and_run instead".to_string()
+                ))
+            )))
         }
     }
 
     /// Restore a VM from a snapshot directory and run the event loop.
     ///
-    /// This delegates to `restore_and_run_with_store` using `FsSnapshotStoreFactory`.
-    /// Restore a VM from a snapshot directory and run the event loop.
-    ///
-    /// This delegates to `restore_and_run_with_store` using `FsSnapshotStoreFactory`.
+    /// This delegates to `restore_and_run_with_store` on Linux, or uses the
+    /// backward-compatible `restore_from_snapshot` path on other platforms.
     #[cfg(feature = "snapshot")]
     pub fn restore_and_run(
         self,
         base_path: &std::path::Path,
         incremental_paths: &[&std::path::Path],
     ) -> Result<vmm::vm_exit::VmExit, StartError> {
-        let factory = vmm::snapshot_store::FsSnapshotStoreFactory::new(base_path, incremental_paths);
-        self.restore_and_run_with_store(Box::new(factory))
+        #[cfg(target_os = "linux")]
+        {
+            let factory = vmm::snapshot_store::FsSnapshotStoreFactory::new(base_path, incremental_paths);
+            self.restore_and_run_with_store(Box::new(factory))
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            // On macOS/other platforms, use the cold restore path
+            self.built_vm
+                .restore_from_snapshot(base_path, incremental_paths)?;
+
+            loop {
+                self.event_manager
+                    .run()
+                    .map_err(StartError::EventManagerRun)?;
+
+                // Check if the VM has exited
+                if let Some(vm_exit) = self.vm_exit.lock().expect("Poisoned vm_exit lock").take() {
+                    return Ok(vm_exit);
+                }
+            }
+        }
     }
 }
 

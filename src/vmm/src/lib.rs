@@ -519,6 +519,8 @@ impl Vmm {
 
         // Drain preload stream to populate memory (eager restore)
         let regions = snapshot::ram_layout(&self.guest_memory);
+        // TODO: Phase 3+ — consolidate runtimes: Context creates one at restore_and_run_with_store,
+        // then Vmm creates another here. Single runtime should be created by Context and passed down.
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .map_err(|e| snapshot::SnapshotError::Deserialize(format!("Failed to create runtime: {e}")))?;
