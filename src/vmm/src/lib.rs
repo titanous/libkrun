@@ -29,6 +29,9 @@ pub mod snapshot;
 /// Snapshot store abstraction for flexible backends.
 #[cfg(feature = "snapshot")]
 pub mod snapshot_store;
+/// UFFD handler for demand-paging during cold restore.
+#[cfg(all(target_os = "linux", feature = "uffd"))]
+pub mod uffd;
 /// VM exit reasons and shared exit state.
 pub mod vm_exit;
 /// Wrappers over structures used to configure the VMM.
