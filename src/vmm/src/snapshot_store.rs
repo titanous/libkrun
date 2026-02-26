@@ -6,9 +6,26 @@
 //! Provides async traits for reading and writing VM snapshots to different
 //! storage backends (filesystem, memory, cloud, etc.).
 
+use std::collections::HashMap;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+
+use futures::stream::{self, StreamExt};
+
+use crate::snapshot::{DirtyPage, IncrementalSnapshot, SnapshotHeader, VmSnapshot};
+
+/// Get the system page size in bytes.
+///
+/// On Linux x86_64: 4096 bytes
+/// On Linux aarch64: 65536 bytes
+/// Returns the result of libc::sysconf(libc::_SC_PAGESIZE)
+pub fn system_page_size() -> u64 {
+    unsafe { libc::sysconf(libc::_SC_PAGESIZE) as u64 }
+}
+
+/// Default preload chunk size: 4MB.
+const PRELOAD_CHUNK_SIZE: u64 = 4 * 1024 * 1024;
 
 /// A Send-able boxed future for dyn-compatible async methods.
 /// All SnapshotStore methods return Send futures to support tokio::spawn in the UFFD handler.
@@ -83,38 +100,212 @@ pub trait SnapshotStoreFactory: Send + 'static {
 
 /// Filesystem-backed snapshot store.
 ///
-/// Implements SnapshotStore by writing to disk. Write path produces
-/// format-compatible files with existing snapshot format:
+/// Implements SnapshotStore by reading from and writing to disk.
+/// Write path produces format-compatible files:
 /// - `vmstate`: serialized VM state bytes
 /// - `memory`: raw guest memory dump (full snapshots only)
+///
+/// Read path supports base + incremental overlays:
+/// - `base_path/vmstate`: base snapshot
+/// - `base_path/memory`: base memory file
+/// - `incremental_paths`: ordered list of incremental snapshot files (each contains VmSnapshot with dirty pages)
 pub struct FsSnapshotStore {
-    path: PathBuf,
+    base_path: PathBuf,
+    #[allow(dead_code)]
+    incremental_paths: Vec<PathBuf>,
+    header: Option<SnapshotHeader>,
+    incremental_snapshots: Vec<IncrementalSnapshot>,
+    /// Map: guest_addr -> (incremental_index, dirty_page_index) for O(1) lookup (newest-first)
+    dirty_page_index: HashMap<u64, (usize, usize)>,
 }
 
 impl FsSnapshotStore {
-    /// Create a new filesystem snapshot store at the given path.
+    /// Create a new filesystem snapshot store for writing only.
+    /// For reading, use FsSnapshotStoreFactory to load metadata properly.
     pub fn new(path: impl AsRef<Path>) -> Self {
         FsSnapshotStore {
-            path: path.as_ref().to_path_buf(),
+            base_path: path.as_ref().to_path_buf(),
+            incremental_paths: Vec::new(),
+            header: None,
+            incremental_snapshots: Vec::new(),
+            dirty_page_index: HashMap::new(),
+        }
+    }
+
+    /// Create a new filesystem snapshot store for writing only (alias for `new`).
+    fn new_for_write(path: impl AsRef<Path>) -> Self {
+        Self::new(path)
+    }
+
+    /// Create a new filesystem snapshot store for reading (internal).
+    /// Populated by FsSnapshotStoreFactory::create().
+    fn new_for_read(
+        base_path: impl AsRef<Path>,
+        incremental_paths: Vec<PathBuf>,
+        header: SnapshotHeader,
+        incremental_snapshots: Vec<IncrementalSnapshot>,
+        dirty_page_index: HashMap<u64, (usize, usize)>,
+    ) -> Self {
+        FsSnapshotStore {
+            base_path: base_path.as_ref().to_path_buf(),
+            incremental_paths,
+            header: Some(header),
+            incremental_snapshots,
+            dirty_page_index,
         }
     }
 }
 
 impl SnapshotStore for FsSnapshotStore {
     fn read_vmstate(&self) -> SendBoxFuture<'_, io::Result<Vec<u8>>> {
-        Box::pin(async { unimplemented!("read_vmstate - Phase 2") })
+        let base_path = self.base_path.clone();
+        let header = self.header.clone();
+        let incremental_snapshots = self.incremental_snapshots.clone();
+
+        Box::pin(async move {
+            if incremental_snapshots.is_empty() {
+                // No incrementals: return base vmstate serialized
+                let vmstate_path = base_path.join("vmstate");
+                std::fs::read(&vmstate_path)
+            } else {
+                // Construct merged vmstate using base header + latest incremental state
+                let merged_vmstate = VmSnapshot {
+                    header: header.expect("header must be set"),
+                    vcpu_states: incremental_snapshots
+                        .last()
+                        .expect("has incrementals")
+                        .vcpu_states
+                        .clone(),
+                    device_states: incremental_snapshots
+                        .last()
+                        .expect("has incrementals")
+                        .device_states
+                        .clone(),
+                    gic_state: incremental_snapshots.last().expect("has incrementals").gic_state.clone(),
+                    vm_state: incremental_snapshots.last().expect("has incrementals").vm_state.clone(),
+                };
+
+                bincode::serialize(&merged_vmstate)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
+            }
+        })
     }
 
-    fn read_page(&self, _guest_addr: u64) -> SendBoxFuture<'_, io::Result<Vec<u8>>> {
-        Box::pin(async { unimplemented!("read_page - Phase 2") })
+    fn read_page(&self, guest_addr: u64) -> SendBoxFuture<'_, io::Result<Vec<u8>>> {
+        let base_path = self.base_path.clone();
+        let incremental_snapshots = self.incremental_snapshots.clone();
+        let dirty_page_index = self.dirty_page_index.clone();
+        let header = self.header.clone();
+
+        Box::pin(async move {
+            // Check if page is in dirty_page_index (newest-first lookup)
+            if let Some((inc_idx, page_idx)) = dirty_page_index.get(&guest_addr) {
+                let dirty_page = &incremental_snapshots[*inc_idx].dirty_pages[*page_idx];
+                return Ok(dirty_page.data.clone());
+            }
+
+            // Not in incrementals: read from base memory file
+            let header = header.expect("header must be set");
+            let page_size = system_page_size();
+
+            // Compute file offset from ram_regions
+            let mut offset = 0u64;
+            let mut found = false;
+            for (region_addr, region_size) in &header.ram_regions {
+                if *region_addr <= guest_addr && guest_addr < region_addr + region_size {
+                    offset += guest_addr - region_addr;
+                    found = true;
+                    break;
+                }
+                offset += region_size;
+            }
+
+            if !found {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("guest_addr 0x{:x} not in RAM regions", guest_addr),
+                ));
+            }
+
+            let memory_path = base_path.join("memory");
+            let mut file = std::fs::File::open(&memory_path)?;
+            file.seek(SeekFrom::Start(offset))?;
+
+            let mut buffer = vec![0u8; page_size as usize];
+            file.read_exact(&mut buffer)?;
+            Ok(buffer)
+        })
     }
 
-    fn preload(&self, _regions: Vec<(u64, u64)>) -> BoxStream<'_, io::Result<(u64, Vec<u8>)>> {
-        Box::pin(futures::stream::iter(vec![]))
+    fn preload(&self, regions: Vec<(u64, u64)>) -> BoxStream<'_, io::Result<(u64, Vec<u8>)>> {
+        let base_path = self.base_path.clone();
+        let header = self.header.clone();
+        let incremental_snapshots = self.incremental_snapshots.clone();
+        let dirty_page_index = self.dirty_page_index.clone();
+
+        // Generate all chunks to yield
+        let mut chunks = Vec::new();
+
+        if header.is_some() {
+            for (base_addr, size) in regions {
+                let mut current_addr = base_addr;
+                let end_addr = base_addr + size;
+
+                while current_addr < end_addr {
+                    let chunk_size = std::cmp::min(PRELOAD_CHUNK_SIZE, end_addr - current_addr);
+                    chunks.push((current_addr, chunk_size));
+                    current_addr += chunk_size;
+                }
+            }
+        }
+
+        // Stream each chunk with dirty pages overlaid
+        let stream = stream::iter(chunks).then(move |(chunk_addr, chunk_size)| {
+            let base_path = base_path.clone();
+            let header = header.clone();
+            let incremental_snapshots = incremental_snapshots.clone();
+            let dirty_page_index = dirty_page_index.clone();
+
+            async move {
+                let mut chunk_data = vec![0u8; chunk_size as usize];
+                let header = header.expect("header must be set");
+
+                // Read base memory
+                let memory_path = base_path.join("memory");
+                let mut offset = 0u64;
+                for (region_addr, region_size) in &header.ram_regions {
+                    if *region_addr <= chunk_addr && chunk_addr < region_addr + region_size {
+                        offset += chunk_addr - region_addr;
+                        break;
+                    }
+                    offset += region_size;
+                }
+
+                let mut file = std::fs::File::open(&memory_path)?;
+                file.seek(SeekFrom::Start(offset))?;
+                file.read_exact(&mut chunk_data)?;
+
+                // Overlay dirty pages from incrementals
+                let page_size = system_page_size() as usize;
+                for (dirty_addr, (inc_idx, page_idx)) in &dirty_page_index {
+                    if *dirty_addr >= chunk_addr && *dirty_addr < chunk_addr + chunk_size {
+                        let offset_in_chunk = (*dirty_addr - chunk_addr) as usize;
+                        let dirty_data = &incremental_snapshots[*inc_idx].dirty_pages[*page_idx].data;
+                        let copy_size = std::cmp::min(page_size, chunk_data.len() - offset_in_chunk);
+                        chunk_data[offset_in_chunk..offset_in_chunk + copy_size]
+                            .copy_from_slice(&dirty_data[..copy_size]);
+                    }
+                }
+
+                Ok((chunk_addr, chunk_data))
+            }
+        });
+
+        Box::pin(stream)
     }
 
     fn write_vmstate(&self, data: Vec<u8>) -> SendBoxFuture<'_, io::Result<()>> {
-        let path = self.path.clone();
+        let path = self.base_path.clone();
         Box::pin(async move {
             fs::create_dir_all(&path)?;
             let vmstate_path = path.join("vmstate");
@@ -126,7 +317,7 @@ impl SnapshotStore for FsSnapshotStore {
     }
 
     fn write_pages(&self, pages: Vec<(u64, Vec<u8>)>) -> SendBoxFuture<'_, io::Result<()>> {
-        let path = self.path.clone();
+        let path = self.base_path.clone();
         Box::pin(async move {
             if pages.is_empty() {
                 return Ok(());
@@ -143,7 +334,7 @@ impl SnapshotStore for FsSnapshotStore {
     }
 
     fn close(&self) -> SendBoxFuture<'_, io::Result<()>> {
-        let path = self.path.clone();
+        let path = self.base_path.clone();
         Box::pin(async move {
             // Ensure all data is durable by syncing the directory
             let dir = fs::File::open(&path)?;
@@ -153,16 +344,24 @@ impl SnapshotStore for FsSnapshotStore {
     }
 }
 
-/// Factory for creating FsSnapshotStore instances.
+/// Factory for creating FsSnapshotStore instances for reading.
+///
+/// Loads and prepares base + incremental snapshots during creation.
 pub struct FsSnapshotStoreFactory {
-    path: PathBuf,
+    base_path: PathBuf,
+    incremental_paths: Vec<PathBuf>,
 }
 
 impl FsSnapshotStoreFactory {
     /// Create a new factory for filesystem snapshots.
-    pub fn new(path: impl AsRef<Path>) -> Self {
+    ///
+    /// # Arguments
+    /// * `base_path` - Path to base snapshot directory (contains `vmstate` and `memory`)
+    /// * `incremental_paths` - Ordered list of paths to incremental snapshot files
+    pub fn new(base_path: impl AsRef<Path>, incremental_paths: &[impl AsRef<Path>]) -> Self {
         FsSnapshotStoreFactory {
-            path: path.as_ref().to_path_buf(),
+            base_path: base_path.as_ref().to_path_buf(),
+            incremental_paths: incremental_paths.iter().map(|p| p.as_ref().to_path_buf()).collect(),
         }
     }
 }
@@ -170,7 +369,41 @@ impl FsSnapshotStoreFactory {
 impl SnapshotStoreFactory for FsSnapshotStoreFactory {
     fn create(self: Box<Self>) -> SendBoxFuture<'static, io::Result<Box<dyn SnapshotStore>>> {
         Box::pin(async move {
-            Ok(Box::new(FsSnapshotStore::new(self.path)) as Box<dyn SnapshotStore>)
+            use crate::snapshot::load_vmstate;
+
+            // Load base vmstate
+            let vmstate_path = self.base_path.join("vmstate");
+            let base_vmstate = load_vmstate(&vmstate_path)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+            let header = base_vmstate.header.clone();
+
+            // Load all incrementals
+            let mut incremental_snapshots = Vec::new();
+            for inc_path in &self.incremental_paths {
+                let inc = crate::snapshot::load_incremental_snapshot(inc_path)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+                incremental_snapshots.push(inc);
+            }
+
+            // Build dirty_page_index: guest_addr -> (incremental_index, dirty_page_index)
+            // Iterate newest-first so the first occurrence wins (newest)
+            let mut dirty_page_index = HashMap::new();
+            for (inc_idx, inc_snap) in incremental_snapshots.iter().enumerate().rev() {
+                for (page_idx, dirty_page) in inc_snap.dirty_pages.iter().enumerate() {
+                    dirty_page_index.entry(dirty_page.guest_addr)
+                        .or_insert((inc_idx, page_idx));
+                }
+            }
+
+            let store = FsSnapshotStore::new_for_read(
+                self.base_path,
+                self.incremental_paths,
+                header,
+                incremental_snapshots,
+                dirty_page_index,
+            );
+
+            Ok(Box::new(store) as Box<dyn SnapshotStore>)
         })
     }
 }
@@ -267,8 +500,8 @@ mod tests {
         let _ = fs::remove_dir_all(&test_dir);
         fs::create_dir_all(&test_dir).unwrap();
 
-        // Verify we can create a trait object
-        let _store: Box<dyn SnapshotStore> = Box::new(FsSnapshotStore::new(&test_dir));
+        // Verify we can create a trait object (for writing)
+        let _store: Box<dyn SnapshotStore> = Box::new(FsSnapshotStore::new_for_write(&test_dir));
 
         // Cleanup
         let _ = fs::remove_dir_all(&test_dir);
@@ -282,7 +515,7 @@ mod tests {
         let _ = fs::remove_dir_all(&test_dir);
         fs::create_dir_all(&test_dir).unwrap();
 
-        let store = FsSnapshotStore::new(&test_dir);
+        let store = FsSnapshotStore::new_for_write(&test_dir);
 
         // Create test data: vmstate bytes and memory pages
         let test_vmstate = vec![0x01, 0x02, 0x03, 0x04, 0x05];
@@ -333,5 +566,186 @@ mod tests {
     fn test_factory_bounds() {
         fn assert_send<T: Send + 'static>() {}
         assert_send::<FsSnapshotStoreFactory>();
+    }
+
+    /// AC2.3: Read path with base + incremental overlays
+    #[test]
+    fn test_ac2_3_read_path_base_plus_incrementals() {
+        use crate::snapshot::{SnapshotHeader, SNAPSHOT_MAGIC, SNAPSHOT_VERSION, VmSnapshot, IncrementalSnapshot};
+
+        let temp_dir = std::env::temp_dir();
+        let test_dir = temp_dir.join("libkrun_test_ac2_3");
+        let _ = fs::remove_dir_all(&test_dir);
+        fs::create_dir_all(&test_dir).unwrap();
+
+        // Create base snapshot
+        let base_subdir = test_dir.join("base");
+        fs::create_dir_all(&base_subdir).unwrap();
+
+        let header = SnapshotHeader {
+            magic: SNAPSHOT_MAGIC,
+            version: SNAPSHOT_VERSION,
+            vcpu_count: 2,
+            ram_regions: vec![(0x1000, 0x3000)],
+            nested_enabled: false,
+        };
+
+        let base_vmstate = VmSnapshot {
+            header: header.clone(),
+            vcpu_states: vec![vec![0x01, 0x02], vec![0x03, 0x04]],
+            device_states: vec![],
+            gic_state: None,
+            vm_state: None,
+        };
+
+        let base_vmstate_bytes = bincode::serialize(&base_vmstate).unwrap();
+        fs::write(base_subdir.join("vmstate"), &base_vmstate_bytes).unwrap();
+
+        // Base memory: 0x1000-0x4000 filled with 0xAA
+        let base_memory = vec![0xAAu8; 0x3000];
+        fs::write(base_subdir.join("memory"), &base_memory).unwrap();
+
+        // Create first incremental
+        let inc1_path = test_dir.join("inc1.snap");
+        let inc1 = IncrementalSnapshot {
+            header: header.clone(),
+            vcpu_states: vec![vec![0x05, 0x06], vec![0x07, 0x08]],
+            device_states: vec![],
+            dirty_pages: vec![
+                DirtyPage { guest_addr: 0x1000, data: vec![0xBB; 4096] },
+                DirtyPage { guest_addr: 0x2000, data: vec![0xCC; 4096] },
+            ],
+            gic_state: None,
+            vm_state: None,
+        };
+        let inc1_bytes = bincode::serialize(&inc1).unwrap();
+        fs::write(&inc1_path, &inc1_bytes).unwrap();
+
+        // Create second incremental
+        let inc2_path = test_dir.join("inc2.snap");
+        let inc2 = IncrementalSnapshot {
+            header: header.clone(),
+            vcpu_states: vec![vec![0x09, 0x0A], vec![0x0B, 0x0C]],
+            device_states: vec![],
+            dirty_pages: vec![
+                DirtyPage { guest_addr: 0x1000, data: vec![0xDD; 4096] }, // Overrides inc1
+                DirtyPage { guest_addr: 0x3000, data: vec![0xEE; 4096] },
+            ],
+            gic_state: None,
+            vm_state: None,
+        };
+        let inc2_bytes = bincode::serialize(&inc2).unwrap();
+        fs::write(&inc2_path, &inc2_bytes).unwrap();
+
+        // Create factory and store
+        let factory = FsSnapshotStoreFactory::new(&base_subdir, &[&inc1_path, &inc2_path]);
+        let boxed_factory = Box::new(factory);
+        let store = futures::executor::block_on(boxed_factory.create()).expect("factory.create() should succeed");
+
+        // Test read_page: page 0x1000 should come from inc2 (newest)
+        let page_0x1000 = futures::executor::block_on(store.read_page(0x1000))
+            .expect("read_page(0x1000) should succeed");
+        assert_eq!(page_0x1000, vec![0xDDu8; 4096], "Page 0x1000 should be from inc2");
+
+        // Test read_page: page 0x2000 should come from inc1
+        let page_0x2000 = futures::executor::block_on(store.read_page(0x2000))
+            .expect("read_page(0x2000) should succeed");
+        assert_eq!(page_0x2000, vec![0xCCu8; 4096], "Page 0x2000 should be from inc1");
+
+        // Test read_page: clean page should come from base memory
+        let page_0x1800 = futures::executor::block_on(store.read_page(0x1800))
+            .expect("read_page(0x1800) should succeed");
+        assert_eq!(page_0x1800[..], vec![0xAAu8; 4096][..], "Page 0x1800 should be from base");
+
+        // Cleanup
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+
+    /// AC2.4: Preload yields sequential chunks with dirty pages overlaid
+    #[test]
+    fn test_ac2_4_preload_chunks_with_dirty_overlay() {
+        use crate::snapshot::{SnapshotHeader, SNAPSHOT_MAGIC, SNAPSHOT_VERSION, VmSnapshot, IncrementalSnapshot};
+
+        let temp_dir = std::env::temp_dir();
+        let test_dir = temp_dir.join("libkrun_test_ac2_4");
+        let _ = fs::remove_dir_all(&test_dir);
+        fs::create_dir_all(&test_dir).unwrap();
+
+        // Create base snapshot
+        let base_subdir = test_dir.join("base");
+        fs::create_dir_all(&base_subdir).unwrap();
+
+        let header = SnapshotHeader {
+            magic: SNAPSHOT_MAGIC,
+            version: SNAPSHOT_VERSION,
+            vcpu_count: 1,
+            ram_regions: vec![(0x1000, 0x1000000)], // 16 MB
+            nested_enabled: false,
+        };
+
+        let base_vmstate = VmSnapshot {
+            header: header.clone(),
+            vcpu_states: vec![vec![0x01]],
+            device_states: vec![],
+            gic_state: None,
+            vm_state: None,
+        };
+
+        let base_vmstate_bytes = bincode::serialize(&base_vmstate).unwrap();
+        fs::write(base_subdir.join("vmstate"), &base_vmstate_bytes).unwrap();
+
+        // Base memory: filled with 0xAA
+        let base_memory = vec![0xAAu8; 0x1000000];
+        fs::write(base_subdir.join("memory"), &base_memory).unwrap();
+
+        // Create incremental with a dirty page
+        let inc_path = test_dir.join("inc.snap");
+        let inc = IncrementalSnapshot {
+            header: header.clone(),
+            vcpu_states: vec![vec![0x02]],
+            device_states: vec![],
+            dirty_pages: vec![
+                DirtyPage { guest_addr: 0x1000, data: vec![0xBB; 4096] },
+            ],
+            gic_state: None,
+            vm_state: None,
+        };
+        let inc_bytes = bincode::serialize(&inc).unwrap();
+        fs::write(&inc_path, &inc_bytes).unwrap();
+
+        // Create factory and store
+        let factory = FsSnapshotStoreFactory::new(&base_subdir, &[&inc_path]);
+        let boxed_factory = Box::new(factory);
+        let store = futures::executor::block_on(boxed_factory.create()).expect("factory.create() should succeed");
+
+        // Preload a 5MB region starting at 0x1000
+        let regions = vec![(0x1000, 5 * 1024 * 1024)];
+        let mut chunks: Vec<(u64, Vec<u8>)> = Vec::new();
+
+        futures::executor::block_on(async {
+            use futures::stream::StreamExt;
+            let mut preload_stream = store.preload(regions);
+            while let Some(result) = preload_stream.next().await {
+                let chunk = result.expect("chunk should load successfully");
+                chunks.push(chunk);
+            }
+        });
+
+        // Verify chunks
+        assert!(!chunks.is_empty(), "should have at least one chunk");
+
+        // First chunk should be 4MB
+        assert_eq!(chunks[0].1.len(), 4 * 1024 * 1024, "first chunk should be 4MB");
+
+        // Verify dirty page is overlaid in first chunk
+        let first_page = &chunks[0].1[0..4096];
+        assert_eq!(first_page, vec![0xBBu8; 4096].as_slice(), "dirty page should be overlaid");
+
+        // Verify rest of first chunk is from base
+        let page_at_offset_4k = &chunks[0].1[4096..8192];
+        assert_eq!(page_at_offset_4k, vec![0xAAu8; 4096].as_slice(), "base page should be present");
+
+        // Cleanup
+        let _ = fs::remove_dir_all(&test_dir);
     }
 }

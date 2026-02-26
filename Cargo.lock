@@ -1889,6 +1889,7 @@ dependencies = [
  "crossbeam-channel",
  "devices",
  "flate2",
+ "futures",
  "hvf",
  "iocuddle",
  "kbs-types",
