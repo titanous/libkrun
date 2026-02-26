@@ -96,12 +96,10 @@ fn pop_head_blocking<'mem>(
     loop {
         match queue.pop(mem) {
             Some(descriptor) => break Some(descriptor),
+            None if stop.load(Ordering::Acquire) => break None,
             None => {
                 interrupt.signal_used_queue();
                 thread::park();
-                if stop.load(Ordering::Acquire) {
-                    break None;
-                }
                 log::trace!("tx unparked, queue len {}", queue.len(mem))
             }
         }
@@ -128,9 +126,7 @@ fn write_desc_to_output(
 
         let mut written_in_slice = 0;
         loop {
-            let remaining = src
-                .offset(written_in_slice)
-                .map_err(io::Error::other)?;
+            let remaining = src.offset(written_in_slice).map_err(io::Error::other)?;
             log::trace!("Tx {remaining:?}, write_volatile {} bytes", remaining.len());
             match output.write_volatile(&remaining) {
                 Ok(n) => {

@@ -193,11 +193,17 @@ impl Port {
                 rx_thread.thread().unpark();
                 if let Err(e) = rx_thread.join() {
                     log::error!(
-                        "Failed to flush tx for port {port_id}, thread panicked: {e:?}",
+                        "Failed to flush rx for port {port_id}, thread panicked: {e:?}",
                         port_id = self.port_id
                     )
                 }
             }
         };
+    }
+}
+
+impl Drop for Port {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }

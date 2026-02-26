@@ -1247,6 +1247,12 @@ int main(int argc, char **argv)
         } else if (WIFSIGNALED(status)) {
             set_exit_code(WTERMSIG(status) + 128);
         }
+
+        // Drain the console before exiting. When PID 1 exits the kernel
+        // reboots immediately, which can tear down the hvc driver before
+        // it has flushed pending output to the virtio TX queue.
+        tcdrain(STDOUT_FILENO);
+        tcdrain(STDERR_FILENO);
     }
 
     return 0;
