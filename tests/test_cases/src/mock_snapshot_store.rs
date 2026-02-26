@@ -6,8 +6,10 @@
 use std::io;
 use std::path::Path;
 
-use krun::snapshot_store::{BoxStream, SendBoxFuture, SnapshotStore, SnapshotStoreFactory, FsSnapshotStoreFactory};
-use futures::stream::{self, StreamExt};
+use futures::stream::{self, StreamExt, TryStreamExt};
+use krun::snapshot_store::{
+    BoxStream, FsSnapshotStoreFactory, SendBoxFuture, SnapshotStore, SnapshotStoreFactory,
+};
 
 /// EmptyPreloadStore: preload returns empty, all pages loaded via faults
 pub struct EmptyPreloadStore {
@@ -51,7 +53,10 @@ impl EmptyPreloadStoreFactory {
     pub fn new(base_path: impl AsRef<Path>, incremental_paths: &[impl AsRef<Path>]) -> Self {
         Self {
             base_path: base_path.as_ref().to_path_buf(),
-            incremental_paths: incremental_paths.iter().map(|p| p.as_ref().to_path_buf()).collect(),
+            incremental_paths: incremental_paths
+                .iter()
+                .map(|p| p.as_ref().to_path_buf())
+                .collect(),
         }
     }
 }
@@ -59,7 +64,8 @@ impl EmptyPreloadStoreFactory {
 impl SnapshotStoreFactory for EmptyPreloadStoreFactory {
     fn create(self: Box<Self>) -> SendBoxFuture<'static, io::Result<Box<dyn SnapshotStore>>> {
         Box::pin(async move {
-            let inner_factory = FsSnapshotStoreFactory::new(&self.base_path, &self.incremental_paths);
+            let inner_factory =
+                FsSnapshotStoreFactory::new(&self.base_path, &self.incremental_paths);
             let inner = Box::new(inner_factory).create().await?;
             Ok(Box::new(EmptyPreloadStore { inner }) as Box<dyn SnapshotStore>)
         })
@@ -74,7 +80,10 @@ pub struct PartialPreloadStore {
 
 impl PartialPreloadStore {
     fn new(inner: Box<dyn SnapshotStore>, preload_fraction: f64) -> Self {
-        Self { inner, preload_fraction }
+        Self {
+            inner,
+            preload_fraction,
+        }
     }
 }
 
@@ -134,10 +143,17 @@ pub struct PartialPreloadStoreFactory {
 }
 
 impl PartialPreloadStoreFactory {
-    pub fn new(base_path: impl AsRef<Path>, incremental_paths: &[impl AsRef<Path>], preload_fraction: f64) -> Self {
+    pub fn new(
+        base_path: impl AsRef<Path>,
+        incremental_paths: &[impl AsRef<Path>],
+        preload_fraction: f64,
+    ) -> Self {
         Self {
             base_path: base_path.as_ref().to_path_buf(),
-            incremental_paths: incremental_paths.iter().map(|p| p.as_ref().to_path_buf()).collect(),
+            incremental_paths: incremental_paths
+                .iter()
+                .map(|p| p.as_ref().to_path_buf())
+                .collect(),
             preload_fraction,
         }
     }
@@ -146,9 +162,13 @@ impl PartialPreloadStoreFactory {
 impl SnapshotStoreFactory for PartialPreloadStoreFactory {
     fn create(self: Box<Self>) -> SendBoxFuture<'static, io::Result<Box<dyn SnapshotStore>>> {
         Box::pin(async move {
-            let inner_factory = FsSnapshotStoreFactory::new(&self.base_path, &self.incremental_paths);
+            let inner_factory =
+                FsSnapshotStoreFactory::new(&self.base_path, &self.incremental_paths);
             let inner = Box::new(inner_factory).create().await?;
-            Ok(Box::new(PartialPreloadStore::new(inner, self.preload_fraction)) as Box<dyn SnapshotStore>)
+            Ok(
+                Box::new(PartialPreloadStore::new(inner, self.preload_fraction))
+                    as Box<dyn SnapshotStore>,
+            )
         })
     }
 }
@@ -172,7 +192,7 @@ impl SnapshotStore for ErrorStore {
 
     fn read_page(&self, guest_addr: u64) -> SendBoxFuture<'_, io::Result<Vec<u8>>> {
         if guest_addr == self.error_addr {
-            Box::pin(async {
+            Box::pin(async move {
                 Err(io::Error::new(
                     io::ErrorKind::Other,
                     format!("simulated read_page failure at addr 0x{:x}", guest_addr),
@@ -184,7 +204,23 @@ impl SnapshotStore for ErrorStore {
     }
 
     fn preload(&self, regions: Vec<(u64, u64)>) -> BoxStream<'_, io::Result<(u64, Vec<u8>)>> {
-        self.inner.preload(regions)
+        let error_addr = self.error_addr;
+        let inner_stream = self.inner.preload(regions);
+
+        // Inject error for chunks that cover the error address
+        Box::pin(inner_stream.and_then(move |(chunk_addr, chunk_data)| {
+            let chunk_end = chunk_addr + chunk_data.len() as u64;
+            async move {
+                if error_addr >= chunk_addr && error_addr < chunk_end {
+                    Err(io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("simulated read_page failure at addr 0x{:x}", error_addr),
+                    ))
+                } else {
+                    Ok((chunk_addr, chunk_data))
+                }
+            }
+        }))
     }
 
     fn write_vmstate(&self, data: Vec<u8>) -> SendBoxFuture<'_, io::Result<()>> {
@@ -208,10 +244,17 @@ pub struct ErrorStoreFactory {
 }
 
 impl ErrorStoreFactory {
-    pub fn new(base_path: impl AsRef<Path>, incremental_paths: &[impl AsRef<Path>], error_addr: u64) -> Self {
+    pub fn new(
+        base_path: impl AsRef<Path>,
+        incremental_paths: &[impl AsRef<Path>],
+        error_addr: u64,
+    ) -> Self {
         Self {
             base_path: base_path.as_ref().to_path_buf(),
-            incremental_paths: incremental_paths.iter().map(|p| p.as_ref().to_path_buf()).collect(),
+            incremental_paths: incremental_paths
+                .iter()
+                .map(|p| p.as_ref().to_path_buf())
+                .collect(),
             error_addr,
         }
     }
@@ -220,7 +263,8 @@ impl ErrorStoreFactory {
 impl SnapshotStoreFactory for ErrorStoreFactory {
     fn create(self: Box<Self>) -> SendBoxFuture<'static, io::Result<Box<dyn SnapshotStore>>> {
         Box::pin(async move {
-            let inner_factory = FsSnapshotStoreFactory::new(&self.base_path, &self.incremental_paths);
+            let inner_factory =
+                FsSnapshotStoreFactory::new(&self.base_path, &self.incremental_paths);
             let inner = Box::new(inner_factory).create().await?;
             Ok(Box::new(ErrorStore::new(inner, self.error_addr)) as Box<dyn SnapshotStore>)
         })
@@ -280,10 +324,17 @@ pub struct DelayStoreFactory {
 }
 
 impl DelayStoreFactory {
-    pub fn new(base_path: impl AsRef<Path>, incremental_paths: &[impl AsRef<Path>], delay_ms: u64) -> Self {
+    pub fn new(
+        base_path: impl AsRef<Path>,
+        incremental_paths: &[impl AsRef<Path>],
+        delay_ms: u64,
+    ) -> Self {
         Self {
             base_path: base_path.as_ref().to_path_buf(),
-            incremental_paths: incremental_paths.iter().map(|p| p.as_ref().to_path_buf()).collect(),
+            incremental_paths: incremental_paths
+                .iter()
+                .map(|p| p.as_ref().to_path_buf())
+                .collect(),
             delay_ms,
         }
     }
@@ -292,7 +343,8 @@ impl DelayStoreFactory {
 impl SnapshotStoreFactory for DelayStoreFactory {
     fn create(self: Box<Self>) -> SendBoxFuture<'static, io::Result<Box<dyn SnapshotStore>>> {
         Box::pin(async move {
-            let inner_factory = FsSnapshotStoreFactory::new(&self.base_path, &self.incremental_paths);
+            let inner_factory =
+                FsSnapshotStoreFactory::new(&self.base_path, &self.incremental_paths);
             let inner = Box::new(inner_factory).create().await?;
             Ok(Box::new(DelayStore::new(inner, self.delay_ms)) as Box<dyn SnapshotStore>)
         })

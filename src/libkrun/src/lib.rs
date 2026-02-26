@@ -55,9 +55,9 @@ pub use vmm::resources::VirtioConsoleConfigMode;
 use vmm::resources::{
     DefaultVirtioConsoleConfig, PortConfig, SerialConsoleConfig, TsiFlags, VmResources, VsockConfig,
 };
-pub use vmm::vm_exit::VmExit;
 #[cfg(feature = "snapshot")]
 pub use vmm::snapshot_store;
+pub use vmm::vm_exit::VmExit;
 #[cfg(feature = "blk")]
 pub use vmm::vmm_config::block::{BlockConfigError, BlockDeviceConfig, BlockRootConfig};
 #[cfg(not(feature = "tee"))]
@@ -3155,27 +3155,30 @@ impl Context {
         {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .build()
-                .map_err(|e| StartError::Microvm(vmm::builder::StartMicrovmError::Internal(
-                    vmm::Error::EventFd(std::io::Error::other(e.to_string()))
-                )))?;
-
-            let (vmstate_bytes, store): (Vec<u8>, Box<dyn vmm::snapshot_store::SnapshotStore>) = rt.block_on(async {
-                let store = factory.create().await
-                    .map_err(|e| StartError::Microvm(vmm::builder::StartMicrovmError::Internal(
-                        vmm::Error::EventFd(std::io::Error::other(e.to_string()))
-                    )))?;
-
-                let vmstate_bytes = store.read_vmstate().await.map_err(|e| {
+                .map_err(|e| {
                     StartError::Microvm(vmm::builder::StartMicrovmError::Internal(
-                        vmm::Error::EventFd(std::io::Error::other(e.to_string()))
+                        vmm::Error::EventFd(std::io::Error::other(e.to_string())),
                     ))
                 })?;
 
-                Ok::<_, StartError>((vmstate_bytes, store))
-            })?;
+            let (vmstate_bytes, store): (Vec<u8>, Box<dyn vmm::snapshot_store::SnapshotStore>) = rt
+                .block_on(async {
+                    let store = factory.create().await.map_err(|e| {
+                        StartError::Microvm(vmm::builder::StartMicrovmError::Internal(
+                            vmm::Error::EventFd(std::io::Error::other(e.to_string())),
+                        ))
+                    })?;
 
-            self.built_vm
-                .restore_from_store(vmstate_bytes, store)?;
+                    let vmstate_bytes = store.read_vmstate().await.map_err(|e| {
+                        StartError::Microvm(vmm::builder::StartMicrovmError::Internal(
+                            vmm::Error::EventFd(std::io::Error::other(e.to_string())),
+                        ))
+                    })?;
+
+                    Ok::<_, StartError>((vmstate_bytes, store))
+                })?;
+
+            self.built_vm.restore_from_store(vmstate_bytes, store)?;
 
             loop {
                 self.event_manager
@@ -3215,7 +3218,8 @@ impl Context {
     ) -> Result<vmm::vm_exit::VmExit, StartError> {
         #[cfg(target_os = "linux")]
         {
-            let factory = vmm::snapshot_store::FsSnapshotStoreFactory::new(base_path, incremental_paths);
+            let factory =
+                vmm::snapshot_store::FsSnapshotStoreFactory::new(base_path, incremental_paths);
             self.restore_and_run_with_store(Box::new(factory))
         }
 

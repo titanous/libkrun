@@ -91,10 +91,7 @@ async fn preload_task(
     regions: Vec<UffdRegion>,
     tracker: Arc<PageTracker>,
 ) {
-    let region_params: Vec<(u64, u64)> = regions
-        .iter()
-        .map(|r| (r.guest_addr, r.size))
-        .collect();
+    let region_params: Vec<(u64, u64)> = regions.iter().map(|r| (r.guest_addr, r.size)).collect();
 
     let mut stream = store.preload(region_params);
 
@@ -126,7 +123,9 @@ async fn preload_task(
                         // Successfully copied chunk. Mark all pages in the chunk as loaded via preload.
                         // Chunk is typically multi-page (e.g., 4MB chunks from FsSnapshotStore).
                         let chunk_pages = data.len().div_ceil(4096); // Round up to pages
-                        if let Some(start_page_index) = guest_addr_to_page_index(&regions, guest_addr) {
+                        if let Some(start_page_index) =
+                            guest_addr_to_page_index(&regions, guest_addr)
+                        {
                             for i in 0..chunk_pages {
                                 tracker.mark_loaded(start_page_index + i, LoadSource::Preload);
                             }
@@ -190,9 +189,7 @@ impl UffdHandler {
             .non_blocking(true)
             .user_mode_only(true)
             .create()
-            .map_err(|e| {
-                std::io::Error::other(format!("Failed to create UFFD: {e}"))
-            })?;
+            .map_err(|e| std::io::Error::other(format!("Failed to create UFFD: {e}")))?;
 
         let uffd = Arc::new(uffd);
 
@@ -202,9 +199,9 @@ impl UffdHandler {
         for (guest_addr, host_addr, size) in regions {
             uffd.register(host_addr as *mut _, size as usize)
                 .map_err(|e| {
-                    std::io::Error::other(
-                        format!("Failed to register UFFD region at 0x{guest_addr:x}: {e}"),
-                    )
+                    std::io::Error::other(format!(
+                        "Failed to register UFFD region at 0x{guest_addr:x}: {e}"
+                    ))
                 })?;
 
             // Calculate number of 4KB pages in this region
@@ -212,9 +209,7 @@ impl UffdHandler {
             let page_offset = total_pages;
             total_pages = total_pages
                 .checked_add(num_pages as usize)
-                .ok_or_else(|| {
-                    std::io::Error::other("total_pages overflow")
-                })?;
+                .ok_or_else(|| std::io::Error::other("total_pages overflow"))?;
 
             uffd_regions.push(UffdRegion {
                 guest_addr,
@@ -290,7 +285,12 @@ impl UffdHandler {
         let tracker_for_preload = self.tracker.clone();
 
         // Create preload and fault loop futures
-        let preload_future = preload_task(store_for_preload, uffd_for_preload, regions_for_preload, tracker_for_preload);
+        let preload_future = preload_task(
+            store_for_preload,
+            uffd_for_preload,
+            regions_for_preload,
+            tracker_for_preload,
+        );
         let fault_future = self.fault_loop();
 
         // Run both concurrently until the fault loop exits
@@ -367,8 +367,11 @@ impl UffdHandler {
                                 match result {
                                     Ok(_) => {
                                         // Successfully copied page data. Mark page as loaded via fault.
-                                        if let Some(page_index) = guest_addr_to_page_index(&regions_clone, guest_addr) {
-                                            tracker_clone.mark_loaded(page_index, LoadSource::Fault);
+                                        if let Some(page_index) =
+                                            guest_addr_to_page_index(&regions_clone, guest_addr)
+                                        {
+                                            tracker_clone
+                                                .mark_loaded(page_index, LoadSource::Fault);
                                         }
                                     }
                                     Err(e) => {
@@ -483,10 +486,7 @@ impl PageTracker {
     /// Allocates and zeroes the bitmap.
     pub fn new(total_pages: usize) -> Self {
         let num_words = total_pages.div_ceil(64);
-        let bitmap: Vec<AtomicU64> =
-            (0..num_words)
-                .map(|_| AtomicU64::new(0))
-                .collect();
+        let bitmap: Vec<AtomicU64> = (0..num_words).map(|_| AtomicU64::new(0)).collect();
 
         PageTracker {
             total_pages,
@@ -511,19 +511,16 @@ impl PageTracker {
         let bit_idx = page_index % 64;
 
         // Use fetch_or to atomically set the bit. It returns the old value.
-        let old_word = self.bitmap[word_idx]
-            .fetch_or(1u64 << bit_idx, Ordering::Relaxed);
+        let old_word = self.bitmap[word_idx].fetch_or(1u64 << bit_idx, Ordering::Relaxed);
 
         // Only increment counter if bit was not already set
         if (old_word >> bit_idx) & 1 == 0 {
             match source {
                 LoadSource::Preload => {
-                    self.preload_count
-                        .fetch_add(1, Ordering::Relaxed);
+                    self.preload_count.fetch_add(1, Ordering::Relaxed);
                 }
                 LoadSource::Fault => {
-                    self.fault_count
-                        .fetch_add(1, Ordering::Relaxed);
+                    self.fault_count.fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
@@ -533,8 +530,7 @@ impl PageTracker {
     ///
     /// Called on every fault event, regardless of outcome (including EEXIST).
     pub fn record_fault(&self) {
-        self.total_faults
-            .fetch_add(1, Ordering::Relaxed);
+        self.total_faults.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Check whether a page has been loaded.
@@ -560,15 +556,9 @@ impl PageTracker {
             loaded_pages += w.count_ones() as usize;
         }
 
-        let preload_pages = self
-            .preload_count
-            .load(Ordering::Relaxed);
-        let fault_pages = self
-            .fault_count
-            .load(Ordering::Relaxed);
-        let total_faults = self
-            .total_faults
-            .load(Ordering::Relaxed);
+        let preload_pages = self.preload_count.load(Ordering::Relaxed);
+        let fault_pages = self.fault_count.load(Ordering::Relaxed);
+        let total_faults = self.total_faults.load(Ordering::Relaxed);
 
         let progress_pct = if self.total_pages > 0 {
             (loaded_pages as f64 / self.total_pages as f64) * 100.0
@@ -617,11 +607,16 @@ mod tests {
     }
 
     impl SnapshotStore for MockSnapshotStore {
-        fn read_vmstate(&self) -> crate::snapshot_store::SendBoxFuture<'_, std::io::Result<Vec<u8>>> {
+        fn read_vmstate(
+            &self,
+        ) -> crate::snapshot_store::SendBoxFuture<'_, std::io::Result<Vec<u8>>> {
             Box::pin(async { Ok(vec![]) })
         }
 
-        fn read_page(&self, _guest_addr: u64) -> crate::snapshot_store::SendBoxFuture<'_, std::io::Result<Vec<u8>>> {
+        fn read_page(
+            &self,
+            _guest_addr: u64,
+        ) -> crate::snapshot_store::SendBoxFuture<'_, std::io::Result<Vec<u8>>> {
             self.page_reads.fetch_add(1, Ordering::SeqCst);
             // Return a page (4KB) of zeros
             Box::pin(async { Ok(vec![0u8; 4096]) })
@@ -801,26 +796,35 @@ mod tests {
     #[test]
     fn test_guest_to_host_translation_function() {
         // Test the shared guest_to_host free function
-        let regions = vec![
-            UffdRegion {
-                guest_addr: 0x0,
-                host_addr: 0x7f0000000000u64,
-                size: 0x100000000,
-                page_offset: 0,
-            }
-        ];
+        let regions = vec![UffdRegion {
+            guest_addr: 0x0,
+            host_addr: 0x7f0000000000u64,
+            size: 0x100000000,
+            page_offset: 0,
+        }];
 
         // Test address within region
         let result = guest_to_host(&regions, 0x1000);
-        assert_eq!(result, Some(0x7f0000001000), "Should translate 0x1000 to 0x7f0000001000");
+        assert_eq!(
+            result,
+            Some(0x7f0000001000),
+            "Should translate 0x1000 to 0x7f0000001000"
+        );
 
         // Test boundary (start of region)
         let result = guest_to_host(&regions, 0x0);
-        assert_eq!(result, Some(0x7f0000000000), "Should translate 0x0 to 0x7f0000000000");
+        assert_eq!(
+            result,
+            Some(0x7f0000000000),
+            "Should translate 0x0 to 0x7f0000000000"
+        );
 
         // Test address outside region
         let result = guest_to_host(&regions, 0x200000000);
-        assert_eq!(result, None, "Should return None for address outside regions");
+        assert_eq!(
+            result, None,
+            "Should return None for address outside regions"
+        );
     }
 
     #[test]
@@ -851,10 +855,18 @@ mod tests {
             Ok(handler) => {
                 // Test guest to host translation using the handler's regions
                 let result = guest_to_host(&handler.regions, 0x1000);
-                assert_eq!(result, Some(host_addr as u64), "Guest 0x1000 should translate to host_addr");
+                assert_eq!(
+                    result,
+                    Some(host_addr as u64),
+                    "Guest 0x1000 should translate to host_addr"
+                );
 
                 let result = guest_to_host(&handler.regions, 0x1064);
-                assert_eq!(result, Some(host_addr as u64 + 100), "Guest 0x1064 should translate to host_addr + 100");
+                assert_eq!(
+                    result,
+                    Some(host_addr as u64 + 100),
+                    "Guest 0x1064 should translate to host_addr + 100"
+                );
 
                 // Test address outside registered regions
                 let result = guest_to_host(&handler.regions, 0x10000);
@@ -889,24 +901,39 @@ mod tests {
                 host_addr: 0x7f0001000000u64,
                 size: 0x100000,
                 page_offset: (0x100000 / 4096),
-            }
+            },
         ];
 
         // Test address in first region
         let result = guest_to_host(&regions, 0x2000);
-        assert_eq!(result, Some(0x7f0000001000), "Should translate address from first region");
+        assert_eq!(
+            result,
+            Some(0x7f0000001000),
+            "Should translate address from first region"
+        );
 
         // Test address in second region
         let result = guest_to_host(&regions, 0x200000);
-        assert_eq!(result, Some(0x7f0001000000), "Should translate address from second region");
+        assert_eq!(
+            result,
+            Some(0x7f0001000000),
+            "Should translate address from second region"
+        );
 
         // Test boundary: end of first region
         let result = guest_to_host(&regions, 0x1000 + 0x100000 - 1);
-        assert_eq!(result, Some(0x7f0000000000u64 + 0xfffffu64), "Should handle end boundary");
+        assert_eq!(
+            result,
+            Some(0x7f0000000000u64 + 0xfffffu64),
+            "Should handle end boundary"
+        );
 
         // Test address outside all regions
         let result = guest_to_host(&regions, 0x300000);
-        assert_eq!(result, None, "Should return None for address outside all regions");
+        assert_eq!(
+            result, None,
+            "Should return None for address outside all regions"
+        );
     }
 
     #[test]
@@ -915,8 +942,8 @@ mod tests {
         // This verifies mock configuration behavior — it does not test preload_task codepath.
         // See test_preload_task_with_uffd_and_mmap for end-to-end preload_task testing.
         let preload_chunks = vec![
-            (0x0u64, vec![0xAAu8; 4096]),      // 1 page at 0x0
-            (0x1000u64, vec![0xBBu8; 8192]),   // 2 pages at 0x1000
+            (0x0u64, vec![0xAAu8; 4096]),    // 1 page at 0x0
+            (0x1000u64, vec![0xBBu8; 8192]), // 2 pages at 0x1000
         ];
 
         let store = Arc::new(MockSnapshotStore::with_preload_chunks(preload_chunks));
@@ -986,7 +1013,8 @@ mod tests {
         let (vmstate_tx, _vmstate_rx) = oneshot::channel();
         let (_ready_tx, ready_rx) = oneshot::channel();
 
-        let handler = match UffdHandler::new(store.clone(), vm_exit, regions, vmstate_tx, ready_rx) {
+        let handler = match UffdHandler::new(store.clone(), vm_exit, regions, vmstate_tx, ready_rx)
+        {
             Ok(h) => h,
             Err(e) => {
                 let error_msg = e.to_string();
@@ -1010,7 +1038,9 @@ mod tests {
             (0x10000u64, vec![0xBBu8; 8192]),
         ];
 
-        let store_with_chunks = Arc::new(MockSnapshotStore::with_preload_chunks(preload_chunks.clone()));
+        let store_with_chunks = Arc::new(MockSnapshotStore::with_preload_chunks(
+            preload_chunks.clone(),
+        ));
 
         // Create a tracker for the test (optional, since test just verifies preload writes data)
         let tracker = Arc::new(PageTracker::new(1000));
@@ -1022,7 +1052,8 @@ mod tests {
                 handler.uffd.clone(),
                 handler.regions.clone(),
                 tracker.clone(),
-            ).await;
+            )
+            .await;
         });
 
         // Verify preloaded data was written to memory
@@ -1030,7 +1061,10 @@ mod tests {
         unsafe {
             let slice1 = std::slice::from_raw_parts(region1_addr as *const u8, 4096);
             for (i, &byte) in slice1.iter().enumerate() {
-                assert_eq!(byte, 0xAA, "Region 1, byte {i}: expected 0xAA, got {byte:#x}");
+                assert_eq!(
+                    byte, 0xAA,
+                    "Region 1, byte {i}: expected 0xAA, got {byte:#x}"
+                );
             }
         }
 
@@ -1038,7 +1072,10 @@ mod tests {
         unsafe {
             let slice2 = std::slice::from_raw_parts(region2_addr as *const u8, 8192);
             for (i, &byte) in slice2.iter().enumerate() {
-                assert_eq!(byte, 0xBB, "Region 2, byte {i}: expected 0xBB, got {byte:#x}");
+                assert_eq!(
+                    byte, 0xBB,
+                    "Region 2, byte {i}: expected 0xBB, got {byte:#x}"
+                );
             }
         }
 
@@ -1056,7 +1093,7 @@ mod tests {
         // This tests mock behavior: stream yields success, then error, and preload should stop.
 
         let preload_chunks = vec![
-            (0x0u64, vec![0xAAu8; 4096]),  // First chunk succeeds
+            (0x0u64, vec![0xAAu8; 4096]), // First chunk succeeds
         ];
 
         let store = Arc::new(MockSnapshotStore::with_preload_chunks(preload_chunks));
@@ -1090,14 +1127,20 @@ mod tests {
         // Verify that marking a page as loaded sets the bit and increments counter
         let tracker = PageTracker::new(64);
 
-        assert!(!tracker.is_loaded(0), "Page 0 should not be loaded initially");
+        assert!(
+            !tracker.is_loaded(0),
+            "Page 0 should not be loaded initially"
+        );
         assert_eq!(tracker.stats().loaded_pages, 0);
         assert_eq!(tracker.stats().preload_pages, 0);
         assert_eq!(tracker.stats().fault_pages, 0);
 
         tracker.mark_loaded(0, LoadSource::Preload);
 
-        assert!(tracker.is_loaded(0), "Page 0 should be loaded after mark_loaded");
+        assert!(
+            tracker.is_loaded(0),
+            "Page 0 should be loaded after mark_loaded"
+        );
         let stats = tracker.stats();
         assert_eq!(stats.loaded_pages, 1);
         assert_eq!(stats.preload_pages, 1);
@@ -1145,7 +1188,10 @@ mod tests {
 
         let stats = tracker.stats();
         assert_eq!(stats.loaded_pages, 25);
-        assert!((stats.progress_pct - 25.0).abs() < 0.01, "Progress should be ~25%");
+        assert!(
+            (stats.progress_pct - 25.0).abs() < 0.01,
+            "Progress should be ~25%"
+        );
     }
 
     #[test]
@@ -1178,7 +1224,10 @@ mod tests {
         tracker.mark_loaded(1000, LoadSource::Fault);
 
         let stats = tracker.stats();
-        assert_eq!(stats.loaded_pages, 0, "Out-of-bounds marks should be ignored");
+        assert_eq!(
+            stats.loaded_pages, 0,
+            "Out-of-bounds marks should be ignored"
+        );
     }
 
     #[test]
@@ -1196,11 +1245,11 @@ mod tests {
         let tracker = PageTracker::new(200);
 
         // Mark pages in different words
-        tracker.mark_loaded(0, LoadSource::Preload);    // Word 0, bit 0
-        tracker.mark_loaded(63, LoadSource::Preload);   // Word 0, bit 63
-        tracker.mark_loaded(64, LoadSource::Fault);     // Word 1, bit 0
-        tracker.mark_loaded(127, LoadSource::Fault);    // Word 1, bit 63
-        tracker.mark_loaded(128, LoadSource::Preload);  // Word 2, bit 0
+        tracker.mark_loaded(0, LoadSource::Preload); // Word 0, bit 0
+        tracker.mark_loaded(63, LoadSource::Preload); // Word 0, bit 63
+        tracker.mark_loaded(64, LoadSource::Fault); // Word 1, bit 0
+        tracker.mark_loaded(127, LoadSource::Fault); // Word 1, bit 63
+        tracker.mark_loaded(128, LoadSource::Preload); // Word 2, bit 0
 
         let stats = tracker.stats();
         assert_eq!(stats.loaded_pages, 5);
@@ -1228,7 +1277,10 @@ mod tests {
         let stats = tracker.stats();
         assert_eq!(stats.loaded_pages, 1, "Page should be counted once");
         assert_eq!(stats.preload_pages, 1, "Only preload should be counted");
-        assert_eq!(stats.fault_pages, 0, "Fault should not increment counter on EEXIST race");
+        assert_eq!(
+            stats.fault_pages, 0,
+            "Fault should not increment counter on EEXIST race"
+        );
     }
 
     #[test]
@@ -1413,20 +1465,37 @@ mod tests {
             Ok(handler) => {
                 let stats = handler.tracker_stats();
                 // Total should be sum of both regions: 50 + 30 = 80 pages
-                assert_eq!(stats.total_pages, 80, "Tracker should account for both regions");
+                assert_eq!(
+                    stats.total_pages, 80,
+                    "Tracker should account for both regions"
+                );
 
                 // Verify region-relative indexing: page_offset for region 2 should be 50
-                assert_eq!(handler.regions[0].page_offset, 0, "Region 1 page_offset should be 0");
-                assert_eq!(handler.regions[1].page_offset, 50, "Region 2 page_offset should be 50");
+                assert_eq!(
+                    handler.regions[0].page_offset, 0,
+                    "Region 1 page_offset should be 0"
+                );
+                assert_eq!(
+                    handler.regions[1].page_offset, 50,
+                    "Region 2 page_offset should be 50"
+                );
 
                 // Verify guest_addr_to_page_index works correctly for region 2
                 // Guest address 0x100000 (start of region 2) should map to page index 50
                 let page_idx = guest_addr_to_page_index(&handler.regions, 0x100000);
-                assert_eq!(page_idx, Some(50), "Guest 0x100000 should map to page index 50");
+                assert_eq!(
+                    page_idx,
+                    Some(50),
+                    "Guest 0x100000 should map to page index 50"
+                );
 
                 // Guest address 0x101000 (page 1 of region 2) should map to page index 51
                 let page_idx = guest_addr_to_page_index(&handler.regions, 0x101000);
-                assert_eq!(page_idx, Some(51), "Guest 0x101000 should map to page index 51");
+                assert_eq!(
+                    page_idx,
+                    Some(51),
+                    "Guest 0x101000 should map to page index 51"
+                );
             }
             Err(e) => {
                 let error_msg = e.to_string();
@@ -1465,7 +1534,8 @@ mod tests {
         let (vmstate_tx, _vmstate_rx) = oneshot::channel();
         let (_ready_tx, ready_rx) = oneshot::channel();
 
-        let handler = match UffdHandler::new(store.clone(), vm_exit, regions, vmstate_tx, ready_rx) {
+        let handler = match UffdHandler::new(store.clone(), vm_exit, regions, vmstate_tx, ready_rx)
+        {
             Ok(h) => h,
             Err(e) => {
                 let error_msg = e.to_string();
@@ -1480,9 +1550,7 @@ mod tests {
         };
 
         // Create a preload chunk (1 page of data at guest addr 0x0)
-        let preload_chunks = vec![
-            (0x0u64, vec![0xAAu8; 4096]),
-        ];
+        let preload_chunks = vec![(0x0u64, vec![0xAAu8; 4096])];
         let store_with_chunks = Arc::new(MockSnapshotStore::with_preload_chunks(preload_chunks));
         let tracker = handler.tracker.clone();
 
@@ -1493,7 +1561,8 @@ mod tests {
                 handler.uffd.clone(),
                 handler.regions.clone(),
                 tracker.clone(),
-            ).await;
+            )
+            .await;
         });
 
         // Verify tracker was updated

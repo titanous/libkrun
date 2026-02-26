@@ -67,7 +67,7 @@ mod host {
                 let context = builder.build()?;
 
                 // Create factory with empty preload (forces all pages through faults)
-                let factory = EmptyPreloadStoreFactory::new(&snap_dir, &[]);
+                let factory = EmptyPreloadStoreFactory::new(&snap_dir, &[] as &[&std::path::Path]);
 
                 // spawn listener thread before restore starts
                 let listener_thread = thread::spawn(move || {
@@ -96,7 +96,7 @@ mod guest {
     use crate::Test;
     use nix::libc::VMADDR_CID_HOST;
     use nix::sys::socket::{connect, socket, AddressFamily, SockFlag, SockType, VsockAddr};
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::os::fd::AsRawFd;
     use std::os::unix::net::UnixStream;
     use std::time::Duration;

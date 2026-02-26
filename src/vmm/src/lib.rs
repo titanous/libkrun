@@ -583,7 +583,9 @@ impl Vmm {
         // then Vmm creates another here. Single runtime should be created by Context and passed down.
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
-            .map_err(|e| snapshot::SnapshotError::Deserialize(format!("Failed to create runtime: {e}")))?;
+            .map_err(|e| {
+                snapshot::SnapshotError::Deserialize(format!("Failed to create runtime: {e}"))
+            })?;
 
         rt.block_on(async {
             use futures::stream::StreamExt;
@@ -646,10 +648,14 @@ impl Vmm {
         use vm_memory::{GuestAddress, GuestMemory};
         for (guest_addr, size) in regions {
             // Get host address for this guest address range
-            let host_addr = self.guest_memory.get_host_address(GuestAddress(guest_addr))
-                .map_err(|e| snapshot::SnapshotError::Deserialize(
-                    format!("failed to get host address for guest region 0x{guest_addr:x}: {e}")
-                ))?;
+            let host_addr = self
+                .guest_memory
+                .get_host_address(GuestAddress(guest_addr))
+                .map_err(|e| {
+                    snapshot::SnapshotError::Deserialize(format!(
+                        "failed to get host address for guest region 0x{guest_addr:x}: {e}"
+                    ))
+                })?;
             uffd_regions.push((guest_addr, host_addr as u64, size));
         }
 
@@ -664,7 +670,9 @@ impl Vmm {
             vmstate_tx,
             ready_rx,
         )
-        .map_err(|e| snapshot::SnapshotError::Deserialize(format!("Failed to create UFFD handler: {e}")))?;
+        .map_err(|e| {
+            snapshot::SnapshotError::Deserialize(format!("Failed to create UFFD handler: {e}"))
+        })?;
 
         let handler_thread = handler.run();
 
@@ -968,7 +976,7 @@ impl Vmm {
         &mut self,
         path: &std::path::Path,
     ) -> std::result::Result<(), snapshot::SnapshotError> {
-        let incremental = snapshot::load_incremental_snapshot(path)?;
+        let incremental = snapshot::load_incremental_snapshot(&path.join("vmstate"))?;
         snapshot::validate_header_for_vm(
             &incremental.header,
             &self.guest_memory,
@@ -1114,7 +1122,7 @@ impl Vmm {
         &mut self,
         path: &std::path::Path,
     ) -> std::result::Result<(), snapshot::SnapshotError> {
-        let incremental = snapshot::load_incremental_snapshot(path)?;
+        let incremental = snapshot::load_incremental_snapshot(&path.join("vmstate"))?;
         snapshot::validate_header_for_vm(
             &incremental.header,
             &self.guest_memory,
@@ -1213,8 +1221,7 @@ impl Vmm {
             .map_err(snapshot::SnapshotError::Io)?;
 
         // Sync all data
-        futures::executor::block_on(store.close())
-            .map_err(snapshot::SnapshotError::Io)?;
+        futures::executor::block_on(store.close()).map_err(snapshot::SnapshotError::Io)?;
 
         Ok(())
     }
@@ -1442,8 +1449,7 @@ impl Vmm {
             .map_err(snapshot::SnapshotError::Io)?;
 
         // Sync all data
-        futures::executor::block_on(store.close())
-            .map_err(snapshot::SnapshotError::Io)?;
+        futures::executor::block_on(store.close()).map_err(snapshot::SnapshotError::Io)?;
 
         Ok(())
     }
@@ -1551,8 +1557,7 @@ impl Vmm {
             .map_err(snapshot::SnapshotError::Io)?;
 
         // Sync all data
-        futures::executor::block_on(store.close())
-            .map_err(snapshot::SnapshotError::Io)?;
+        futures::executor::block_on(store.close()).map_err(snapshot::SnapshotError::Io)?;
 
         Ok(())
     }

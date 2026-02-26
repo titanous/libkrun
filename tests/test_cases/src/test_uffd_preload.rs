@@ -72,7 +72,7 @@ mod host_full {
                     }
                 });
 
-                let factory = FsSnapshotStoreFactory::new(&snap_dir, &[]);
+                let factory = FsSnapshotStoreFactory::new(&snap_dir, &[] as &[&std::path::Path]);
                 let _vm_exit = context.restore_and_run_with_store(Box::new(factory))?;
 
                 listener_thread.join().ok();
@@ -89,7 +89,7 @@ mod guest_full {
     use crate::Test;
     use nix::libc::VMADDR_CID_HOST;
     use nix::sys::socket::{connect, socket, AddressFamily, SockFlag, SockType, VsockAddr};
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::os::fd::AsRawFd;
     use std::os::unix::net::UnixStream;
     use std::time::Duration;
@@ -223,7 +223,8 @@ mod host_partial {
                     }
                 });
 
-                let factory = PartialPreloadStoreFactory::new(&snap_dir, &[], 0.5);
+                let factory =
+                    PartialPreloadStoreFactory::new(&snap_dir, &[] as &[&std::path::Path], 0.5);
                 let _vm_exit = context.restore_and_run_with_store(Box::new(factory))?;
 
                 listener_thread.join().ok();
@@ -240,7 +241,7 @@ mod guest_partial {
     use crate::Test;
     use nix::libc::VMADDR_CID_HOST;
     use nix::sys::socket::{connect, socket, AddressFamily, SockFlag, SockType, VsockAddr};
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::os::fd::AsRawFd;
     use std::os::unix::net::UnixStream;
     use std::time::Duration;

@@ -53,6 +53,9 @@ mod host {
                 vm_thread.join().ok();
             }
 
+            // Clean up root dir from Phase 1 so setup_fs_builder can recreate it
+            let _ = std::fs::remove_dir_all(test_setup.tmp_dir.join("root"));
+
             // Phase 2: Restore with error on read_page
             {
                 let mut builder = krun::Builder::new();
@@ -62,7 +65,7 @@ mod host {
                 let context = builder.build()?;
 
                 // Create factory that will fail on read_page at address 0x0
-                let factory = ErrorStoreFactory::new(&snap_dir, &[], 0x0);
+                let factory = ErrorStoreFactory::new(&snap_dir, &[] as &[&std::path::Path], 0x0);
 
                 // Attempt to restore and expect VmExit::Error or StartError
                 match context.restore_and_run_with_store(Box::new(factory)) {

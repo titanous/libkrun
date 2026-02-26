@@ -76,7 +76,7 @@ mod host {
                 let start = Instant::now();
 
                 // Create factory with 50ms delay per read_page
-                let factory = DelayStoreFactory::new(&snap_dir, &[], 50);
+                let factory = DelayStoreFactory::new(&snap_dir, &[] as &[&std::path::Path], 50);
                 let _vm_exit = context.restore_and_run_with_store(Box::new(factory))?;
 
                 let elapsed = start.elapsed();
@@ -105,7 +105,7 @@ mod guest {
     use crate::Test;
     use nix::libc::VMADDR_CID_HOST;
     use nix::sys::socket::{connect, socket, AddressFamily, SockFlag, SockType, VsockAddr};
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::os::fd::AsRawFd;
     use std::os::unix::net::UnixStream;
     use std::time::Duration;
