@@ -421,6 +421,63 @@ impl Vmm {
         self.snapshot_to_store(&store)
     }
 
+    /// Restore device and vCPU states from a snapshot.
+    ///
+    /// This is a shared helper used by both eager restore (drain preload) and
+    /// demand-paging restore (UFFD) paths.
+    #[cfg(all(target_os = "linux", feature = "snapshot"))]
+    fn restore_device_and_vcpu_states(
+        &mut self,
+        vmstate: snapshot::VmSnapshot,
+    ) -> std::result::Result<(), snapshot::SnapshotError> {
+        #[cfg(target_arch = "aarch64")]
+        if let Some(gic_data) = &vmstate.gic_state {
+            self.restore_interrupt_controller_state(gic_data)?;
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        if let Some(data) = &vmstate.vm_state {
+            let state: vstate::VmState = bincode::deserialize(data)
+                .map_err(|e| snapshot::SnapshotError::Deserialize(e.to_string()))?;
+            self.vm.restore_state(&state).map_err(|e| {
+                snapshot::SnapshotError::Deserialize(format!("Failed to restore VM state: {e}"))
+            })?;
+        }
+
+        self.mmio_device_manager
+            .restore_all_device_states(&vmstate.device_states)
+            .map_err(|e| {
+                snapshot::SnapshotError::Deserialize(format!(
+                    "Failed to restore device states: {e}"
+                ))
+            })?;
+
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.pio_device_manager
+                .restore_all_device_states(&vmstate.device_states)
+                .map_err(|e| {
+                    snapshot::SnapshotError::Deserialize(format!(
+                        "Failed to restore PortIO device states: {e}"
+                    ))
+                })?;
+        }
+
+        self.mmio_device_manager
+            .complete_all_device_restores()
+            .map_err(|e| {
+                snapshot::SnapshotError::Deserialize(format!(
+                    "Failed to complete device restores: {e}"
+                ))
+            })?;
+        self.mmio_device_manager.resume_all_device_workers();
+
+        self.restore_vcpu_states(vmstate.vcpu_states).map_err(|e| {
+            snapshot::SnapshotError::Deserialize(format!("Failed to restore vCPU states: {e}"))
+        })?;
+        Ok(())
+    }
+
     /// Restore a full snapshot into the running VM. vCPUs must already be paused.
     #[cfg(all(target_os = "linux", feature = "snapshot"))]
     pub fn restore_snapshot(
@@ -550,52 +607,7 @@ impl Vmm {
             Ok::<(), snapshot::SnapshotError>(())
         })?;
 
-        #[cfg(target_arch = "aarch64")]
-        if let Some(gic_data) = &vmstate.gic_state {
-            self.restore_interrupt_controller_state(gic_data)?;
-        }
-
-        #[cfg(target_arch = "x86_64")]
-        if let Some(data) = &vmstate.vm_state {
-            let state: vstate::VmState = bincode::deserialize(data)
-                .map_err(|e| snapshot::SnapshotError::Deserialize(e.to_string()))?;
-            self.vm.restore_state(&state).map_err(|e| {
-                snapshot::SnapshotError::Deserialize(format!("Failed to restore VM state: {e}"))
-            })?;
-        }
-
-        self.mmio_device_manager
-            .restore_all_device_states(&vmstate.device_states)
-            .map_err(|e| {
-                snapshot::SnapshotError::Deserialize(format!(
-                    "Failed to restore device states: {e}"
-                ))
-            })?;
-
-        #[cfg(target_arch = "x86_64")]
-        {
-            self.pio_device_manager
-                .restore_all_device_states(&vmstate.device_states)
-                .map_err(|e| {
-                    snapshot::SnapshotError::Deserialize(format!(
-                        "Failed to restore PortIO device states: {e}"
-                    ))
-                })?;
-        }
-
-        self.mmio_device_manager
-            .complete_all_device_restores()
-            .map_err(|e| {
-                snapshot::SnapshotError::Deserialize(format!(
-                    "Failed to complete device restores: {e}"
-                ))
-            })?;
-        self.mmio_device_manager.resume_all_device_workers();
-
-        self.restore_vcpu_states(vmstate.vcpu_states).map_err(|e| {
-            snapshot::SnapshotError::Deserialize(format!("Failed to restore vCPU states: {e}"))
-        })?;
-        Ok(())
+        self.restore_device_and_vcpu_states(vmstate)
     }
 
     /// Restore a full snapshot using UFFD for demand paging.
@@ -634,9 +646,11 @@ impl Vmm {
         use vm_memory::{GuestAddress, GuestMemory};
         for (guest_addr, size) in regions {
             // Get host address for this guest address range
-            if let Ok(host_addr) = self.guest_memory.get_host_address(GuestAddress(guest_addr)) {
-                uffd_regions.push((guest_addr, host_addr as u64, size));
-            }
+            let host_addr = self.guest_memory.get_host_address(GuestAddress(guest_addr))
+                .map_err(|e| snapshot::SnapshotError::Deserialize(
+                    format!("failed to get host address for guest region 0x{guest_addr:x}: {e}")
+                ))?;
+            uffd_regions.push((guest_addr, host_addr as u64, size));
         }
 
         // Convert store Box to Arc for sharing with UFFD handler
@@ -644,7 +658,7 @@ impl Vmm {
 
         // Create and spawn UFFD handler on dedicated thread
         let handler = uffd::UffdHandler::new(
-            store_arc.clone(),
+            store_arc,
             self.vm_exit.clone(),
             uffd_regions,
             vmstate_tx,
@@ -655,25 +669,19 @@ impl Vmm {
         let handler_thread = handler.run();
 
         // Receive vmstate from handler
-        let vmstate_bytes = std::thread::spawn(move || {
-            // Block until handler sends vmstate
-            match vmstate_rx.blocking_recv() {
-                Ok(Ok(bytes)) => Ok::<_, snapshot::SnapshotError>(bytes),
-                Ok(Err(e)) => Err(snapshot::SnapshotError::Deserialize(format!(
+        let vmstate_bytes = match vmstate_rx.blocking_recv() {
+            Ok(Ok(bytes)) => bytes,
+            Ok(Err(e)) => {
+                return Err(snapshot::SnapshotError::Deserialize(format!(
                     "Handler failed to read vmstate: {e}"
-                ))),
-                Err(_) => Err(snapshot::SnapshotError::Deserialize(
-                    "Handler vmstate channel closed".to_string(),
-                )),
+                )))
             }
-        })
-        .join()
-        .map_err(|_| {
-            snapshot::SnapshotError::Deserialize(
-                "Failed to join vmstate thread".to_string(),
-            )
-        })?
-        .map_err(|e| e)?;
+            Err(_) => {
+                return Err(snapshot::SnapshotError::Deserialize(
+                    "Handler vmstate channel closed".to_string(),
+                ))
+            }
+        };
 
         // Deserialize and validate vmstate
         let vmstate: snapshot::VmSnapshot = bincode::deserialize(&vmstate_bytes)
@@ -687,51 +695,7 @@ impl Vmm {
         )?;
 
         // Restore device and vCPU states
-        #[cfg(target_arch = "aarch64")]
-        if let Some(gic_data) = &vmstate.gic_state {
-            self.restore_interrupt_controller_state(gic_data)?;
-        }
-
-        #[cfg(target_arch = "x86_64")]
-        if let Some(data) = &vmstate.vm_state {
-            let state: vstate::VmState = bincode::deserialize(data)
-                .map_err(|e| snapshot::SnapshotError::Deserialize(e.to_string()))?;
-            self.vm.restore_state(&state).map_err(|e| {
-                snapshot::SnapshotError::Deserialize(format!("Failed to restore VM state: {e}"))
-            })?;
-        }
-
-        self.mmio_device_manager
-            .restore_all_device_states(&vmstate.device_states)
-            .map_err(|e| {
-                snapshot::SnapshotError::Deserialize(format!(
-                    "Failed to restore device states: {e}"
-                ))
-            })?;
-
-        #[cfg(target_arch = "x86_64")]
-        {
-            self.pio_device_manager
-                .restore_all_device_states(&vmstate.device_states)
-                .map_err(|e| {
-                    snapshot::SnapshotError::Deserialize(format!(
-                        "Failed to restore PortIO device states: {e}"
-                    ))
-                })?;
-        }
-
-        self.mmio_device_manager
-            .complete_all_device_restores()
-            .map_err(|e| {
-                snapshot::SnapshotError::Deserialize(format!(
-                    "Failed to complete device restores: {e}"
-                ))
-            })?;
-        self.mmio_device_manager.resume_all_device_workers();
-
-        self.restore_vcpu_states(vmstate.vcpu_states).map_err(|e| {
-            snapshot::SnapshotError::Deserialize(format!("Failed to restore vCPU states: {e}"))
-        })?;
+        self.restore_device_and_vcpu_states(vmstate)?;
 
         // Signal handler that main thread is ready; handler will start fault loop
         let _ = ready_tx.send(());
