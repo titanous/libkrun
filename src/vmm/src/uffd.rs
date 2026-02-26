@@ -715,28 +715,26 @@ mod tests {
     }
 
     #[test]
-    fn test_is_eexist_helper() {
-        // Test that is_eexist function correctly identifies EEXIST errors
-        // We test the logic by verifying the libc constants match expected values
-        // and by checking the match statement implementation.
+    fn test_is_eexist_constant_verification() {
+        // This test has limited scope: it only verifies that libc::EEXIST has the expected value (17).
+        //
+        // LIMITATION: Due to nix version mismatches in the dependency tree, we cannot directly
+        // construct userfaultfd::Error::CopyFailed in unit tests to test is_eexist() with real
+        // error values. Instead, this test verifies the underlying constants are correct.
+        //
+        // FULL COVERAGE: The is_eexist() function is fully exercised during integration tests
+        // and in the UFFD fault loop when actual page copy operations race (copy_failed can
+        // occur if another thread has already populated the page). In those cases, EEXIST is
+        // silently ignored (not treated as a fatal error), and the next UFFD fault will retry.
         //
         // The is_eexist function is defined as:
         // fn is_eexist(e: &userfaultfd::Error) -> bool {
         //     matches!(e, userfaultfd::Error::CopyFailed(errno) if *errno as i32 == libc::EEXIST)
         // }
-        //
-        // This test verifies the libc constants are correct. Due to nix version
-        // mismatches in the dependency tree, we cannot easily construct
-        // userfaultfd::Error::CopyFailed directly in tests. However, the function
-        // itself is tested implicitly during fault loop execution when actual
-        // UFFD copy errors occur.
 
         // Verify libc constants match expected values
         assert_eq!(libc::EEXIST, 17, "EEXIST errno value changed");
         assert_eq!(libc::EIO, 5, "EIO errno value changed");
-
-        // The is_eexist function checks if the errno matches EEXIST (17).
-        // This is validated implicitly in the fault loop when page copy races occur.
     }
 
     #[test]

@@ -33,6 +33,12 @@ const PRELOAD_CHUNK_SIZE: u64 = 4 * 1024 * 1024;
 pub type SendBoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
 /// A boxed stream type alias for dyn-compatible async streams.
+///
+/// **Note on Send bound**: This type intentionally does NOT include `+ Send`. Requiring Send
+/// would constrain all SnapshotStore implementations, but the current design does not need it:
+/// the preload stream is processed on a single-threaded tokio runtime where cooperative
+/// scheduling via `futures::future::join` on the same thread is sufficient. Custom store
+/// implementations doing heavy async I/O should be aware of this limitation.
 pub type BoxStream<'a, T> = std::pin::Pin<Box<dyn futures::stream::Stream<Item = T> + 'a>>;
 
 /// Async trait for snapshot storage operations.
@@ -61,6 +67,15 @@ pub trait SnapshotStore: Send + Sync + 'static {
     ///
     /// Yields (guest_addr, page_data) tuples as they become available.
     /// Implementations may optimize by preloading in parallel or streaming.
+    ///
+    /// # Implementation Note
+    /// This is designed for use on a single-threaded tokio runtime. Between chunk yields,
+    /// the fault loop can process incoming UFFD events, allowing some concurrency via
+    /// cooperative scheduling. For filesystem stores, the blocking I/O duration per chunk
+    /// is acceptable (typically <= 4MB per chunk). Custom store implementations doing heavy
+    /// async I/O should be aware that if blocking per-chunk time becomes excessive, the
+    /// fault loop responsiveness will degrade; consider implementing parallel preload streams
+    /// in those cases.
     fn preload(&self, regions: Vec<(u64, u64)>) -> BoxStream<'_, io::Result<(u64, Vec<u8>)>>;
 
     /// Write VM state metadata to the store.
@@ -110,9 +125,9 @@ pub trait SnapshotStoreFactory: Send + 'static {
 pub struct FsSnapshotStore {
     base_path: PathBuf,
     header: Option<SnapshotHeader>,
-    incremental_snapshots: Vec<IncrementalSnapshot>,
+    incremental_snapshots: Arc<Vec<IncrementalSnapshot>>,
     /// Map: guest_addr -> (incremental_index, dirty_page_index) for O(1) lookup (newest-first)
-    dirty_page_index: HashMap<u64, (usize, usize)>,
+    dirty_page_index: Arc<HashMap<u64, (usize, usize)>>,
 }
 
 impl FsSnapshotStore {
@@ -122,8 +137,8 @@ impl FsSnapshotStore {
         FsSnapshotStore {
             base_path: path.as_ref().to_path_buf(),
             header: None,
-            incremental_snapshots: Vec::new(),
-            dirty_page_index: HashMap::new(),
+            incremental_snapshots: Arc::new(Vec::new()),
+            dirty_page_index: Arc::new(HashMap::new()),
         }
     }
 
@@ -138,8 +153,8 @@ impl FsSnapshotStore {
         FsSnapshotStore {
             base_path: base_path.as_ref().to_path_buf(),
             header: Some(header),
-            incremental_snapshots,
-            dirty_page_index,
+            incremental_snapshots: Arc::new(incremental_snapshots),
+            dirty_page_index: Arc::new(dirty_page_index),
         }
     }
 }
@@ -148,7 +163,7 @@ impl SnapshotStore for FsSnapshotStore {
     fn read_vmstate(&self) -> SendBoxFuture<'_, io::Result<Vec<u8>>> {
         let base_path = self.base_path.clone();
         let header = self.header.clone();
-        let incremental_snapshots = self.incremental_snapshots.clone();
+        let incremental_snapshots = Arc::clone(&self.incremental_snapshots);
 
         Box::pin(async move {
             if incremental_snapshots.is_empty() {
@@ -187,8 +202,8 @@ impl SnapshotStore for FsSnapshotStore {
 
     fn read_page(&self, guest_addr: u64) -> SendBoxFuture<'_, io::Result<Vec<u8>>> {
         let base_path = self.base_path.clone();
-        let incremental_snapshots = self.incremental_snapshots.clone();
-        let dirty_page_index = self.dirty_page_index.clone();
+        let incremental_snapshots = Arc::clone(&self.incremental_snapshots);
+        let dirty_page_index = Arc::clone(&self.dirty_page_index);
         let header = self.header.clone();
 
         Box::pin(async move {
@@ -236,11 +251,19 @@ impl SnapshotStore for FsSnapshotStore {
         })
     }
 
+    /// Preload implementation for filesystem-backed snapshots.
+    ///
+    /// Streams 4MB chunks from the base memory file with dirty pages from incrementals overlaid.
+    /// This implementation opens the memory file once and shares it via Arc<Mutex> to avoid
+    /// repeated file opens. Note: File seeks and reads are synchronous within the async closure,
+    /// which blocks the entire single-threaded runtime during chunk I/O. However, between chunks,
+    /// the fault handler loop can process UFFD events before requesting the next chunk, providing
+    /// cooperative concurrency on a single-threaded runtime.
     fn preload(&self, regions: Vec<(u64, u64)>) -> BoxStream<'_, io::Result<(u64, Vec<u8>)>> {
         let base_path = self.base_path.clone();
         let header = self.header.clone();
-        let incremental_snapshots = self.incremental_snapshots.clone();
-        let dirty_page_index = self.dirty_page_index.clone();
+        let incremental_snapshots = Arc::clone(&self.incremental_snapshots);
+        let dirty_page_index = Arc::clone(&self.dirty_page_index);
 
         // Generate all chunks to yield
         let mut chunks = Vec::new();
@@ -276,8 +299,8 @@ impl SnapshotStore for FsSnapshotStore {
         // Stream each chunk with dirty pages overlaid
         let stream = stream::iter(chunks).then(move |(chunk_addr, chunk_size)| {
             let header = header.clone();
-            let incremental_snapshots = incremental_snapshots.clone();
-            let dirty_page_index = dirty_page_index.clone();
+            let incremental_snapshots = Arc::clone(&incremental_snapshots);
+            let dirty_page_index = Arc::clone(&dirty_page_index);
             let file = file.clone();
 
             async move {
@@ -316,7 +339,7 @@ impl SnapshotStore for FsSnapshotStore {
 
                 // Overlay dirty pages from incrementals
                 let page_size = system_page_size() as usize;
-                for (dirty_addr, (inc_idx, page_idx)) in &dirty_page_index {
+                for (dirty_addr, (inc_idx, page_idx)) in dirty_page_index.iter() {
                     if *dirty_addr >= chunk_addr && *dirty_addr < chunk_addr + chunk_size {
                         let offset_in_chunk = (*dirty_addr - chunk_addr) as usize;
                         let dirty_data =
@@ -528,7 +551,7 @@ mod tests {
     fn test_ac2_1_fs_snapshot_store_implements_trait() {
         // Create a temporary directory using std only
         let temp_dir = std::env::temp_dir();
-        let test_dir = temp_dir.join("libkrun_test_ac2_1");
+        let test_dir = temp_dir.join(format!("libkrun_test_ac2_1_{}", std::process::id()));
         let _ = fs::remove_dir_all(&test_dir);
         fs::create_dir_all(&test_dir).unwrap();
 
@@ -543,7 +566,7 @@ mod tests {
     #[test]
     fn test_ac2_2_write_path_format_compatible() {
         let temp_dir = std::env::temp_dir();
-        let test_dir = temp_dir.join("libkrun_test_ac2_2");
+        let test_dir = temp_dir.join(format!("libkrun_test_ac2_2_{}", std::process::id()));
         let _ = fs::remove_dir_all(&test_dir);
         fs::create_dir_all(&test_dir).unwrap();
 
@@ -608,7 +631,7 @@ mod tests {
         };
 
         let temp_dir = std::env::temp_dir();
-        let test_dir = temp_dir.join("libkrun_test_ac2_3");
+        let test_dir = temp_dir.join(format!("libkrun_test_ac2_3_{}", std::process::id()));
         let _ = fs::remove_dir_all(&test_dir);
         fs::create_dir_all(&test_dir).unwrap();
 
@@ -731,7 +754,7 @@ mod tests {
         };
 
         let temp_dir = std::env::temp_dir();
-        let test_dir = temp_dir.join("libkrun_test_ac2_4");
+        let test_dir = temp_dir.join(format!("libkrun_test_ac2_4_{}", std::process::id()));
         let _ = fs::remove_dir_all(&test_dir);
         fs::create_dir_all(&test_dir).unwrap();
 
@@ -837,7 +860,7 @@ mod tests {
         };
 
         let temp_dir = std::env::temp_dir();
-        let test_dir = temp_dir.join("libkrun_test_ac2_3a");
+        let test_dir = temp_dir.join(format!("libkrun_test_ac2_3a_{}", std::process::id()));
         let _ = fs::remove_dir_all(&test_dir);
         fs::create_dir_all(&test_dir).unwrap();
 
@@ -941,7 +964,7 @@ mod tests {
         use crate::snapshot::{SnapshotHeader, VmSnapshot, SNAPSHOT_MAGIC, SNAPSHOT_VERSION};
 
         let temp_dir = std::env::temp_dir();
-        let test_dir = temp_dir.join("libkrun_test_ac2_3b");
+        let test_dir = temp_dir.join(format!("libkrun_test_ac2_3b_{}", std::process::id()));
         let _ = fs::remove_dir_all(&test_dir);
         fs::create_dir_all(&test_dir).unwrap();
 
