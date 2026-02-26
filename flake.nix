@@ -61,6 +61,9 @@
             virglrenderer
             libepoxy.dev
             libdrm.dev
+
+            # stress testing for flakiness investigation
+            stress-ng
           ];
 
           # Point Rust's pkg_config crate at the shim so PKG_CONFIG_PATH set by
