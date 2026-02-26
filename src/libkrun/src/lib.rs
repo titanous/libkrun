@@ -56,6 +56,8 @@ use vmm::resources::{
     DefaultVirtioConsoleConfig, PortConfig, SerialConsoleConfig, TsiFlags, VmResources, VsockConfig,
 };
 pub use vmm::vm_exit::VmExit;
+#[cfg(feature = "snapshot")]
+pub use vmm::snapshot_store;
 #[cfg(feature = "blk")]
 pub use vmm::vmm_config::block::{BlockConfigError, BlockDeviceConfig, BlockRootConfig};
 #[cfg(not(feature = "tee"))]

@@ -6,7 +6,7 @@
 use std::io;
 use std::path::Path;
 
-use libkrun::snapshot_store::{BoxStream, SendBoxFuture, SnapshotStore, SnapshotStoreFactory, FsSnapshotStoreFactory};
+use krun::snapshot_store::{BoxStream, SendBoxFuture, SnapshotStore, SnapshotStoreFactory, FsSnapshotStoreFactory};
 use futures::stream::{self, StreamExt};
 
 /// EmptyPreloadStore: preload returns empty, all pages loaded via faults
@@ -104,8 +104,8 @@ impl SnapshotStore for PartialPreloadStore {
             if remaining == 0 {
                 break;
             }
-            let take = std::cmp::min(*size, remaining);
-            partial_regions.push((*addr, take));
+            let take = std::cmp::min(size, remaining);
+            partial_regions.push((addr, take));
             accumulated += take;
         }
 
@@ -254,8 +254,9 @@ impl SnapshotStore for DelayStore {
         })
     }
 
-    fn preload(&self, regions: Vec<(u64, u64)>) -> BoxStream<'_, io::Result<(u64, Vec<u8>)>> {
-        self.inner.preload(regions)
+    fn preload(&self, _regions: Vec<(u64, u64)>) -> BoxStream<'_, io::Result<(u64, Vec<u8>)>> {
+        // Return empty stream: no preload, all pages via read_page with delay
+        Box::pin(stream::iter(vec![]))
     }
 
     fn write_vmstate(&self, data: Vec<u8>) -> SendBoxFuture<'_, io::Result<()>> {

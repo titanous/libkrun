@@ -14,7 +14,7 @@ mod host {
     use super::*;
     use crate::krun_rust::setup_fs_builder;
     use crate::{Test, TestSetup};
-    use libkrun::snapshot_store::FsSnapshotStoreFactory;
+    use krun::snapshot_store::FsSnapshotStoreFactory;
     use std::io::{Read, Write};
     use std::os::unix::net::UnixListener;
     use std::thread;

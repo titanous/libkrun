@@ -14,7 +14,7 @@ mod host {
     use crate::krun_rust::setup_fs_builder;
     use crate::mock_snapshot_store::EmptyPreloadStoreFactory;
     use crate::{Test, TestSetup};
-    use std::io::Write;
+    use std::io::{Read, Write};
     use std::os::unix::net::UnixListener;
     use std::thread;
     use std::time::Duration;

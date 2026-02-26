@@ -6,13 +6,18 @@ use macros::{guest, host};
 
 pub struct TestUffdErrorHandling;
 
+const VSOCK_PORT: u32 = 5705;
+
 #[host]
 mod host {
     use super::*;
     use crate::krun_rust::setup_fs_builder;
     use crate::mock_snapshot_store::ErrorStoreFactory;
     use crate::{Test, TestSetup};
+    use std::io::Read;
+    use std::os::unix::net::UnixListener;
     use std::thread;
+    use std::time::Duration;
 
     impl Test for TestUffdErrorHandling {
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
@@ -20,17 +25,27 @@ mod host {
 
             // Phase 1: Snapshot
             {
+                let sock_path = test_setup.tmp_dir.join("uffd_error_phase1.sock");
+                let listener = UnixListener::bind(&sock_path).unwrap();
+
                 let mut builder = krun::Builder::new();
                 builder.vm_config(1, 256)?;
                 setup_fs_builder(&mut builder, &test_setup)?;
+                builder.add_vsock_port(VSOCK_PORT, sock_path, false);
 
                 let context = builder.build()?;
                 let handle = context.vm_handle();
 
                 let vm_thread = thread::spawn(move || context.run());
 
-                // Give VM time to boot and set up memory
-                thread::sleep(std::time::Duration::from_millis(100));
+                // Wait for guest READY signal
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .unwrap();
+                let mut buf = vec![0u8; 5];
+                stream.read_exact(&mut buf).unwrap();
+                assert_eq!(&buf, b"READY");
 
                 // Take snapshot
                 handle.snapshot(&snap_dir)?;
@@ -85,11 +100,36 @@ mod host {
 mod guest {
     use super::*;
     use crate::Test;
+    use nix::libc::VMADDR_CID_HOST;
+    use nix::sys::socket::{connect, socket, AddressFamily, SockFlag, SockType, VsockAddr};
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
 
     impl Test for TestUffdErrorHandling {
         fn in_guest(self: Box<Self>) {
-            // Guest never runs because cold restore fails with read_page error
-            panic!("Guest should not run when read_page fails");
+            // Phase 1: Signal READY for snapshot
+            let sock = socket(
+                AddressFamily::Vsock,
+                SockType::Stream,
+                SockFlag::empty(),
+                None,
+            )
+            .unwrap();
+            let addr = VsockAddr::new(VMADDR_CID_HOST, VSOCK_PORT);
+            connect(sock.as_raw_fd(), &addr).unwrap();
+            let mut stream = UnixStream::from(sock);
+            stream
+                .set_write_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+
+            // Signal host we are ready
+            stream.write_all(b"READY").unwrap();
+            drop(stream);
+
+            // Guest never runs phase 2 because cold restore fails with read_page error
+            panic!("Guest should not reach phase 2 when read_page fails");
         }
     }
 }
