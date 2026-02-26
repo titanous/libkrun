@@ -3144,13 +3144,38 @@ impl Context {
     /// snapshots in order. The VM starts executing from the final
     /// restored state. Blocks until the VM exits.
     #[cfg(feature = "snapshot")]
-    pub fn restore_and_run(
+    /// Restore a VM from a SnapshotStore and run the event loop.
+    ///
+    /// This creates a store from the factory, loads vmstate, drains the preload
+    /// stream to eagerly populate memory, then resumes vCPUs and runs the event loop.
+    #[cfg(feature = "snapshot")]
+    pub fn restore_and_run_with_store(
         mut self,
-        base_path: &std::path::Path,
-        incremental_paths: &[&std::path::Path],
+        factory: Box<dyn vmm::snapshot_store::SnapshotStoreFactory>,
     ) -> Result<vmm::vm_exit::VmExit, StartError> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .map_err(|e| StartError::Microvm(vmm::builder::StartMicrovmError::Internal(
+                vmm::Error::EventFd(std::io::Error::other(e.to_string()))
+            )))?;
+
+        let (vmstate_bytes, store): (Vec<u8>, Box<dyn vmm::snapshot_store::SnapshotStore>) = rt.block_on(async {
+            let store = factory.create().await
+                .map_err(|e| StartError::Microvm(vmm::builder::StartMicrovmError::Internal(
+                    vmm::Error::EventFd(std::io::Error::other(e.to_string()))
+                )))?;
+
+            let vmstate_bytes = store.read_vmstate().await.map_err(|e| {
+                StartError::Microvm(vmm::builder::StartMicrovmError::Internal(
+                    vmm::Error::EventFd(std::io::Error::other(e.to_string()))
+                ))
+            })?;
+
+            Ok::<_, StartError>((vmstate_bytes, store))
+        })?;
+
         self.built_vm
-            .restore_from_snapshot(base_path, incremental_paths)?;
+            .restore_from_store(vmstate_bytes, store)?;
 
         loop {
             self.event_manager
@@ -3162,6 +3187,22 @@ impl Context {
                 return Ok(vm_exit);
             }
         }
+    }
+
+    /// Restore a VM from a snapshot directory and run the event loop.
+    ///
+    /// This delegates to `restore_and_run_with_store` using `FsSnapshotStoreFactory`.
+    /// Restore a VM from a snapshot directory and run the event loop.
+    ///
+    /// This delegates to `restore_and_run_with_store` using `FsSnapshotStoreFactory`.
+    #[cfg(feature = "snapshot")]
+    pub fn restore_and_run(
+        self,
+        base_path: &std::path::Path,
+        incremental_paths: &[&std::path::Path],
+    ) -> Result<vmm::vm_exit::VmExit, StartError> {
+        let factory = vmm::snapshot_store::FsSnapshotStoreFactory::new(base_path, incremental_paths);
+        self.restore_and_run_with_store(Box::new(factory))
     }
 }
 

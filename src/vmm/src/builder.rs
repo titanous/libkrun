@@ -717,6 +717,52 @@ impl BuiltVm {
         drop(vmm);
         Ok(self.vmm.clone())
     }
+
+    /// Restore from a SnapshotStore (eager restore with preload).
+    /// vCPUs must not yet be started; they will be started paused, memory populated, then resumed.
+    #[cfg(all(target_os = "linux", feature = "snapshot"))]
+    pub fn restore_from_store(
+        &mut self,
+        vmstate_bytes: Vec<u8>,
+        store: Box<dyn super::snapshot_store::SnapshotStore>,
+    ) -> std::result::Result<Arc<Mutex<Vmm>>, StartMicrovmError> {
+        let mut vcpus = self
+            .vcpus
+            .take()
+            .ok_or(StartMicrovmError::MicroVMAlreadyRunning)?;
+
+        let mut vmm = self.vmm.lock().expect("Poisoned vmm lock");
+
+        // Step 1: Start vCPU threads — they park in the initial event loop
+        // waiting for Resume or RestoreState.
+        vmm.start_vcpus_paused(&mut vcpus)
+            .map_err(StartMicrovmError::Internal)?;
+
+        // Step 2 (macOS only): Unblock secondary vCPUs. On HVF they block on
+        // boot_receiver.recv() waiting for PSCI CPU_ON from the kernel. Since
+        // we're skipping boot, send a dummy entry address to unblock them.
+        // On KVM, secondary vCPUs are powered off via KVM_ARM_VCPU_POWER_OFF
+        // and don't need unblocking — they go straight to the paused state.
+        #[cfg(target_os = "macos")]
+        for sender in self.boot_senders.drain(..) {
+            let _ = sender.send(0);
+        }
+
+        let snapshot_err = |e: super::snapshot::SnapshotError| {
+            StartMicrovmError::Internal(super::Error::EventFd(std::io::Error::other(e.to_string())))
+        };
+
+        // Step 3: Restore using store (eager restore, drains preload to populate memory)
+        vmm.restore_from_store(vmstate_bytes, store)
+            .map_err(snapshot_err)?;
+
+        // Step 4: Resume all vCPUs — they leave the initial event loop and
+        // enter the main execution loop with the final restored state.
+        vmm.resume_vcpus().map_err(StartMicrovmError::Internal)?;
+
+        drop(vmm);
+        Ok(self.vmm.clone())
+    }
 }
 
 pub fn build_microvm(

@@ -133,6 +133,7 @@ impl FsSnapshotStore {
     }
 
     /// Create a new filesystem snapshot store for writing only (alias for `new`).
+    #[allow(dead_code)]
     fn new_for_write(path: impl AsRef<Path>) -> Self {
         Self::new(path)
     }

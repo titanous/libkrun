@@ -490,6 +490,109 @@ impl Vmm {
         Ok(())
     }
 
+    /// Restore a full snapshot using a SnapshotStore. vCPUs must already be paused.
+    /// This drains the preload stream to populate memory (eager restore).
+    #[cfg(all(target_os = "linux", feature = "snapshot"))]
+    pub fn restore_from_store(
+        &mut self,
+        vmstate_bytes: Vec<u8>,
+        store: Box<dyn snapshot_store::SnapshotStore>,
+    ) -> std::result::Result<(), snapshot::SnapshotError> {
+        // Deserialize vmstate
+        let vmstate: snapshot::VmSnapshot = bincode::deserialize(&vmstate_bytes)
+            .map_err(|e| snapshot::SnapshotError::Deserialize(e.to_string()))?;
+
+        snapshot::validate_header_for_vm(
+            &vmstate.header,
+            &self.guest_memory,
+            self.vcpus_handles.len(),
+            self.nested_enabled,
+        )?;
+
+        self.mmio_device_manager
+            .quiesce_all_device_workers(snapshot::SNAPSHOT_QUIESCE_TIMEOUT)
+            .map_err(|e| {
+                snapshot::SnapshotError::Deserialize(format!(
+                    "Failed to quiesce device workers before restore: {e}"
+                ))
+            })?;
+
+        // Drain preload stream to populate memory (eager restore)
+        let regions = snapshot::ram_layout(&self.guest_memory);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .map_err(|e| snapshot::SnapshotError::Deserialize(format!("Failed to create runtime: {e}")))?;
+
+        rt.block_on(async {
+            use futures::stream::StreamExt;
+            use vm_memory::{Bytes, GuestAddress};
+
+            let mut preload_stream = store.preload(regions);
+            while let Some(result) = preload_stream.next().await {
+                let (chunk_addr, chunk_data) = result.map_err(|e| {
+                    snapshot::SnapshotError::Deserialize(format!("Failed to preload chunk: {e}"))
+                })?;
+                // Write chunk to guest memory at the specified address
+                self.guest_memory
+                    .write_slice(&chunk_data, GuestAddress(chunk_addr))
+                    .map_err(|e| {
+                        snapshot::SnapshotError::Deserialize(format!(
+                            "Failed to write chunk at 0x{:x}: {e}",
+                            chunk_addr
+                        ))
+                    })?;
+            }
+            Ok::<(), snapshot::SnapshotError>(())
+        })?;
+
+        #[cfg(target_arch = "aarch64")]
+        if let Some(gic_data) = &vmstate.gic_state {
+            self.restore_interrupt_controller_state(gic_data)?;
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        if let Some(data) = &vmstate.vm_state {
+            let state: vstate::VmState = bincode::deserialize(data)
+                .map_err(|e| snapshot::SnapshotError::Deserialize(e.to_string()))?;
+            self.vm.restore_state(&state).map_err(|e| {
+                snapshot::SnapshotError::Deserialize(format!("Failed to restore VM state: {e}"))
+            })?;
+        }
+
+        self.mmio_device_manager
+            .restore_all_device_states(&vmstate.device_states)
+            .map_err(|e| {
+                snapshot::SnapshotError::Deserialize(format!(
+                    "Failed to restore device states: {e}"
+                ))
+            })?;
+
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.pio_device_manager
+                .restore_all_device_states(&vmstate.device_states)
+                .map_err(|e| {
+                    snapshot::SnapshotError::Deserialize(format!(
+                        "Failed to restore PortIO device states: {e}"
+                    ))
+                })?;
+        }
+
+        self.mmio_device_manager
+            .complete_all_device_restores()
+            .map_err(|e| {
+                snapshot::SnapshotError::Deserialize(format!(
+                    "Failed to complete device restores: {e}"
+                ))
+            })?;
+        self.mmio_device_manager.resume_all_device_workers();
+
+        self.restore_vcpu_states(vmstate.vcpu_states).map_err(|e| {
+            snapshot::SnapshotError::Deserialize(format!("Failed to restore vCPU states: {e}"))
+        })?;
+        Ok(())
+    }
+
     /// Sends a resume command to the vcpus.
     pub fn resume_vcpus(&mut self) -> Result<()> {
         for handle in self.vcpus_handles.iter() {
