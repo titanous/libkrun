@@ -63,6 +63,8 @@ use test_vhost_user_fs::{
 
 #[cfg(feature = "guest")]
 mod net_helpers;
+#[cfg(feature = "guest")]
+mod vsock_helpers;
 
 mod test_uffd_demand_page;
 use test_uffd_demand_page::TestUffdDemandPageOnly;
@@ -190,10 +192,19 @@ pub trait Test {
     /// Start the VM
     fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()>;
 
-    /// Checks the output of the (host) process which started the VM
+    /// Checks the output of the (host) process which started the VM.
+    ///
+    /// Looks for "OK\n" anywhere in stdout. Kernel boot messages appear
+    /// before the test output, and kernel shutdown/warning messages may
+    /// appear after it — both are tolerated.
     fn check(self: Box<Self>, child: Child) {
         let output = child.wait_with_output().unwrap();
-        assert_eq!(String::from_utf8(output.stdout).unwrap(), "OK\n");
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(
+            stdout.contains("OK\n"),
+            "expected stdout to contain \"OK\\n\", got {:?}",
+            stdout,
+        );
     }
 }
 
