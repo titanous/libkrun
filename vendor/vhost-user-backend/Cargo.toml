@@ -78,7 +78,7 @@ version = "0.2.6"
 version = "0.17.0"
 
 [dependencies.vm-memory]
-version = "0.17.1"
+version = "0.18"
 features = [
     "backend-mmap",
     "backend-atomic",
@@ -108,7 +108,7 @@ features = [
 ]
 
 [dev-dependencies.vm-memory]
-version = "0.17.1"
+version = "0.18"
 features = [
     "backend-mmap",
     "backend-atomic",

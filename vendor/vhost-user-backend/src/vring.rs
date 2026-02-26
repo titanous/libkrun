@@ -14,7 +14,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use virtio_queue::{Error as VirtQueError, Queue, QueueT};
-use vm_memory::{GuestAddress, GuestAddressSpace, GuestMemoryAtomic, GuestMemoryMmap};
+use vm_memory::{GuestAddress, GuestAddressSpace, GuestMemoryAtomic, GuestMemoryBackend, GuestMemoryMmap};
 use vmm_sys_util::event::{EventConsumer, EventNotifier};
 
 /// Trait for objects returned by `VringT::get_ref()`.
@@ -116,7 +116,10 @@ pub struct VringState<M: GuestAddressSpace = GuestMemoryAtomic<GuestMemoryMmap>>
     mem: M,
 }
 
-impl<M: GuestAddressSpace> VringState<M> {
+impl<M: GuestAddressSpace> VringState<M>
+where
+    M::M: GuestMemoryBackend,
+{
     /// Create a new instance of Vring.
     fn new(mem: M, max_queue_size: u16) -> Result<Self, VirtQueError> {
         Ok(VringState {
@@ -288,7 +291,10 @@ impl<'a, M: 'a + GuestAddressSpace> VringStateMutGuard<'a, M> for VringMutex<M> 
     type G = MutexGuard<'a, VringState<M>>;
 }
 
-impl<M: 'static + GuestAddressSpace> VringT<M> for VringMutex<M> {
+impl<M: 'static + GuestAddressSpace> VringT<M> for VringMutex<M>
+where
+    M::M: GuestMemoryBackend,
+{
     fn new(mem: M, max_queue_size: u16) -> Result<Self, VirtQueError> {
         Ok(VringMutex {
             state: Arc::new(Mutex::new(VringState::new(mem, max_queue_size)?)),
@@ -403,7 +409,10 @@ impl<'a, M: 'a + GuestAddressSpace> VringStateMutGuard<'a, M> for VringRwLock<M>
     type G = RwLockWriteGuard<'a, VringState<M>>;
 }
 
-impl<M: 'static + GuestAddressSpace> VringT<M> for VringRwLock<M> {
+impl<M: 'static + GuestAddressSpace> VringT<M> for VringRwLock<M>
+where
+    M::M: GuestMemoryBackend,
+{
     fn new(mem: M, max_queue_size: u16) -> Result<Self, VirtQueError> {
         Ok(VringRwLock {
             state: Arc::new(RwLock::new(VringState::new(mem, max_queue_size)?)),
