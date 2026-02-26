@@ -10,10 +10,8 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-/// A boxed future type alias for dyn-compatible async methods.
-pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + 'a>>;
-
-/// A Send-able boxed future for factory creation (needs to cross thread boundary).
+/// A Send-able boxed future for dyn-compatible async methods.
+/// All SnapshotStore methods return Send futures to support tokio::spawn in the UFFD handler.
 pub type SendBoxFuture<'a, T> =
     std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
