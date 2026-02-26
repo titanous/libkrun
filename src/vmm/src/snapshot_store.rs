@@ -1,4 +1,4 @@
-// Copyright 2024 The libkrun Authors.
+// Copyright 2026 The libkrun Authors.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Snapshot store abstraction for flexible snapshot backends.
@@ -7,7 +7,7 @@
 //! storage backends (filesystem, memory, cloud, etc.).
 
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 /// A boxed future type alias for dyn-compatible async methods.
@@ -25,11 +25,12 @@ pub type BoxStream<'a, T> =
 ///
 /// Supports both read and write paths for full and incremental snapshots.
 /// Implementations must be `Send + Sync + 'static` for use in concurrent contexts.
+/// All methods return `Send` futures to support tokio::spawn in Phase 2+ (UFFD handler).
 pub trait SnapshotStore: Send + Sync + 'static {
     /// Read VM state metadata from the store.
     ///
     /// Returns the serialized `VmSnapshot` or `IncrementalSnapshot` bytes.
-    fn read_vmstate(&self) -> BoxFuture<'_, io::Result<Vec<u8>>>;
+    fn read_vmstate(&self) -> SendBoxFuture<'_, io::Result<Vec<u8>>>;
 
     /// Read a single page from the store.
     ///
@@ -37,7 +38,7 @@ pub trait SnapshotStore: Send + Sync + 'static {
     /// * `guest_addr` - Guest physical address of the page
     ///
     /// Returns the raw page data.
-    fn read_page(&self, guest_addr: u64) -> BoxFuture<'_, io::Result<Vec<u8>>>;
+    fn read_page(&self, guest_addr: u64) -> SendBoxFuture<'_, io::Result<Vec<u8>>>;
 
     /// Preload a set of memory regions asynchronously.
     ///
@@ -52,7 +53,7 @@ pub trait SnapshotStore: Send + Sync + 'static {
     ///
     /// # Arguments
     /// * `data` - Serialized `VmSnapshot` or `IncrementalSnapshot` bytes
-    fn write_vmstate(&self, data: Vec<u8>) -> BoxFuture<'_, io::Result<()>>;
+    fn write_vmstate(&self, data: Vec<u8>) -> SendBoxFuture<'_, io::Result<()>>;
 
     /// Write memory pages to the store.
     ///
@@ -61,13 +62,13 @@ pub trait SnapshotStore: Send + Sync + 'static {
     ///
     /// For full snapshots, contains all guest memory.
     /// For incremental snapshots, may be empty (dirty pages are in vmstate blob).
-    fn write_pages(&self, pages: Vec<(u64, Vec<u8>)>) -> BoxFuture<'_, io::Result<()>>;
+    fn write_pages(&self, pages: Vec<(u64, Vec<u8>)>) -> SendBoxFuture<'_, io::Result<()>>;
 
     /// Ensure all written data is durable.
     ///
     /// Implementations should fsync or equivalent to guarantee data is
     /// persisted to the underlying storage medium.
-    fn close(&self) -> BoxFuture<'_, io::Result<()>>;
+    fn close(&self) -> SendBoxFuture<'_, io::Result<()>>;
 }
 
 /// Factory trait for creating snapshot store instances.
@@ -102,11 +103,11 @@ impl FsSnapshotStore {
 }
 
 impl SnapshotStore for FsSnapshotStore {
-    fn read_vmstate(&self) -> BoxFuture<'_, io::Result<Vec<u8>>> {
+    fn read_vmstate(&self) -> SendBoxFuture<'_, io::Result<Vec<u8>>> {
         Box::pin(async { unimplemented!("read_vmstate - Phase 2") })
     }
 
-    fn read_page(&self, _guest_addr: u64) -> BoxFuture<'_, io::Result<Vec<u8>>> {
+    fn read_page(&self, _guest_addr: u64) -> SendBoxFuture<'_, io::Result<Vec<u8>>> {
         Box::pin(async { unimplemented!("read_page - Phase 2") })
     }
 
@@ -114,17 +115,19 @@ impl SnapshotStore for FsSnapshotStore {
         Box::pin(futures::stream::iter(vec![]))
     }
 
-    fn write_vmstate(&self, data: Vec<u8>) -> BoxFuture<'_, io::Result<()>> {
+    fn write_vmstate(&self, data: Vec<u8>) -> SendBoxFuture<'_, io::Result<()>> {
         let path = self.path.clone();
         Box::pin(async move {
             fs::create_dir_all(&path)?;
             let vmstate_path = path.join("vmstate");
-            fs::write(vmstate_path, data)?;
+            let mut file = fs::File::create(vmstate_path)?;
+            file.write_all(&data)?;
+            file.sync_all()?;
             Ok(())
         })
     }
 
-    fn write_pages(&self, pages: Vec<(u64, Vec<u8>)>) -> BoxFuture<'_, io::Result<()>> {
+    fn write_pages(&self, pages: Vec<(u64, Vec<u8>)>) -> SendBoxFuture<'_, io::Result<()>> {
         let path = self.path.clone();
         Box::pin(async move {
             if pages.is_empty() {
@@ -133,7 +136,6 @@ impl SnapshotStore for FsSnapshotStore {
 
             let memory_path = path.join("memory");
             let mut file = fs::File::create(memory_path)?;
-            use std::io::Write;
             for (_guest_addr, page_data) in pages {
                 file.write_all(&page_data)?;
             }
@@ -142,7 +144,7 @@ impl SnapshotStore for FsSnapshotStore {
         })
     }
 
-    fn close(&self) -> BoxFuture<'_, io::Result<()>> {
+    fn close(&self) -> SendBoxFuture<'_, io::Result<()>> {
         let path = self.path.clone();
         Box::pin(async move {
             // Ensure all data is durable by syncing the directory
@@ -169,9 +171,8 @@ impl FsSnapshotStoreFactory {
 
 impl SnapshotStoreFactory for FsSnapshotStoreFactory {
     fn create(self: Box<Self>) -> SendBoxFuture<'static, io::Result<Box<dyn SnapshotStore>>> {
-        let path = self.path.clone();
         Box::pin(async move {
-            Ok(Box::new(FsSnapshotStore::new(path)) as Box<dyn SnapshotStore>)
+            Ok(Box::new(FsSnapshotStore::new(self.path)) as Box<dyn SnapshotStore>)
         })
     }
 }
@@ -184,11 +185,11 @@ mod tests {
     struct MockSnapshotStore;
 
     impl SnapshotStore for MockSnapshotStore {
-        fn read_vmstate(&self) -> BoxFuture<'_, io::Result<Vec<u8>>> {
+        fn read_vmstate(&self) -> SendBoxFuture<'_, io::Result<Vec<u8>>> {
             Box::pin(async { Err(io::Error::new(io::ErrorKind::Unsupported, "mock")) })
         }
 
-        fn read_page(&self, _guest_addr: u64) -> BoxFuture<'_, io::Result<Vec<u8>>> {
+        fn read_page(&self, _guest_addr: u64) -> SendBoxFuture<'_, io::Result<Vec<u8>>> {
             Box::pin(async { Err(io::Error::new(io::ErrorKind::Unsupported, "mock")) })
         }
 
@@ -196,15 +197,15 @@ mod tests {
             Box::pin(futures::stream::iter(vec![]))
         }
 
-        fn write_vmstate(&self, _data: Vec<u8>) -> BoxFuture<'_, io::Result<()>> {
+        fn write_vmstate(&self, _data: Vec<u8>) -> SendBoxFuture<'_, io::Result<()>> {
             Box::pin(async { Ok(()) })
         }
 
-        fn write_pages(&self, _pages: Vec<(u64, Vec<u8>)>) -> BoxFuture<'_, io::Result<()>> {
+        fn write_pages(&self, _pages: Vec<(u64, Vec<u8>)>) -> SendBoxFuture<'_, io::Result<()>> {
             Box::pin(async { Ok(()) })
         }
 
-        fn close(&self) -> BoxFuture<'_, io::Result<()>> {
+        fn close(&self) -> SendBoxFuture<'_, io::Result<()>> {
             Box::pin(async { Ok(()) })
         }
     }
@@ -225,12 +226,12 @@ mod tests {
         let store: Box<dyn SnapshotStore> = Box::new(MockSnapshotStore);
         // If trait is missing methods, this won't compile.
         // Test body is just calling all methods to verify they exist.
-        let _ = store.read_vmstate();
-        let _ = store.read_page(0x0);
-        let _ = store.preload(vec![]);
-        let _ = store.write_vmstate(vec![]);
-        let _ = store.write_pages(vec![]);
-        let _ = store.close();
+        drop(store.read_vmstate());
+        drop(store.read_page(0x0));
+        drop(store.preload(vec![]));
+        drop(store.write_vmstate(vec![]));
+        drop(store.write_pages(vec![]));
+        drop(store.close());
     }
 
     /// AC1.2: Verify return types are correct (compile-time via trait definition).
@@ -239,7 +240,6 @@ mod tests {
     fn test_ac1_3_trait_object_safety() {
         // This test verifies object-safety: we can create a Box<dyn SnapshotStore>
         let _store: Box<dyn SnapshotStore> = Box::new(MockSnapshotStore);
-        assert!(true, "Box<dyn SnapshotStore> is object-safe");
 
         // Verify Send + Sync + 'static constraints via trait bounds
         let _: Box<dyn SnapshotStore> = Box::new(MockSnapshotStore);
@@ -250,7 +250,6 @@ mod tests {
     fn test_ac1_4_factory_trait_and_object_safety() {
         let _factory: Box<dyn SnapshotStoreFactory> = Box::new(MockFactory);
         // If factory is missing create method or has wrong signature, this won't compile.
-        assert!(true, "Box<dyn SnapshotStoreFactory> is object-safe");
     }
 
     /// AC1.5: Verify no snapshot IDs or lineage in trait (compile-time inspection).
@@ -259,7 +258,6 @@ mod tests {
         // This is a compile-time check: the trait has no ID or lineage fields/methods.
         // If we added ID methods, this comment would be false.
         // Visual inspection: SnapshotStore has no ID-related methods.
-        assert!(true, "Trait has no snapshot ID parameters");
     }
 
     /// AC2.1: Verify FsSnapshotStore implements SnapshotStore via trait object.
@@ -276,45 +274,35 @@ mod tests {
 
         // Cleanup
         let _ = fs::remove_dir_all(&test_dir);
-        assert!(true, "FsSnapshotStore implements SnapshotStore");
     }
 
     /// AC2.2: Write vmstate and memory files in format compatible with existing code.
     #[test]
     fn test_ac2_2_write_path_format_compatible() {
-        use std::io::Write;
-
         let temp_dir = std::env::temp_dir();
         let test_dir = temp_dir.join("libkrun_test_ac2_2");
         let _ = fs::remove_dir_all(&test_dir);
         fs::create_dir_all(&test_dir).unwrap();
 
-        let _store = FsSnapshotStore::new(&test_dir);
+        let store = FsSnapshotStore::new(&test_dir);
 
         // Create test data: vmstate bytes and memory pages
         let test_vmstate = vec![0x01, 0x02, 0x03, 0x04, 0x05];
         let test_pages = vec![(0x1000u64, vec![0xAB; 256]), (0x2000u64, vec![0xCD; 256])];
 
-        // Manually execute the async blocks by creating a minimal runtime
-        // For tests, we can directly call the synchronous fs operations
-        let vmstate_data = test_vmstate.clone();
-        fs::create_dir_all(&test_dir).ok();
-        let vmstate_path = test_dir.join("vmstate");
-        fs::write(&vmstate_path, &vmstate_data).unwrap();
+        // Use futures::executor::block_on to invoke actual store async methods
+        futures::executor::block_on(store.write_vmstate(test_vmstate.clone()))
+            .expect("write_vmstate should succeed");
 
-        // Write memory pages
-        let memory_path = test_dir.join("memory");
-        let mut file = fs::File::create(&memory_path).unwrap();
-        for (_addr, page_data) in &test_pages {
-            file.write_all(page_data).unwrap();
-        }
-        file.sync_all().unwrap();
+        futures::executor::block_on(store.write_pages(test_pages.clone()))
+            .expect("write_pages should succeed");
 
-        // Sync directory
-        let dir = fs::File::open(&test_dir).unwrap();
-        dir.sync_all().unwrap();
+        futures::executor::block_on(store.close())
+            .expect("close should succeed");
 
         // Verify files exist
+        let vmstate_path = test_dir.join("vmstate");
+        let memory_path = test_dir.join("memory");
         assert!(vmstate_path.exists(), "vmstate file should exist");
         assert!(memory_path.exists(), "memory file should exist");
 

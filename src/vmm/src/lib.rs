@@ -968,14 +968,50 @@ impl Vmm {
         Ok(())
     }
 
+    /// Private helper to dump guest memory and write to store, then close.
+    /// Extracted to reduce code duplication between Linux and macOS snapshot_to_store.
+    #[cfg(feature = "snapshot")]
+    fn dump_memory_to_store(
+        &self,
+        store: &dyn snapshot_store::SnapshotStore,
+        vmstate_data: Vec<u8>,
+    ) -> std::result::Result<(), snapshot::SnapshotError> {
+        use vm_memory::{Address, GuestMemory, GuestMemoryRegion};
+
+        // Serialize vmstate
+        futures::executor::block_on(store.write_vmstate(vmstate_data))
+            .map_err(snapshot::SnapshotError::Io)?;
+
+        // Dump memory and write pages
+        let mut pages = Vec::new();
+        for region in self.guest_memory.iter() {
+            let host_addr = self
+                .guest_memory
+                .get_host_address(region.start_addr())
+                .map_err(|e| {
+                    snapshot::SnapshotError::Serialize(format!("Invalid guest address: {e}"))
+                })?;
+            let len = region.len() as usize;
+            let slice = unsafe { std::slice::from_raw_parts(host_addr, len) };
+            pages.push((region.start_addr().raw_value(), slice.to_vec()));
+        }
+
+        futures::executor::block_on(store.write_pages(pages))
+            .map_err(snapshot::SnapshotError::Io)?;
+
+        // Sync all data
+        futures::executor::block_on(store.close())
+            .map_err(snapshot::SnapshotError::Io)?;
+
+        Ok(())
+    }
+
     /// Create a full snapshot using a SnapshotStore. vCPUs must already be paused.
     #[cfg(all(target_os = "linux", feature = "snapshot"))]
     pub fn snapshot_to_store(
         &mut self,
         store: &dyn snapshot_store::SnapshotStore,
     ) -> std::result::Result<(), snapshot::SnapshotError> {
-        use vm_memory::{Address, GuestMemory, GuestMemoryRegion};
-
         // Reuse the existing full snapshot creation, but write to store instead
         let mut device_states = self
             .mmio_device_manager
@@ -1023,6 +1059,7 @@ impl Vmm {
                 version: snapshot::SNAPSHOT_VERSION,
                 vcpu_count: vcpu_states.len() as u32,
                 ram_regions: snapshot::ram_layout(&self.guest_memory),
+                // Use nested_enabled from Vmm; this fixes the hardcoded false from the previous implementation
                 nested_enabled: self.nested_enabled,
             },
             vcpu_states,
@@ -1035,32 +1072,8 @@ impl Vmm {
         let vmstate_data = bincode::serialize(&vm_snapshot)
             .map_err(|e| snapshot::SnapshotError::Serialize(e.to_string()))?;
 
-        // Write vmstate via store (blocking on async)
-        futures::executor::block_on(store.write_vmstate(vmstate_data))
-            .map_err(|e| snapshot::SnapshotError::Io(e))?;
-
-        // Dump memory and write pages
-        let mut pages = Vec::new();
-        for region in self.guest_memory.iter() {
-            let host_addr = self
-                .guest_memory
-                .get_host_address(region.start_addr())
-                .map_err(|e| {
-                    snapshot::SnapshotError::Serialize(format!("Invalid guest address: {e}"))
-                })?;
-            let len = region.len() as usize;
-            let slice = unsafe { std::slice::from_raw_parts(host_addr, len) };
-            pages.push((region.start_addr().raw_value(), slice.to_vec()));
-        }
-
-        futures::executor::block_on(store.write_pages(pages))
-            .map_err(|e| snapshot::SnapshotError::Io(e))?;
-
-        // Sync all data
-        futures::executor::block_on(store.close())
-            .map_err(|e| snapshot::SnapshotError::Io(e))?;
-
-        Ok(())
+        // Use helper to dump memory and write to store
+        self.dump_memory_to_store(store, vmstate_data)
     }
 
     /// Create a full snapshot using a SnapshotStore. vCPUs must already be paused.
@@ -1069,8 +1082,6 @@ impl Vmm {
         &mut self,
         store: &dyn snapshot_store::SnapshotStore,
     ) -> std::result::Result<(), snapshot::SnapshotError> {
-        use vm_memory::{Address, GuestMemory, GuestMemoryRegion};
-
         // macOS/aarch64 version - no vm_state, no PortIO
         let device_states = self
             .mmio_device_manager
@@ -1099,6 +1110,7 @@ impl Vmm {
                 version: snapshot::SNAPSHOT_VERSION,
                 vcpu_count: serialized_vcpu_states.len() as u32,
                 ram_regions: snapshot::ram_layout(&self.guest_memory),
+                // Use nested_enabled from Vmm; this fixes the hardcoded false from the previous implementation
                 nested_enabled: self.nested_enabled,
             },
             vcpu_states: serialized_vcpu_states,
@@ -1111,32 +1123,8 @@ impl Vmm {
         let vmstate_data = bincode::serialize(&vm_snapshot)
             .map_err(|e| snapshot::SnapshotError::Serialize(e.to_string()))?;
 
-        // Write vmstate via store (blocking on async)
-        futures::executor::block_on(store.write_vmstate(vmstate_data))
-            .map_err(|e| snapshot::SnapshotError::Io(e))?;
-
-        // Dump memory and write pages
-        let mut pages = Vec::new();
-        for region in self.guest_memory.iter() {
-            let host_addr = self
-                .guest_memory
-                .get_host_address(region.start_addr())
-                .map_err(|e| {
-                    snapshot::SnapshotError::Serialize(format!("Invalid guest address: {e}"))
-                })?;
-            let len = region.len() as usize;
-            let slice = unsafe { std::slice::from_raw_parts(host_addr, len) };
-            pages.push((region.start_addr().raw_value(), slice.to_vec()));
-        }
-
-        futures::executor::block_on(store.write_pages(pages))
-            .map_err(|e| snapshot::SnapshotError::Io(e))?;
-
-        // Sync all data
-        futures::executor::block_on(store.close())
-            .map_err(|e| snapshot::SnapshotError::Io(e))?;
-
-        Ok(())
+        // Use helper to dump memory and write to store
+        self.dump_memory_to_store(store, vmstate_data)
     }
 
     /// Create an incremental snapshot using a SnapshotStore. vCPUs must already be paused.
@@ -1234,15 +1222,15 @@ impl Vmm {
 
         // Write vmstate via store (blocking on async)
         futures::executor::block_on(store.write_vmstate(vmstate_data))
-            .map_err(|e| snapshot::SnapshotError::Io(e))?;
+            .map_err(snapshot::SnapshotError::Io)?;
 
         // For incremental snapshots, dirty pages are in the vmstate blob, so no memory file
         futures::executor::block_on(store.write_pages(Vec::new()))
-            .map_err(|e| snapshot::SnapshotError::Io(e))?;
+            .map_err(snapshot::SnapshotError::Io)?;
 
         // Sync all data
         futures::executor::block_on(store.close())
-            .map_err(|e| snapshot::SnapshotError::Io(e))?;
+            .map_err(snapshot::SnapshotError::Io)?;
 
         Ok(())
     }
@@ -1343,15 +1331,15 @@ impl Vmm {
 
         // Write vmstate via store (blocking on async)
         futures::executor::block_on(store.write_vmstate(vmstate_data))
-            .map_err(|e| snapshot::SnapshotError::Io(e))?;
+            .map_err(snapshot::SnapshotError::Io)?;
 
         // For incremental snapshots, dirty pages are in the vmstate blob, so no memory file
         futures::executor::block_on(store.write_pages(Vec::new()))
-            .map_err(|e| snapshot::SnapshotError::Io(e))?;
+            .map_err(snapshot::SnapshotError::Io)?;
 
         // Sync all data
         futures::executor::block_on(store.close())
-            .map_err(|e| snapshot::SnapshotError::Io(e))?;
+            .map_err(snapshot::SnapshotError::Io)?;
 
         Ok(())
     }
