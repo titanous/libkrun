@@ -18,7 +18,6 @@
 //! Most messages that can be sent via the Unix domain socket implementing vhost-user have an
 //! equivalent ioctl to the kernel implementation.
 
-use std::fs::File;
 use std::io::Error as IOError;
 
 pub mod message;
@@ -96,7 +95,7 @@ pub enum Error {
     /// memfd file creation error
     MemFdCreateError,
     /// File truncate error
-    FileTrucateError,
+    FileTruncateError,
     /// memfd file seal errors
     MemFdSealError,
 }
@@ -105,7 +104,7 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             Error::InvalidParam => write!(f, "invalid parameters"),
-            Error::InvalidOperation(reason) => write!(f, "invalid operation: {}", reason),
+            Error::InvalidOperation(reason) => write!(f, "invalid operation: {reason}"),
             Error::InactiveFeature(bits) => write!(f, "inactive feature: {}", bits.bits()),
             Error::InactiveOperation(bits) => {
                 write!(f, "inactive protocol operation: {}", bits.bits())
@@ -115,19 +114,19 @@ impl std::fmt::Display for Error {
             Error::Disconnected => write!(f, "peer disconnected"),
             Error::OversizedMsg => write!(f, "oversized message"),
             Error::IncorrectFds => write!(f, "wrong number of attached fds"),
-            Error::SocketError(e) => write!(f, "socket error: {}", e),
-            Error::SocketConnect(e) => write!(f, "can't connect to peer: {}", e),
-            Error::SocketBroken(e) => write!(f, "socket is broken: {}", e),
-            Error::SocketRetry(e) => write!(f, "temporary socket error: {}", e),
+            Error::SocketError(e) => write!(f, "socket error: {e}"),
+            Error::SocketConnect(e) => write!(f, "can't connect to peer: {e}"),
+            Error::SocketBroken(e) => write!(f, "socket is broken: {e}"),
+            Error::SocketRetry(e) => write!(f, "temporary socket error: {e}"),
             Error::BackendInternalError => write!(f, "backend internal error"),
             Error::FrontendInternalError => write!(f, "Frontend internal error"),
             Error::FeatureMismatch => write!(f, "virtio/protocol features mismatch"),
-            Error::ReqHandlerError(e) => write!(f, "handler failed to handle request: {}", e),
+            Error::ReqHandlerError(e) => write!(f, "handler failed to handle request: {e}"),
             Error::MemFdCreateError => {
                 write!(f, "handler failed to allocate memfd during get_inflight_fd")
             }
-            Error::FileTrucateError => {
-                write!(f, "handler failed to trucate memfd during get_inflight_fd")
+            Error::FileTruncateError => {
+                write!(f, "handler failed to truncate memfd during get_inflight_fd")
             }
             Error::MemFdSealError => write!(
                 f,
@@ -161,7 +160,7 @@ impl Error {
             Error::SocketError(_) | Error::SocketConnect(_) => false,
             Error::FeatureMismatch => false,
             Error::ReqHandlerError(_) => false,
-            Error::MemFdCreateError | Error::FileTrucateError | Error::MemFdSealError => false,
+            Error::MemFdCreateError | Error::FileTruncateError | Error::MemFdSealError => false,
         }
     }
 }
@@ -178,6 +177,7 @@ impl std::convert::From<vmm_sys_util::errno::Error> for Error {
     /// * - Error::SocketBroken: the underline socket is broken.
     /// * - Error::SocketError: other socket related errors.
     #[allow(unreachable_patterns)] // EWOULDBLOCK equals to EGAIN on linux
+    #[allow(clippy::match_overlapping_arm)] // EWOULDBLOCK equals to EGAIN on linux
     fn from(err: vmm_sys_util::errno::Error) -> Self {
         match err.errno() {
             // The socket is marked nonblocking and the requested operation would block.
@@ -213,7 +213,8 @@ pub type HandlerResult<T> = std::result::Result<T, IOError>;
 
 /// Utility function to take the first element from option of a vector of files.
 /// Returns `None` if the vector contains no file or more than one file.
-pub(crate) fn take_single_file(files: Option<Vec<File>>) -> Option<File> {
+#[cfg(any(feature = "vhost-user-backend", feature = "vhost-user-frontend"))]
+pub(crate) fn take_single_file(files: Option<Vec<std::fs::File>>) -> Option<std::fs::File> {
     let mut files = files?;
     if files.len() != 1 {
         return None;
@@ -292,8 +293,8 @@ mod tests {
         P: AsRef<Path>,
         S: VhostUserBackendReqHandler,
     {
-        let listener = Listener::new(&path, true).unwrap();
-        let mut backend_listener = BackendListener::new(listener, backend).unwrap();
+        let mut listener = Listener::new(&path, true).unwrap();
+        let mut backend_listener = BackendListener::new(&mut listener, backend).unwrap();
         let frontend = Frontend::connect(&path, 1).unwrap();
         (frontend, backend_listener.accept().unwrap().unwrap())
     }

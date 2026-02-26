@@ -98,18 +98,6 @@ pub trait VhostUserFrontend: VhostBackend {
     /// sent by [`VhostUserFrontend::postcopy_advise`].
     #[cfg(feature = "postcopy")]
     fn postcopy_end(&mut self) -> Result<()>;
-
-    /// Send SET_DEVICE_STATE_FD to the backend for device state transfer.
-    /// Returns an optional replacement fd from the backend.
-    fn set_device_state_fd(
-        &mut self,
-        direction: VhostTransferStateDirection,
-        phase: VhostTransferStatePhase,
-        fd: &dyn AsRawFd,
-    ) -> Result<Option<File>>;
-
-    /// Send CHECK_DEVICE_STATE to verify the backend completed state transfer.
-    fn check_device_state(&mut self) -> Result<()>;
 }
 
 fn error_code<T>(err: VhostUserError) -> Result<T> {
@@ -608,51 +596,6 @@ impl VhostUserFrontend for Frontend {
         let hdr = node.send_request_header(FrontendReq::POSTCOPY_END, None)?;
         node.wait_for_ack(&hdr).map_err(|e| e.into())
     }
-
-    fn set_device_state_fd(
-        &mut self,
-        direction: VhostTransferStateDirection,
-        phase: VhostTransferStatePhase,
-        fd: &dyn AsRawFd,
-    ) -> Result<Option<File>> {
-        let mut node = self.node();
-        node.check_proto_feature(VhostUserProtocolFeatures::DEVICE_STATE)?;
-
-        let body = VhostUserTransferDeviceState::new(direction, phase);
-        let fds = [fd.as_raw_fd()];
-        let hdr = node.send_request_with_body(FrontendReq::SET_DEVICE_STATE_FD, &body, Some(&fds))?;
-
-        let (reply_body, reply_fds) = node.recv_reply_with_optional_files::<VhostUserU64>(&hdr)?;
-        let val = reply_body.value;
-
-        // Bits 0-7: error code (0 = success)
-        // Bit 8: "invalid fd" flag (1 = no fd in reply)
-        let error_code = val & 0xFF;
-        if error_code != 0 {
-            return Err(Error::VhostUserProtocol(VhostUserError::BackendInternalError));
-        }
-
-        let has_valid_fd = (val & 0x100) == 0;
-        if has_valid_fd {
-            Ok(reply_fds.and_then(|fds| fds.into_iter().next()))
-        } else {
-            Ok(None)
-        }
-    }
-
-    fn check_device_state(&mut self) -> Result<()> {
-        let mut node = self.node();
-        node.check_proto_feature(VhostUserProtocolFeatures::DEVICE_STATE)?;
-
-        let hdr = node.send_request_header(FrontendReq::CHECK_DEVICE_STATE, None)?;
-        let reply = node.recv_reply::<VhostUserU64>(&hdr)?;
-
-        if reply.value != 0 {
-            return Err(Error::VhostUserProtocol(VhostUserError::BackendInternalError));
-        }
-
-        Ok(())
-    }
 }
 
 impl AsRawFd for Frontend {
@@ -804,24 +747,6 @@ impl FrontendInternal {
 
         let (reply, body, files) = self.main_sock.recv_body::<T>()?;
         if !reply.is_reply_for(hdr) || files.is_none() || !body.is_valid() {
-            return Err(VhostUserError::InvalidMessage);
-        }
-        Ok((body, files))
-    }
-
-    /// Like `recv_reply_with_files` but does not require file descriptors in the reply.
-    /// Used for SET_DEVICE_STATE_FD where the backend may or may not return a pipe fd.
-    fn recv_reply_with_optional_files<T: ByteValued + Sized + VhostUserMsgValidator + Default>(
-        &mut self,
-        hdr: &VhostUserMsgHeader<FrontendReq>,
-    ) -> VhostUserResult<(T, Option<Vec<File>>)> {
-        if mem::size_of::<T>() > MAX_MSG_SIZE || hdr.is_reply() {
-            return Err(VhostUserError::InvalidParam);
-        }
-        self.check_state()?;
-
-        let (reply, body, files) = self.main_sock.recv_body::<T>()?;
-        if !reply.is_reply_for(hdr) || !body.is_valid() {
             return Err(VhostUserError::InvalidMessage);
         }
         Ok((body, files))

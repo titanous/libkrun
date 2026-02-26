@@ -202,7 +202,7 @@ impl<T: VhostKernBackend> VhostBackend for T {
     /// # Arguments
     /// * `queue_index` - Index of the queue to set addresses for.
     /// * `config_data` - Vring config data, addresses of desc_table, avail_ring
-    ///     and used_ring are in the guest address space.
+    ///   and used_ring are in the guest address space.
     fn set_vring_addr(&self, queue_index: usize, config_data: &VringConfigData) -> Result<()> {
         if !self.is_valid(config_data) {
             return Err(Error::InvalidQueue);
@@ -235,12 +235,12 @@ impl<T: VhostKernBackend> VhostBackend for T {
 
     /// Get a bitmask of supported virtio/vhost features.
     fn get_vring_base(&self, queue_index: usize) -> Result<u32> {
-        let vring_state = vhost_vring_state {
+        let mut vring_state = vhost_vring_state {
             index: queue_index as u32,
             num: 0,
         };
         // SAFETY: This ioctl is called on a valid vhost fd and has its return value checked.
-        let ret = unsafe { ioctl_with_ref(self, VHOST_GET_VRING_BASE(), &vring_state) };
+        let ret = unsafe { ioctl_with_mut_ref(self, VHOST_GET_VRING_BASE(), &mut vring_state) };
         ioctl_result(ret, vring_state.num)
     }
 

@@ -51,10 +51,15 @@ pub mod vhost_user;
 #[cfg(feature = "vhost-vsock")]
 pub mod vsock;
 
-/// Due to the way `xen` handles memory mappings we can not combine it with
-/// `postcopy` feature which relies on persistent memory mappings. Thus we
-/// disallow enabling both features at the same time.
-#[cfg(all(feature = "postcopy", feature = "xen"))]
+// Due to the way `xen` handles memory mappings we can not combine it with
+// `postcopy` feature which relies on persistent memory mappings. Thus we
+// disallow enabling both features at the same time.
+#[cfg(all(
+    not(RUSTDOC_disable_feature_compat_errors),
+    not(doc),
+    feature = "postcopy",
+    feature = "xen"
+))]
 compile_error!("Both `postcopy` and `xen` features can not be enabled at the same time.");
 
 /// Error codes for vhost operations
@@ -105,13 +110,13 @@ impl std::fmt::Display for Error {
             Error::UsedAddress => write!(f, "invalid virtqueue used table address"),
             Error::AvailAddress => write!(f, "invalid virtqueue available table address"),
             Error::LogAddress => write!(f, "invalid virtqueue log address"),
-            Error::IOError(e) => write!(f, "IO error: {}", e),
+            Error::IOError(e) => write!(f, "IO error: {e}"),
             #[cfg(feature = "vhost-kern")]
-            Error::VhostOpen(e) => write!(f, "failure in opening vhost file: {}", e),
+            Error::VhostOpen(e) => write!(f, "failure in opening vhost file: {e}"),
             #[cfg(feature = "vhost-kern")]
-            Error::IoctlError(e) => write!(f, "failure in vhost ioctl: {}", e),
+            Error::IoctlError(e) => write!(f, "failure in vhost ioctl: {e}"),
             #[cfg(feature = "vhost-user")]
-            Error::VhostUserProtocol(e) => write!(f, "vhost-user: {}", e),
+            Error::VhostUserProtocol(e) => write!(f, "vhost-user: {e}"),
         }
     }
 }
@@ -176,6 +181,6 @@ mod tests {
     fn test_convert_from_vhost_user_error() {
         let e: Error = vhost_user::Error::OversizedMsg.into();
 
-        assert_eq!(format!("{}", e), "vhost-user: oversized message");
+        assert_eq!(format!("{e}"), "vhost-user: oversized message");
     }
 }
