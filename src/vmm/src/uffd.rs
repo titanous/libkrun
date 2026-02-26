@@ -6,7 +6,7 @@
 //! The `UffdHandler` manages registration of guest memory regions with the Linux
 //! userfaultfd mechanism and resolves page faults by reading pages from a `SnapshotStore`.
 
-use crate::snapshot_store::SnapshotStore;
+use crate::snapshot_store::{system_page_size, SnapshotStore};
 use crate::vm_exit::SharedVmExit;
 use futures::StreamExt;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -50,7 +50,7 @@ fn guest_addr_to_page_index(regions: &[UffdRegion], guest_addr: u64) -> Option<u
     for region in regions {
         if guest_addr >= region.guest_addr && guest_addr < region.guest_addr + region.size {
             let region_offset = guest_addr - region.guest_addr;
-            let page_in_region = (region_offset / 4096) as usize;
+            let page_in_region = (region_offset / system_page_size()) as usize;
             return Some(region.page_offset + page_in_region);
         }
     }
@@ -120,7 +120,7 @@ async fn preload_task(
                     Ok(_) => {
                         // Successfully copied chunk. Mark all pages in the chunk as loaded via preload.
                         // Chunk is typically multi-page (e.g., 4MB chunks from FsSnapshotStore).
-                        let chunk_pages = data.len().div_ceil(4096); // Round up to pages
+                        let chunk_pages = data.len().div_ceil(system_page_size() as usize);
                         if let Some(start_page_index) =
                             guest_addr_to_page_index(&regions, guest_addr)
                         {
@@ -200,8 +200,7 @@ impl UffdHandler {
                     ))
                 })?;
 
-            // Calculate number of 4KB pages in this region
-            let num_pages = size.div_ceil(4096);
+            let num_pages = size.div_ceil(system_page_size());
             let page_offset = total_pages;
             total_pages = total_pages
                 .checked_add(num_pages as usize)
