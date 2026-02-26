@@ -502,51 +502,7 @@ impl Vmm {
 
         snapshot::load_memory(&self.guest_memory, &path.join("memory"))?;
 
-        #[cfg(target_arch = "aarch64")]
-        if let Some(gic_data) = &vmstate.gic_state {
-            self.restore_interrupt_controller_state(gic_data)?;
-        }
-
-        #[cfg(target_arch = "x86_64")]
-        if let Some(data) = &vmstate.vm_state {
-            let state: vstate::VmState = bincode::deserialize(data)
-                .map_err(|e| snapshot::SnapshotError::Deserialize(e.to_string()))?;
-            self.vm.restore_state(&state).map_err(|e| {
-                snapshot::SnapshotError::Deserialize(format!("Failed to restore VM state: {e}"))
-            })?;
-        }
-
-        self.mmio_device_manager
-            .restore_all_device_states(&vmstate.device_states)
-            .map_err(|e| {
-                snapshot::SnapshotError::Deserialize(format!(
-                    "Failed to restore device states: {e}"
-                ))
-            })?;
-
-        #[cfg(target_arch = "x86_64")]
-        {
-            self.pio_device_manager
-                .restore_all_device_states(&vmstate.device_states)
-                .map_err(|e| {
-                    snapshot::SnapshotError::Deserialize(format!(
-                        "Failed to restore PortIO device states: {e}"
-                    ))
-                })?;
-        }
-
-        self.mmio_device_manager
-            .complete_all_device_restores()
-            .map_err(|e| {
-                snapshot::SnapshotError::Deserialize(format!(
-                    "Failed to complete device restores: {e}"
-                ))
-            })?;
-        self.mmio_device_manager.resume_all_device_workers();
-
-        self.restore_vcpu_states(vmstate.vcpu_states).map_err(|e| {
-            snapshot::SnapshotError::Deserialize(format!("Failed to restore vCPU states: {e}"))
-        })?;
+        self.restore_device_and_vcpu_states(vmstate)?;
         Ok(())
     }
 
@@ -1122,52 +1078,15 @@ impl Vmm {
 
         snapshot::apply_dirty_pages(&self.guest_memory, &incremental.dirty_pages)?;
 
-        #[cfg(target_arch = "aarch64")]
-        if let Some(gic_data) = &incremental.gic_state {
-            self.restore_interrupt_controller_state(gic_data)?;
-        }
-
-        #[cfg(target_arch = "x86_64")]
-        if let Some(data) = &incremental.vm_state {
-            let state: vstate::VmState = bincode::deserialize(data)
-                .map_err(|e| snapshot::SnapshotError::Deserialize(e.to_string()))?;
-            self.vm.restore_state(&state).map_err(|e| {
-                snapshot::SnapshotError::Deserialize(format!("Failed to restore VM state: {e}"))
-            })?;
-        }
-
-        self.mmio_device_manager
-            .restore_all_device_states(&incremental.device_states)
-            .map_err(|e| {
-                snapshot::SnapshotError::Deserialize(format!(
-                    "Failed to restore device states: {e}"
-                ))
-            })?;
-
-        #[cfg(target_arch = "x86_64")]
-        {
-            self.pio_device_manager
-                .restore_all_device_states(&incremental.device_states)
-                .map_err(|e| {
-                    snapshot::SnapshotError::Deserialize(format!(
-                        "Failed to restore PortIO device states: {e}"
-                    ))
-                })?;
-        }
-
-        self.mmio_device_manager
-            .complete_all_device_restores()
-            .map_err(|e| {
-                snapshot::SnapshotError::Deserialize(format!(
-                    "Failed to complete device restores: {e}"
-                ))
-            })?;
-        self.mmio_device_manager.resume_all_device_workers();
-
-        self.restore_vcpu_states(incremental.vcpu_states)
-            .map_err(|e| {
-                snapshot::SnapshotError::Deserialize(format!("Failed to restore vCPU states: {e}"))
-            })?;
+        // Reuse shared helper for device/vCPU state restoration
+        let vmstate = snapshot::VmSnapshot {
+            header: incremental.header,
+            vcpu_states: incremental.vcpu_states,
+            device_states: incremental.device_states,
+            gic_state: incremental.gic_state,
+            vm_state: incremental.vm_state,
+        };
+        self.restore_device_and_vcpu_states(vmstate)?;
         Ok(())
     }
 
