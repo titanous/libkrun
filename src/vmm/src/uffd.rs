@@ -57,6 +57,8 @@ pub struct UffdHandler {
     vmstate_tx: Option<oneshot::Sender<std::io::Result<Vec<u8>>>>,
     /// Receiver to signal that main thread is ready for faults
     ready_rx: Option<oneshot::Receiver<()>>,
+    /// Page tracker for monitoring restore progress (preload vs fault)
+    tracker: Arc<PageTracker>,
 }
 
 /// Preload task that consumes the store's preload stream and copies pages via UFFD.
@@ -67,6 +69,7 @@ async fn preload_task(
     store: Arc<dyn SnapshotStore>,
     uffd: Arc<Uffd>,
     regions: Vec<UffdRegion>,
+    tracker: Arc<PageTracker>,
 ) {
     let region_params: Vec<(u64, u64)> = regions
         .iter()
@@ -100,7 +103,13 @@ async fn preload_task(
 
                 match result {
                     Ok(_) => {
-                        // Successfully copied chunk
+                        // Successfully copied chunk. Mark all pages in the chunk as loaded via preload.
+                        // Chunk is typically multi-page (e.g., 4MB chunks from FsSnapshotStore).
+                        let chunk_pages = (data.len() + 4095) / 4096; // Round up to pages
+                        let start_page_index = (guest_addr / 4096) as usize;
+                        for i in 0..chunk_pages {
+                            tracker.mark_loaded(start_page_index + i, LoadSource::Preload);
+                        }
                     }
                     Err(e) if is_eexist(&e) => {
                         // Race with fault handler — a page in this chunk was
@@ -163,14 +172,23 @@ impl UffdHandler {
 
         let uffd = Arc::new(uffd);
 
-        // Register all memory regions
+        // Register all memory regions and compute total pages
         let mut uffd_regions = Vec::new();
+        let mut total_pages: usize = 0;
         for (guest_addr, host_addr, size) in regions {
             uffd.register(host_addr as *mut _, size as usize)
                 .map_err(|e| {
                     std::io::Error::other(
                         format!("Failed to register UFFD region at 0x{guest_addr:x}: {e}"),
                     )
+                })?;
+
+            // Calculate number of 4KB pages in this region
+            let num_pages = (size + 4095) / 4096;
+            total_pages = total_pages
+                .checked_add(num_pages as usize)
+                .ok_or_else(|| {
+                    std::io::Error::other("total_pages overflow")
                 })?;
 
             uffd_regions.push(UffdRegion {
@@ -180,6 +198,9 @@ impl UffdHandler {
             });
         }
 
+        // Create page tracker for monitoring restore progress
+        let tracker = Arc::new(PageTracker::new(total_pages));
+
         Ok(UffdHandler {
             uffd,
             store,
@@ -187,6 +208,7 @@ impl UffdHandler {
             regions: uffd_regions,
             vmstate_tx: Some(vmstate_tx),
             ready_rx: Some(ready_rx),
+            tracker,
         })
     }
 
@@ -205,6 +227,13 @@ impl UffdHandler {
             "UFFD fault at host address 0x{:x} not found in any registered region",
             host_addr
         );
+    }
+
+    /// Get current restore progress statistics.
+    ///
+    /// Returns a snapshot of pages loaded, fault counts, and progress percentage.
+    pub fn tracker_stats(&self) -> PageTrackerStats {
+        self.tracker.stats()
     }
 
     /// Spawn the handler on a dedicated thread with tokio runtime.
@@ -232,9 +261,10 @@ impl UffdHandler {
         let store_for_preload = self.store.clone();
         let uffd_for_preload = self.uffd.clone();
         let regions_for_preload = self.regions.clone();
+        let tracker_for_preload = self.tracker.clone();
 
         // Create preload and fault loop futures
-        let preload_future = preload_task(store_for_preload, uffd_for_preload, regions_for_preload);
+        let preload_future = preload_task(store_for_preload, uffd_for_preload, regions_for_preload, tracker_for_preload);
         let fault_future = self.fault_loop();
 
         // Run both concurrently until the fault loop exits
@@ -286,11 +316,15 @@ impl UffdHandler {
             // Read event (non-blocking)
             match async_uffd.get_ref().0.read_event() {
                 Ok(Some(userfaultfd::Event::Pagefault { addr, .. })) => {
+                    // Record that a fault event was received
+                    self.tracker.record_fault();
+
                     let guest_addr = self.host_to_guest(addr as u64);
                     let store_clone = self.store.clone();
                     let uffd_clone = self.uffd.clone();
                     let host_addr = addr as u64;
                     let vm_exit = self.vm_exit.clone();
+                    let tracker_clone = self.tracker.clone();
 
                     tokio::spawn(async move {
                         match store_clone.read_page(guest_addr).await {
@@ -305,7 +339,9 @@ impl UffdHandler {
                                 };
                                 match result {
                                     Ok(_) => {
-                                        // Successfully copied page data
+                                        // Successfully copied page data. Mark page as loaded via fault.
+                                        let page_index = (guest_addr / 4096) as usize;
+                                        tracker_clone.mark_loaded(page_index, LoadSource::Fault);
                                     }
                                     Err(e) => {
                                         // Check for EEXIST (page already mapped, race condition)
@@ -945,12 +981,16 @@ mod tests {
 
         let store_with_chunks = Arc::new(MockSnapshotStore::with_preload_chunks(preload_chunks.clone()));
 
+        // Create a tracker for the test (optional, since test just verifies preload writes data)
+        let tracker = Arc::new(PageTracker::new(1000));
+
         // Run preload_task with the configured mock store
         futures::executor::block_on(async {
             preload_task(
                 store_with_chunks,
                 handler.uffd.clone(),
                 handler.regions.clone(),
+                tracker.clone(),
             ).await;
         });
 
@@ -1246,5 +1286,180 @@ mod tests {
         assert_eq!(stats.fault_pages, 100);
         assert_eq!(stats.total_faults, 200);
         assert!((stats.progress_pct - 70.0).abs() < 0.01);
+    }
+
+    // ============================================================================
+    // UffdHandler + PageTracker Integration Tests
+    // ============================================================================
+
+    #[test]
+    fn test_uffd_handler_initializes_tracker() {
+        // Verify that UffdHandler initializes PageTracker with correct page count
+        let size = 4096 * 100; // 100 pages
+        let host_addr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert!(!host_addr.is_null());
+
+        let store = Arc::new(MockSnapshotStore::new());
+        let vm_exit = Arc::new(Mutex::new(None));
+        let regions = vec![(0x0u64, host_addr as u64, size as u64)];
+
+        let (vmstate_tx, _vmstate_rx) = oneshot::channel();
+        let (_ready_tx, ready_rx) = oneshot::channel();
+
+        match UffdHandler::new(store, vm_exit, regions, vmstate_tx, ready_rx) {
+            Ok(handler) => {
+                // Verify tracker was initialized
+                let stats = handler.tracker_stats();
+                assert_eq!(stats.total_pages, 100, "Tracker should track 100 pages");
+                assert_eq!(stats.loaded_pages, 0, "No pages should be loaded initially");
+                assert_eq!(stats.preload_pages, 0);
+                assert_eq!(stats.fault_pages, 0);
+                assert_eq!(stats.total_faults, 0);
+            }
+            Err(e) => {
+                let error_msg = e.to_string();
+                if !error_msg.contains("Permission denied") {
+                    panic!("UffdHandler creation failed: {:?}", e);
+                }
+            }
+        }
+
+        unsafe {
+            libc::munmap(host_addr, size);
+        }
+    }
+
+    #[test]
+    fn test_uffd_handler_tracks_multiple_regions() {
+        // Verify that tracker accounts for multiple memory regions
+        let region1_size = 4096 * 50;
+        let region2_size = 4096 * 30;
+
+        let region1_addr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                region1_size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert!(!region1_addr.is_null());
+
+        let region2_addr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                region2_size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert!(!region2_addr.is_null());
+
+        let store = Arc::new(MockSnapshotStore::new());
+        let vm_exit = Arc::new(Mutex::new(None));
+        let regions = vec![
+            (0x0u64, region1_addr as u64, region1_size as u64),
+            (0x100000u64, region2_addr as u64, region2_size as u64),
+        ];
+
+        let (vmstate_tx, _vmstate_rx) = oneshot::channel();
+        let (_ready_tx, ready_rx) = oneshot::channel();
+
+        match UffdHandler::new(store, vm_exit, regions, vmstate_tx, ready_rx) {
+            Ok(handler) => {
+                let stats = handler.tracker_stats();
+                // Total should be sum of both regions: 50 + 30 = 80 pages
+                assert_eq!(stats.total_pages, 80, "Tracker should account for both regions");
+            }
+            Err(e) => {
+                let error_msg = e.to_string();
+                if !error_msg.contains("Permission denied") {
+                    panic!("UffdHandler creation failed: {:?}", e);
+                }
+            }
+        }
+
+        unsafe {
+            libc::munmap(region1_addr, region1_size);
+            libc::munmap(region2_addr, region2_size);
+        }
+    }
+
+    #[test]
+    fn test_preload_task_updates_tracker() {
+        // Test that preload_task correctly marks pages as loaded via preload
+        let size = 4096 * 10;
+        let host_addr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert!(!host_addr.is_null());
+
+        let store = Arc::new(MockSnapshotStore::new());
+        let vm_exit = Arc::new(Mutex::new(None));
+        let regions = vec![(0x0u64, host_addr as u64, size as u64)];
+
+        let (vmstate_tx, _vmstate_rx) = oneshot::channel();
+        let (_ready_tx, ready_rx) = oneshot::channel();
+
+        let handler = match UffdHandler::new(store.clone(), vm_exit, regions, vmstate_tx, ready_rx) {
+            Ok(h) => h,
+            Err(e) => {
+                let error_msg = e.to_string();
+                if error_msg.contains("Permission denied") {
+                    unsafe {
+                        libc::munmap(host_addr, size);
+                    }
+                    return;
+                }
+                panic!("UffdHandler creation failed: {e}");
+            }
+        };
+
+        // Create a preload chunk (1 page of data at guest addr 0x0)
+        let preload_chunks = vec![
+            (0x0u64, vec![0xAAu8; 4096]),
+        ];
+        let store_with_chunks = Arc::new(MockSnapshotStore::with_preload_chunks(preload_chunks));
+        let tracker = handler.tracker.clone();
+
+        // Run preload_task
+        futures::executor::block_on(async {
+            preload_task(
+                store_with_chunks,
+                handler.uffd.clone(),
+                handler.regions.clone(),
+                tracker.clone(),
+            ).await;
+        });
+
+        // Verify tracker was updated
+        let stats = tracker.stats();
+        assert_eq!(stats.loaded_pages, 1, "One page should be marked as loaded");
+        assert_eq!(stats.preload_pages, 1, "Page should be from preload source");
+        assert_eq!(stats.fault_pages, 0);
+
+        unsafe {
+            libc::munmap(host_addr, size);
+        }
     }
 }
