@@ -368,6 +368,161 @@ fn signal_error(vm_exit: &SharedVmExit, message: String) {
     }
 }
 
+/// Source of page load: preload or demand fault.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LoadSource {
+    /// Page loaded via preload stream
+    Preload,
+    /// Page loaded via fault handler
+    Fault,
+}
+
+/// Statistics snapshot for restore progress monitoring.
+#[derive(Debug, Clone)]
+pub struct PageTrackerStats {
+    /// Total number of pages tracked
+    pub total_pages: usize,
+    /// Number of pages that have been loaded (set bits in bitmap)
+    pub loaded_pages: usize,
+    /// Pages loaded via preload
+    pub preload_pages: usize,
+    /// Pages loaded via fault handler
+    pub fault_pages: usize,
+    /// Total fault events received (including EEXIST races)
+    pub total_faults: usize,
+    /// Progress percentage (loaded_pages / total_pages * 100.0)
+    pub progress_pct: f64,
+}
+
+/// Atomic bitmap for tracking which guest pages have been loaded during restore.
+///
+/// Uses `AtomicU64` words to enable lock-free updates from concurrent fault handler
+/// and preload tasks. One bit per page, packed into u64 words.
+///
+/// Thread-safe: `mark_loaded` uses atomic OR and can be called from concurrent tasks.
+pub struct PageTracker {
+    /// Total number of pages tracked
+    total_pages: usize,
+    /// Bitmap stored as AtomicU64 words (each covers 64 pages)
+    bitmap: Vec<std::sync::atomic::AtomicU64>,
+    /// Number of pages loaded via preload stream
+    preload_count: std::sync::atomic::AtomicUsize,
+    /// Number of pages loaded via fault handler
+    fault_count: std::sync::atomic::AtomicUsize,
+    /// Total faults received (including EEXIST)
+    total_faults: std::sync::atomic::AtomicUsize,
+}
+
+impl PageTracker {
+    /// Create a new page tracker for the given number of pages.
+    ///
+    /// Allocates and zeroes the bitmap.
+    pub fn new(total_pages: usize) -> Self {
+        let num_words = (total_pages + 63) / 64;
+        let bitmap: Vec<std::sync::atomic::AtomicU64> =
+            (0..num_words)
+                .map(|_| std::sync::atomic::AtomicU64::new(0))
+                .collect();
+
+        PageTracker {
+            total_pages,
+            bitmap,
+            preload_count: std::sync::atomic::AtomicUsize::new(0),
+            fault_count: std::sync::atomic::AtomicUsize::new(0),
+            total_faults: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// Mark a page as loaded from the given source.
+    ///
+    /// Uses atomic OR to set the bit. If the bit was already set (page previously loaded),
+    /// the counter is not incremented. This handles EEXIST races where both preload and
+    /// fault handler might try to load the same page.
+    pub fn mark_loaded(&self, page_index: usize, source: LoadSource) {
+        if page_index >= self.total_pages {
+            return;
+        }
+
+        let word_idx = page_index / 64;
+        let bit_idx = page_index % 64;
+
+        // Use fetch_or to atomically set the bit. It returns the old value.
+        let old_word = self.bitmap[word_idx]
+            .fetch_or(1u64 << bit_idx, std::sync::atomic::Ordering::Relaxed);
+
+        // Only increment counter if bit was not already set
+        if (old_word >> bit_idx) & 1 == 0 {
+            match source {
+                LoadSource::Preload => {
+                    self.preload_count
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                LoadSource::Fault => {
+                    self.fault_count
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        }
+    }
+
+    /// Record that a fault event was received.
+    ///
+    /// Called on every fault event, regardless of outcome (including EEXIST).
+    pub fn record_fault(&self) {
+        self.total_faults
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Check whether a page has been loaded.
+    pub fn is_loaded(&self, page_index: usize) -> bool {
+        if page_index >= self.total_pages {
+            return false;
+        }
+
+        let word_idx = page_index / 64;
+        let bit_idx = page_index % 64;
+
+        (self.bitmap[word_idx].load(std::sync::atomic::Ordering::Relaxed) >> bit_idx) & 1 != 0
+    }
+
+    /// Get a snapshot of current statistics.
+    ///
+    /// This counts all set bits in the bitmap (O(n/64) where n = total_pages).
+    pub fn stats(&self) -> PageTrackerStats {
+        // Count set bits across all words
+        let mut loaded_pages = 0;
+        for word in &self.bitmap {
+            let w = word.load(std::sync::atomic::Ordering::Relaxed);
+            loaded_pages += w.count_ones() as usize;
+        }
+
+        let preload_pages = self
+            .preload_count
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let fault_pages = self
+            .fault_count
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let total_faults = self
+            .total_faults
+            .load(std::sync::atomic::Ordering::Relaxed);
+
+        let progress_pct = if self.total_pages > 0 {
+            (loaded_pages as f64 / self.total_pages as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        PageTrackerStats {
+            total_pages: self.total_pages,
+            loaded_pages,
+            preload_pages,
+            fault_pages,
+            total_faults,
+            progress_pct,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -853,5 +1008,243 @@ mod tests {
             }
             assert_eq!(count, 1, "Should consume 1 chunk before stopping");
         });
+    }
+
+    // ============================================================================
+    // PageTracker Tests
+    // ============================================================================
+
+    #[test]
+    fn test_page_tracker_basic_mark_loaded() {
+        // Verify that marking a page as loaded sets the bit and increments counter
+        let tracker = PageTracker::new(64);
+
+        assert!(!tracker.is_loaded(0), "Page 0 should not be loaded initially");
+        assert_eq!(tracker.stats().loaded_pages, 0);
+        assert_eq!(tracker.stats().preload_pages, 0);
+        assert_eq!(tracker.stats().fault_pages, 0);
+
+        tracker.mark_loaded(0, LoadSource::Preload);
+
+        assert!(tracker.is_loaded(0), "Page 0 should be loaded after mark_loaded");
+        let stats = tracker.stats();
+        assert_eq!(stats.loaded_pages, 1);
+        assert_eq!(stats.preload_pages, 1);
+        assert_eq!(stats.fault_pages, 0);
+    }
+
+    #[test]
+    fn test_page_tracker_mark_same_page_twice() {
+        // Verify that marking the same page twice only increments counter once
+        let tracker = PageTracker::new(64);
+
+        tracker.mark_loaded(5, LoadSource::Preload);
+        tracker.mark_loaded(5, LoadSource::Preload);
+
+        let stats = tracker.stats();
+        assert_eq!(stats.loaded_pages, 1, "Should only count the page once");
+        assert_eq!(stats.preload_pages, 1, "Preload counter should be 1");
+    }
+
+    #[test]
+    fn test_page_tracker_mixed_sources() {
+        // Verify that pages from both preload and fault sources are tracked correctly
+        let tracker = PageTracker::new(100);
+
+        tracker.mark_loaded(0, LoadSource::Preload);
+        tracker.mark_loaded(1, LoadSource::Preload);
+        tracker.mark_loaded(2, LoadSource::Fault);
+        tracker.mark_loaded(3, LoadSource::Fault);
+
+        let stats = tracker.stats();
+        assert_eq!(stats.loaded_pages, 4);
+        assert_eq!(stats.preload_pages, 2);
+        assert_eq!(stats.fault_pages, 2);
+    }
+
+    #[test]
+    fn test_page_tracker_progress_percentage() {
+        // Verify that progress_pct calculation is correct
+        let tracker = PageTracker::new(100);
+
+        // Load 25 pages
+        for i in 0..25 {
+            tracker.mark_loaded(i, LoadSource::Preload);
+        }
+
+        let stats = tracker.stats();
+        assert_eq!(stats.loaded_pages, 25);
+        assert!((stats.progress_pct - 25.0).abs() < 0.01, "Progress should be ~25%");
+    }
+
+    #[test]
+    fn test_page_tracker_progress_zero_pages() {
+        // Verify that progress_pct is 0 when total_pages is 0
+        let tracker = PageTracker::new(0);
+        let stats = tracker.stats();
+        assert_eq!(stats.progress_pct, 0.0);
+    }
+
+    #[test]
+    fn test_page_tracker_record_fault() {
+        // Verify that fault counter increments independently
+        let tracker = PageTracker::new(64);
+
+        tracker.record_fault();
+        tracker.record_fault();
+        tracker.record_fault();
+
+        let stats = tracker.stats();
+        assert_eq!(stats.total_faults, 3);
+    }
+
+    #[test]
+    fn test_page_tracker_out_of_bounds() {
+        // Verify that marking out-of-bounds pages is silently ignored
+        let tracker = PageTracker::new(64);
+
+        tracker.mark_loaded(64, LoadSource::Preload); // Out of bounds
+        tracker.mark_loaded(1000, LoadSource::Fault);
+
+        let stats = tracker.stats();
+        assert_eq!(stats.loaded_pages, 0, "Out-of-bounds marks should be ignored");
+    }
+
+    #[test]
+    fn test_page_tracker_is_loaded_out_of_bounds() {
+        // Verify that checking out-of-bounds returns false
+        let tracker = PageTracker::new(64);
+
+        assert!(!tracker.is_loaded(64));
+        assert!(!tracker.is_loaded(1000));
+    }
+
+    #[test]
+    fn test_page_tracker_multiple_words() {
+        // Verify that bitmap works correctly across multiple 64-bit words
+        let tracker = PageTracker::new(200);
+
+        // Mark pages in different words
+        tracker.mark_loaded(0, LoadSource::Preload);    // Word 0, bit 0
+        tracker.mark_loaded(63, LoadSource::Preload);   // Word 0, bit 63
+        tracker.mark_loaded(64, LoadSource::Fault);     // Word 1, bit 0
+        tracker.mark_loaded(127, LoadSource::Fault);    // Word 1, bit 63
+        tracker.mark_loaded(128, LoadSource::Preload);  // Word 2, bit 0
+
+        let stats = tracker.stats();
+        assert_eq!(stats.loaded_pages, 5);
+        assert_eq!(stats.preload_pages, 3);
+        assert_eq!(stats.fault_pages, 2);
+
+        assert!(tracker.is_loaded(0));
+        assert!(tracker.is_loaded(63));
+        assert!(tracker.is_loaded(64));
+        assert!(tracker.is_loaded(127));
+        assert!(tracker.is_loaded(128));
+        assert!(!tracker.is_loaded(1));
+        assert!(!tracker.is_loaded(65));
+    }
+
+    #[test]
+    fn test_page_tracker_race_condition_preload_then_fault() {
+        // Simulate preload-then-fault race: both try to load same page
+        // Preload marks first, then fault tries to mark same page
+        let tracker = PageTracker::new(100);
+
+        tracker.mark_loaded(10, LoadSource::Preload);
+        tracker.mark_loaded(10, LoadSource::Fault); // Race: fault sees page already loaded (EEXIST)
+
+        let stats = tracker.stats();
+        assert_eq!(stats.loaded_pages, 1, "Page should be counted once");
+        assert_eq!(stats.preload_pages, 1, "Only preload should be counted");
+        assert_eq!(stats.fault_pages, 0, "Fault should not increment counter on EEXIST race");
+    }
+
+    #[test]
+    fn test_page_tracker_full_preload() {
+        // Simulate full preload: all pages loaded via preload, zero faults
+        let total = 1000;
+        let tracker = PageTracker::new(total);
+
+        for i in 0..total {
+            tracker.mark_loaded(i, LoadSource::Preload);
+        }
+
+        let stats = tracker.stats();
+        assert_eq!(stats.loaded_pages, total);
+        assert_eq!(stats.preload_pages, total);
+        assert_eq!(stats.fault_pages, 0);
+        assert!((stats.progress_pct - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_page_tracker_concurrent_marking() {
+        // Verify concurrent marking from multiple threads doesn't corrupt state
+        use std::sync::atomic::AtomicBool;
+        use std::thread;
+
+        let tracker = Arc::new(PageTracker::new(1000));
+        let _success = Arc::new(AtomicBool::new(true));
+
+        let mut handles = vec![];
+
+        // Spawn multiple threads, each marking pages
+        for thread_id in 0..4 {
+            let tracker_clone = tracker.clone();
+
+            let handle = thread::spawn(move || {
+                for i in 0..250 {
+                    let page_idx = thread_id * 250 + i;
+                    let source = if thread_id % 2 == 0 {
+                        LoadSource::Preload
+                    } else {
+                        LoadSource::Fault
+                    };
+                    tracker_clone.mark_loaded(page_idx, source);
+                }
+            });
+
+            handles.push(handle);
+        }
+
+        // Wait for all threads
+        for handle in handles {
+            handle.join().expect("Thread panicked");
+        }
+
+        // Verify final state
+        let stats = tracker.stats();
+        assert_eq!(stats.loaded_pages, 1000, "All 1000 pages should be marked");
+        assert_eq!(stats.preload_pages, 500, "500 pages from preload");
+        assert_eq!(stats.fault_pages, 500, "500 pages from fault");
+    }
+
+    #[test]
+    fn test_page_tracker_partial_load() {
+        // Verify stats for partially loaded memory
+        let tracker = PageTracker::new(1000);
+
+        // Simulate restore in progress: 700 pages loaded, 300 remaining
+        for i in 0..700 {
+            let source = if i < 600 {
+                LoadSource::Preload
+            } else {
+                LoadSource::Fault
+            };
+            tracker.mark_loaded(i, source);
+        }
+
+        // 200 total faults received (some resulted in loads, some in EEXIST)
+        for _ in 0..200 {
+            tracker.record_fault();
+        }
+
+        let stats = tracker.stats();
+        assert_eq!(stats.total_pages, 1000);
+        assert_eq!(stats.loaded_pages, 700);
+        assert_eq!(stats.preload_pages, 600);
+        assert_eq!(stats.fault_pages, 100);
+        assert_eq!(stats.total_faults, 200);
+        assert!((stats.progress_pct - 70.0).abs() < 0.01);
     }
 }
