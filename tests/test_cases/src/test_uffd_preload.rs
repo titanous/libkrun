@@ -15,7 +15,7 @@ mod host_full {
     use crate::krun_rust::setup_fs_builder;
     use crate::{Test, TestSetup};
     use krun::snapshot_store::FsSnapshotStoreFactory;
-    use std::io::{Read, Write};
+    use std::io::Read;
     use std::os::unix::net::UnixListener;
     use std::thread;
     use std::time::Duration;
@@ -166,7 +166,7 @@ mod host_partial {
     use crate::krun_rust::setup_fs_builder;
     use crate::mock_snapshot_store::PartialPreloadStoreFactory;
     use crate::{Test, TestSetup};
-    use std::io::{Read, Write};
+    use std::io::Read;
     use std::os::unix::net::UnixListener;
     use std::thread;
     use std::time::Duration;

@@ -6,7 +6,7 @@
 use std::io;
 use std::path::Path;
 
-use futures::stream::{self, StreamExt, TryStreamExt};
+use futures::stream::{self, TryStreamExt};
 use krun::snapshot_store::{
     BoxStream, FsSnapshotStoreFactory, SendBoxFuture, SnapshotStore, SnapshotStoreFactory,
 };
