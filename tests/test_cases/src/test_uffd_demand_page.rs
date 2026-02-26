@@ -152,7 +152,10 @@ mod guest {
 
             // After cold restore, verify counter is still 42
             let val = COUNTER.load(std::sync::atomic::Ordering::SeqCst);
-            assert_eq!(val, 42, "counter was {val} after demand-page restore, expected 42");
+            assert_eq!(
+                val, 42,
+                "counter was {val} after demand-page restore, expected 42"
+            );
 
             // Allocate and write to heap to ensure demand-paged memory works
             let _heap_data: Vec<u8> = vec![0xAB; 4096];

@@ -157,7 +157,10 @@ mod guest {
 
             // After cold restore, verify counter
             let val = COUNTER.load(std::sync::atomic::Ordering::SeqCst);
-            assert_eq!(val, 42, "counter was {val} after parallel fault restore, expected 42");
+            assert_eq!(
+                val, 42,
+                "counter was {val} after parallel fault restore, expected 42"
+            );
 
             // Allocate memory to trigger faults from multiple vCPUs if running in parallel
             let _heap_data: Vec<u8> = vec![0xCC; 8192];

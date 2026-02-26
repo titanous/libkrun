@@ -104,7 +104,10 @@ mod host {
                 });
 
                 // Create factory with base and incrementals
-                let factory = FsSnapshotStoreFactory::new(&full_snap_dir, &[&incr_snap_dir_1, &incr_snap_dir_2]);
+                let factory = FsSnapshotStoreFactory::new(
+                    &full_snap_dir,
+                    &[&incr_snap_dir_1, &incr_snap_dir_2],
+                );
                 let _vm_exit = context2.restore_and_run_with_store(Box::new(factory))?;
 
                 listener_thread.join().ok();

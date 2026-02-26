@@ -141,7 +141,10 @@ mod guest_full {
 
             // Verify counter
             let val = COUNTER.load(std::sync::atomic::Ordering::SeqCst);
-            assert_eq!(val, 42, "counter was {val} after full preload restore, expected 42");
+            assert_eq!(
+                val, 42,
+                "counter was {val} after full preload restore, expected 42"
+            );
 
             // Touch memory to ensure it's available
             let _heap_data: Vec<u8> = vec![0xAB; 4096];
@@ -289,7 +292,10 @@ mod guest_partial {
 
             // Verify counter (both preloaded and demand-paged memory work)
             let val = COUNTER.load(std::sync::atomic::Ordering::SeqCst);
-            assert_eq!(val, 42, "counter was {val} after partial preload restore, expected 42");
+            assert_eq!(
+                val, 42,
+                "counter was {val} after partial preload restore, expected 42"
+            );
 
             // Allocate to trigger demand-paging on second half
             let _heap_data: Vec<u8> = vec![0xAB; 4096];
