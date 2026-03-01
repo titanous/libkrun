@@ -22,6 +22,29 @@ pub use fuse::OpenOptions;
 pub use fuse::RemovemappingOne;
 pub use fuse::SetattrValid;
 
+/// Represents a location in the filesystem tree and can be used to perform operations that act
+/// on the metadata of a file/directory (e.g., `getattr` and `setattr`). Can also be used as the
+/// starting point for looking up paths in the filesystem tree. An `Inode` may support operating
+/// directly on the content of the path that to which it points. `FileSystem` implementations
+/// that support this should set the `FsOptions::ZERO_MESSAGE_OPEN` option in the return value
+/// of the `init` function. On linux based systems, an `Inode` is equivalent to opening a file
+/// or directory with the `libc::O_PATH` flag.
+///
+/// # Lookup Count
+///
+/// The `FileSystem` implementation is required to keep a "lookup count" for every `Inode`.
+/// Every time an `Entry` is returned by a `FileSystem` trait method, this lookup count should
+/// increase by 1. The lookup count for an `Inode` decreases when the kernel sends a `forget`
+/// request. `Inode`s with a non-zero lookup count may receive requests from the kernel even
+/// after calls to `unlink`, `rmdir` or (when overwriting an existing file) `rename`.
+/// `FileSystem` implementations must handle such requests properly and it is recommended to
+/// defer removal of the `Inode` until the lookup count reaches zero. Calls to `unlink`, `rmdir`
+/// or `rename` will be followed closely by `forget` unless the file or directory is open, in
+/// which case the kernel issues `forget` only after the `release` or `releasedir` calls.
+///
+/// Note that if a file system will be exported over NFS the `Inode`'s lifetime must extend even
+/// beyond `forget`. See the `generation` field in `Entry`.
+///
 /// Newtype wrapper for filesystem inode numbers.
 /// Prevents accidental mix-ups with raw u64 values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -380,28 +403,6 @@ pub type ExportTable = Arc<Mutex<BTreeMap<(u64, u64), File>>>;
 /// The main trait that connects a file system with a transport.
 #[allow(unused_variables)]
 pub trait FileSystem {
-    /// Represents a location in the filesystem tree and can be used to perform operations that act
-    /// on the metadata of a file/directory (e.g., `getattr` and `setattr`). Can also be used as the
-    /// starting point for looking up paths in the filesystem tree. An `Inode` may support operating
-    /// directly on the content of the path that to which it points. `FileSystem` implementations
-    /// that support this should set the `FsOptions::ZERO_MESSAGE_OPEN` option in the return value
-    /// of the `init` function. On linux based systems, an `Inode` is equivalent to opening a file
-    /// or directory with the `libc::O_PATH` flag.
-    ///
-    /// # Lookup Count
-    ///
-    /// The `FileSystem` implementation is required to keep a "lookup count" for every `Inode`.
-    /// Every time an `Entry` is returned by a `FileSystem` trait method, this lookup count should
-    /// increase by 1. The lookup count for an `Inode` decreases when the kernel sends a `forget`
-    /// request. `Inode`s with a non-zero lookup count may receive requests from the kernel even
-    /// after calls to `unlink`, `rmdir` or (when overwriting an existing file) `rename`.
-    /// `FileSystem` implementations must handle such requests properly and it is recommended to
-    /// defer removal of the `Inode` until the lookup count reaches zero. Calls to `unlink`, `rmdir`
-    /// or `rename` will be followed closely by `forget` unless the file or directory is open, in
-    /// which case the kernel issues `forget` only after the `release` or `releasedir` calls.
-    ///
-    /// Note that if a file system will be exported over NFS the `Inode`'s lifetime must extend even
-    /// beyond `forget`. See the `generation` field in `Entry`.
     /// Initialize the file system.
     ///
     /// This method is called when a connection to the FUSE kernel module is first established. The
