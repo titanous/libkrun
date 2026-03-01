@@ -6,6 +6,7 @@ pub mod fuse;
 mod multikey;
 mod server;
 mod worker;
+pub mod dax_mapper;
 
 #[cfg(target_os = "linux")]
 pub mod linux;
@@ -26,6 +27,7 @@ use super::descriptor_utils;
 pub use self::defs::uapi::VIRTIO_ID_FS as TYPE_FS;
 pub use self::device::Fs;
 pub use self::filesystem::ExportTable;
+pub use self::dax_mapper::DaxMapper;
 
 mod defs {
     use super::super::QueueConfig;
