@@ -2,11 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#[cfg(target_os = "macos")]
-use crossbeam_channel::Sender;
-#[cfg(target_os = "macos")]
-use utils::worker_message::WorkerMessage;
-
 use std::collections::BTreeMap;
 use std::convert::TryInto;
 use std::ffi::{CStr, CString};
@@ -18,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use super::bindings;
+use super::dax_mapper::DaxMapper;
 use super::fuse;
 
 pub use super::fuse::FsOptions;
@@ -25,6 +21,40 @@ pub use fuse::FileLock;
 pub use fuse::OpenOptions;
 pub use fuse::RemovemappingOne;
 pub use fuse::SetattrValid;
+
+/// Newtype wrapper for filesystem inode numbers.
+/// Prevents accidental mix-ups with raw u64 values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Inode(pub u64);
+
+impl From<u64> for Inode {
+    fn from(val: u64) -> Self {
+        Inode(val)
+    }
+}
+
+impl From<Inode> for u64 {
+    fn from(val: Inode) -> Self {
+        val.0
+    }
+}
+
+/// Newtype wrapper for filesystem handle numbers.
+/// Prevents accidental mix-ups with raw u64 values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Handle(pub u64);
+
+impl From<u64> for Handle {
+    fn from(val: u64) -> Self {
+        Handle(val)
+    }
+}
+
+impl From<Handle> for u64 {
+    fn from(val: Handle) -> Self {
+        val.0
+    }
+}
 
 /// Information about a path in the filesystem.
 pub struct Entry {
@@ -124,7 +154,7 @@ pub enum ListxattrReply {
 
 /// A trait for directly copying data from the fuse transport into a `File` without first storing it
 /// in an intermediate buffer.
-pub trait ZeroCopyReader {
+pub trait ZeroCopyReader: io::Read {
     /// Copies at most `count` bytes from `self` directly into `f` at offset `off` without storing
     /// it in any intermediate buffers. If the return value is `Ok(n)` then it must be guaranteed
     /// that `0 <= n <= count`. If `n` is `0`, then it can indicate one of 3 possibilities:
@@ -214,7 +244,7 @@ impl<R: ZeroCopyReader> ZeroCopyReader for &mut R {
 
 /// A trait for directly copying data from a `File` into the fuse transport without first storing
 /// it in an intermediate buffer.
-pub trait ZeroCopyWriter {
+pub trait ZeroCopyWriter: io::Write {
     /// Copies at most `count` bytes from `f` at offset `off` directly into `self` without storing
     /// it in any intermediate buffers. If the return value is `Ok(n)` then it must be guaranteed
     /// that `0 <= n <= count`. If `n` is `0`, then it can indicate one of 3 possibilities:
@@ -372,10 +402,6 @@ pub trait FileSystem {
     ///
     /// Note that if a file system will be exported over NFS the `Inode`'s lifetime must extend even
     /// beyond `forget`. See the `generation` field in `Entry`.
-    type Inode: From<u64> + Into<u64>;
-
-    /// Represents a file or directory that is open for reading/writing.
-    type Handle: From<u64> + Into<u64>;
 
     /// Initialize the file system.
     ///
@@ -399,7 +425,7 @@ pub trait FileSystem {
     ///
     /// If this call is successful then the lookup count of the `Inode` associated with the returned
     /// `Entry` must be increased by 1.
-    fn lookup(&self, ctx: Context, parent: Self::Inode, name: &CStr) -> io::Result<Entry> {
+    fn lookup(&self, ctx: Context, parent: Inode, name: &CStr) -> io::Result<Entry> {
         Err(io::Error::from_raw_os_error(bindings::LINUX_ENOSYS))
     }
 
@@ -408,13 +434,13 @@ pub trait FileSystem {
     /// Called when the kernel removes an inode from its internal caches. `count` indicates the
     /// amount by which the lookup count for the inode should be decreased. If reducing the lookup
     /// count by `count` causes it to go to zero, then the implementation may delete the `Inode`.
-    fn forget(&self, ctx: Context, inode: Self::Inode, count: u64) {}
+    fn forget(&self, ctx: Context, inode: Inode, count: u64) {}
 
     /// Forget about multiple inodes.
     ///
     /// `requests` is a vector of `(inode, count)` pairs. See the documentation for `forget` for
     /// more information.
-    fn batch_forget(&self, ctx: Context, requests: Vec<(Self::Inode, u64)>) {
+    fn batch_forget(&self, ctx: Context, requests: Vec<(Inode, u64)>) {
         for (inode, count) in requests {
             self.forget(ctx, inode, count)
         }
@@ -437,8 +463,8 @@ pub trait FileSystem {
     fn getattr(
         &self,
         ctx: Context,
-        inode: Self::Inode,
-        handle: Option<Self::Handle>,
+        inode: Inode,
+        handle: Option<Handle>,
     ) -> io::Result<(bindings::stat64, Duration)> {
         Err(io::Error::from_raw_os_error(bindings::LINUX_ENOSYS))
     }
@@ -463,16 +489,16 @@ pub trait FileSystem {
     fn setattr(
         &self,
         ctx: Context,
-        inode: Self::Inode,
+        inode: Inode,
         attr: bindings::stat64,
-        handle: Option<Self::Handle>,
+        handle: Option<Handle>,
         valid: SetattrValid,
     ) -> io::Result<(bindings::stat64, Duration)> {
         Err(io::Error::from_raw_os_error(bindings::LINUX_ENOSYS))
     }
 
     /// Read a symbolic link.
-    fn readlink(&self, ctx: Context, inode: Self::Inode) -> io::Result<Vec<u8>> {
+    fn readlink(&self, ctx: Context, inode: Inode) -> io::Result<Vec<u8>> {
         Err(io::Error::from_raw_os_error(bindings::LINUX_ENOSYS))
     }
 
@@ -488,7 +514,7 @@ pub trait FileSystem {
         &self,
         ctx: Context,
         linkname: &CStr,
-        parent: Self::Inode,
+        parent: Inode,
         name: &CStr,
         extensions: Extensions,
     ) -> io::Result<Entry> {
@@ -510,7 +536,7 @@ pub trait FileSystem {
     fn mknod(
         &self,
         ctx: Context,
-        inode: Self::Inode,
+        inode: Inode,
         name: &CStr,
         mode: u32,
         rdev: u32,
@@ -531,7 +557,7 @@ pub trait FileSystem {
     fn mkdir(
         &self,
         ctx: Context,
-        parent: Self::Inode,
+        parent: Inode,
         name: &CStr,
         mode: u32,
         umask: u32,
@@ -545,7 +571,7 @@ pub trait FileSystem {
     /// If the file's inode lookup count is non-zero, then the file system is expected to delay
     /// removal of the inode until the lookup count goes to zero. See the documentation of the
     /// `forget` function for more information.
-    fn unlink(&self, ctx: Context, parent: Self::Inode, name: &CStr) -> io::Result<()> {
+    fn unlink(&self, ctx: Context, parent: Inode, name: &CStr) -> io::Result<()> {
         Err(io::Error::from_raw_os_error(bindings::LINUX_ENOSYS))
     }
 
@@ -554,7 +580,7 @@ pub trait FileSystem {
     /// If the directory's inode lookup count is non-zero, then the file system is expected to delay
     /// removal of the inode until the lookup count goes to zero. See the documentation of the
     /// `forget` function for more information.
-    fn rmdir(&self, ctx: Context, parent: Self::Inode, name: &CStr) -> io::Result<()> {
+    fn rmdir(&self, ctx: Context, parent: Inode, name: &CStr) -> io::Result<()> {
         Err(io::Error::from_raw_os_error(bindings::LINUX_ENOSYS))
     }
 
@@ -573,9 +599,9 @@ pub trait FileSystem {
     fn rename(
         &self,
         ctx: Context,
-        olddir: Self::Inode,
+        olddir: Inode,
         oldname: &CStr,
-        newdir: Self::Inode,
+        newdir: Inode,
         newname: &CStr,
         flags: u32,
     ) -> io::Result<()> {
@@ -591,8 +617,8 @@ pub trait FileSystem {
     fn link(
         &self,
         ctx: Context,
-        inode: Self::Inode,
-        newparent: Self::Inode,
+        inode: Inode,
+        newparent: Inode,
         newname: &CStr,
     ) -> io::Result<Entry> {
         Err(io::Error::from_raw_os_error(bindings::LINUX_ENOSYS))
@@ -644,10 +670,10 @@ pub trait FileSystem {
     fn open(
         &self,
         ctx: Context,
-        inode: Self::Inode,
+        inode: Inode,
         kill_priv: bool,
         flags: u32,
-    ) -> io::Result<(Option<Self::Handle>, OpenOptions)> {
+    ) -> io::Result<(Option<Handle>, OpenOptions)> {
         // Matches the behavior of libfuse.
         Ok((None, OpenOptions::empty()))
     }
@@ -673,14 +699,14 @@ pub trait FileSystem {
     fn create(
         &self,
         ctx: Context,
-        parent: Self::Inode,
+        parent: Inode,
         name: &CStr,
         mode: u32,
         kill_priv: bool,
         flags: u32,
         umask: u32,
         extensions: Extensions,
-    ) -> io::Result<(Entry, Option<Self::Handle>, OpenOptions)> {
+    ) -> io::Result<(Entry, Option<Handle>, OpenOptions)> {
         Err(io::Error::from_raw_os_error(bindings::LINUX_ENOSYS))
     }
 
@@ -700,12 +726,12 @@ pub trait FileSystem {
     /// (`libc::O_DIRECT`), in which case the kernel will forward the return code from this method
     /// to the userspace application that made the system call.
     #[allow(clippy::too_many_arguments)]
-    fn read<W: io::Write + ZeroCopyWriter>(
+    fn read(
         &self,
         ctx: Context,
-        inode: Self::Inode,
-        handle: Self::Handle,
-        w: W,
+        inode: Inode,
+        handle: Handle,
+        w: &mut dyn ZeroCopyWriter,
         size: u32,
         offset: u64,
         lock_owner: Option<u64>,
@@ -734,12 +760,12 @@ pub trait FileSystem {
     /// option (`libc::O_DIRECT`), in which case the kernel will forward the return code from this
     /// method to the userspace application that made the system call.
     #[allow(clippy::too_many_arguments)]
-    fn write<R: io::Read + ZeroCopyReader>(
+    fn write(
         &self,
         ctx: Context,
-        inode: Self::Inode,
-        handle: Self::Handle,
-        r: R,
+        inode: Inode,
+        handle: Handle,
+        r: &mut dyn ZeroCopyReader,
         size: u32,
         offset: u64,
         lock_owner: Option<u64>,
@@ -775,8 +801,8 @@ pub trait FileSystem {
     fn flush(
         &self,
         ctx: Context,
-        inode: Self::Inode,
-        handle: Self::Handle,
+        inode: Inode,
+        handle: Handle,
         lock_owner: u64,
     ) -> io::Result<()> {
         Err(io::Error::from_raw_os_error(bindings::LINUX_ENOSYS))
@@ -798,9 +824,9 @@ pub trait FileSystem {
     fn fsync(
         &self,
         ctx: Context,
-        inode: Self::Inode,
+        inode: Inode,
         datasync: bool,
-        handle: Self::Handle,
+        handle: Handle,
     ) -> io::Result<()> {
         Err(io::Error::from_raw_os_error(bindings::LINUX_ENOSYS))
     }
@@ -821,8 +847,8 @@ pub trait FileSystem {
     fn fallocate(
         &self,
         ctx: Context,
-        inode: Self::Inode,
-        handle: Self::Handle,
+        inode: Inode,
+        handle: Handle,
         mode: u32,
         offset: u64,
         length: u64,
@@ -850,9 +876,9 @@ pub trait FileSystem {
     fn release(
         &self,
         ctx: Context,
-        inode: Self::Inode,
+        inode: Inode,
         flags: u32,
-        handle: Self::Handle,
+        handle: Handle,
         flush: bool,
         flock_release: bool,
         lock_owner: Option<u64>,
@@ -861,7 +887,7 @@ pub trait FileSystem {
     }
 
     /// Get information about the file system.
-    fn statfs(&self, ctx: Context, inode: Self::Inode) -> io::Result<bindings::statvfs64> {
+    fn statfs(&self, ctx: Context, inode: Inode) -> io::Result<bindings::statvfs64> {
         // Safe because we are zero-initializing a struct with only POD fields.
         let mut st: bindings::statvfs64 = unsafe { mem::zeroed() };
 
@@ -884,7 +910,7 @@ pub trait FileSystem {
     fn setxattr(
         &self,
         ctx: Context,
-        inode: Self::Inode,
+        inode: Inode,
         name: &CStr,
         value: &[u8],
         flags: u32,
@@ -906,7 +932,7 @@ pub trait FileSystem {
     fn getxattr(
         &self,
         ctx: Context,
-        inode: Self::Inode,
+        inode: Inode,
         name: &CStr,
         size: u32,
     ) -> io::Result<GetxattrReply> {
@@ -925,7 +951,7 @@ pub trait FileSystem {
     /// If this method fails with an `ENOSYS` error, then the kernel will treat that as a permanent
     /// failure. The kernel will return `EOPNOTSUPP` for all future calls to `listxattr` without
     /// forwarding them to the file system.
-    fn listxattr(&self, ctx: Context, inode: Self::Inode, size: u32) -> io::Result<ListxattrReply> {
+    fn listxattr(&self, ctx: Context, inode: Inode, size: u32) -> io::Result<ListxattrReply> {
         Err(io::Error::from_raw_os_error(bindings::LINUX_ENOSYS))
     }
 
@@ -934,7 +960,7 @@ pub trait FileSystem {
     /// If this method fails with an `ENOSYS` error, then the kernel will treat that as a permanent
     /// failure. The kernel will return `EOPNOTSUPP` for all future calls to `removexattr` without
     /// forwarding them to the file system.
-    fn removexattr(&self, ctx: Context, inode: Self::Inode, name: &CStr) -> io::Result<()> {
+    fn removexattr(&self, ctx: Context, inode: Inode, name: &CStr) -> io::Result<()> {
         Err(io::Error::from_raw_os_error(bindings::LINUX_ENOSYS))
     }
 
@@ -957,9 +983,9 @@ pub trait FileSystem {
     fn opendir(
         &self,
         ctx: Context,
-        inode: Self::Inode,
+        inode: Inode,
         flags: u32,
-    ) -> io::Result<(Option<Self::Handle>, OpenOptions)> {
+    ) -> io::Result<(Option<Handle>, OpenOptions)> {
         // Matches the behavior of libfuse.
         Ok((None, OpenOptions::empty()))
     }
@@ -991,18 +1017,15 @@ pub trait FileSystem {
     ///
     // TODO(chirantan): Change method signature to return `Iterator<DirEntry>` rather than using an
     // `FnMut` for adding entries.
-    fn readdir<F>(
+    fn readdir(
         &self,
         ctx: Context,
-        inode: Self::Inode,
-        handle: Self::Handle,
+        inode: Inode,
+        handle: Handle,
         size: u32,
         offset: u64,
-        add_entry: F,
-    ) -> io::Result<()>
-    where
-        F: FnMut(DirEntry) -> io::Result<usize>,
-    {
+        add_entry: &mut dyn FnMut(DirEntry) -> io::Result<usize>,
+    ) -> io::Result<()> {
         Err(io::Error::from_raw_os_error(bindings::LINUX_ENOSYS))
     }
 
@@ -1030,18 +1053,15 @@ pub trait FileSystem {
     ///
     /// TODO(chirantan): Change method signature to return `Iterator<(DirEntry, Entry)>` rather than
     /// using an `FnMut` for adding entries.
-    fn readdirplus<F>(
+    fn readdirplus(
         &self,
         ctx: Context,
-        inode: Self::Inode,
-        handle: Self::Handle,
+        inode: Inode,
+        handle: Handle,
         size: u32,
         offset: u64,
-        add_entry: F,
-    ) -> io::Result<()>
-    where
-        F: FnMut(DirEntry, Entry) -> io::Result<usize>,
-    {
+        add_entry: &mut dyn FnMut(DirEntry, Entry) -> io::Result<usize>,
+    ) -> io::Result<()> {
         Err(io::Error::from_raw_os_error(bindings::LINUX_ENOSYS))
     }
 
@@ -1061,9 +1081,9 @@ pub trait FileSystem {
     fn fsyncdir(
         &self,
         ctx: Context,
-        inode: Self::Inode,
+        inode: Inode,
         datasync: bool,
-        handle: Self::Handle,
+        handle: Handle,
     ) -> io::Result<()> {
         Err(io::Error::from_raw_os_error(bindings::LINUX_ENOSYS))
     }
@@ -1081,9 +1101,9 @@ pub trait FileSystem {
     fn releasedir(
         &self,
         ctx: Context,
-        inode: Self::Inode,
+        inode: Inode,
         flags: u32,
-        handle: Self::Handle,
+        handle: Handle,
     ) -> io::Result<()> {
         Err(io::Error::from_raw_os_error(bindings::LINUX_ENOSYS))
     }
@@ -1098,7 +1118,7 @@ pub trait FileSystem {
     /// If this method returns an `ENOSYS` error, then the kernel will treat it as a permanent
     /// success: all future calls to `access` will return success without being forwarded to the
     /// file system.
-    fn access(&self, ctx: Context, inode: Self::Inode, mask: u32) -> io::Result<()> {
+    fn access(&self, ctx: Context, inode: Inode, mask: u32) -> io::Result<()> {
         Err(io::Error::from_raw_os_error(bindings::LINUX_ENOSYS))
     }
 
@@ -1106,8 +1126,8 @@ pub trait FileSystem {
     fn lseek(
         &self,
         ctx: Context,
-        inode: Self::Inode,
-        handle: Self::Handle,
+        inode: Inode,
+        handle: Handle,
         offset: u64,
         whence: u32,
     ) -> io::Result<u64> {
@@ -1118,11 +1138,11 @@ pub trait FileSystem {
     fn copyfilerange(
         &self,
         ctx: Context,
-        inode_in: Self::Inode,
-        handle_in: Self::Handle,
+        inode_in: Inode,
+        handle_in: Handle,
         offset_in: u64,
-        inode_out: Self::Inode,
-        handle_out: Self::Handle,
+        inode_out: Inode,
+        handle_out: Handle,
         offset_out: u64,
         len: u64,
         flags: u64,
@@ -1135,15 +1155,13 @@ pub trait FileSystem {
     fn setupmapping(
         &self,
         _ctx: Context,
-        inode: Self::Inode,
-        handle: Self::Handle,
+        inode: Inode,
+        handle: Handle,
         foffset: u64,
         len: u64,
         flags: u64,
         moffset: u64,
-        host_shm_base: u64,
-        shm_size: u64,
-        #[cfg(target_os = "macos")] map_sender: &Option<Sender<WorkerMessage>>,
+        mapper: &dyn DaxMapper,
     ) -> io::Result<()> {
         Err(io::Error::from_raw_os_error(libc::ENOSYS))
     }
@@ -1152,9 +1170,7 @@ pub trait FileSystem {
         &self,
         _ctx: Context,
         requests: Vec<RemovemappingOne>,
-        host_shm_base: u64,
-        shm_size: u64,
-        #[cfg(target_os = "macos")] map_sender: &Option<Sender<WorkerMessage>>,
+        mapper: &dyn DaxMapper,
     ) -> io::Result<()> {
         Err(io::Error::from_raw_os_error(libc::ENOSYS))
     }
@@ -1163,8 +1179,8 @@ pub trait FileSystem {
     fn ioctl(
         &self,
         ctx: Context,
-        inode: Self::Inode,
-        handle: Self::Handle,
+        inode: Inode,
+        handle: Handle,
         flags: u32,
         cmd: u32,
         arg: u64,
@@ -1183,8 +1199,8 @@ pub trait FileSystem {
     fn getlk(
         &self,
         ctx: Context,
-        inode: Self::Inode,
-        handle: Self::Handle,
+        inode: Inode,
+        handle: Handle,
         owner: u64,
         lock: FileLock,
         flags: u32,
@@ -1199,8 +1215,8 @@ pub trait FileSystem {
     fn setlk(
         &self,
         ctx: Context,
-        inode: Self::Inode,
-        handle: Self::Handle,
+        inode: Inode,
+        handle: Handle,
         owner: u64,
         lock: FileLock,
         flags: u32,
@@ -1214,8 +1230,8 @@ pub trait FileSystem {
     fn setlkw(
         &self,
         ctx: Context,
-        inode: Self::Inode,
-        handle: Self::Handle,
+        inode: Inode,
+        handle: Handle,
         owner: u64,
         lock: FileLock,
         flags: u32,
@@ -1236,5 +1252,9 @@ pub trait FileSystem {
     /// TODO: support this
     fn notify_reply(&self) -> io::Result<()> {
         Err(io::Error::from_raw_os_error(bindings::LINUX_ENOSYS))
+    }
+
+    fn set_export_table(&mut self, _export_table: ExportTable) -> u64 {
+        0 // no-op for backends that don't support export tables
     }
 }
