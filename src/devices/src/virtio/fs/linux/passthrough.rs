@@ -430,13 +430,13 @@ pub struct PassthroughFs {
     // do with an fd opened with this flag.
     inodes: RwLock<MultikeyBTreeMap<Inode, InodeAltKey, Arc<InodeData>>>,
     next_inode: AtomicU64,
-    init_inode: u64,
+    init_inode: Inode,
 
     // File descriptors for open files and directories. Unlike the fds in `inodes`, these _can_ be
     // used for reading and writing data.
     handles: RwLock<BTreeMap<Handle, Arc<HandleData>>>,
     next_handle: AtomicU64,
-    init_handle: u64,
+    init_handle: Handle,
 
     // File descriptor pointing to the `/proc/self/fd` directory. This is used to convert an fd from
     // `inodes` into one that can go into `handles`. This is accomplished by reading the
@@ -510,11 +510,11 @@ impl PassthroughFs {
         Ok(PassthroughFs {
             inodes: RwLock::new(MultikeyBTreeMap::new()),
             next_inode: AtomicU64::new(fuse::ROOT_ID + 2),
-            init_inode: fuse::ROOT_ID + 1,
+            init_inode: Inode(fuse::ROOT_ID + 1),
 
             handles: RwLock::new(BTreeMap::new()),
             next_handle: AtomicU64::new(1),
-            init_handle: 0,
+            init_handle: Handle(0),
 
             proc_self_fd,
 
@@ -1081,14 +1081,14 @@ impl FileSystem for PassthroughFs {
         debug!("do_lookup: {name:?}");
         let init_name = unsafe { CStr::from_bytes_with_nul_unchecked(INIT_CSTR) };
 
-        if self.init_inode != 0 && name == init_name {
+        if self.init_inode.0 != 0 && name == init_name {
             let mut st: libc::stat64 = unsafe { mem::zeroed() };
             st.st_size = INIT_BINARY.len() as i64;
-            st.st_ino = self.init_inode;
+            st.st_ino = self.init_inode.0;
             st.st_mode = 0o100_755;
 
             Ok(Entry {
-                inode: self.init_inode,
+                inode: self.init_inode.0,
                 generation: 0,
                 attr: st,
                 attr_flags: 0,
@@ -1211,8 +1211,8 @@ impl FileSystem for PassthroughFs {
         kill_priv: bool,
         flags: u32,
     ) -> io::Result<(Option<Handle>, OpenOptions)> {
-        if inode == Inode(self.init_inode) {
-            Ok((Some(Handle(self.init_handle)), OpenOptions::empty()))
+        if inode == self.init_inode {
+            Ok((Some(self.init_handle), OpenOptions::empty()))
         } else {
             self.do_open(inode, kill_priv, flags)
         }
@@ -1317,7 +1317,7 @@ impl FileSystem for PassthroughFs {
         _flags: u32,
     ) -> io::Result<usize> {
         debug!("read: {inode:?}");
-        if inode == Inode(self.init_inode) {
+        if inode == self.init_inode {
             let off: usize = offset.try_into().map_err(|_| einval())?;
             let len = if off + (size as usize) < INIT_BINARY.len() {
                 size as usize
@@ -1907,7 +1907,7 @@ impl FileSystem for PassthroughFs {
             return Err(io::Error::from_raw_os_error(libc::ENOSYS));
         }
 
-        if inode == Inode(self.init_inode) {
+        if inode == self.init_inode {
             return Err(io::Error::from_raw_os_error(libc::ENODATA));
         }
 
@@ -2151,7 +2151,7 @@ impl FileSystem for PassthroughFs {
     ) -> io::Result<()> {
         let writable = (flags & fuse::SetupmappingFlags::WRITE.bits()) != 0;
 
-        if inode == Inode(self.init_inode) {
+        if inode == self.init_inode {
             let to_copy = std::cmp::min(len as usize, INIT_BINARY.len());
             mapper.map_data(moffset, &INIT_BINARY[..to_copy])?;
             return Ok(());

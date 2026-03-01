@@ -61,7 +61,7 @@ pub struct Entry {
     /// An `Inode` that uniquely identifies this path. During `lookup`, setting this to `0` means a
     /// negative entry. Returning `ENOENT` also means a negative entry but setting this to `0`
     /// allows the kernel to cache the negative result for `entry_timeout`. The value should be
-    /// produced by converting a `FileSystem::Inode` into a `u64`.
+    /// produced by converting an `Inode` into a `u64`.
     pub inode: u64,
 
     /// The generation number for this `Entry`. Typically used for network file systems. An `inode`
@@ -402,7 +402,6 @@ pub trait FileSystem {
     ///
     /// Note that if a file system will be exported over NFS the `Inode`'s lifetime must extend even
     /// beyond `forget`. See the `generation` field in `Entry`.
-
     /// Initialize the file system.
     ///
     /// This method is called when a connection to the FUSE kernel module is first established. The
