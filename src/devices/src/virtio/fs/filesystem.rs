@@ -41,7 +41,7 @@ impl From<Inode> for u64 {
 
 /// Newtype wrapper for filesystem handle numbers.
 /// Prevents accidental mix-ups with raw u64 values.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Handle(pub u64);
 
 impl From<u64> for Handle {

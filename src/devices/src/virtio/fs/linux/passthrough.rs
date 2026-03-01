@@ -20,9 +20,10 @@ use nix::{request_code_none, request_code_read};
 
 use vm_memory::ByteValued;
 
+use super::super::dax_mapper::DaxMapper;
 use super::super::filesystem::{
     Context, DirEntry, Entry, ExportTable, Extensions, FileSystem, FsOptions, GetxattrReply,
-    ListxattrReply, OpenOptions, SetattrValid, ZeroCopyReader, ZeroCopyWriter,
+    Handle, Inode, ListxattrReply, OpenOptions, SetattrValid, ZeroCopyReader, ZeroCopyWriter,
 };
 use super::super::fuse;
 use super::super::multikey::MultikeyBTreeMap;
@@ -38,9 +39,6 @@ static INIT_BINARY: &[u8] = include_bytes!("../../../../../../init/init");
 
 #[cfg(not(feature = "embedded_init"))]
 static INIT_BINARY: &[u8] = &[];
-
-type Inode = u64;
-type Handle = u64;
 
 #[derive(Clone, Copy, PartialOrd, Ord, PartialEq, Eq)]
 struct InodeAltKey {
@@ -652,7 +650,8 @@ impl PassthroughFs {
             // There is a possible race here where 2 threads end up adding the same file
             // into the inode list.  However, since each of those will get a unique Inode
             // value and unique file descriptors this shouldn't be that much of a problem.
-            let inode = self.next_inode.fetch_add(1, Ordering::Relaxed);
+            let inode_val = self.next_inode.fetch_add(1, Ordering::Relaxed);
+            let inode = Inode(inode_val);
             self.inodes.write().unwrap().insert(
                 inode,
                 InodeAltKey {
@@ -675,7 +674,7 @@ impl PassthroughFs {
         debug!("do_lookup: {}, inode: {:?}", name.to_str().unwrap(), inode);
 
         Ok(Entry {
-            inode,
+            inode: inode.into(),
             generation: 0,
             attr: st,
             attr_flags,
@@ -684,17 +683,14 @@ impl PassthroughFs {
         })
     }
 
-    fn do_readdir<F>(
+    fn do_readdir(
         &self,
         inode: Inode,
         handle: Handle,
         size: u32,
         offset: u64,
-        mut add_entry: F,
-    ) -> io::Result<()>
-    where
-        F: FnMut(DirEntry) -> io::Result<usize>,
-    {
+        add_entry: &mut dyn FnMut(DirEntry) -> io::Result<usize>,
+    ) -> io::Result<()> {
         if size == 0 {
             return Ok(());
         }
@@ -817,7 +813,8 @@ impl PassthroughFs {
             RwLock::new(self.open_inode(inode, flags as i32)?)
         };
 
-        let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
+        let handle_val = self.next_handle.fetch_add(1, Ordering::Relaxed);
+        let handle = Handle(handle_val);
         let data = HandleData {
             inode,
             file,
@@ -858,7 +855,7 @@ impl PassthroughFs {
                         .unwrap()
                         .lock()
                         .unwrap()
-                        .remove(&(self.cfg.export_fsid, handle));
+                        .remove(&(self.cfg.export_fsid, handle.into()));
                 }
 
                 // We don't need to close the file here because that will happen automatically when
@@ -994,9 +991,6 @@ fn flock_len_to_end(start: u64, len: libc::off_t) -> u64 {
 }
 
 impl FileSystem for PassthroughFs {
-    type Inode = Inode;
-    type Handle = Handle;
-
     fn init(&self, capable: FsOptions) -> io::Result<FsOptions> {
         let root = CString::new(self.cfg.root_dir.as_str()).expect("CString::new failed");
 
@@ -1028,14 +1022,14 @@ impl FileSystem for PassthroughFs {
 
         // Not sure why the root inode gets a refcount of 2 but that's what libfuse does.
         inodes.insert(
-            fuse::ROOT_ID,
+            Inode(fuse::ROOT_ID),
             InodeAltKey {
                 ino: st.st_ino,
                 dev: st.st_dev,
                 mnt_id,
             },
             Arc::new(InodeData {
-                inode: fuse::ROOT_ID,
+                inode: Inode(fuse::ROOT_ID),
                 file: f,
                 dev: st.st_dev,
                 mnt_id,
@@ -1174,34 +1168,28 @@ impl FileSystem for PassthroughFs {
         self.do_unlink(parent, name, libc::AT_REMOVEDIR)
     }
 
-    fn readdir<F>(
+    fn readdir(
         &self,
         _ctx: Context,
         inode: Inode,
         handle: Handle,
         size: u32,
         offset: u64,
-        add_entry: F,
-    ) -> io::Result<()>
-    where
-        F: FnMut(DirEntry) -> io::Result<usize>,
-    {
+        add_entry: &mut dyn FnMut(DirEntry) -> io::Result<usize>,
+    ) -> io::Result<()> {
         self.do_readdir(inode, handle, size, offset, add_entry)
     }
 
-    fn readdirplus<F>(
+    fn readdirplus(
         &self,
         _ctx: Context,
         inode: Inode,
         handle: Handle,
         size: u32,
         offset: u64,
-        mut add_entry: F,
-    ) -> io::Result<()>
-    where
-        F: FnMut(DirEntry, Entry) -> io::Result<usize>,
-    {
-        self.do_readdir(inode, handle, size, offset, |dir_entry| {
+        add_entry: &mut dyn FnMut(DirEntry, Entry) -> io::Result<usize>,
+    ) -> io::Result<()> {
+        let mut wrapper = |dir_entry: DirEntry| {
             // Safe because the kernel guarantees that the buffer is nul-terminated. Additionally,
             // the kernel will pad the name with '\0' bytes up to 8-byte alignment and there's no
             // way for us to know exactly how many padding bytes there are. This would cause
@@ -1212,7 +1200,8 @@ impl FileSystem for PassthroughFs {
             let entry = self.do_lookup(inode, name)?;
 
             add_entry(dir_entry, entry)
-        })
+        };
+        self.do_readdir(inode, handle, size, offset, &mut wrapper)
     }
 
     fn open(
@@ -1222,8 +1211,8 @@ impl FileSystem for PassthroughFs {
         kill_priv: bool,
         flags: u32,
     ) -> io::Result<(Option<Handle>, OpenOptions)> {
-        if inode == self.init_inode {
-            Ok((Some(self.init_handle), OpenOptions::empty()))
+        if inode == Inode(self.init_inode) {
+            Ok((Some(Handle(self.init_handle)), OpenOptions::empty()))
         } else {
             self.do_open(inode, kill_priv, flags)
         }
@@ -1292,9 +1281,10 @@ impl FileSystem for PassthroughFs {
 
         let entry = self.do_lookup(parent, name)?;
 
-        let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
+        let handle_val = self.next_handle.fetch_add(1, Ordering::Relaxed);
+        let handle = Handle(handle_val);
         let data = HandleData {
-            inode: entry.inode,
+            inode: Inode(entry.inode),
             file,
             exported: Default::default(),
         };
@@ -1315,19 +1305,19 @@ impl FileSystem for PassthroughFs {
         self.do_unlink(parent, name, 0)
     }
 
-    fn read<W: io::Write + ZeroCopyWriter>(
+    fn read(
         &self,
         _ctx: Context,
         inode: Inode,
         handle: Handle,
-        mut w: W,
+        w: &mut dyn ZeroCopyWriter,
         size: u32,
         offset: u64,
         _lock_owner: Option<u64>,
         _flags: u32,
     ) -> io::Result<usize> {
         debug!("read: {inode:?}");
-        if inode == self.init_inode {
+        if inode == Inode(self.init_inode) {
             let off: usize = offset.try_into().map_err(|_| einval())?;
             let len = if off + (size as usize) < INIT_BINARY.len() {
                 size as usize
@@ -1352,12 +1342,12 @@ impl FileSystem for PassthroughFs {
         w.write_from(&f, size as usize, offset)
     }
 
-    fn write<R: io::Read + ZeroCopyReader>(
+    fn write(
         &self,
         _ctx: Context,
         inode: Inode,
         handle: Handle,
-        mut r: R,
+        r: &mut dyn ZeroCopyReader,
         size: u32,
         offset: u64,
         _lock_owner: Option<u64>,
@@ -1917,7 +1907,7 @@ impl FileSystem for PassthroughFs {
             return Err(io::Error::from_raw_os_error(libc::ENOSYS));
         }
 
-        if inode == self.init_inode {
+        if inode == Inode(self.init_inode) {
             return Err(io::Error::from_raw_os_error(libc::ENODATA));
         }
 
@@ -2157,76 +2147,19 @@ impl FileSystem for PassthroughFs {
         len: u64,
         flags: u64,
         moffset: u64,
-        host_shm_base: u64,
-        shm_size: u64,
+        mapper: &dyn DaxMapper,
     ) -> io::Result<()> {
-        let open_flags = if (flags & fuse::SetupmappingFlags::WRITE.bits()) != 0 {
-            libc::O_RDWR
-        } else {
-            libc::O_RDONLY
-        };
+        let writable = (flags & fuse::SetupmappingFlags::WRITE.bits()) != 0;
 
-        let prot_flags = if (flags & fuse::SetupmappingFlags::WRITE.bits()) != 0 {
-            libc::PROT_READ | libc::PROT_WRITE
-        } else {
-            libc::PROT_READ
-        };
-
-        if (moffset + len) > shm_size {
-            return Err(einval());
-        }
-
-        let addr = host_shm_base + moffset;
-
-        debug!("setupmapping: ino {inode:?} addr={addr:x} len={len}");
-
-        if inode == self.init_inode {
-            let ret = unsafe {
-                libc::mmap(
-                    addr as *mut libc::c_void,
-                    len as usize,
-                    libc::PROT_READ | libc::PROT_WRITE,
-                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_FIXED,
-                    -1,
-                    0,
-                )
-            };
-            if std::ptr::eq(ret, libc::MAP_FAILED) {
-                return Err(io::Error::last_os_error());
-            }
-
-            let to_copy = if len as usize > INIT_BINARY.len() {
-                INIT_BINARY.len()
-            } else {
-                len as usize
-            };
-            unsafe {
-                libc::memcpy(
-                    addr as *mut libc::c_void,
-                    INIT_BINARY.as_ptr() as *const _,
-                    to_copy,
-                )
-            };
+        if inode == Inode(self.init_inode) {
+            let to_copy = std::cmp::min(len as usize, INIT_BINARY.len());
+            mapper.map_data(moffset, &INIT_BINARY[..to_copy])?;
             return Ok(());
         }
 
+        let open_flags = if writable { libc::O_RDWR } else { libc::O_RDONLY };
         let file = self.open_inode(inode, open_flags)?;
-        let fd = file.as_raw_fd();
-
-        let ret = unsafe {
-            libc::mmap(
-                addr as *mut libc::c_void,
-                len as usize,
-                prot_flags,
-                libc::MAP_SHARED | libc::MAP_FIXED,
-                fd,
-                foffset as libc::off_t,
-            )
-        };
-        if std::ptr::eq(ret, libc::MAP_FAILED) {
-            return Err(io::Error::last_os_error());
-        }
-
+        mapper.map_file(moffset, len, file.as_raw_fd(), foffset, writable)?;
         Ok(())
     }
 
@@ -2234,38 +2167,19 @@ impl FileSystem for PassthroughFs {
         &self,
         _ctx: Context,
         requests: Vec<fuse::RemovemappingOne>,
-        host_shm_base: u64,
-        shm_size: u64,
+        mapper: &dyn DaxMapper,
     ) -> io::Result<()> {
         for req in requests {
-            let addr = host_shm_base + req.moffset;
-            if (req.moffset + req.len) > shm_size {
-                return Err(einval());
-            }
-            debug!("removemapping: addr={:x} len={:?}", addr, req.len);
-            let ret = unsafe {
-                libc::mmap(
-                    addr as *mut libc::c_void,
-                    req.len as usize,
-                    libc::PROT_NONE,
-                    libc::MAP_ANONYMOUS | libc::MAP_PRIVATE | libc::MAP_FIXED,
-                    -1,
-                    0_i64,
-                )
-            };
-            if std::ptr::eq(ret, libc::MAP_FAILED) {
-                return Err(io::Error::last_os_error());
-            }
+            mapper.unmap(req.moffset, req.len)?;
         }
-
         Ok(())
     }
 
     fn ioctl(
         &self,
         _ctx: Context,
-        inode: Self::Inode,
-        handle: Self::Handle,
+        inode: Inode,
+        handle: Handle,
         _flags: u32,
         cmd: u32,
         arg: u64,
@@ -2315,10 +2229,10 @@ impl FileSystem for PassthroughFs {
 
                 let fd = data.file.read().unwrap().try_clone()?;
 
-                exports.insert((self.cfg.export_fsid, handle), fd);
+                exports.insert((self.cfg.export_fsid, handle.into()), fd);
 
                 let mut ret: Vec<_> = self.cfg.export_fsid.to_ne_bytes().into();
-                ret.extend_from_slice(&handle.to_ne_bytes());
+                ret.extend_from_slice(&handle.0.to_ne_bytes());
                 Ok(ret)
             }
             VIRTIO_IOC_EXIT_CODE_REQ => {
@@ -2447,5 +2361,14 @@ impl FileSystem for PassthroughFs {
         } else {
             Ok(())
         }
+    }
+
+    fn set_export_table(&mut self, export_table: ExportTable) -> u64 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static FS_UNIQUE_ID: AtomicU64 = AtomicU64::new(0);
+
+        self.cfg.export_fsid = FS_UNIQUE_ID.fetch_add(1, Ordering::Relaxed);
+        self.cfg.export_table = Some(export_table);
+        self.cfg.export_fsid
     }
 }

@@ -2,11 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#[cfg(target_os = "macos")]
-use crossbeam_channel::Sender;
-#[cfg(target_os = "macos")]
-use utils::worker_message::WorkerMessage;
-
 use std::convert::TryInto;
 use std::ffi::{CStr, CString};
 use std::fs::File;
@@ -19,10 +14,11 @@ use vm_memory::ByteValued;
 
 use super::super::linux_errno::linux_error;
 use super::bindings;
+use super::dax_mapper::LinuxDaxMapper;
 use super::descriptor_utils::{Reader, Writer};
 use super::filesystem::{
-    Context, DirEntry, Entry, Extensions, FileSystem, GetxattrReply, ListxattrReply, SecContext,
-    ZeroCopyReader, ZeroCopyWriter,
+    Context, DirEntry, Entry, Extensions, FileSystem, GetxattrReply,
+    ListxattrReply, SecContext, ZeroCopyReader, ZeroCopyWriter,
 };
 use super::fs_utils::einval;
 use super::fuse::*;
@@ -85,7 +81,6 @@ impl<F: FileSystem + Sync> Server<F> {
         w: Writer,
         shm_region: &Option<VirtioShmRegion>,
         exit_code: &Arc<AtomicI32>,
-        #[cfg(target_os = "macos")] map_sender: &Option<Sender<WorkerMessage>>,
     ) -> Result<usize> {
         let in_header: InHeader = r.read_obj().map_err(Error::DecodeMessage)?;
 
@@ -145,35 +140,13 @@ impl<F: FileSystem + Sync> Server<F> {
             x if x == Opcode::CopyFileRange as u32 => self.copyfilerange(in_header, r, w),
             x if (x == Opcode::SetupMapping as u32) && shm_region.is_some() => {
                 let shm = shm_region.as_ref().unwrap();
-                #[cfg(target_os = "linux")]
-                let shm_base_addr = shm.host_addr;
-                #[cfg(target_os = "macos")]
-                let shm_base_addr = shm.guest_addr;
-                self.setupmapping(
-                    in_header,
-                    r,
-                    w,
-                    shm_base_addr,
-                    shm.size as u64,
-                    #[cfg(target_os = "macos")]
-                    map_sender,
-                )
+                let mapper = LinuxDaxMapper::new(shm.host_addr, shm.size as u64);
+                self.setupmapping(in_header, r, w, &mapper)
             }
             x if (x == Opcode::RemoveMapping as u32) && shm_region.is_some() => {
                 let shm = shm_region.as_ref().unwrap();
-                #[cfg(target_os = "linux")]
-                let shm_base_addr = shm.host_addr;
-                #[cfg(target_os = "macos")]
-                let shm_base_addr = shm.guest_addr;
-                self.removemapping(
-                    in_header,
-                    r,
-                    w,
-                    shm_base_addr,
-                    shm.size as u64,
-                    #[cfg(target_os = "macos")]
-                    map_sender,
-                )
+                let mapper = LinuxDaxMapper::new(shm.host_addr, shm.size as u64);
+                self.removemapping(in_header, r, w, &mapper)
             }
             _ => reply_error(
                 linux_error(io::Error::from_raw_os_error(libc::ENOSYS)),
@@ -563,13 +536,13 @@ impl<F: FileSystem + Sync> Server<F> {
         };
 
         // Split the writer into 2 pieces: one for the `OutHeader` and the rest for the data.
-        let data_writer = ZCWriter(w.split_at(size_of::<OutHeader>()).unwrap());
+        let mut data_writer = ZCWriter(w.split_at(size_of::<OutHeader>()).unwrap());
 
         match self.fs.read(
             Context::from(in_header),
             in_header.nodeid.into(),
             fh.into(),
-            data_writer,
+            &mut data_writer,
             size,
             offset,
             owner,
@@ -619,13 +592,13 @@ impl<F: FileSystem + Sync> Server<F> {
         let delayed_write = write_flags & WRITE_CACHE != 0;
         let kill_priv = write_flags & WRITE_KILL_PRIV != 0;
 
-        let data_reader = ZCReader(r);
+        let mut data_reader = ZCReader(r);
 
         match self.fs.write(
             Context::from(in_header),
             in_header.nodeid.into(),
             fh.into(),
-            data_reader,
+            &mut data_reader,
             size,
             offset,
             owner,
@@ -992,7 +965,7 @@ impl<F: FileSystem + Sync> Server<F> {
                 fh.into(),
                 size,
                 offset,
-                |d, e| add_dirent(&mut cursor, size, d, Some(e)),
+                &mut |d, e| add_dirent(&mut cursor, size, d, Some(e)),
             )
         } else {
             self.fs.readdir(
@@ -1001,7 +974,7 @@ impl<F: FileSystem + Sync> Server<F> {
                 fh.into(),
                 size,
                 offset,
-                |d| add_dirent(&mut cursor, size, d, None),
+                &mut |d| add_dirent(&mut cursor, size, d, None),
             )
         };
 
@@ -1395,9 +1368,7 @@ impl<F: FileSystem + Sync> Server<F> {
         in_header: InHeader,
         mut r: Reader,
         w: Writer,
-        host_shm_base: u64,
-        shm_size: u64,
-        #[cfg(target_os = "macos")] map_sender: &Option<Sender<WorkerMessage>>,
+        mapper: &dyn super::dax_mapper::DaxMapper,
     ) -> Result<usize> {
         let SetupmappingIn {
             fh,
@@ -1415,10 +1386,7 @@ impl<F: FileSystem + Sync> Server<F> {
             len,
             flags,
             moffset,
-            host_shm_base,
-            shm_size,
-            #[cfg(target_os = "macos")]
-            map_sender,
+            mapper,
         ) {
             Ok(()) => reply_ok(None::<u8>, None, in_header.unique, w),
             Err(e) => reply_error(e, in_header.unique, w),
@@ -1430,9 +1398,7 @@ impl<F: FileSystem + Sync> Server<F> {
         in_header: InHeader,
         mut r: Reader,
         w: Writer,
-        host_shm_base: u64,
-        shm_size: u64,
-        #[cfg(target_os = "macos")] map_sender: &Option<Sender<WorkerMessage>>,
+        mapper: &dyn super::dax_mapper::DaxMapper,
     ) -> Result<usize> {
         let RemovemappingIn { count } = r.read_obj().map_err(Error::DecodeMessage)?;
 
@@ -1460,14 +1426,7 @@ impl<F: FileSystem + Sync> Server<F> {
             );
         }
 
-        match self.fs.removemapping(
-            Context::from(in_header),
-            requests,
-            host_shm_base,
-            shm_size,
-            #[cfg(target_os = "macos")]
-            map_sender,
-        ) {
+        match self.fs.removemapping(Context::from(in_header), requests, mapper) {
             Ok(()) => reply_ok(None::<u8>, None, in_header.unique, w),
             Err(e) => reply_error(e, in_header.unique, w),
         }
