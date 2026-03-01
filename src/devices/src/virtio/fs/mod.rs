@@ -7,18 +7,9 @@ mod server;
 mod worker;
 pub mod dax_mapper;
 
-#[cfg(target_os = "linux")]
 pub mod linux;
-#[cfg(target_os = "linux")]
 pub use linux::fs_utils;
-#[cfg(target_os = "linux")]
 pub use linux::passthrough;
-#[cfg(target_os = "macos")]
-pub mod macos;
-#[cfg(target_os = "macos")]
-pub use macos::fs_utils;
-#[cfg(target_os = "macos")]
-pub use macos::passthrough;
 
 use super::bindings;
 use super::descriptor_utils;

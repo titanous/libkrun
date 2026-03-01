@@ -1,8 +1,3 @@
-#[cfg(target_os = "macos")]
-use crossbeam_channel::Sender;
-#[cfg(target_os = "macos")]
-use utils::worker_message::WorkerMessage;
-
 use std::os::fd::AsRawFd;
 use std::sync::atomic::AtomicI32;
 use std::sync::Arc;
@@ -28,8 +23,6 @@ pub struct FsWorker {
     server: Server<PassthroughFs>,
     stop_fd: EventFd,
     exit_code: Arc<AtomicI32>,
-    #[cfg(target_os = "macos")]
-    map_sender: Option<Sender<WorkerMessage>>,
 }
 
 impl FsWorker {
@@ -43,7 +36,6 @@ impl FsWorker {
         passthrough_cfg: passthrough::Config,
         stop_fd: EventFd,
         exit_code: Arc<AtomicI32>,
-        #[cfg(target_os = "macos")] map_sender: Option<Sender<WorkerMessage>>,
     ) -> Self {
         Self {
             queues,
@@ -54,8 +46,6 @@ impl FsWorker {
             server: Server::new(PassthroughFs::new(passthrough_cfg).unwrap()),
             stop_fd,
             exit_code,
-            #[cfg(target_os = "macos")]
-            map_sender,
         }
     }
 
@@ -160,8 +150,6 @@ impl FsWorker {
                 writer,
                 &self.shm_region,
                 &self.exit_code,
-                #[cfg(target_os = "macos")]
-                &self.map_sender,
             ) {
                 error!("error handling message: {e:?}");
             }
