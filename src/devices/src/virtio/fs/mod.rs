@@ -1,6 +1,5 @@
 mod device;
-#[allow(dead_code)]
-mod filesystem;
+pub mod filesystem;
 pub mod fuse;
 #[allow(dead_code)]
 mod multikey;
@@ -28,6 +27,10 @@ pub use self::defs::uapi::VIRTIO_ID_FS as TYPE_FS;
 pub use self::device::Fs;
 pub use self::filesystem::ExportTable;
 pub use self::dax_mapper::DaxMapper;
+pub use self::filesystem::{
+    Context, DirEntry, Entry, Extensions, FileSystem, GetxattrReply, Handle, Inode,
+    ListxattrReply, SecContext, ZeroCopyReader, ZeroCopyWriter,
+};
 
 mod defs {
     use super::super::QueueConfig;
