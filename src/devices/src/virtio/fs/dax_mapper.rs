@@ -37,7 +37,7 @@ impl LinuxDaxMapper {
     }
 
     fn check_bounds(&self, offset: u64, len: u64) -> io::Result<()> {
-        if offset.checked_add(len).map_or(true, |end| end > self.size) {
+        if offset.checked_add(len).is_none_or(|end| end > self.size) {
             return Err(io::Error::from_raw_os_error(libc::EINVAL));
         }
         Ok(())
@@ -191,7 +191,7 @@ mod tests {
     fn test_unmap_bounds_exceeds_window() {
         let mapper = LinuxDaxMapper::new(0, 4096);
         // Unmapping beyond the window should fail
-        let result = mapper.unmap(2048, 2049, );
+        let result = mapper.unmap(2048, 2049);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().raw_os_error(), Some(libc::EINVAL));
     }
@@ -221,14 +221,11 @@ mod tests {
     #[test]
     fn test_unmap_in_bounds_passes_check() {
         let mapper = LinuxDaxMapper::new(0, 4096);
-        // In-bounds unmap passes bounds check
         let result = mapper.unmap(0, 4096);
-        // Will fail due to trying to unmap unmapped memory, but not bounds check
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        // Should not be EINVAL (bounds check), would be different error from mmap
-        // Actually unmap at 0 with 4096 might succeed on some systems,
-        // but the point is to verify bounds check passed
-        // We just verify the call was made, not that it succeeded
+        // If it errors, it should NOT be from bounds check (EINVAL)
+        if let Err(e) = result {
+            assert_ne!(e.raw_os_error(), Some(libc::EINVAL));
+        }
+        // If Ok, bounds check also passed - either outcome is valid
     }
 }
