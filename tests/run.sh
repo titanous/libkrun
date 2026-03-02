@@ -14,9 +14,11 @@ GUEST_TARGET_ARCH="$(uname -m)-unknown-linux-musl"
 cargo build --target=$GUEST_TARGET_ARCH -p guest-agent
 cargo build -p runner
 cargo build -p test-daemon
+cargo build -p test-vsock-proxy
 
 export KRUN_TEST_GUEST_AGENT_PATH="target/$GUEST_TARGET_ARCH/debug/guest-agent"
 export KRUN_TEST_DAEMON_PATH="target/debug/test-daemon"
+export KRUN_TEST_VSOCK_PROXY_PATH="target/debug/test-vsock-proxy"
 
 # Build runner args: pass through all arguments
 RUNNER_ARGS="$*"

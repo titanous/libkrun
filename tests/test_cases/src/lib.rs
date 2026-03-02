@@ -61,6 +61,11 @@ use test_vhost_user_fs::{
     TestVhostUserFsDaxAlways, TestVhostUserFsDaxInode, TestVhostUserFsDaxNever,
 };
 
+mod test_vhost_user_vsock;
+use test_vhost_user_vsock::{
+    TestVhostUserVsockEcho, TestVhostUserVsockFd, TestVhostUserVsockSnapshot,
+};
+
 mod test_virtiofs_generic_passthrough;
 use test_virtiofs_generic_passthrough::TestVirtiofsGenericPassthrough;
 
@@ -149,6 +154,9 @@ pub fn test_cases() -> Vec<TestCase> {
         ),
         TestCase::new("vhost-user-fs-dax-inode", Box::new(TestVhostUserFsDaxInode)),
         TestCase::new("vhost-user-fs-dax-never", Box::new(TestVhostUserFsDaxNever)),
+        TestCase::new("vhost-user-vsock-echo", Box::new(TestVhostUserVsockEcho)),
+        TestCase::new("vhost-user-vsock-fd", Box::new(TestVhostUserVsockFd)),
+        TestCase::new("vhost-user-vsock-snapshot", Box::new(TestVhostUserVsockSnapshot)),
         TestCase::new(
             "virtiofs-generic-passthrough",
             Box::new(TestVirtiofsGenericPassthrough),
