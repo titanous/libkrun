@@ -15,9 +15,13 @@ mod defs {
     pub mod uapi {
         pub const VIRTIO_F_VERSION_1: u32 = 32;
         pub const VIRTIO_ID_BALLOON: u32 = 5;
+        pub const VIRTIO_BALLOON_F_MUST_TELL_HOST: u32 = 0;
         pub const VIRTIO_BALLOON_F_STATS_VQ: u32 = 1;
+        pub const VIRTIO_BALLOON_F_DEFLATE_ON_OOM: u32 = 2;
+        pub const VIRTIO_BALLOON_F_PAGE_POISON: u32 = 4;
         pub const VIRTIO_BALLOON_F_FREE_PAGE_HINT: u32 = 3;
         pub const VIRTIO_BALLOON_F_REPORTING: u32 = 5;
+        pub const VIRTIO_BALLOON_PFN_SHIFT: u32 = 12;
     }
 }
 
