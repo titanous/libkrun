@@ -19,6 +19,7 @@ pub mod fdt;
 pub mod legacy;
 pub mod snapshot;
 pub mod virtio;
+pub mod vmgenid;
 
 pub use self::bus::{Bus, BusDevice, Error as BusError};
 
