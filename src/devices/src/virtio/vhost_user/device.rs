@@ -116,9 +116,44 @@ impl VhostUserDevice {
         queue_sizes: &[u16],
     ) -> IoResult<Self> {
         debug!("Connecting to vhost-user backend at {}", socket_path);
-
-        // Connect to the vhost-user backend
         let stream = UnixStream::connect(socket_path)?;
+        Self::negotiate_and_build(stream, device_type, device_name, num_queues, queue_sizes)
+    }
+
+    /// Create a new vhost-user device from a pre-connected UnixStream.
+    ///
+    /// This supports the fd-provisioned connection model where the orchestrator
+    /// establishes the Unix socket connection before passing the fd to libkrun.
+    ///
+    /// # Arguments
+    ///
+    /// * `stream` - A pre-connected UnixStream to the vhost-user backend
+    /// * `device_type` - Virtio device type ID
+    /// * `device_name` - Human-readable device name for logging
+    /// * `num_queues` - Number of queues (0 = query backend via MQ protocol)
+    /// * `queue_sizes` - Size for each queue (empty = use default 256)
+    pub fn from_stream(
+        stream: UnixStream,
+        device_type: u32,
+        device_name: String,
+        num_queues: u16,
+        queue_sizes: &[u16],
+    ) -> IoResult<Self> {
+        debug!(
+            "Creating vhost-user device from pre-connected stream for {}",
+            device_name
+        );
+        Self::negotiate_and_build(stream, device_type, device_name, num_queues, queue_sizes)
+    }
+
+    /// Shared construction logic: negotiate features with backend and build device.
+    fn negotiate_and_build(
+        stream: UnixStream,
+        device_type: u32,
+        device_name: String,
+        num_queues: u16,
+        queue_sizes: &[u16],
+    ) -> IoResult<Self> {
         let mut frontend = Frontend::from_stream(stream, 1);
 
         // Get available features from backend
