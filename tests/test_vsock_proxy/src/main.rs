@@ -27,6 +27,7 @@ const VSOCK_OP_CREDIT_REQUEST: u16 = 7;
 
 const VSOCK_TYPE_STREAM: u16 = 1;
 const VSOCK_HDR_SIZE: usize = 44;
+const COUNTER_QUERY_PORT: u32 = 9998;
 
 // Vsock header structure (44 bytes, little-endian)
 #[repr(C, packed)]
@@ -318,37 +319,64 @@ impl VsockProxyBackend {
                         self.write_response_to_rx(&mut rx_vring_lock, guest_mem_deref, &resp_bytes)?;
                     }
                     VSOCK_OP_RW => {
-                        // Echo the data back
-                        let data = &packet_bytes[VSOCK_HDR_SIZE..];
-                        let data_len = hdr.len as usize;
+                        // Check if this is a counter query request
+                        if hdr.dst_port == COUNTER_QUERY_PORT {
+                            // Respond with 8-byte LE counter value
+                            let counter_bytes = self.state.borrow().bytes_echoed.to_le_bytes();
+                            let counter_hdr = VsockHdr {
+                                src_cid: hdr.dst_cid,
+                                dst_cid: hdr.src_cid,
+                                src_port: hdr.dst_port,
+                                dst_port: hdr.src_port,
+                                len: 8,
+                                r#type: VSOCK_TYPE_STREAM,
+                                op: VSOCK_OP_RW,
+                                flags: 0,
+                                buf_alloc: 65536,
+                                fwd_cnt: 0,
+                            };
+                            debug!(
+                                "Counter query: returning {}",
+                                self.state.borrow().bytes_echoed
+                            );
 
-                        // Increment bytes_echoed counter
-                        let bytes_to_echo = data_len.min(data.len());
-                        self.state.borrow_mut().bytes_echoed += bytes_to_echo as u64;
+                            // Write header + counter to RX queue
+                            let mut counter_packet = counter_hdr.to_bytes();
+                            counter_packet.extend_from_slice(&counter_bytes);
+                            self.write_response_to_rx(&mut rx_vring_lock, guest_mem_deref, &counter_packet)?;
+                        } else {
+                            // Normal echo: copy data, increment counter
+                            let data = &packet_bytes[VSOCK_HDR_SIZE..];
+                            let data_len = hdr.len as usize;
 
-                        // Create echo response header with swapped CID/port
-                        let echo_hdr = VsockHdr {
-                            src_cid: hdr.dst_cid,
-                            dst_cid: hdr.src_cid,
-                            src_port: hdr.dst_port,
-                            dst_port: hdr.src_port,
-                            len: bytes_to_echo as u32,
-                            r#type: VSOCK_TYPE_STREAM,
-                            op: VSOCK_OP_RW,
-                            flags: 0,
-                            buf_alloc: 65536,
-                            fwd_cnt: 0,
-                        };
-                        debug!(
-                            "Echoing {} bytes, total echoed: {}",
-                            bytes_to_echo,
-                            self.state.borrow().bytes_echoed
-                        );
+                            // Increment bytes_echoed counter
+                            let bytes_to_echo = data_len.min(data.len());
+                            self.state.borrow_mut().bytes_echoed += bytes_to_echo as u64;
 
-                        // Write header + echo data to RX queue
-                        let mut echo_packet = echo_hdr.to_bytes();
-                        echo_packet.extend_from_slice(&data[..bytes_to_echo]);
-                        self.write_response_to_rx(&mut rx_vring_lock, guest_mem_deref, &echo_packet)?;
+                            // Create echo response header with swapped CID/port
+                            let echo_hdr = VsockHdr {
+                                src_cid: hdr.dst_cid,
+                                dst_cid: hdr.src_cid,
+                                src_port: hdr.dst_port,
+                                dst_port: hdr.src_port,
+                                len: bytes_to_echo as u32,
+                                r#type: VSOCK_TYPE_STREAM,
+                                op: VSOCK_OP_RW,
+                                flags: 0,
+                                buf_alloc: 65536,
+                                fwd_cnt: 0,
+                            };
+                            debug!(
+                                "Echoing {} bytes, total echoed: {}",
+                                bytes_to_echo,
+                                self.state.borrow().bytes_echoed
+                            );
+
+                            // Write header + echo data to RX queue
+                            let mut echo_packet = echo_hdr.to_bytes();
+                            echo_packet.extend_from_slice(&data[..bytes_to_echo]);
+                            self.write_response_to_rx(&mut rx_vring_lock, guest_mem_deref, &echo_packet)?;
+                        }
                     }
                     VSOCK_OP_SHUTDOWN => {
                         // Send RST response
