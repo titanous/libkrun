@@ -1420,4 +1420,189 @@ mod tests {
         assert!(stats.total_memory.is_none());
         assert!(stats.available_memory.is_none());
     }
+
+    /// Test process_phq processes descriptor chain with START cmd_id, page blocks, and STOP (AC1.5)
+    /// Verifies that process_phq processes the command ID protocol correctly:
+    /// 1. Reads a 4-byte START command ID matching the host command
+    /// 2. Processes subsequent memory range descriptors (>4 bytes) with MADV_DONTNEED
+    /// 3. Reads a 4-byte STOP command ID
+    /// 4. Device transitions to DONE state (hinting_host_cmd becomes CMD_ID_DONE)
+    #[test]
+    fn test_process_phq_with_command_id_protocol() {
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x50000)])
+            .expect("Failed to create guest memory");
+
+        let irqchip: crate::legacy::IrqChip = DummyIrqChip::new().into();
+        let interrupt = InterruptTransport::new(irqchip, "test-balloon".into())
+            .expect("Failed to create interrupt transport");
+
+        const DESC_TABLE_ADDR: u64 = 0x1000;
+        const AVAIL_RING_ADDR: u64 = 0x2000;
+        const USED_RING_ADDR: u64 = 0x3000;
+        const CMD_ID_ADDR: u64 = 0x10000;
+        const PAGE_BLOCK_ADDR: u64 = 0x10100;
+        const STOP_CMD_ADDR: u64 = 0x10200;
+
+        // Create device queues with PHQ (index 3) having descriptor structures
+        let device_queues: Vec<DeviceQueue> = (0..5)
+            .map(|i| DeviceQueue {
+                queue: {
+                    let mut q = Queue::new(256);
+                    q.size = 256;
+                    q.ready = true;
+                    if i == 3 {
+                        // PHQ at index 3
+                        q.desc_table = GuestAddress(DESC_TABLE_ADDR);
+                        q.avail_ring = GuestAddress(AVAIL_RING_ADDR);
+                        q.used_ring = GuestAddress(USED_RING_ADDR);
+                    }
+                    q
+                },
+                event: std::sync::Arc::new(
+                    utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK)
+                        .expect("Failed to create eventfd"),
+                ),
+            })
+            .collect();
+
+        let mut balloon = Balloon::new().expect("Failed to create balloon device");
+        balloon
+            .activate(mem.clone(), interrupt, device_queues)
+            .expect("Failed to activate balloon device");
+
+        // Generate a host command ID using start_free_page_hinting
+        // This will set hinting_host_cmd to 2 (first command ID after init)
+        balloon.start_free_page_hinting();
+
+        // Get the host command ID that was set
+        let host_cmd_id = balloon.hinting_host_cmd;
+        assert!(host_cmd_id > 1, "Host command ID should be > 1");
+
+        // Prepare descriptor chain:
+        // Descriptor 0: 4-byte START command ID (matches host cmd)
+        // Descriptor 1: Page block descriptor (>4 bytes)
+        // Descriptor 2: 4-byte STOP command ID
+
+        // Write START command ID
+        mem.write_obj(host_cmd_id, GuestAddress(CMD_ID_ADDR))
+            .expect("Failed to write start cmd_id");
+
+        // Write page block data (4KB page at 0x1000)
+        let page_block_data = vec![0u8; 4096];
+        mem.write_slice(&page_block_data, GuestAddress(PAGE_BLOCK_ADDR))
+            .expect("Failed to write page block");
+
+        // Write STOP command ID (0 = CMD_ID_STOP)
+        mem.write_obj(uapi::VIRTIO_BALLOON_CMD_ID_STOP, GuestAddress(STOP_CMD_ADDR))
+            .expect("Failed to write stop cmd_id");
+
+        // Set up descriptor chain (3 descriptors: START, PAGE_BLOCK, STOP)
+        // Descriptor 0 (START): 4 bytes
+        let desc0 = Descriptor {
+            addr: CMD_ID_ADDR,
+            len: 4,
+            flags: 1, // Has next
+            next: 1,
+        };
+        mem.write_obj(desc0, GuestAddress(DESC_TABLE_ADDR))
+            .expect("Failed to write descriptor 0");
+
+        // Descriptor 1 (PAGE_BLOCK): 4096 bytes
+        let desc1 = Descriptor {
+            addr: PAGE_BLOCK_ADDR,
+            len: 4096,
+            flags: 1, // Has next
+            next: 2,
+        };
+        mem.write_obj(desc1, GuestAddress(DESC_TABLE_ADDR + 16))
+            .expect("Failed to write descriptor 1");
+
+        // Descriptor 2 (STOP): 4 bytes
+        let desc2 = Descriptor {
+            addr: STOP_CMD_ADDR,
+            len: 4,
+            flags: 0, // No next
+            next: 0,
+        };
+        mem.write_obj(desc2, GuestAddress(DESC_TABLE_ADDR + 32))
+            .expect("Failed to write descriptor 2");
+
+        // Set up available ring to point to descriptor chain (head = 0)
+        mem.write_obj(0u16, GuestAddress(AVAIL_RING_ADDR))
+            .expect("Failed to write avail flags");
+        mem.write_obj(1u16, GuestAddress(AVAIL_RING_ADDR + 2))
+            .expect("Failed to write avail idx");
+        mem.write_obj(0u16, GuestAddress(AVAIL_RING_ADDR + 4))
+            .expect("Failed to write avail ring[0]");
+
+        // Initialize used ring
+        mem.write_obj(0u16, GuestAddress(USED_RING_ADDR))
+            .expect("Failed to write used flags");
+        mem.write_obj(0u16, GuestAddress(USED_RING_ADDR + 2))
+            .expect("Failed to write used idx");
+
+        // Call process_phq
+        let result = balloon.process_phq();
+
+        // Should return true (descriptors were processed)
+        assert!(
+            result,
+            "process_phq should return true when descriptors are available"
+        );
+
+        // Verify device transitioned to DONE state
+        assert_eq!(
+            balloon.hinting_host_cmd,
+            uapi::VIRTIO_BALLOON_CMD_ID_DONE,
+            "Device should transition to DONE state after processing STOP command"
+        );
+
+        // Verify the command ID was read correctly
+        assert_eq!(
+            balloon.hinting_guest_cmd,
+            Some(uapi::VIRTIO_BALLOON_CMD_ID_STOP),
+            "Guest command should be set to STOP after processing"
+        );
+
+        // Verify descriptor was marked as used
+        let used_idx = mem.read_obj::<u16>(GuestAddress(USED_RING_ADDR + 2))
+            .expect("Failed to read used idx");
+        assert_eq!(used_idx, 1, "Descriptor chain should be marked as used");
+    }
+
+    /// Test process_phq returns false when queue is empty
+    #[test]
+    fn test_process_phq_empty_queue() {
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x50000)])
+            .expect("Failed to create guest memory");
+
+        let irqchip: crate::legacy::IrqChip = DummyIrqChip::new().into();
+        let interrupt = InterruptTransport::new(irqchip, "test-balloon".into())
+            .expect("Failed to create interrupt transport");
+
+        // Create device queues with empty PHQ
+        let device_queues: Vec<DeviceQueue> = (0..5)
+            .map(|_| DeviceQueue {
+                queue: Queue::new(256),
+                event: std::sync::Arc::new(
+                    utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK)
+                        .expect("Failed to create eventfd"),
+                ),
+            })
+            .collect();
+
+        let mut balloon = Balloon::new().expect("Failed to create balloon device");
+        balloon
+            .activate(mem, interrupt, device_queues)
+            .expect("Failed to activate balloon device");
+
+        // Call process_phq with empty queue
+        let result = balloon.process_phq();
+
+        // Should return false (no descriptors to process)
+        assert!(
+            !result,
+            "process_phq should return false when queue is empty"
+        );
+    }
 }
