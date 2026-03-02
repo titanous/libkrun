@@ -779,4 +779,118 @@ mod tests {
             })
         ));
     }
+
+    /// AC2.5: Incremental snapshot records reclaimed pages in the snapshot metadata
+    #[cfg(feature = "snapshot")]
+    #[test]
+    fn test_incremental_snapshot_with_reclaimed_pages() {
+        let mem = make_memory(&[(0x1000, 0x4000)]);
+        let header = valid_header(&mem, 2, false);
+
+        // Create an incremental snapshot with both dirty and reclaimed pages
+        let dirty_pages = vec![
+            DirtyPage {
+                guest_addr: 0x1000,
+                data: vec![0xAA; 4096],
+            },
+            DirtyPage {
+                guest_addr: 0x2000,
+                data: vec![0xBB; 4096],
+            },
+        ];
+
+        // Reclaimed pages are in the snapshot
+        let reclaimed_pages = vec![0x3000, 0x4000];
+
+        let snapshot = IncrementalSnapshot {
+            header,
+            vcpu_states: vec![vec![0xCC; 256], vec![0xDD; 256]],
+            device_states: vec![],
+            dirty_pages,
+            gic_state: None,
+            vm_state: None,
+            reclaimed_pages,
+        };
+
+        // Create a temp file for incremental snapshot
+        let temp_dir = std::path::PathBuf::from("/tmp");
+        let temp_path = temp_dir.join(format!(
+            "libkrun_test_reclaimed_pages_{}.bin",
+            std::process::id()
+        ));
+
+        // Save incremental snapshot
+        let save_result = save_incremental_snapshot(&snapshot, &temp_path);
+        assert!(save_result.is_ok());
+
+        // Load incremental snapshot back
+        let load_result = load_incremental_snapshot(&temp_path);
+        let _ = std::fs::remove_file(&temp_path);
+        assert!(load_result.is_ok());
+
+        let loaded = load_result.unwrap();
+
+        // Verify reclaimed_pages are preserved
+        assert_eq!(loaded.reclaimed_pages.len(), 2);
+        assert_eq!(loaded.reclaimed_pages[0], 0x3000);
+        assert_eq!(loaded.reclaimed_pages[1], 0x4000);
+    }
+
+    /// AC2.6: Restore zero-fills reclaimed pages in guest memory
+    #[cfg(feature = "snapshot")]
+    #[test]
+    fn test_apply_reclaimed_pages_zero_fills() {
+        let mem = make_memory(&[(0x0, 0x8000)]); // 32KB region
+
+        // Fill the first two pages with non-zero data
+        let test_data = vec![0xFF; 4096];
+        mem.write_slice(&test_data, GuestAddress(0x0)).unwrap();
+        mem.write_slice(&test_data, GuestAddress(0x1000)).unwrap();
+
+        // Fill pages after with different data
+        let test_data2 = vec![0xAA; 4096];
+        mem.write_slice(&test_data2, GuestAddress(0x2000)).unwrap();
+        mem.write_slice(&test_data2, GuestAddress(0x3000)).unwrap();
+
+        // Apply reclaimed pages for the first two pages (should be zeroed)
+        let reclaimed = vec![0x0, 0x1000];
+        let result = apply_reclaimed_pages(&mem, &reclaimed);
+        assert!(result.is_ok());
+
+        // Verify first two pages are now zeros
+        let mut buf = vec![0u8; 4096];
+        mem.read_slice(&mut buf, GuestAddress(0x0)).unwrap();
+        assert!(buf.iter().all(|&b| b == 0), "Page at 0x0 should be zeroed");
+
+        mem.read_slice(&mut buf, GuestAddress(0x1000)).unwrap();
+        assert!(buf.iter().all(|&b| b == 0), "Page at 0x1000 should be zeroed");
+
+        // Verify other pages are unchanged
+        mem.read_slice(&mut buf, GuestAddress(0x2000)).unwrap();
+        assert!(buf.iter().all(|&b| b == 0xAA), "Page at 0x2000 should be unchanged");
+
+        mem.read_slice(&mut buf, GuestAddress(0x3000)).unwrap();
+        assert!(buf.iter().all(|&b| b == 0xAA), "Page at 0x3000 should be unchanged");
+    }
+
+    /// AC2.6 variant: Empty reclaimed_pages list (backward compat with old snapshots)
+    #[cfg(feature = "snapshot")]
+    #[test]
+    fn test_apply_reclaimed_pages_empty_list() {
+        let mem = make_memory(&[(0x0, 0x4000)]);
+
+        // Fill with non-zero data
+        let test_data = vec![0xFF; 4096];
+        mem.write_slice(&test_data, GuestAddress(0x0)).unwrap();
+
+        // Apply empty reclaimed pages
+        let reclaimed = vec![];
+        let result = apply_reclaimed_pages(&mem, &reclaimed);
+        assert!(result.is_ok());
+
+        // Verify data is unchanged
+        let mut buf = vec![0u8; 4096];
+        mem.read_slice(&mut buf, GuestAddress(0x0)).unwrap();
+        assert!(buf.iter().all(|&b| b == 0xFF), "Page should be unchanged with empty reclaimed list");
+    }
 }
