@@ -161,14 +161,11 @@ impl VhostUserBackendMut for VsockProxyBackend {
         if (device_event as usize) >= vrings.len() {
             return Ok(());
         }
-        match device_event {
-            1 => {
-                // Process TX queue
-                let tx_vring = &vrings[1];
-                let rx_vring = &vrings[0];
-                self.process_tx_queue(tx_vring, rx_vring)?;
-            }
-            _ => {}
+        // Process TX queue (index 1). Event queue (index 2) will be handled in future.
+        if device_event == 1 {
+            let tx_vring = &vrings[1];
+            let rx_vring = &vrings[0];
+            self.process_tx_queue(tx_vring, rx_vring)?;
         }
         Ok(())
     }
@@ -401,37 +398,38 @@ impl VsockProxyBackend {
     ) -> std::io::Result<()> {
         let rx_queue = rx_vring_lock.get_queue_mut();
 
-        // Collect descriptor chains to write to
-        let mut chains_to_write = Vec::new();
-        if let Ok(iter) = rx_queue.iter(guest_mem_deref) {
-            for desc_chain in iter {
-                chains_to_write.push(desc_chain);
+        // Get iterator and take only ONE descriptor chain
+        let mut iter = match rx_queue.iter(guest_mem_deref) {
+            Ok(i) => i,
+            Err(_) => return Ok(()), // No RX buffers available
+        };
+
+        // Take the first (and only) available descriptor chain
+        let desc_chain = match iter.next() {
+            Some(c) => c,
+            None => return Ok(()), // No RX buffers available
+        };
+
+        let rx_head_index = desc_chain.head_index();
+
+        // Write packet to writable descriptors
+        let mut offset = 0;
+        for desc in desc_chain.clone().writable() {
+            let addr = desc.addr();
+            let len = desc.len() as usize;
+            if len > 0 && offset < packet_bytes.len() {
+                let write_len = std::cmp::min(len, packet_bytes.len() - offset);
+                guest_mem_deref
+                    .write_slice(&packet_bytes[offset..offset + write_len], addr)
+                    .map_err(|e| {
+                        std::io::Error::other(format!("failed to write to RX: {}", e))
+                    })?;
+                offset += write_len;
             }
         }
 
-        // Write to the first available descriptor chain
-        if let Some(desc_chain) = chains_to_write.first() {
-            let rx_head_index = desc_chain.head_index();
-
-            // Write packet to writable descriptors
-            let mut offset = 0;
-            for desc in desc_chain.clone().writable() {
-                let addr = desc.addr();
-                let len = desc.len() as usize;
-                if len > 0 && offset < packet_bytes.len() {
-                    let write_len = std::cmp::min(len, packet_bytes.len() - offset);
-                    guest_mem_deref
-                        .write_slice(&packet_bytes[offset..offset + write_len], addr)
-                        .map_err(|e| {
-                            std::io::Error::other(format!("failed to write to RX: {}", e))
-                        })?;
-                    offset += write_len;
-                }
-            }
-
-            // Mark RX descriptor as used with the number of bytes written
-            rx_queue.add_used(guest_mem_deref, rx_head_index, offset as u32).ok();
-        }
+        // Mark RX descriptor as used with the number of bytes written
+        rx_queue.add_used(guest_mem_deref, rx_head_index, offset as u32).ok();
 
         Ok(())
     }
