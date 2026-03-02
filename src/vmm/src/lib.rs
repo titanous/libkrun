@@ -521,7 +521,7 @@ impl Vmm {
     pub fn restore_from_store(
         &mut self,
         vmstate_bytes: Vec<u8>,
-        store: Box<dyn snapshot_store::SnapshotStore>,
+        mut store: Box<dyn snapshot_store::SnapshotStore>,
         rt: &tokio::runtime::Runtime,
     ) -> std::result::Result<(), snapshot::SnapshotError> {
         // Deserialize vmstate
@@ -542,6 +542,17 @@ impl Vmm {
                     "Failed to quiesce device workers before restore: {e}"
                 ))
             })?;
+
+        // Extract excluded pages from vmstate and configure store if it's FsSnapshotStore
+        let excluded_pages = vmstate.excluded_pages.clone();
+        if !excluded_pages.is_empty() {
+            // Try to downcast to FsSnapshotStore and set excluded pages
+            use std::any::Any;
+            let store_any = &mut store as &mut dyn Any;
+            if let Some(fs_store) = store_any.downcast_mut::<snapshot_store::FsSnapshotStore>() {
+                fs_store.set_excluded_pages(excluded_pages.clone());
+            }
+        }
 
         // Drain preload stream to populate memory (eager restore)
         let regions = snapshot::ram_layout(&self.guest_memory);
@@ -568,6 +579,11 @@ impl Vmm {
             Ok::<(), snapshot::SnapshotError>(())
         })?;
 
+        // After eager preload completes, zero-fill excluded pages
+        if !excluded_pages.is_empty() {
+            snapshot::apply_reclaimed_pages(&self.guest_memory, &excluded_pages)?;
+        }
+
         self.restore_device_and_vcpu_states(vmstate)
     }
 
@@ -588,7 +604,7 @@ impl Vmm {
     pub fn restore_from_store_with_uffd(
         &mut self,
         vmstate_bytes: Vec<u8>,
-        store: Box<dyn snapshot_store::SnapshotStore>,
+        mut store: Box<dyn snapshot_store::SnapshotStore>,
         rt: tokio::runtime::Runtime,
     ) -> std::result::Result<std::thread::JoinHandle<()>, snapshot::SnapshotError> {
         // Deserialize and validate vmstate BEFORE creating UFFD handler or starting threads.
@@ -610,6 +626,17 @@ impl Vmm {
                     "Failed to quiesce device workers before restore: {e}"
                 ))
             })?;
+
+        // Extract excluded pages from vmstate and configure store before converting to Arc
+        let excluded_pages = vmstate.excluded_pages.clone();
+        if !excluded_pages.is_empty() {
+            // Try to downcast to FsSnapshotStore and set excluded pages
+            use std::any::Any;
+            let store_any = &mut store as &mut dyn Any;
+            if let Some(fs_store) = store_any.downcast_mut::<snapshot_store::FsSnapshotStore>() {
+                fs_store.set_excluded_pages(excluded_pages);
+            }
+        }
 
         // Get memory regions for UFFD registration (guest_addr, host_addr, size)
         let regions = snapshot::ram_layout(&self.guest_memory);

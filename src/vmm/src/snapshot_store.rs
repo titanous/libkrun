@@ -6,6 +6,7 @@
 //! Provides async traits for reading and writing VM snapshots to different
 //! storage backends (filesystem, memory, cloud, etc.).
 
+use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -46,7 +47,7 @@ pub type BoxStream<'a, T> = std::pin::Pin<Box<dyn futures::stream::Stream<Item =
 /// Supports both read and write paths for full and incremental snapshots.
 /// Implementations must be `Send + Sync + 'static` for use in concurrent contexts.
 /// All methods return `Send` futures to support tokio::spawn in Phase 2+ (UFFD handler).
-pub trait SnapshotStore: Send + Sync + 'static {
+pub trait SnapshotStore: Any + Send + Sync + 'static {
     /// Read VM state metadata from the store.
     ///
     /// Returns the serialized `VmSnapshot` or `IncrementalSnapshot` bytes.
@@ -99,6 +100,7 @@ pub trait SnapshotStore: Send + Sync + 'static {
     /// Implementations should fsync or equivalent to guarantee data is
     /// persisted to the underlying storage medium.
     fn close(&self) -> SendBoxFuture<'_, io::Result<()>>;
+
 }
 
 /// Factory trait for creating snapshot store instances.
