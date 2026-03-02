@@ -3,13 +3,13 @@ use std::convert::TryInto;
 use std::io::Write;
 
 use utils::eventfd::EventFd;
-use vm_memory::{Address, ByteValued, Bytes, GuestAddress, GuestMemoryBackend, GuestMemoryMmap};
+use vm_memory::{Address, ByteValued, Bytes, GuestAddress, GuestMemoryBackend, GuestMemoryMmap, GuestMemoryRegion};
 
 use super::super::{
     ActivateError, ActivateResult, BalloonError, DeviceQueue, DeviceState, QueueConfig,
     VirtioDevice,
 };
-use super::{defs, defs::uapi};
+use super::{defs, defs::uapi, reclaimed_bitmap::ReclaimedBitmap};
 use crate::virtio::InterruptTransport;
 
 // Inflate queue.
@@ -116,6 +116,8 @@ pub struct Balloon {
     hinting_cmd_counter: u32,
     hinting_host_cmd: u32,
     hinting_guest_cmd: Option<u32>,
+    pub(crate) inflated_bitmap: Option<ReclaimedBitmap>,
+    pub(crate) reported_free_bitmap: Option<ReclaimedBitmap>,
 }
 
 impl Balloon {
@@ -133,6 +135,8 @@ impl Balloon {
             hinting_cmd_counter: 2,
             hinting_host_cmd: 0,
             hinting_guest_cmd: None,
+            inflated_bitmap: None,
+            reported_free_bitmap: None,
         })
     }
 
@@ -472,6 +476,11 @@ impl Balloon {
         self.device_state.signal_config_change();
         debug!("balloon: initiated free page hinting with cmd_id: {}", cmd_id);
     }
+
+    /// Query the reclaimed bitmaps for snapshot integration.
+    pub fn reclaimed_bitmaps(&self) -> (Option<&ReclaimedBitmap>, Option<&ReclaimedBitmap>) {
+        (self.inflated_bitmap.as_ref(), self.reported_free_bitmap.as_ref())
+    }
 }
 
 impl VirtioDevice for Balloon {
@@ -562,6 +571,20 @@ impl VirtioDevice for Balloon {
             error!("Cannot write to activate_evt",);
             return Err(ActivateError::BadActivate);
         }
+
+        // Calculate total guest address space by finding the highest end address
+        let max_addr = mem
+            .iter()
+            .map(|region| region.start_addr().raw_value() + region.len())
+            .max()
+            .unwrap_or(0);
+
+        // Convert to page count using 4KB page size
+        let num_pages = (max_addr / 4096) as usize;
+
+        // Create reclaimed bitmaps
+        self.inflated_bitmap = Some(ReclaimedBitmap::new(num_pages));
+        self.reported_free_bitmap = Some(ReclaimedBitmap::new(num_pages));
 
         self.queues = Some(queues);
         self.device_state = DeviceState::Activated(mem, interrupt);
