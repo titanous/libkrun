@@ -1356,8 +1356,6 @@ pub fn build_microvm(
             export_table,
             intc.clone(),
             exit_code,
-            #[cfg(target_os = "macos")]
-            _sender,
         )?;
         #[cfg(feature = "vhost-user")]
         {
@@ -2381,7 +2379,6 @@ fn attach_fs_devices(
     #[cfg(not(feature = "tee"))] export_table: Option<ExportTable>,
     intc: IrqChip,
     exit_code: Arc<AtomicI32>,
-    #[cfg(target_os = "macos")] _map_sender: Sender<WorkerMessage>,
 ) -> std::result::Result<(), StartMicrovmError> {
     use self::StartMicrovmError::*;
 
