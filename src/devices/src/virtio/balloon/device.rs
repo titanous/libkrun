@@ -173,6 +173,17 @@ impl Balloon {
                         libc::MADV_DONTNEED,
                     )
                 };
+
+                // Track reported-free pages in the bitmap
+                if let Some(ref bitmap) = self.reported_free_bitmap {
+                    let start_pfn = (desc.addr.raw_value() >> 12) as u32;
+                    let count = desc.len / 4096;
+                    debug!(
+                        "balloon: marking FRQ pages as reported-free: start_pfn={:#x} count={}",
+                        start_pfn, count
+                    );
+                    bitmap.mark_range(start_pfn, count as u32);
+                }
             }
 
             have_used = true;
@@ -248,6 +259,11 @@ impl Balloon {
                             warn!("balloon: madvise failed for PFN {:#x}: {}", pfn, ret);
                         }
                     }
+
+                    // Track this page in the inflated bitmap for snapshot exclusion
+                    if let Some(ref bitmap) = self.inflated_bitmap {
+                        bitmap.mark(pfn);
+                    }
                 }
             }
 
@@ -276,7 +292,32 @@ impl Balloon {
 
         while let Some(head) = queues[DFQ_INDEX].queue.pop(mem) {
             let index = head.index;
-            // Just acknowledge the descriptor chains - the guest will fault pages back in on access
+            // Read PFN values from the descriptor chain and clear the inflated bitmap
+            for desc in head.into_iter() {
+                // Descriptor contains a buffer of u32 PFN values
+                // Iterate through each PFN in the buffer (4 bytes per PFN)
+                for offset in (0..desc.len).step_by(4) {
+                    // Read PFN from guest memory
+                    let pfn = match mem.read_obj::<u32>(
+                        desc.addr
+                            .checked_add(offset as u64)
+                            .expect("PFN offset should not overflow"),
+                    ) {
+                        Ok(pfn) => pfn,
+                        Err(e) => {
+                            warn!("balloon: failed to read PFN at offset {}: {:?}", offset, e);
+                            continue;
+                        }
+                    };
+
+                    // Clear the bit in the inflated bitmap
+                    if let Some(ref bitmap) = self.inflated_bitmap {
+                        debug!("balloon: deflating PFN {:#x}", pfn);
+                        bitmap.clear(pfn);
+                    }
+                }
+            }
+
             have_used = true;
             if let Err(e) = queues[DFQ_INDEX].queue.add_used(mem, index, 0) {
                 error!("failed to add used elements to the queue: {e:?}");
@@ -437,6 +478,17 @@ impl Balloon {
                                 libc::MADV_DONTNEED,
                             )
                         };
+
+                        // Track reported-free pages in the bitmap
+                        if let Some(ref bitmap) = self.reported_free_bitmap {
+                            let start_pfn = (desc.addr.raw_value() >> 12) as u32;
+                            let count = desc.len / 4096;
+                            debug!(
+                                "balloon: marking PHQ pages as reported-free: start_pfn={:#x} count={}",
+                                start_pfn, count
+                            );
+                            bitmap.mark_range(start_pfn, count as u32);
+                        }
                     }
                 }
             }
@@ -1625,5 +1677,231 @@ mod tests {
             !result,
             "process_phq should return false when queue is empty"
         );
+    }
+
+    /// Test AC2.1: Inflated bitmap tracking on inflate/deflate
+    /// After inflate, bits are set for inflated PFNs.
+    /// After deflate of the same PFNs, bits are cleared.
+    #[test]
+    fn test_inflated_bitmap_tracking() {
+        // Create guest memory
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x50000)])
+            .expect("Failed to create guest memory");
+
+        let irqchip: crate::legacy::IrqChip = DummyIrqChip::new().into();
+        let interrupt = InterruptTransport::new(irqchip, "test-balloon".into())
+            .expect("Failed to create interrupt transport");
+
+        const DESC_TABLE_ADDR: u64 = 0x1000;
+        const AVAIL_RING_ADDR: u64 = 0x2000;
+        const USED_RING_ADDR: u64 = 0x3000;
+        const PFN_DATA_ADDR: u64 = 0x10000;
+
+        // Create device queues with inflate/deflate queue descriptor structures
+        let device_queues: Vec<DeviceQueue> = (0..5)
+            .map(|i| DeviceQueue {
+                queue: {
+                    let mut q = Queue::new(256);
+                    q.size = 256;
+                    q.ready = true;
+                    if i == 0 || i == 1 {
+                        // Inflate or Deflate queue - set up descriptor structures
+                        q.desc_table = GuestAddress(DESC_TABLE_ADDR);
+                        q.avail_ring = GuestAddress(AVAIL_RING_ADDR);
+                        q.used_ring = GuestAddress(USED_RING_ADDR);
+                    }
+                    q
+                },
+                event: std::sync::Arc::new(
+                    utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK)
+                        .expect("Failed to create eventfd"),
+                ),
+            })
+            .collect();
+
+        let mut balloon = Balloon::new().expect("Failed to create balloon device");
+        balloon
+            .activate(mem.clone(), interrupt, device_queues)
+            .expect("Failed to activate balloon device");
+
+        // Write PFN values for inflate
+        let pfn1: u32 = 0x1;
+        let pfn2: u32 = 0x5;
+        mem.write_obj(pfn1, GuestAddress(PFN_DATA_ADDR))
+            .expect("Failed to write PFN 1");
+        mem.write_obj(pfn2, GuestAddress(PFN_DATA_ADDR + 4))
+            .expect("Failed to write PFN 2");
+
+        // Set up inflate descriptor
+        let inflate_desc = Descriptor {
+            addr: PFN_DATA_ADDR,
+            len: 8,
+            flags: 0,
+            next: 0,
+        };
+        mem.write_obj(inflate_desc, GuestAddress(DESC_TABLE_ADDR))
+            .expect("Failed to write descriptor");
+
+        // Set up avail ring to indicate descriptor 0 is available
+        mem.write_obj(0u16, GuestAddress(AVAIL_RING_ADDR))
+            .expect("Failed to write avail flags");
+        mem.write_obj(1u16, GuestAddress(AVAIL_RING_ADDR + 2))
+            .expect("Failed to write avail idx");
+        mem.write_obj(0u16, GuestAddress(AVAIL_RING_ADDR + 4))
+            .expect("Failed to write avail ring[0]");
+
+        // Set up used ring
+        mem.write_obj(0u16, GuestAddress(USED_RING_ADDR))
+            .expect("Failed to write used flags");
+        mem.write_obj(0u16, GuestAddress(USED_RING_ADDR + 2))
+            .expect("Failed to write used idx");
+
+        // Process inflate
+        let result = balloon.process_inflate();
+        assert!(result, "process_inflate should return true");
+
+        // Verify inflated bitmap has the bits set
+        if let Some(ref bitmap) = balloon.inflated_bitmap {
+            assert!(bitmap.is_set(pfn1), "PFN 1 should be marked as inflated");
+            assert!(bitmap.is_set(pfn2), "PFN 2 should be marked as inflated");
+        } else {
+            panic!("inflated_bitmap should be initialized");
+        }
+
+        // Now test deflate - write the same PFNs to the deflate queue
+        mem.write_obj(pfn1, GuestAddress(PFN_DATA_ADDR + 0x1000))
+            .expect("Failed to write PFN 1 for deflate");
+        mem.write_obj(pfn2, GuestAddress(PFN_DATA_ADDR + 0x1004))
+            .expect("Failed to write PFN 2 for deflate");
+
+        // Set up deflate descriptor
+        let deflate_desc = Descriptor {
+            addr: PFN_DATA_ADDR + 0x1000,
+            len: 8,
+            flags: 0,
+            next: 0,
+        };
+        mem.write_obj(deflate_desc, GuestAddress(DESC_TABLE_ADDR))
+            .expect("Failed to write deflate descriptor");
+
+        // Set up avail ring to indicate descriptor 0 is available for deflate
+        mem.write_obj(0u16, GuestAddress(AVAIL_RING_ADDR))
+            .expect("Failed to write avail flags");
+        mem.write_obj(1u16, GuestAddress(AVAIL_RING_ADDR + 2))
+            .expect("Failed to write avail idx");
+        mem.write_obj(0u16, GuestAddress(AVAIL_RING_ADDR + 4))
+            .expect("Failed to write avail ring[0]");
+
+        // Set up used ring
+        mem.write_obj(0u16, GuestAddress(USED_RING_ADDR))
+            .expect("Failed to write used flags");
+        mem.write_obj(0u16, GuestAddress(USED_RING_ADDR + 2))
+            .expect("Failed to write used idx");
+
+        // Process deflate
+        let result = balloon.process_deflate();
+        assert!(result, "process_deflate should return true");
+
+        // Verify inflated bitmap bits are cleared
+        if let Some(ref bitmap) = balloon.inflated_bitmap {
+            assert!(
+                !bitmap.is_set(pfn1),
+                "PFN 1 should be cleared after deflate"
+            );
+            assert!(
+                !bitmap.is_set(pfn2),
+                "PFN 2 should be cleared after deflate"
+            );
+        }
+    }
+
+    /// Test AC2.2: Reported-free bitmap tracking on FRQ/PHQ
+    /// After FRQ or PHQ processing, bits are set for reported ranges
+    #[test]
+    fn test_reported_free_bitmap_tracking() {
+        // Create guest memory
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x50000)])
+            .expect("Failed to create guest memory");
+
+        let irqchip: crate::legacy::IrqChip = DummyIrqChip::new().into();
+        let interrupt = InterruptTransport::new(irqchip, "test-balloon".into())
+            .expect("Failed to create interrupt transport");
+
+        const DESC_TABLE_ADDR: u64 = 0x1000;
+        const AVAIL_RING_ADDR: u64 = 0x2000;
+        const USED_RING_ADDR: u64 = 0x3000;
+        const PFN_DATA_ADDR: u64 = 0x10000;
+
+        // Create device queues with FRQ queue descriptor structures
+        let device_queues: Vec<DeviceQueue> = (0..5)
+            .map(|i| DeviceQueue {
+                queue: {
+                    let mut q = Queue::new(256);
+                    q.size = 256;
+                    q.ready = true;
+                    if i == 4 {
+                        // FRQ queue - set up descriptor structures
+                        q.desc_table = GuestAddress(DESC_TABLE_ADDR);
+                        q.avail_ring = GuestAddress(AVAIL_RING_ADDR);
+                        q.used_ring = GuestAddress(USED_RING_ADDR);
+                    }
+                    q
+                },
+                event: std::sync::Arc::new(
+                    utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK)
+                        .expect("Failed to create eventfd"),
+                ),
+            })
+            .collect();
+
+        let mut balloon = Balloon::new().expect("Failed to create balloon device");
+        balloon
+            .activate(mem.clone(), interrupt, device_queues)
+            .expect("Failed to activate balloon device");
+
+        // Set up FRQ descriptor with a range of pages
+        // Address 0x1000 covers PFN 0x1, length 0x4000 (4 pages)
+        let frq_desc = Descriptor {
+            addr: 0x1000,
+            len: 0x4000,
+            flags: 0,
+            next: 0,
+        };
+        mem.write_obj(frq_desc, GuestAddress(DESC_TABLE_ADDR))
+            .expect("Failed to write FRQ descriptor");
+
+        // Set up avail ring
+        mem.write_obj(0u16, GuestAddress(AVAIL_RING_ADDR))
+            .expect("Failed to write avail flags");
+        mem.write_obj(1u16, GuestAddress(AVAIL_RING_ADDR + 2))
+            .expect("Failed to write avail idx");
+        mem.write_obj(0u16, GuestAddress(AVAIL_RING_ADDR + 4))
+            .expect("Failed to write avail ring[0]");
+
+        // Set up used ring
+        mem.write_obj(0u16, GuestAddress(USED_RING_ADDR))
+            .expect("Failed to write used flags");
+        mem.write_obj(0u16, GuestAddress(USED_RING_ADDR + 2))
+            .expect("Failed to write used idx");
+
+        // Process FRQ
+        let result = balloon.process_frq();
+        assert!(result, "process_frq should return true");
+
+        // Verify reported-free bitmap has the bits set for the range
+        if let Some(ref bitmap) = balloon.reported_free_bitmap {
+            // PFN 0x1, 0x2, 0x3, 0x4 should all be set
+            assert!(bitmap.is_set(0x1), "PFN 0x1 should be marked as reported-free");
+            assert!(bitmap.is_set(0x2), "PFN 0x2 should be marked as reported-free");
+            assert!(bitmap.is_set(0x3), "PFN 0x3 should be marked as reported-free");
+            assert!(bitmap.is_set(0x4), "PFN 0x4 should be marked as reported-free");
+            // PFN 0x0 should NOT be set (outside range)
+            assert!(
+                !bitmap.is_set(0x0),
+                "PFN 0x0 should not be marked as reported-free"
+            );
+        } else {
+            panic!("reported_free_bitmap should be initialized");
+        }
     }
 }
