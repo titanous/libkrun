@@ -3,7 +3,7 @@ use std::convert::TryInto;
 use std::io::Write;
 
 use utils::eventfd::EventFd;
-use vm_memory::{ByteValued, GuestMemoryBackend, GuestMemoryMmap};
+use vm_memory::{Address, ByteValued, Bytes, GuestAddress, GuestMemoryBackend, GuestMemoryMmap};
 
 use super::super::{
     ActivateError, ActivateResult, BalloonError, DeviceQueue, DeviceState, QueueConfig,
@@ -107,6 +107,108 @@ impl Balloon {
 
             have_used = true;
             if let Err(e) = queues[FRQ_INDEX].queue.add_used(mem, index, 0) {
+                error!("failed to add used elements to the queue: {e:?}");
+            }
+        }
+
+        have_used
+    }
+
+    pub fn process_inflate(&mut self) -> bool {
+        debug!("balloon: process_inflate()");
+        let mem = match self.device_state {
+            DeviceState::Activated(ref mem, _) => mem,
+            // This should never happen, it's been already validated in the event handler.
+            DeviceState::Inactive => unreachable!(),
+        };
+
+        let queues = self
+            .queues
+            .as_mut()
+            .expect("queues should exist when activated");
+        let mut have_used = false;
+
+        while let Some(head) = queues[IFQ_INDEX].queue.pop(mem) {
+            let index = head.index;
+            for desc in head.into_iter() {
+                // Descriptor contains a buffer of u32 PFN values
+                // Iterate through each PFN in the buffer (4 bytes per PFN)
+                for offset in (0..desc.len).step_by(4) {
+                    // Read PFN from guest memory
+                    let pfn = match mem.read_obj::<u32>(
+                        desc.addr
+                            .checked_add(offset as u64)
+                            .expect("PFN offset should not overflow"),
+                    ) {
+                        Ok(pfn) => pfn,
+                        Err(e) => {
+                            warn!("balloon: failed to read PFN at offset {}: {:?}", offset, e);
+                            continue;
+                        }
+                    };
+
+                    // Convert PFN to guest physical address
+                    let guest_addr = GuestAddress(u64::from(pfn) << uapi::VIRTIO_BALLOON_PFN_SHIFT);
+
+                    // Get host address - if this fails, PFN is invalid, skip silently
+                    let host_addr = match mem.get_host_address(guest_addr) {
+                        Ok(addr) => addr,
+                        Err(_) => {
+                            debug!(
+                                "balloon: invalid PFN {:#x} (guest_addr={:?}) outside guest memory",
+                                pfn, guest_addr
+                            );
+                            continue;
+                        }
+                    };
+
+                    // Call madvise to release the page
+                    // This is idempotent on already-released pages (AC1.8)
+                    debug!(
+                        "balloon: inflating PFN {:#x} guest_addr={:?} host_addr={:p}",
+                        pfn, guest_addr, host_addr
+                    );
+                    unsafe {
+                        let ret = libc::madvise(
+                            host_addr as *mut libc::c_void,
+                            4096,
+                            libc::MADV_DONTNEED,
+                        );
+                        if ret != 0 {
+                            warn!("balloon: madvise failed for PFN {:#x}: {}", pfn, ret);
+                        }
+                    }
+                }
+            }
+
+            have_used = true;
+            if let Err(e) = queues[IFQ_INDEX].queue.add_used(mem, index, 0) {
+                error!("failed to add used elements to the queue: {e:?}");
+            }
+        }
+
+        have_used
+    }
+
+    pub fn process_deflate(&mut self) -> bool {
+        debug!("balloon: process_deflate()");
+        let mem = match self.device_state {
+            DeviceState::Activated(ref mem, _) => mem,
+            // This should never happen, it's been already validated in the event handler.
+            DeviceState::Inactive => unreachable!(),
+        };
+
+        let queues = self
+            .queues
+            .as_mut()
+            .expect("queues should exist when activated");
+        let mut have_used = false;
+
+        while let Some(head) = queues[DFQ_INDEX].queue.pop(mem) {
+            let index = head.index;
+            // Just acknowledge the descriptor chains - the guest will fault pages back in on access
+            have_used = true;
+            if let Err(e) = queues[DFQ_INDEX].queue.add_used(mem, index, 0) {
                 error!("failed to add used elements to the queue: {e:?}");
             }
         }
