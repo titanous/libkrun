@@ -118,6 +118,7 @@ pub struct Balloon {
     hinting_guest_cmd: Option<u32>,
     pub(crate) inflated_bitmap: Option<ReclaimedBitmap>,
     pub(crate) reported_free_bitmap: Option<ReclaimedBitmap>,
+    actual_condvar: std::sync::Arc<(std::sync::Mutex<u64>, std::sync::Condvar)>,
 }
 
 impl Balloon {
@@ -137,11 +138,16 @@ impl Balloon {
             hinting_guest_cmd: None,
             inflated_bitmap: None,
             reported_free_bitmap: None,
+            actual_condvar: std::sync::Arc::new((std::sync::Mutex::new(0), std::sync::Condvar::new())),
         })
     }
 
     pub fn id(&self) -> &str {
         defs::BALLOON_DEV_ID
+    }
+
+    pub fn actual_condvar(&self) -> std::sync::Arc<(std::sync::Mutex<u64>, std::sync::Condvar)> {
+        self.actual_condvar.clone()
     }
 
     pub fn process_frq(&mut self) -> bool {
@@ -592,7 +598,7 @@ impl VirtioDevice for Balloon {
             }
         }
 
-        // If the write touched the actual field, log the new value
+        // If the write touched the actual field, log the new value and notify waiters
         if offset < 8 && end_offset > 4 {
             let actual = u32::from_le_bytes([
                 config_slice[4],
@@ -601,6 +607,14 @@ impl VirtioDevice for Balloon {
                 config_slice[7],
             ]);
             debug!("balloon: guest wrote actual field = {}", actual);
+
+            // Notify condvar waiters of the new actual value
+            let actual_pages = actual as u64;
+            let (lock, cvar) = &*self.actual_condvar;
+            if let Ok(mut val) = lock.lock() {
+                *val = actual_pages;
+                cvar.notify_all();
+            }
         }
     }
 
