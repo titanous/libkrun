@@ -119,22 +119,36 @@ mod tests {
     #[test]
     fn test_regions_lt_1024gb() {
         let (_mem_info, regions) = arch_memory_regions(1usize << 29, 0, None);
-        assert_eq!(1, regions.len());
+        assert_eq!(2, regions.len());
+        // GUID page region at index 0
         assert_eq!(
-            GuestAddress(super::layout::DRAM_MEM_START_KERNEL),
+            GuestAddress(super::layout::VMGENID_GUID_PAGE),
             regions[0].0
         );
-        assert_eq!(1usize << 29, regions[0].1);
+        assert_eq!(0x1000, regions[0].1);
+        // DRAM region at index 1
+        assert_eq!(
+            GuestAddress(super::layout::DRAM_MEM_START_KERNEL),
+            regions[1].0
+        );
+        assert_eq!(1usize << 29, regions[1].1);
     }
 
     #[test]
     fn test_regions_gt_1024gb() {
         let (_mem_info, regions) = arch_memory_regions(1usize << 41, 0, None);
-        assert_eq!(1, regions.len());
+        assert_eq!(2, regions.len());
+        // GUID page region at index 0
         assert_eq!(
-            GuestAddress(super::layout::DRAM_MEM_START_KERNEL),
+            GuestAddress(super::layout::VMGENID_GUID_PAGE),
             regions[0].0
         );
-        assert_eq!(super::layout::DRAM_MEM_MAX_SIZE, regions[0].1 as u64);
+        assert_eq!(0x1000, regions[0].1);
+        // DRAM region at index 1
+        assert_eq!(
+            GuestAddress(super::layout::DRAM_MEM_START_KERNEL),
+            regions[1].0
+        );
+        assert_eq!(super::layout::DRAM_MEM_MAX_SIZE, regions[1].1 as u64);
     }
 }
