@@ -30,6 +30,7 @@ const QUEUE_SIZE: u16 = 256;
 pub struct VhostUserVsock {
     vhost_user: VhostUserDevice,
     guest_cid: u64,
+    socket_path: Option<String>,
     queue_configs: Vec<QueueConfig>,
     /// Queue state buffer for snapshot support
     queues: Vec<Queue>,
@@ -46,6 +47,7 @@ pub(crate) struct VhostUserVsockState {
     pub acked_protocol_features: u64,
     pub vring_bases: Vec<u16>,
     pub daemon_state: Vec<u8>,
+    pub socket_path: Option<String>,
 }
 
 impl VhostUserVsock {
@@ -59,7 +61,7 @@ impl VhostUserVsock {
             NUM_QUEUES as u16,
             &[QUEUE_SIZE; NUM_QUEUES],
         )?;
-        Self::build_from_device(vhost_user)
+        Self::build_from_device(vhost_user, Some(socket_path.to_string()))
     }
 
     /// Create a new VhostUserVsock from a pre-connected UnixStream.
@@ -72,11 +74,11 @@ impl VhostUserVsock {
             NUM_QUEUES as u16,
             &[QUEUE_SIZE; NUM_QUEUES],
         )?;
-        Self::build_from_device(vhost_user)
+        Self::build_from_device(vhost_user, None)
     }
 
     /// Shared construction: fetch guest_cid from backend config, build struct.
-    fn build_from_device(vhost_user: VhostUserDevice) -> IoResult<Self> {
+    fn build_from_device(vhost_user: VhostUserDevice, socket_path: Option<String>) -> IoResult<Self> {
         // Fetch guest_cid from backend via GET_CONFIG
         let guest_cid = {
             let mut frontend = vhost_user.frontend.lock().unwrap();
@@ -109,6 +111,7 @@ impl VhostUserVsock {
         Ok(VhostUserVsock {
             vhost_user,
             guest_cid,
+            socket_path,
             queue_configs,
             queues,
             #[cfg(feature = "snapshot")]
@@ -250,6 +253,7 @@ impl VirtioDevice for VhostUserVsock {
             acked_protocol_features: self.vhost_user.acked_protocol_features().bits(),
             vring_bases,
             daemon_state,
+            socket_path: self.socket_path.clone(),
         };
 
         // 4. Serialize with bincode
@@ -271,6 +275,7 @@ impl VirtioDevice for VhostUserVsock {
 
         // 2. Restore local fields
         self.guest_cid = state.guest_cid;
+        self.socket_path = state.socket_path.clone();
 
         // 3. Mark as inactive so complete_restore() → activate() runs
         self.vhost_user.mark_inactive();
@@ -284,10 +289,6 @@ impl VirtioDevice for VhostUserVsock {
 impl VhostUserVsock {
     /// Activate device in restore mode using previously saved state.
     /// Called by activate() when pending_restore_state is Some.
-    ///
-    /// Phase 6 will add reconnection logic here (reconnect_for_restore via
-    /// socket_path, matching the VhostUserFs pattern). For now, this handles
-    /// the activate/load sequence assuming the connection is already established.
     fn activate_restore(
         &mut self,
         mem: vm_memory::GuestMemoryMmap,
@@ -297,8 +298,20 @@ impl VhostUserVsock {
     ) -> ActivateResult {
         use crate::virtio::ActivateError;
 
-        // TODO(Phase 6): Add reconnect_for_restore() call here using
-        // state.socket_path to reconnect to a fresh backend process.
+        // Reconnect to fresh backend at the saved socket path.
+        // For fd-based devices (socket_path is None), the orchestrator must
+        // provide a new connection before restore — not yet supported.
+        if let Some(ref path) = state.socket_path {
+            let stream = std::os::unix::net::UnixStream::connect(path)
+                .map_err(|_| ActivateError::BadActivate)?;
+            self.vhost_user
+                .reconnect_for_restore(
+                    stream,
+                    state.acked_features,
+                    state.acked_protocol_features,
+                )
+                .map_err(|_| ActivateError::BadActivate)?;
+        }
 
         // 1. Share guest memory + set up vrings with SAVED bases
         self.vhost_user
@@ -329,6 +342,7 @@ impl VhostUserVsock {
         VhostUserVsock {
             vhost_user: VhostUserDevice::new_for_test_unconnected(),
             guest_cid,
+            socket_path: None,
             queue_configs: vec![QueueConfig::new(QUEUE_SIZE); NUM_QUEUES],
             queues: (0..NUM_QUEUES).map(|_| Queue::new(QUEUE_SIZE)).collect(),
             #[cfg(feature = "snapshot")]
@@ -426,6 +440,7 @@ mod tests {
             acked_protocol_features: 0x9abc_def0,
             vring_bases: vec![5, 10, 15],
             daemon_state: vec![1, 2, 3, 4, 5],
+            socket_path: Some("/tmp/test.sock".to_string()),
         };
 
         let serialized = bincode::serialize(&state).expect("serialize failed");
@@ -437,6 +452,7 @@ mod tests {
         assert_eq!(deserialized.acked_protocol_features, 0x9abc_def0);
         assert_eq!(deserialized.vring_bases, vec![5, 10, 15]);
         assert_eq!(deserialized.daemon_state, vec![1, 2, 3, 4, 5]);
+        assert_eq!(deserialized.socket_path, Some("/tmp/test.sock".to_string()));
     }
 
     // AC4.1: restore_backend_state stores pending state
@@ -451,6 +467,7 @@ mod tests {
             acked_protocol_features: 0xbeef,
             vring_bases: vec![1, 2, 3],
             daemon_state: vec![10, 20],
+            socket_path: Some("/tmp/restore.sock".to_string()),
         };
 
         let serialized = bincode::serialize(&state).expect("serialize");
@@ -460,8 +477,11 @@ mod tests {
         let restored = device.pending_restore_state.as_ref().unwrap();
         assert_eq!(restored.guest_cid, 99);
         assert_eq!(restored.vring_bases, vec![1, 2, 3]);
+        assert_eq!(restored.socket_path, Some("/tmp/restore.sock".to_string()));
         // guest_cid on device should also be updated
         assert_eq!(device.guest_cid(), 99);
+        // socket_path on device should also be updated
+        assert_eq!(device.socket_path, Some("/tmp/restore.sock".to_string()));
     }
 
     // AC4.4: activate with pending restore fails when backend is unavailable
@@ -482,6 +502,7 @@ mod tests {
             acked_protocol_features: 0,
             vring_bases: vec![0, 0, 0],
             daemon_state: vec![],
+            socket_path: None,
         };
         device.pending_restore_state = Some(state);
 
