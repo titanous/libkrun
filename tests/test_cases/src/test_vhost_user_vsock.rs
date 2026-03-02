@@ -4,7 +4,9 @@ pub struct TestVhostUserVsockEcho;
 pub struct TestVhostUserVsockFd;
 pub struct TestVhostUserVsockSnapshot;
 
+#[allow(dead_code)]
 const ECHO_PORT: u32 = 9999;
+#[allow(dead_code)]
 const COUNTER_PORT: u32 = 9998;
 
 #[host]

@@ -372,7 +372,10 @@ impl VhostUserDevice {
 
             frontend
                 .set_vring_call(queue_index, &vring_call_event)
-                .map_err(io::Error::other)?;
+                .map_err(|e| {
+                    error!("{}: set_vring_call failed: {:?}", self.device_name, e);
+                    io::Error::other(e)
+                })?;
 
             // Per QEMU vhost.c: when VHOST_USER_F_PROTOCOL_FEATURES is not negotiated,
             // the rings start directly in the enabled state, and set_vring_enable will fail.
