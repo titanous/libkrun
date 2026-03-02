@@ -18,6 +18,12 @@ pub use devices::virtio::block::{
     AsyncBlockBackend, AsyncBlockBackendFactory, BlockBackend, BoxFuture, ImageType, IoVector,
     IoVectorMut, SendBoxFuture, SyncMode, VolatileSlice, VolatileSliceGuard,
 };
+#[cfg(not(feature = "tee"))]
+pub use devices::virtio::fs::dax_mapper;
+#[cfg(not(feature = "tee"))]
+pub use devices::virtio::fs::filesystem::FileSystem;
+#[cfg(not(feature = "tee"))]
+pub use devices::virtio::fs::passthrough;
 #[cfg(feature = "net")]
 pub use devices::virtio::net::device::VirtioNetBackend;
 #[cfg(feature = "net")]
@@ -30,12 +36,6 @@ pub use devices::virtio::port_io::{self, PortInput, PortOutput};
 pub use devices::virtio::rng::{OsRngBackend, RngBackend};
 pub use devices::virtio::PortDescription;
 pub use devices::virtio::VmmExitObserver;
-#[cfg(not(feature = "tee"))]
-pub use devices::virtio::fs::dax_mapper;
-#[cfg(not(feature = "tee"))]
-pub use devices::virtio::fs::filesystem::FileSystem;
-#[cfg(not(feature = "tee"))]
-pub use devices::virtio::fs::passthrough;
 use libc::{c_char, c_int, size_t};
 use once_cell::sync::Lazy;
 use polly::event_manager::EventManager;
