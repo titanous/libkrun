@@ -491,6 +491,22 @@ impl Vmm {
             })?;
         self.mmio_device_manager.resume_all_device_workers();
 
+        // Update VMGENID: write new GUID and fire interrupt before vCPUs resume.
+        if let Some(ref mut vmgenid) = self.vmgenid {
+            let (old, new) = vmgenid.update_guid(&self.guest_memory).map_err(|e| {
+                snapshot::SnapshotError::Deserialize(format!("vmgenid: failed to update GUID: {e}"))
+            })?;
+            log::info!(
+                "vmgenid: updated GUID from {:02x?} to {:02x?}",
+                &old[..4], &new[..4]
+            );
+            vmgenid.signal_interrupt().map_err(|e| {
+                snapshot::SnapshotError::Deserialize(format!(
+                    "vmgenid: interrupt injection failed: {e}"
+                ))
+            })?;
+        }
+
         self.restore_vcpu_states(vmstate.vcpu_states).map_err(|e| {
             snapshot::SnapshotError::Deserialize(format!("Failed to restore vCPU states: {e}"))
         })?;
