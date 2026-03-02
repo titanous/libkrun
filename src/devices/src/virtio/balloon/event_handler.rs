@@ -44,7 +44,7 @@ impl Balloon {
     }
 
     pub(crate) fn handle_stq_event(&mut self, event: &EpollEvent) {
-        debug!("balloon: stats queue event (ignored)");
+        debug!("balloon: stats queue event");
 
         let event_set = event.event_set();
         if event_set != EventSet::IN {
@@ -54,6 +54,8 @@ impl Balloon {
 
         if let Err(e) = self.queue_event(STQ_INDEX).read() {
             error!("Failed to read balloon stats queue event: {e:?}");
+        } else {
+            self.process_stats_queue();
         }
     }
 
