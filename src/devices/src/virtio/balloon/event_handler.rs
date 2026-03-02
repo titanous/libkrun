@@ -60,7 +60,7 @@ impl Balloon {
     }
 
     pub(crate) fn handle_phq_event(&mut self, event: &EpollEvent) {
-        error!("balloon: unsupported page-hinting queue event");
+        debug!("balloon: page-hinting queue event");
 
         let event_set = event.event_set();
         if event_set != EventSet::IN {
@@ -70,6 +70,8 @@ impl Balloon {
 
         if let Err(e) = self.queue_event(PHQ_INDEX).read() {
             error!("Failed to read balloon page-hinting queue event: {e:?}");
+        } else if self.process_phq() {
+            self.device_state.signal_used_queue();
         }
     }
 
