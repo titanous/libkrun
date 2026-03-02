@@ -182,7 +182,7 @@ impl Balloon {
                         "balloon: marking FRQ pages as reported-free: start_pfn={:#x} count={}",
                         start_pfn, count
                     );
-                    bitmap.mark_range(start_pfn, count as u32);
+                    bitmap.mark_range(start_pfn, count);
                 }
             }
 
@@ -487,7 +487,7 @@ impl Balloon {
                                 "balloon: marking PHQ pages as reported-free: start_pfn={:#x} count={}",
                                 start_pfn, count
                             );
-                            bitmap.mark_range(start_pfn, count as u32);
+                            bitmap.mark_range(start_pfn, count);
                         }
                     }
                 }

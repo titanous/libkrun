@@ -29,7 +29,7 @@ pub struct ReclaimedBitmap {
 impl ReclaimedBitmap {
     /// Create a new reclaimed bitmap covering the specified number of pages.
     pub fn new(num_pages: usize) -> Self {
-        let num_words = (num_pages + 63) / 64;
+        let num_words = num_pages.div_ceil(64);
         let bitmap: Vec<AtomicU64> = (0..num_words).map(|_| AtomicU64::new(0)).collect();
 
         ReclaimedBitmap { num_pages, bitmap }
