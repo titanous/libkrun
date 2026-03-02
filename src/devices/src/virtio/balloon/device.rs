@@ -418,9 +418,7 @@ impl Balloon {
                     // and the guest command matches the host command
                     let should_process = self.hinting_host_cmd != uapi::VIRTIO_BALLOON_CMD_ID_STOP
                         && self.hinting_host_cmd != uapi::VIRTIO_BALLOON_CMD_ID_DONE
-                        && self
-                            .hinting_guest_cmd
-                            .map_or(false, |guest_cmd| guest_cmd == self.hinting_host_cmd);
+                        && self.hinting_guest_cmd == Some(self.hinting_host_cmd);
 
                     if should_process {
                         let host_addr = mem.get_host_address(desc.addr).unwrap();

@@ -40,6 +40,7 @@ mod defs {
         pub const VIRTIO_BALLOON_S_DIRECT_SCAN: u16 = 13;
         pub const VIRTIO_BALLOON_S_ASYNC_RECLAIM: u16 = 14;
         pub const VIRTIO_BALLOON_S_DIRECT_RECLAIM: u16 = 15;
+        #[allow(dead_code)]
         pub const VIRTIO_BALLOON_S_NR: u16 = 16;
 
         // Free page hinting command IDs
