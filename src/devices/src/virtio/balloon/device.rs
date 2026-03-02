@@ -2026,6 +2026,7 @@ mod tests {
     /// Test AC4.5: Balloon device state survives snapshot/restore roundtrip
     /// After save_backend_state() and restore_backend_state(), config and hinting fields match
     #[test]
+    #[cfg(feature = "snapshot")]
     fn test_balloon_snapshot_roundtrip() {
         // Create first balloon with distinctive values
         let mut balloon1 = Balloon::new().expect("Failed to create balloon device");
@@ -2086,6 +2087,7 @@ mod tests {
     /// Test AC4.5: restore_backend_state with empty data doesn't panic
     /// Should log error but continue normally
     #[test]
+    #[cfg(feature = "snapshot")]
     fn test_balloon_snapshot_empty_data_no_panic() {
         let mut balloon = Balloon::new().expect("Failed to create balloon device");
 
@@ -2102,6 +2104,7 @@ mod tests {
     /// Test AC4.5: Reclaimed page bitmaps are not serialized
     /// After save/restore, bitmaps are still None (not created during restore)
     #[test]
+    #[cfg(feature = "snapshot")]
     fn test_balloon_snapshot_no_bitmaps() {
         // Create first balloon
         let mut balloon1 = Balloon::new().expect("Failed to create balloon device");
