@@ -15,7 +15,7 @@ use vhost::vhost_user::VhostUserFrontend;
 
 use crate::virtio::device::VirtioDevice;
 use crate::virtio::QueueConfig;
-use crate::virtio::{ActivateError, ActivateResult, Queue};
+use crate::virtio::{ActivateResult, Queue};
 
 use super::VhostUserDevice;
 
@@ -224,6 +224,7 @@ impl VhostUserVsock {
         _queues: Vec<crate::virtio::DeviceQueue>,
         _state: VhostUserVsockState,
     ) -> ActivateResult {
+        use crate::virtio::ActivateError;
         Err(ActivateError::BadActivate) // Stub until Phase 4
     }
 }
