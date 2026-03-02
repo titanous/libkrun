@@ -2884,7 +2884,7 @@ fn attach_balloon_device(
     let id = String::from(balloon.lock().unwrap().id());
 
     // The device mutex mustn't be locked here otherwise it will deadlock.
-    attach_mmio_device(vmm, id, intc.clone(), balloon.clone()).map_err(RegisterBalloonDevice)?;
+    attach_mmio_device(vmm, id, intc, balloon.clone()).map_err(RegisterBalloonDevice)?;
 
     Ok(balloon)
 }

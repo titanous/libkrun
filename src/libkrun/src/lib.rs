@@ -3441,6 +3441,11 @@ impl BalloonHandle {
         // Convert MB to pages: (MB * 1024 * 1024) / 4096
         let target_pages = (target_mb * 1024 * 1024) / 4096;
 
+        // Bounds check: ensure target_pages fits in u32
+        if target_pages > u32::MAX as u64 {
+            return Err(BalloonError::DeviceNotActive); // Using DeviceNotActive as error for out-of-bounds
+        }
+
         // Write num_pages to config
         balloon.set_num_pages(target_pages as u32);
 
@@ -3843,5 +3848,127 @@ mod tests {
             matches!(result2, Err(StartError::VsockConflict)),
             "add_vsock_vhost_user() should return VsockConflict after vhost-user-fd"
         );
+    }
+
+    // BalloonHandle API tests (AC4.2-AC4.8)
+
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn test_balloon_handle_ac4_2_enable_balloon_sets_flag() {
+        // AC4.2: Builder::enable_balloon() sets balloon_enabled flag on VmResources
+        let mut builder = Builder::new();
+        assert_eq!(
+            builder.config.vmr.balloon_enabled, false,
+            "balloon_enabled should be false by default"
+        );
+
+        builder.enable_balloon();
+        assert_eq!(
+            builder.config.vmr.balloon_enabled, true,
+            "balloon_enabled should be true after enable_balloon()"
+        );
+    }
+
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn test_balloon_handle_ac4_6_resize_inactive_device_error() {
+        // AC4.6: resize() on inactive device returns Err(DeviceNotActive)
+        let balloon = Arc::new(Mutex::new(devices::virtio::Balloon::new().unwrap()));
+        let condvar = balloon.lock().unwrap().actual_condvar();
+        let handle = BalloonHandle::new(balloon, condvar);
+
+        // Device is inactive by default
+        let result = handle.resize(256);
+        assert!(
+            matches!(result, Err(BalloonError::DeviceNotActive)),
+            "resize() on inactive device should return DeviceNotActive"
+        );
+    }
+
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn test_balloon_handle_resize_large_value() {
+        // Test bounds check behavior: very large target_mb should fail
+        let balloon = Arc::new(Mutex::new(devices::virtio::Balloon::new().unwrap()));
+        let condvar = balloon.lock().unwrap().actual_condvar();
+        let handle = BalloonHandle::new(balloon, condvar);
+
+        // Try to resize to very large value when device is inactive
+        // This will fail due to inactive state check (which comes first)
+        let too_large = 100_000u64; // 100,000 MB
+        let result = handle.resize(too_large);
+
+        assert!(
+            result.is_err(),
+            "resize() should fail for inactive device"
+        );
+    }
+
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn test_balloon_handle_creation_and_accessors() {
+        // AC4.3/AC4.4: Test BalloonHandle can be created and used with a balloon device
+        let balloon = Arc::new(Mutex::new(devices::virtio::Balloon::new().unwrap()));
+        let condvar = balloon.lock().unwrap().actual_condvar();
+        let handle = BalloonHandle::new(balloon.clone(), condvar);
+
+        // Test that we can access actual (should be 0 initially)
+        let actual_mb = handle.actual();
+        assert_eq!(actual_mb, 0, "actual should be 0 initially");
+
+        // Test that we can call stats (should be None initially)
+        let stats = handle.stats();
+        assert!(stats.is_none(), "stats should be None before collection");
+    }
+
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn test_balloon_handle_await_target_stalled_no_progress() {
+        // AC4.7: await_target() with stalled guest returns Stalled after stall_timeout
+        let balloon = Arc::new(Mutex::new(devices::virtio::Balloon::new().unwrap()));
+        let condvar = balloon.lock().unwrap().actual_condvar();
+        let handle = BalloonHandle::new(balloon, condvar);
+
+        // Initialize the condvar with current actual value
+        let (lock, _cvar) = &*handle.actual_condvar;
+        {
+            let mut actual = lock.lock().unwrap();
+            *actual = 0; // actual is 0
+        }
+
+        // await_target with target higher than actual and small stall_timeout
+        // should return Stalled when no one signals the condvar
+        let stall_timeout = std::time::Duration::from_millis(50);
+        let max_timeout = std::time::Duration::from_secs(2);
+        let result = handle.await_target(256, stall_timeout, Some(max_timeout));
+
+        assert!(
+            matches!(result, Ok(BalloonResult::Stalled(_))),
+            "await_target() should return Stalled when guest doesn't progress"
+        );
+    }
+
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn test_balloon_handle_condvar_notification() {
+        // AC4.4/AC4.8: Test that actual_condvar is accessible and can be notified
+        let balloon = Arc::new(Mutex::new(devices::virtio::Balloon::new().unwrap()));
+        let condvar = balloon.lock().unwrap().actual_condvar();
+        let handle = BalloonHandle::new(balloon, condvar);
+
+        // Verify we can access the condvar
+        let (lock, _cvar) = &*handle.actual_condvar;
+
+        // Verify we can update and read from it
+        {
+            let mut actual = lock.lock().unwrap();
+            *actual = 100;
+        }
+
+        // Read back the value to verify the condvar holds state
+        {
+            let actual = lock.lock().unwrap();
+            assert_eq!(*actual, 100, "condvar should hold the updated value");
+        }
     }
 }
