@@ -61,6 +61,9 @@ use test_vhost_user_fs::{
     TestVhostUserFsDaxAlways, TestVhostUserFsDaxInode, TestVhostUserFsDaxNever,
 };
 
+mod test_virtiofs_generic_passthrough;
+use test_virtiofs_generic_passthrough::TestVirtiofsGenericPassthrough;
+
 #[cfg(feature = "guest")]
 mod net_helpers;
 #[cfg(feature = "guest")]
@@ -146,6 +149,10 @@ pub fn test_cases() -> Vec<TestCase> {
         ),
         TestCase::new("vhost-user-fs-dax-inode", Box::new(TestVhostUserFsDaxInode)),
         TestCase::new("vhost-user-fs-dax-never", Box::new(TestVhostUserFsDaxNever)),
+        TestCase::new(
+            "virtiofs-generic-passthrough",
+            Box::new(TestVirtiofsGenericPassthrough),
+        ),
         TestCase::new("uffd-demand-page-only", Box::new(TestUffdDemandPageOnly)),
         TestCase::new("uffd-preload-full", Box::new(TestUffdPreloadFull)),
         TestCase::new("uffd-preload-partial", Box::new(TestUffdPreloadPartial)),
