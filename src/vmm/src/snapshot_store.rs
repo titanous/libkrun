@@ -101,6 +101,16 @@ pub trait SnapshotStore: Any + Send + Sync + 'static {
     /// persisted to the underlying storage medium.
     fn close(&self) -> SendBoxFuture<'_, io::Result<()>>;
 
+    /// Set excluded pages (pages absent from snapshot).
+    /// Default no-op implementation for stores that don't support this feature.
+    /// Used during restore to mark pages that should return None from read_page.
+    fn set_excluded_pages(&mut self, _pages: Vec<u64>) {}
+
+    /// Set RAM regions for sparse file offset calculation.
+    /// Default no-op implementation for stores that don't need this.
+    /// Called during snapshot writes to ensure correct file layout.
+    fn set_ram_regions(&mut self, _regions: Vec<(u64, u64)>) {}
+
 }
 
 /// Factory trait for creating snapshot store instances.
@@ -133,6 +143,8 @@ pub struct FsSnapshotStore {
     dirty_page_index: Arc<HashMap<u64, (usize, usize)>>,
     /// Set of excluded page guest addresses (pages not present in snapshot)
     excluded_pages: Arc<Mutex<HashSet<u64>>>,
+    /// RAM regions for sparse file offset calculation during write (stores only, used in write_pages)
+    ram_regions: Arc<Vec<(u64, u64)>>,
 }
 
 impl FsSnapshotStore {
@@ -145,6 +157,7 @@ impl FsSnapshotStore {
             incremental_snapshots: Arc::new(Vec::new()),
             dirty_page_index: Arc::new(HashMap::new()),
             excluded_pages: Arc::new(Mutex::new(HashSet::new())),
+            ram_regions: Arc::new(Vec::new()),
         }
     }
 
@@ -156,12 +169,14 @@ impl FsSnapshotStore {
         incremental_snapshots: Vec<IncrementalSnapshot>,
         dirty_page_index: HashMap<u64, (usize, usize)>,
     ) -> Self {
+        let ram_regions = header.ram_regions.clone();
         FsSnapshotStore {
             base_path: base_path.as_ref().to_path_buf(),
             header: Some(header),
             incremental_snapshots: Arc::new(incremental_snapshots),
             dirty_page_index: Arc::new(dirty_page_index),
             excluded_pages: Arc::new(Mutex::new(HashSet::new())),
+            ram_regions: Arc::new(ram_regions),
         }
     }
 
@@ -169,10 +184,13 @@ impl FsSnapshotStore {
     /// Used during reading to know which pages to return None for.
     /// Also used during writing to know which pages to write to page_index.
     pub fn set_excluded_pages(&mut self, pages: Vec<u64>) {
-        if let Ok(mut set) = self.excluded_pages.lock() {
-            set.clear();
-            set.extend(pages);
-        }
+        self.excluded_pages.lock().unwrap().extend(pages);
+    }
+
+    /// Set the RAM regions for sparse file offset calculation during write.
+    /// Must be called before write_pages for stores created for writing.
+    pub fn set_ram_regions(&mut self, regions: Vec<(u64, u64)>) {
+        self.ram_regions = Arc::new(regions);
     }
 }
 
@@ -399,14 +417,37 @@ impl SnapshotStore for FsSnapshotStore {
     fn write_pages(&self, pages: Vec<(u64, Vec<u8>)>) -> SendBoxFuture<'_, io::Result<()>> {
         let path = self.base_path.clone();
         let excluded_pages = Arc::clone(&self.excluded_pages);
+        let ram_regions = Arc::clone(&self.ram_regions);
 
         Box::pin(async move {
             let memory_path = path.join("memory");
             let mut file = fs::File::create(memory_path)?;
 
-            // Write pages sequentially (sparse layout where excluded pages create file holes)
+            // Write pages with proper sparse file layout
+            // File offset is computed from ram_regions: offset = sum(prior_region_sizes) + (guest_addr - region_addr)
             if !pages.is_empty() {
-                for (_guest_addr, page_data) in pages {
+                for (guest_addr, page_data) in pages {
+                    // Compute file offset from ram_regions
+                    let mut offset = 0u64;
+                    let mut found = false;
+                    for (region_addr, region_size) in ram_regions.iter() {
+                        if *region_addr <= guest_addr && guest_addr < region_addr + region_size {
+                            offset += guest_addr - region_addr;
+                            found = true;
+                            break;
+                        }
+                        offset += region_size;
+                    }
+
+                    if !found {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("guest_addr 0x{:x} not in RAM regions", guest_addr),
+                        ));
+                    }
+
+                    // Seek to the correct offset in the sparse file
+                    file.seek(io::SeekFrom::Start(offset))?;
                     file.write_all(&page_data)?;
                 }
             }
@@ -638,7 +679,10 @@ mod tests {
         let _ = fs::remove_dir_all(&test_dir);
         fs::create_dir_all(&test_dir).unwrap();
 
-        let store = FsSnapshotStore::new(&test_dir);
+        let mut store = FsSnapshotStore::new(&test_dir);
+
+        // Set RAM regions so write_pages can calculate offsets
+        store.set_ram_regions(vec![(0x1000u64, 0x1000u64), (0x2000u64, 0x1000u64)]);
 
         // Create test data: vmstate bytes and memory pages
         let test_vmstate = vec![0x01, 0x02, 0x03, 0x04, 0x05];
@@ -664,10 +708,13 @@ mod tests {
         assert_eq!(written_vmstate, test_vmstate);
 
         let written_memory = fs::read(&memory_path).unwrap();
-        let expected_memory: Vec<u8> = test_pages
-            .iter()
-            .flat_map(|(_, data)| data.clone())
-            .collect();
+        // With sparse layout, the memory file should contain data at specific offsets.
+        // For our test regions: (0x1000, 0x1000) and (0x2000, 0x1000)
+        // Page at 0x1000 should be at file offset 0
+        // Page at 0x2000 should be at file offset 0x1000 (after first region)
+        let mut expected_memory = vec![0u8; 0x1000 + 256]; // first region + second page start
+        expected_memory[0..256].copy_from_slice(&[0xAB; 256]); // page at 0x1000
+        expected_memory[0x1000..0x1000 + 256].copy_from_slice(&[0xCD; 256]); // page at 0x2000
         assert_eq!(written_memory, expected_memory);
 
         // Cleanup

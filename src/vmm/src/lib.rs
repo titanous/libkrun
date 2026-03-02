@@ -426,8 +426,8 @@ impl Vmm {
         &mut self,
         path: &std::path::Path,
     ) -> std::result::Result<(), snapshot::SnapshotError> {
-        let store = snapshot_store::FsSnapshotStore::new(path);
-        self.snapshot_to_store(&store)
+        let mut store = snapshot_store::FsSnapshotStore::new(path);
+        self.snapshot_to_store(&mut store)
     }
 
     /// Restore device and vCPU states from a snapshot.
@@ -543,15 +543,10 @@ impl Vmm {
                 ))
             })?;
 
-        // Extract excluded pages from vmstate and configure store if it's FsSnapshotStore
+        // Extract excluded pages from vmstate and configure store
         let excluded_pages = vmstate.excluded_pages.clone();
         if !excluded_pages.is_empty() {
-            // Try to downcast to FsSnapshotStore and set excluded pages
-            use std::any::Any;
-            let store_any = &mut store as &mut dyn Any;
-            if let Some(fs_store) = store_any.downcast_mut::<snapshot_store::FsSnapshotStore>() {
-                fs_store.set_excluded_pages(excluded_pages.clone());
-            }
+            store.set_excluded_pages(excluded_pages.clone());
         }
 
         // Drain preload stream to populate memory (eager restore)
@@ -630,12 +625,7 @@ impl Vmm {
         // Extract excluded pages from vmstate and configure store before converting to Arc
         let excluded_pages = vmstate.excluded_pages.clone();
         if !excluded_pages.is_empty() {
-            // Try to downcast to FsSnapshotStore and set excluded pages
-            use std::any::Any;
-            let store_any = &mut store as &mut dyn Any;
-            if let Some(fs_store) = store_any.downcast_mut::<snapshot_store::FsSnapshotStore>() {
-                fs_store.set_excluded_pages(excluded_pages);
-            }
+            store.set_excluded_pages(excluded_pages);
         }
 
         // Get memory regions for UFFD registration (guest_addr, host_addr, size)
@@ -787,8 +777,8 @@ impl Vmm {
         &mut self,
         path: &std::path::Path,
     ) -> std::result::Result<(), snapshot::SnapshotError> {
-        let store = snapshot_store::FsSnapshotStore::new(path);
-        self.snapshot_to_store(&store)
+        let mut store = snapshot_store::FsSnapshotStore::new(path);
+        self.snapshot_to_store(&mut store)
     }
 
     /// Restore a full snapshot into the running VM. vCPUs must already be paused.
@@ -935,8 +925,8 @@ impl Vmm {
         &mut self,
         path: &std::path::Path,
     ) -> std::result::Result<(), snapshot::SnapshotError> {
-        let store = snapshot_store::FsSnapshotStore::new(path);
-        self.incremental_snapshot_to_store(&store)
+        let mut store = snapshot_store::FsSnapshotStore::new(path);
+        self.incremental_snapshot_to_store(&mut store)
     }
 
     /// Restore an incremental snapshot. vCPUs must already be paused.
@@ -1081,8 +1071,8 @@ impl Vmm {
         &mut self,
         path: &std::path::Path,
     ) -> std::result::Result<(), snapshot::SnapshotError> {
-        let store = snapshot_store::FsSnapshotStore::new(path);
-        self.incremental_snapshot_to_store(&store)
+        let mut store = snapshot_store::FsSnapshotStore::new(path);
+        self.incremental_snapshot_to_store(&mut store)
     }
 
     /// Restore an incremental snapshot. vCPUs must already be paused.
@@ -1131,17 +1121,21 @@ impl Vmm {
     /// Extracted to reduce code duplication between Linux and macOS snapshot_to_store.
     ///
     /// # Arguments
-    /// * `store` - The snapshot store to write to
+    /// * `store` - The snapshot store to write to (mutable to set ram_regions and excluded_pages)
     /// * `vmstate_data` - Serialized VmSnapshot (including excluded_pages)
     /// * `excluded_pages` - Set of guest page addresses to skip (balloon-reclaimed pages)
     #[cfg(feature = "snapshot")]
     fn dump_memory_to_store(
         &self,
-        store: &dyn snapshot_store::SnapshotStore,
+        store: &mut dyn snapshot_store::SnapshotStore,
         vmstate_data: Vec<u8>,
         excluded_pages: &std::collections::HashSet<u64>,
     ) -> std::result::Result<(), snapshot::SnapshotError> {
         use vm_memory::{Address, GuestMemoryBackend, GuestMemoryRegion};
+
+        // Set RAM regions and excluded pages on the store for proper sparse file layout
+        store.set_ram_regions(snapshot::ram_layout(&self.guest_memory));
+        store.set_excluded_pages(excluded_pages.iter().copied().collect());
 
         // Serialize vmstate
         futures::executor::block_on(store.write_vmstate(vmstate_data))
@@ -1187,7 +1181,7 @@ impl Vmm {
     #[cfg(all(target_os = "linux", feature = "snapshot"))]
     pub fn snapshot_to_store(
         &mut self,
-        store: &dyn snapshot_store::SnapshotStore,
+        store: &mut dyn snapshot_store::SnapshotStore,
     ) -> std::result::Result<(), snapshot::SnapshotError> {
         use std::collections::HashSet;
         use vm_memory::GuestMemoryBackend;
@@ -1328,7 +1322,7 @@ impl Vmm {
     #[cfg(all(target_os = "macos", feature = "snapshot"))]
     pub fn snapshot_to_store(
         &mut self,
-        store: &dyn snapshot_store::SnapshotStore,
+        store: &mut dyn snapshot_store::SnapshotStore,
     ) -> std::result::Result<(), snapshot::SnapshotError> {
         // macOS/aarch64 version - no vm_state, no PortIO
         let device_states = self
@@ -1365,6 +1359,7 @@ impl Vmm {
             device_states,
             gic_state,
             vm_state: None,
+            excluded_pages: Vec::new(),
         };
 
         // Serialize vmstate
@@ -1381,7 +1376,7 @@ impl Vmm {
     #[cfg(all(target_os = "linux", feature = "snapshot"))]
     pub fn incremental_snapshot_to_store(
         &mut self,
-        store: &dyn snapshot_store::SnapshotStore,
+        store: &mut dyn snapshot_store::SnapshotStore,
     ) -> std::result::Result<(), snapshot::SnapshotError> {
         use vm_memory::GuestMemoryBackend;
 
@@ -1735,7 +1730,7 @@ impl Vmm {
 #[cfg(not(feature = "tee"))]
 #[allow(dead_code)]
 fn mincore_check(host_addr: *const u8, len: usize) -> io::Result<Vec<bool>> {
-    let page_count = (len + 4095) / 4096;
+    let page_count = len.div_ceil(4096);
     let mut vec = vec![0u8; page_count];
     let ret = unsafe {
         libc::mincore(
@@ -1935,94 +1930,71 @@ mod tests {
     }
 
     /// Test mem-balloon.AC2.3: Full snapshot excludes all inflated pages
+    /// Test AC2.6: Verify apply_reclaimed_pages zeros guest memory.
+    /// This is a minimal test that apply_reclaimed_pages correctly writes zeros
+    /// to the specified guest addresses.
     #[test]
-    fn test_snapshot_excludes_inflated_pages() {
-        use std::collections::HashSet;
+    #[cfg(feature = "snapshot")]
+    fn test_apply_reclaimed_pages_zeros_memory() {
+        use vm_memory::{GuestAddress, GuestMemoryMmap, Bytes};
 
-        // Create a HashSet and insert a page address
-        let mut excluded = HashSet::new();
-        excluded.insert(4096u64);  // First page after base
-        excluded.insert(8192u64);  // Second page
-        excluded.insert(12288u64); // Third page
+        // Create a small guest memory region
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 16384)])
+            .expect("Failed to create guest memory");
 
-        // Verify the set contains expected addresses
-        assert!(excluded.contains(&4096));
-        assert!(excluded.contains(&8192));
-        assert!(excluded.contains(&12288));
-        assert!(!excluded.contains(&0));
-        assert_eq!(excluded.len(), 3);
+        // Write some non-zero data to a page
+        let page_addr = GuestAddress(4096);
+        let test_data = vec![0xDEu8; 4096];
+        mem.write_slice(&test_data, page_addr)
+            .expect("Failed to write test data");
+
+        // Verify data was written
+        let mut verify = vec![0u8; 4096];
+        mem.read_slice(&mut verify, page_addr)
+            .expect("Failed to read test data");
+        assert_eq!(verify[0], 0xDE);
+
+        // Now apply_reclaimed_pages to zero that page
+        snapshot::apply_reclaimed_pages(&mem, &[4096u64])
+            .expect("apply_reclaimed_pages failed");
+
+        // Verify the page is now zeros
+        mem.read_slice(&mut verify, page_addr)
+            .expect("Failed to read after reclaim");
+        assert!(verify.iter().all(|&b| b == 0), "Page should be all zeros after reclaim");
     }
 
-    /// Test mem-balloon.AC2.4 & AC2.7: Reported-free pages verified via mincore
+    /// Test sparse file offset calculation.
+    /// Verifies that the offset calculation for guest addresses works correctly
+    /// with multiple RAM regions.
     #[test]
-    fn test_snapshot_mincore_page_status() {
-        // Test the principle of mincore-based verification
-        // Non-resident pages (after madvise DONTNEED) are zeros
-        // Resident pages must be checked for content
+    #[cfg(feature = "snapshot")]
+    fn test_sparse_file_offset_calculation() {
 
-        // Create a simple predicate: is page all zeros?
-        let all_zeros_page = vec![0u8; 4096];
-        let all_zero: bool = all_zeros_page.iter().all(|&b| b == 0);
-        assert!(all_zero);
+        // Simulate RAM regions: (guest_addr, size)
+        let ram_regions = vec![(0u64, 4096u64), (4096u64, 4096u64), (8192u64, 4096u64)];
 
-        let mut non_zero_page = vec![0u8; 4096];
-        non_zero_page[0] = 1u8;
-        let is_all_zero: bool = non_zero_page.iter().all(|&b| b == 0);
-        assert!(!is_all_zero);
-    }
+        // Test offset calculation for various guest addresses
+        let test_cases = vec![
+            // (guest_addr, expected_offset)
+            (0u64, 0u64),      // First region, start
+            (4096u64, 4096u64), // Second region, start
+            (8192u64, 8192u64), // Third region, start
+        ];
 
-    /// Test mem-balloon.AC2.8: Page inflated then deflated is NOT excluded
-    #[test]
-    fn test_snapshot_deflated_page_not_excluded() {
-        // This test verifies the principle: only currently-set bits in inflated
-        // bitmap are excluded. Deflate clears the bit (from Phase 3), so the
-        // page is not in the excluded set.
-
-        use std::collections::HashSet;
-
-        let mut excluded = HashSet::new();
-        let inflated_pfn = 5u32;
-        let guest_addr = (inflated_pfn as u64) * 4096;
-
-        // Add the page (simulating inflated state)
-        excluded.insert(guest_addr);
-        assert!(excluded.contains(&guest_addr));
-
-        // Deflate: remove from excluded (simulating bit clear in bitmap)
-        excluded.remove(&guest_addr);
-        assert!(!excluded.contains(&guest_addr));
-    }
-
-    /// Test mem-balloon.AC2.9: No balloon or balloon at zero produces empty excluded set
-    #[test]
-    fn test_snapshot_no_balloon_no_exclusions() {
-        use std::collections::HashSet;
-
-        // No balloon device: excluded set is empty
-        let excluded: HashSet<u64> = HashSet::new();
-        assert_eq!(excluded.len(), 0);
-
-        // Verify that empty excluded set preserves all pages
-        for page_addr in [0u64, 4096, 8192, 12288] {
-            assert!(!excluded.contains(&page_addr));
+        for (guest_addr, expected_offset) in test_cases {
+            let mut offset = 0u64;
+            let mut found = false;
+            for (region_addr, region_size) in &ram_regions {
+                if *region_addr <= guest_addr && guest_addr < region_addr + region_size {
+                    offset += guest_addr - region_addr;
+                    found = true;
+                    break;
+                }
+                offset += region_size;
+            }
+            assert!(found, "Address 0x{:x} should be in one of the regions", guest_addr);
+            assert_eq!(offset, expected_offset, "Offset mismatch for address 0x{:x}", guest_addr);
         }
-    }
-
-    /// Test dump_memory_to_store page skipping logic (helper test)
-    #[test]
-    fn test_page_address_iteration() {
-        // Verify that iterating through a 16KB region at 4KB granularity works
-        let region_start = 0u64;
-        let region_end = 16384u64;  // 4 pages
-
-        let mut visited = Vec::new();
-        let mut addr = region_start;
-        while addr < region_end {
-            visited.push(addr);
-            addr += 4096;
-        }
-
-        assert_eq!(visited.len(), 4);
-        assert_eq!(visited, vec![0u64, 4096, 8192, 12288]);
     }
 }

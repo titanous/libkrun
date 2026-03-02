@@ -368,8 +368,13 @@ impl UffdHandler {
                             }
                             Ok(None) => {
                                 // Page is excluded (absent from snapshot). Phase 5 will handle zero-fill.
-                                // For now, this is a placeholder — Phase 5 will call uffd.zeropage().
-                                // TODO: Implement zero-fill for excluded pages (Phase 5)
+                                // For now, signal an error to avoid silent hang on excluded page faults.
+                                // TODO: Phase 5 will replace this with uffd.zeropage().
+                                log::error!("Excluded page fault at 0x{guest_addr:x} — unable to restore");
+                                signal_error(
+                                    &vm_exit,
+                                    format!("Excluded page fault at 0x{guest_addr:x} (Phase 5 will implement zeropage)"),
+                                );
                             }
                             Err(e) => {
                                 // Fatal: read_page failed, signal VmExit::Error
@@ -601,10 +606,10 @@ mod tests {
         fn read_page(
             &self,
             _guest_addr: u64,
-        ) -> crate::snapshot_store::SendBoxFuture<'_, std::io::Result<Vec<u8>>> {
+        ) -> crate::snapshot_store::SendBoxFuture<'_, std::io::Result<Option<Vec<u8>>>> {
             self.page_reads.fetch_add(1, Ordering::SeqCst);
             // Return a page (4KB) of zeros
-            Box::pin(async { Ok(vec![0u8; 4096]) })
+            Box::pin(async { Ok(Some(vec![0u8; 4096])) })
         }
 
         fn preload(
