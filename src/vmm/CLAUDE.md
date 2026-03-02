@@ -1,6 +1,6 @@
 # VMM Crate
 
-Last verified: 2026-02-25
+Last verified: 2026-03-01
 
 ## Purpose
 Core virtual machine manager. Orchestrates VM lifecycle: build, run, snapshot/restore, dirty page tracking.
@@ -22,6 +22,8 @@ Core virtual machine manager. Orchestrates VM lifecycle: build, run, snapshot/re
   - `MMIODeviceManager::restore_all_device_states` silently skips unknown device IDs (forward compat)
   - `Vm::register_memory_region()` registers additional KVM memory slots (e.g., DAX windows); does NOT track slot in `mem_slots` (DAX is volatile cache)
   - When `vhost-user` feature is enabled, guest memory regions use memfd backing (file-backed) so vhost-user daemons can mmap them; kernel region also gets memfd backing
+  - `VmResources::fs` stores `Vec<FsMount>` (`FsMount { tag, fs: Box<dyn FileSystem + Send + Sync>, shm_size }`); `add_fs_mount()` appends to it (replaces old `FsDeviceConfig`/`add_fs_device`)
+  - `attach_fs_devices` takes `&mut Vec<FsMount>` and `.drain(..)`s it (moves ownership of `Box<dyn FileSystem>` into `Fs` device)
   - `VmResources::vhost_user_fs` stores `VhostUserFsConfig` list; `add_vhost_user_fs_device()` appends to it
   - `StartMicrovmError` gains `MmapDaxWindow`, `RegisterDaxMemoryRegion`, `RegisterVhostUserDevice`, `RegisterVhostUserFsDevice` variants (behind `vhost-user` feature)
   - `attach_vhost_user_fs_device` creates VhostUserFs, mmaps DAX memfd, registers DAX region with KVM, attaches to MMIO bus
@@ -92,6 +94,7 @@ Core virtual machine manager. Orchestrates VM lifecycle: build, run, snapshot/re
 - `linux/vstate.rs` - x86_64 vCPU: `tsc_khz`, `kvmclock_ctrl` on restore, `VcpuHandle::drop()`
 - `macos/vstate.rs` - macOS HVF vCPU: `VcpuHandle::drop()` with channel disconnect + join
 - `resources.rs` - `VmResources`, `VmDeviceInfo`, `VhostUserDeviceConfig` configuration types
+- `vmm_config/fs.rs` - `FsMount` (tag, `Box<dyn FileSystem>`, shm_size)
 - `vmm_config/vhost_user_fs.rs` - `VhostUserFsConfig` (tag, socket_path, dax_window_mib)
 
 ## Gotchas

@@ -1,6 +1,6 @@
 # Integration Tests
 
-Last verified: 2026-02-25
+Last verified: 2026-03-01
 
 ## Purpose
 Host/guest integration test workspace. Tests run inside real microVMs to verify end-to-end behavior.
@@ -46,6 +46,7 @@ Tests are inherently flaky (VM + network timing). 5-6/6 passing is normal.
 - `uffd-incremental-chain` - UFFD restore from incremental snapshot chain (base + incremental overlay)
 - `uffd-error-handling` - UFFD error paths: store read failures during demand-paging
 - `uffd-parallel-faults` - UFFD concurrent fault resolution: multiple vCPUs faulting simultaneously
+- `virtiofs-generic-passthrough` - Generic virtiofs with `Box<dyn FileSystem>`: constructs `PassthroughFs` manually, passes via `Builder::add_virtiofs()`, verifies read/write through DAX
 
 ## Key Files
 - `test_cases/src/lib.rs` - Test case registry
@@ -62,4 +63,5 @@ Tests are inherently flaky (VM + network timing). 5-6/6 passing is normal.
 - `test_cases/src/test_uffd_incremental.rs` - UFFD incremental chain test
 - `test_cases/src/test_uffd_error.rs` - UFFD error handling test
 - `test_cases/src/test_uffd_parallel.rs` - UFFD parallel faults test
+- `test_cases/src/test_virtiofs_generic_passthrough.rs` - Generic virtiofs integration test (host constructs PassthroughFs, guest reads/writes)
 - `test_cases/Cargo.toml` - Feature flags and dependency pins
