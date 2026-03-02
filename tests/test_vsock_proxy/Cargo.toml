@@ -1,0 +1,22 @@
+[package]
+name = "test-vsock-proxy"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "test-vsock-proxy"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+log = "0.4"
+env_logger = "0.10"
+libc = "0.2"
+bincode = "1"
+serde = { version = "1", features = ["derive"] }
+vhost = { version = "0.15", features = ["vhost-user"] }
+vhost-user-backend = "0.21"
+virtio-queue = "0.17"
+vm-memory = { version = "0.18", features = ["backend-mmap", "backend-atomic"] }
+vmm-sys-util = ">=0.14"

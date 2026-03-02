@@ -1,5 +1,5 @@
 [workspace]
-members = ["runner", "guest-agent", "macros", "test_cases", "test_daemon"]
+members = ["runner", "guest-agent", "macros", "test_cases", "test_daemon", "test_vsock_proxy"]
 resolver = "2"
 
 [patch.crates-io]
