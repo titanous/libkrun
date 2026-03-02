@@ -218,6 +218,13 @@ impl VhostUserDevice {
                 ));
             }
         } else {
+            // VHOST_USER_GET_QUEUE_NUM must be called when MQ is negotiated to update
+            // the frontend's internal max_queue_num, which gates set_vring_num and
+            // other per-queue operations. Without this call, max_queue_num stays at 1
+            // and any queue index > 0 is rejected with InvalidParam.
+            if acked_protocol_features.contains(VhostUserProtocolFeatures::MQ) {
+                frontend.get_queue_num().map_err(io::Error::other)?;
+            }
             num_queues as usize
         };
 
@@ -365,10 +372,7 @@ impl VhostUserDevice {
 
             frontend
                 .set_vring_call(queue_index, &vring_call_event)
-                .map_err(|e| {
-                    error!("{}: set_vring_call failed: {:?}", self.device_name, e);
-                    io::Error::other(e)
-                })?;
+                .map_err(io::Error::other)?;
 
             // Per QEMU vhost.c: when VHOST_USER_F_PROTOCOL_FEATURES is not negotiated,
             // the rings start directly in the enabled state, and set_vring_enable will fail.

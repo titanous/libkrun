@@ -139,6 +139,7 @@ impl VhostUserBackendMut for VsockProxyBackend {
     }
 
     fn get_config(&self, offset: u32, size: u32) -> Vec<u8> {
+        log::debug!("get_config: offset={}, size={}, guest_cid={}", offset, size, self.guest_cid);
         // Return guest_cid as little-endian u64 (virtio_vsock_config)
         let mut config = [0u8; 8];
         config.copy_from_slice(&self.guest_cid.to_le_bytes());
@@ -147,6 +148,7 @@ impl VhostUserBackendMut for VsockProxyBackend {
     }
 
     fn update_memory(&mut self, mem: GuestMemoryAtomic<GuestMemoryMmap>) -> std::io::Result<()> {
+        log::debug!("update_memory: guest memory registered");
         self.mem = Some(mem);
         Ok(())
     }
@@ -158,6 +160,7 @@ impl VhostUserBackendMut for VsockProxyBackend {
         vrings: &[Self::Vring],
         _thread_id: usize,
     ) -> std::io::Result<()> {
+        log::debug!("handle_event: device_event={}, vrings.len()={}", device_event, vrings.len());
         // device_event = queue index (0 = RX, 1 = TX, 2 = Event)
         if (device_event as usize) >= vrings.len() {
             return Ok(());
@@ -257,6 +260,8 @@ impl VsockProxyBackend {
             }
         }
 
+        log::debug!("process_tx_queue: found {} chains to process", chains_to_process.len());
+
         // Process each descriptor chain from TX queue
         for desc_chain in chains_to_process {
             let tx_head_index = desc_chain.head_index();
@@ -293,8 +298,8 @@ impl VsockProxyBackend {
                 let dst_cid = hdr.dst_cid;
                 let dst_port = hdr.dst_port;
 
-                debug!(
-                    "RX: op={}, src_cid={}, src_port={}, dst_cid={}, dst_port={}",
+                log::debug!(
+                    "TX packet: op={}, src_cid={}, src_port={}, dst_cid={}, dst_port={}",
                     op, src_cid, src_port, dst_cid, dst_port
                 );
 
@@ -424,6 +429,7 @@ impl VsockProxyBackend {
         guest_mem_deref: &GuestMemoryMmap,
         packet_bytes: &[u8],
     ) -> std::io::Result<()> {
+        log::debug!("write_response_to_rx: {} bytes", packet_bytes.len());
         let rx_queue = rx_vring_lock.get_queue_mut();
 
         // Get iterator and take only ONE descriptor chain
