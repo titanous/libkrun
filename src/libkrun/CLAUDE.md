@@ -1,12 +1,12 @@
 # libkrun Crate
 
-Last verified: 2026-03-01
+Last verified: 2026-03-02
 
 ## Purpose
 Public API crate providing both C FFI (`krun_*` functions) and Rust `Builder` API for configuring and starting microVMs.
 
 ## Contracts
-- **Exposes**: C API (`krun_set_vm_config`, `krun_start_enter`, etc.), Rust `Builder` struct, `Context` struct, `StartError` enum, `VmExit` enum (re-exported from vmm), `Builder::add_virtiofs_vhost_user()` (behind `vhost-user` feature), `Builder::add_vsock_vhost_user()` and `Builder::add_vsock_vhost_user_fd()` (behind `vhost-user` feature), `vmm::snapshot_store` re-export (behind `snapshot` feature), `VmHandle::snapshot_to_store()`, `VmHandle::incremental_snapshot_to_store()` (behind `snapshot` feature), re-exports of `devices::virtio::fs::{FileSystem, passthrough, dax_mapper}` (behind `not(tee)` feature)
+- **Exposes**: C API (`krun_set_vm_config`, `krun_start_enter`, etc.), Rust `Builder` struct, `Context` struct, `StartError` enum, `VmExit` enum (re-exported from vmm), `Builder::add_virtiofs_vhost_user()` (behind `vhost-user` feature), `Builder::add_vsock_vhost_user()` and `Builder::add_vsock_vhost_user_fd()` (behind `vhost-user` feature), `vmm::snapshot_store` re-export (behind `snapshot` feature), `VmHandle::snapshot_to_store()`, `VmHandle::incremental_snapshot_to_store()` (behind `snapshot` feature), re-exports of `devices::virtio::fs::{FileSystem, passthrough, dax_mapper}` (behind `not(tee)` feature), `Builder::enable_balloon()`, `BalloonHandle`, `BalloonResult`, `BalloonError`, `VmHandle::balloon()` (behind `not(tee)` feature)
 - **Guarantees**:
   - `krun_set_vm_config` returns `-EINVAL` when `num_vcpus == 0`
   - `Builder::vm_config()` returns `Result<&mut Self, StartError>` (was infallible before)
@@ -24,10 +24,16 @@ Public API crate providing both C FFI (`krun_*` functions) and Rust `Builder` AP
   - `Context::restore_and_run_with_store(factory)` accepts `Box<dyn SnapshotStoreFactory>`; Linux-only (returns error on other platforms)
   - `VmHandle::snapshot_to_store(store)` and `VmHandle::incremental_snapshot_to_store(store)` pause vCPUs, snapshot via store, resume vCPUs
   - `VmExit::Shutdown { exit_code }` for normal guest shutdown, `VmExit::RebootRequested` for reboot, `VmExit::Error { message }` for fatal errors
-- **Expects**: Callers set vm_config before start; valid feature flags at compile time
+  - `Builder::enable_balloon()` sets `balloon_enabled` on VmResources; balloon device attached during VM build
+  - `VmHandle::balloon()` returns `Option<&BalloonHandle>` -- `None` if balloon not enabled
+  - `BalloonHandle::resize(target_mb)` sets inflation target in MB; returns `Err(BalloonError::DeviceNotActive)` if device not activated, `Err(BalloonError::TargetTooLarge { max_mb })` if target exceeds u32::MAX pages
+  - `BalloonHandle::await_target(target_mb, stall_timeout, max_timeout)` blocks on condvar until guest reaches target; returns `BalloonResult::Reached(actual_mb)`, `BalloonResult::Stalled(actual_mb)`, or `Err(BalloonError::Timeout { actual })`
+  - `BalloonHandle::actual()` returns current inflation in MB
+  - `BalloonHandle` is `Clone` (wraps `Arc`)
+- **Expects**: Callers set vm_config before start; valid feature flags at compile time; `enable_balloon()` must be called before `start()` for balloon to be available
 
 ## Dependencies
-- **Uses**: `vmm` (build_microvm, Vmm lifecycle, VmExit), `devices` (VirtioNetBackend, console, block, VhostUserFs, VhostUserVsock, FileSystem, passthrough, dax_mapper)
+- **Uses**: `vmm` (build_microvm, Vmm lifecycle, VmExit), `devices` (VirtioNetBackend, console, block, Balloon, VhostUserFs, VhostUserVsock, FileSystem, passthrough, dax_mapper)
 - **Used by**: External consumers via C API or Rust crate
 - **Boundary**: This is the outermost crate; nothing in src/ should depend on it
 
@@ -42,6 +48,9 @@ Public API crate providing both C FFI (`krun_*` functions) and Rust `Builder` AP
 - `VmExit` is re-exported as `pub use vmm::vm_exit::VmExit` for consumer convenience
 - `vmm::snapshot_store` re-exported so consumers can implement custom `SnapshotStore` backends
 - `restore_and_run` on Linux now delegates to `restore_and_run_with_store` with `FsSnapshotStoreFactory` (backward compatible)
+- `BalloonHandle` wraps `Arc<Mutex<Balloon>>` + condvar; `Clone` for sharing across threads
+- `BalloonHandle::await_target` uses condvar (not polling) for efficient blocking wait on guest balloon progress
+- `BalloonError::TargetTooLarge` prevents u32 truncation when converting MB to pages
 
 ## Key Files
 - `lib.rs` - All API functions, Builder struct, Context struct, StartError enum (single-file crate)

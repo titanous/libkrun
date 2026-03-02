@@ -1,6 +1,6 @@
 # libkrun
 
-Last verified: 2026-03-01
+Last verified: 2026-03-02
 
 ## Tech Stack
 - Language: Rust (workspace) + C (init binary)
@@ -19,7 +19,7 @@ Last verified: 2026-03-01
 ## Project Structure
 - `src/libkrun/` - Public C API (`krun_*` functions) and Rust `Builder` API
 - `src/vmm/` - Virtual machine manager: builder, snapshot/restore, dirty tracking
-- `src/devices/` - Virtio and legacy device implementations (net, console, block, vsock, fs, vhost-user, serial, CMOS, i8042, RTC)
+- `src/devices/` - Virtio and legacy device implementations (net, console, block, balloon, vsock, fs, vhost-user, serial, CMOS, i8042, RTC)
 - `src/arch/`, `src/kernel/` - Architecture and kernel loading support
 - `tests/` - Integration test workspace (host+guest test cases run inside VMs)
 - `init/` - C init binary compiled for guest (embedded when `embedded_init` feature on)

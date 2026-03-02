@@ -1,12 +1,12 @@
 # VMM Crate
 
-Last verified: 2026-03-01
+Last verified: 2026-03-02
 
 ## Purpose
 Core virtual machine manager. Orchestrates VM lifecycle: build, run, snapshot/restore, dirty page tracking.
 
 ## Contracts
-- **Exposes**: `Vmm` struct (VM lifecycle), `build_microvm()`, snapshot/restore functions, `DirtyBitmap`, `VmExit` enum, `SharedVmExit` type, `VhostUserFsConfig` (behind `vhost-user` feature), `Vm::register_memory_region()`, `snapshot_store` module (`SnapshotStore` trait, `SnapshotStoreFactory` trait, `FsSnapshotStore`, `FsSnapshotStoreFactory`) behind `snapshot` feature, `uffd` module (`UffdHandler`, `PageTracker`, `PageTrackerStats`, `LoadSource`) behind `uffd` feature
+- **Exposes**: `Vmm` struct (VM lifecycle, `get_balloon()`), `build_microvm()`, snapshot/restore functions, `DirtyBitmap`, `VmExit` enum, `SharedVmExit` type, `VhostUserFsConfig` (behind `vhost-user` feature), `Vm::register_memory_region()`, `snapshot_store` module (`SnapshotStore` trait, `SnapshotStoreFactory` trait, `FsSnapshotStore`, `FsSnapshotStoreFactory`) behind `snapshot` feature, `uffd` module (`UffdHandler`, `PageTracker`, `PageTrackerStats`, `LoadSource`) behind `uffd` feature
 - **Guarantees**:
   - `validate_header_for_vm` checks magic, version, RAM layout, vCPU count, and nested_enabled match
   - Incremental snapshots require `dirty_tracking_enabled` (returns `DirtyTrackingNotEnabled` otherwise)
@@ -30,6 +30,15 @@ Core virtual machine manager. Orchestrates VM lifecycle: build, run, snapshot/re
   - `StartMicrovmError` gains `MmapDaxWindow`, `RegisterDaxMemoryRegion`, `RegisterVhostUserDevice`, `RegisterVhostUserFsDevice`, `RegisterVhostUserVsockDevice` variants (behind `vhost-user` feature)
   - `attach_vhost_user_fs_device` creates VhostUserFs, mmaps DAX memfd, registers DAX region with KVM, attaches to MMIO bus
   - `attach_vhost_user_vsock_device` creates VhostUserVsock (via socket path or pre-connected stream), attaches to MMIO bus
+  - `Vmm::get_balloon()` returns `Option<&Arc<Mutex<Balloon>>>` for API access to balloon device (behind `not(tee)` feature)
+  - `VmResources::balloon_enabled` flag controls whether balloon device is attached during VM build
+  - `build_microvm` attaches balloon device and stores `Arc<Mutex<Balloon>>` on `Vmm` when `balloon_enabled` is true
+  - `VmSnapshot` has `excluded_pages: Vec<u64>` field (`#[serde(default)]` for backward compat); balloon-inflated pages excluded from full snapshots
+  - `IncrementalSnapshot` has `reclaimed_pages: Vec<u64>` field (`#[serde(default)]` for backward compat); reclaimed pages zero-filled on restore
+  - `apply_reclaimed_pages(mem, pages)` zero-fills reclaimed page addresses in guest memory during incremental restore
+  - `SnapshotStore::read_page` returns `io::Result<Option<Vec<u8>>>` -- `None` means page was excluded (balloon-reclaimed); callers must handle absent pages
+  - `SnapshotStore` trait has default no-op methods: `set_excluded_pages(Vec<u64>)` and `set_ram_regions(Vec<(u64, u64)>)` for balloon snapshot integration
+  - `FsSnapshotStore` writes sparse memory files when excluded pages are set; stores `page_index` file mapping guest addresses to file offsets
   - `SnapshotStore` trait is object-safe (`dyn SnapshotStore`), `Send + Sync + 'static`; all async methods return `SendBoxFuture` (Send futures for tokio::spawn)
   - `SnapshotStoreFactory::create` consumes `Box<Self>` (factory is single-use)
   - `FsSnapshotStore` reads from directory-based layout: `base_path/vmstate`, `base_path/memory`, with ordered incremental directories each containing `vmstate`
@@ -40,7 +49,7 @@ Core virtual machine manager. Orchestrates VM lifecycle: build, run, snapshot/re
   - `Vmm::restore_from_store_with_uffd(vmstate_bytes, store, rt)` creates UFFD handler, registers memory regions, restores device/vCPU states, signals handler ready, returns handler thread handle (Linux + `uffd` feature)
   - `Vmm::snapshot_to_store` and `Vmm::incremental_snapshot_to_store` write via `SnapshotStore` trait (both platforms)
   - `UffdHandler` runs on a dedicated thread; the caller passes in a `tokio::runtime::Runtime` via `UffdHandler::run(rt)`; preload and fault loop run concurrently via `futures::join!`
-  - `UffdHandler` page fault resolution: reads page from store, copies via `uffd.copy()`, handles EEXIST races silently
+  - `UffdHandler` page fault resolution: reads page from store, copies via `uffd.copy()`, handles EEXIST races silently; when store returns `None` (excluded page), resolves via `uffd.zeropage()` with `LoadSource::Zero`
   - `PageTracker` uses atomic bitmap (`AtomicU64` words) for lock-free page tracking; `mark_loaded` deduplicates via atomic OR
   - `BuiltVm::restore_from_store(vmstate_bytes, store, &rt)` starts vCPUs paused, restores memory+state via eager preload, then resumes (Linux-only)
   - `BuiltVm::restore_from_store_with_uffd(vmstate_bytes, store, rt)` pre-validates vmstate at `BuiltVm` level (defense-in-depth), starts vCPUs paused, delegates to `Vmm::restore_from_store_with_uffd`, returns handler thread handle (Linux + `uffd` feature)
@@ -48,7 +57,7 @@ Core virtual machine manager. Orchestrates VM lifecycle: build, run, snapshot/re
 - **Expects**: Valid `VmResources` from libkrun crate; KVM/HVF available at runtime
 
 ## Dependencies
-- **Uses**: `devices` (mmio device manager, virtio devices, VhostUserFs, VhostUserVsock), `arch`, `kernel`, `vm-memory`, `userfaultfd` (behind `uffd` feature), `tokio` + `futures` (behind `snapshot` feature)
+- **Uses**: `devices` (mmio device manager, virtio devices, Balloon, VhostUserFs, VhostUserVsock), `arch`, `kernel`, `vm-memory`, `userfaultfd` (behind `uffd` feature), `tokio` + `futures` (behind `snapshot` feature)
 - **Used by**: `libkrun` (public API crate)
 - **Boundary**: Does not know about C API; only receives structured `VmResources`
 
@@ -69,6 +78,11 @@ Core virtual machine manager. Orchestrates VM lifecycle: build, run, snapshot/re
 - `restore_device_and_vcpu_states` extracted as shared helper for both eager and UFFD restore paths
 - Vmstate bytes are read in `Context`/`BuiltVm` and passed directly to `Vmm::restore_from_store_with_uffd`; a single `tokio::sync::oneshot` channel signals the UFFD handler that the main thread is ready for faults
 - `Error::Snapshot(String)` variant on `vmm::Error` (behind `snapshot` feature) used for store/runtime errors in restore paths
+- `Vmm` stores `Option<Arc<Mutex<Balloon>>>` for balloon device access; populated by `build_microvm` when `balloon_enabled`
+- `SnapshotStore::read_page` returns `Option` to support excluded (balloon-reclaimed) pages without sentinel values
+- `SnapshotStore::set_excluded_pages` and `set_ram_regions` have default no-op implementations so existing custom stores are unaffected
+- `VmSnapshot::excluded_pages` and `IncrementalSnapshot::reclaimed_pages` use `#[serde(default)]` for backward-compatible deserialization
+- `LoadSource::Zero` variant distinguishes zero-filled pages from store-loaded pages in `PageTracker` stats
 
 ## Invariants
 - `validate_header_for_vm` is called before every snapshot restore (full and incremental)
@@ -83,6 +97,9 @@ Core virtual machine manager. Orchestrates VM lifecycle: build, run, snapshot/re
 - When `vhost-user` feature is active and any vhost-user device is configured (`vhost_user_devices`, `vhost_user_fs`, or `vhost_user_vsock`), `create_guest_memory` creates memfd-backed regions; without the feature, anonymous mmap is used (no behavior change)
 - UFFD handler signals `VmExit::Error` on fatal page fault errors (store read failure, copy failure); EEXIST is non-fatal
 - Preload errors are non-fatal; remaining pages are demand-paged via fault handler
+- Full snapshots exclude balloon-reclaimed pages (inflated + reported-free); excluded page addresses stored in `VmSnapshot::excluded_pages`
+- Incremental snapshots record reclaimed pages in `IncrementalSnapshot::reclaimed_pages`; `apply_reclaimed_pages` zero-fills them on restore
+- UFFD fault handler logs warning and signals `VmExit::Error` when encountering an excluded page fault (should not happen in normal operation)
 
 ## Key Files
 - `vm_exit.rs` - `VmExit` enum (Shutdown, RebootRequested, Error) and `SharedVmExit` type
