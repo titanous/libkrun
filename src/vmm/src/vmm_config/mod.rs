@@ -37,3 +37,7 @@ pub mod net;
 /// Wrapper for configuring vhost-user filesystem devices.
 #[cfg(feature = "vhost-user")]
 pub mod vhost_user_fs;
+
+/// Wrapper for configuring vhost-user vsock devices.
+#[cfg(feature = "vhost-user")]
+pub mod vhost_user_vsock;

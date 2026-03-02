@@ -8,6 +8,8 @@
 
 mod device;
 pub mod fs;
+pub mod vsock;
 
 pub use device::VhostUserDevice;
 pub use fs::VhostUserFs;
+pub use vsock::VhostUserVsock;
