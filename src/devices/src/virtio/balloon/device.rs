@@ -1948,7 +1948,6 @@ mod tests {
         const DESC_TABLE_ADDR: u64 = 0x1000;
         const AVAIL_RING_ADDR: u64 = 0x2000;
         const USED_RING_ADDR: u64 = 0x3000;
-        const PFN_DATA_ADDR: u64 = 0x10000;
 
         // Create device queues with FRQ queue descriptor structures
         let device_queues: Vec<DeviceQueue> = (0..5)

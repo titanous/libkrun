@@ -519,6 +519,8 @@ mod tests {
             block: Default::default(),
             #[cfg(not(feature = "tee"))]
             rng_backend: None,
+            #[cfg(not(feature = "tee"))]
+            balloon_enabled: false,
         }
     }
 
