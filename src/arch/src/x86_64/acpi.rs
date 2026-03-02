@@ -35,7 +35,6 @@ const OEM_ID: [u8; 6] = *b"LIBKRN";
 const OEM_TABLE_ID: [u8; 8] = *b"KRUNVMGN";
 const OEM_REVISION: u32 = 1;
 
-
 /// Sets up minimal ACPI tables for the guest.
 ///
 /// Generates RSDP → XSDT → FADT → DSDT in the EBDA/ROM scan region (0xE0000–0xFFFFF).
