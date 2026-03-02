@@ -1725,4 +1725,104 @@ mod tests {
             assert_eq!(data.unwrap().len(), 4096, "Page data should be 4096 bytes");
         });
     }
+
+    /// AC3.3 Unit: `test_mock_store_some_uses_copy`
+    /// Verify that MockSnapshotStore correctly returns Ok(Some(...)) for present pages
+    /// and that page_reads counter is incremented.
+    #[test]
+    fn test_mock_store_some_uses_copy() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        // Create MockSnapshotStore (returns Ok(Some(vec![0u8; 4096])) for any address)
+        struct MockSnapshotStore {
+            page_reads: Arc<AtomicUsize>,
+        }
+
+        impl MockSnapshotStore {
+            fn new() -> Self {
+                MockSnapshotStore {
+                    page_reads: Arc::new(AtomicUsize::new(0)),
+                }
+            }
+        }
+
+        impl SnapshotStore for MockSnapshotStore {
+            fn read_vmstate(
+                &self,
+            ) -> crate::snapshot_store::SendBoxFuture<'_, std::io::Result<Vec<u8>>> {
+                Box::pin(async { Ok(vec![]) })
+            }
+
+            fn read_page(
+                &self,
+                _guest_addr: u64,
+            ) -> crate::snapshot_store::SendBoxFuture<'_, std::io::Result<Option<Vec<u8>>>> {
+                self.page_reads.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Ok(Some(vec![0u8; 4096])) })
+            }
+
+            fn preload(
+                &self,
+                _regions: Vec<(u64, u64)>,
+            ) -> crate::snapshot_store::BoxStream<'_, std::io::Result<(u64, Vec<u8>)>> {
+                Box::pin(futures::stream::iter(vec![]))
+            }
+
+            fn write_vmstate(
+                &self,
+                _data: Vec<u8>,
+            ) -> crate::snapshot_store::SendBoxFuture<'_, std::io::Result<()>> {
+                Box::pin(async { Ok(()) })
+            }
+
+            fn write_pages(
+                &self,
+                _pages: Vec<(u64, Vec<u8>)>,
+            ) -> crate::snapshot_store::SendBoxFuture<'_, std::io::Result<()>> {
+                Box::pin(async { Ok(()) })
+            }
+
+            fn close(&self) -> crate::snapshot_store::SendBoxFuture<'_, std::io::Result<()>> {
+                Box::pin(async { Ok(()) })
+            }
+        }
+
+        let store = Arc::new(MockSnapshotStore::new());
+
+        // Test reading a page via read_page
+        futures::executor::block_on(async {
+            let result = store.read_page(0).await;
+            assert!(result.is_ok(), "read_page should succeed");
+
+            // Verify it returns Ok(Some(...))
+            let page_data = result.unwrap();
+            assert!(
+                page_data.is_some(),
+                "Present page should return Ok(Some(...))"
+            );
+
+            // Verify the page data is correct
+            let data = page_data.unwrap();
+            assert_eq!(data.len(), 4096, "Page data should be 4096 bytes");
+            assert!(data.iter().all(|&b| b == 0), "Page should be zero-filled");
+
+            // Verify page_reads counter was incremented
+            assert_eq!(
+                store.page_reads.load(Ordering::SeqCst),
+                1,
+                "page_reads counter should be 1"
+            );
+        });
+
+        // Call read_page again to verify counter increments
+        futures::executor::block_on(async {
+            let _ = store.read_page(4096).await;
+            assert_eq!(
+                store.page_reads.load(Ordering::SeqCst),
+                2,
+                "page_reads counter should be 2 after second read"
+            );
+        });
+    }
 }

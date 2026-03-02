@@ -2003,4 +2003,197 @@ mod tests {
             assert_eq!(offset, expected_offset, "Offset mismatch for address 0x{:x}", guest_addr);
         }
     }
+
+    /// AC2.4 Unit: `test_mincore_check_after_madvise`
+    /// Verify that mincore_check detects non-resident pages after madvise(MADV_DONTNEED).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_mincore_check_after_madvise() {
+
+        // Allocate anonymous memory
+        let size = 8192; // 2 pages
+        let host_addr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+
+        assert_ne!(
+            host_addr,
+            libc::MAP_FAILED as *mut libc::c_void,
+            "mmap should succeed"
+        );
+
+        let host_addr = host_addr as *const u8;
+
+        // Touch the page to make it resident
+        unsafe {
+            std::ptr::write(host_addr as *mut u8, 0xFF);
+        }
+
+        // Call madvise(MADV_DONTNEED) to discard the page
+        let ret = unsafe { libc::madvise(host_addr as *mut libc::c_void, 4096, libc::MADV_DONTNEED) };
+        assert_eq!(ret, 0, "madvise should succeed");
+
+        // Check residency using mincore_check
+        let residency = mincore_check(host_addr, 4096).expect("mincore_check should succeed");
+        assert_eq!(residency.len(), 1, "Should have 1 page result");
+        assert_eq!(
+            residency[0], false,
+            "Page should be non-resident after MADV_DONTNEED (bit 0 should be clear)"
+        );
+
+        // Clean up
+        unsafe {
+            libc::munmap(host_addr as *mut libc::c_void, size);
+        }
+    }
+
+    /// AC2.7 Unit: `test_mincore_reused_page_not_excluded`
+    /// Verify that mincore_check detects resident pages after they are reused (written to after MADV_DONTNEED).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_mincore_reused_page_not_excluded() {
+
+        // Allocate anonymous memory
+        let size = 8192; // 2 pages
+        let host_addr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+
+        assert_ne!(
+            host_addr,
+            libc::MAP_FAILED as *mut libc::c_void,
+            "mmap should succeed"
+        );
+
+        let host_addr = host_addr as *const u8;
+
+        // Call madvise(MADV_DONTNEED) to discard the page
+        let ret = unsafe { libc::madvise(host_addr as *mut libc::c_void, 4096, libc::MADV_DONTNEED) };
+        assert_eq!(ret, 0, "madvise should succeed");
+
+        // Write non-zero data to the page (making it resident again)
+        unsafe {
+            std::ptr::write(host_addr as *mut u8, 0xAA);
+        }
+
+        // Check residency using mincore_check
+        let residency = mincore_check(host_addr, 4096).expect("mincore_check should succeed");
+        assert_eq!(residency.len(), 1, "Should have 1 page result");
+        assert_eq!(
+            residency[0], true,
+            "Page should be resident after write (bit 0 should be set)"
+        );
+
+        // Clean up
+        unsafe {
+            libc::munmap(host_addr as *mut libc::c_void, size);
+        }
+    }
+
+    /// AC2.9 Unit: `test_snapshot_no_balloon_no_regression`
+    /// Verify that VmSnapshot with no excluded pages round-trips correctly through serialization.
+    #[test]
+    #[cfg(feature = "snapshot")]
+    fn test_snapshot_no_balloon_no_regression() {
+        use crate::snapshot::{SnapshotHeader, VmSnapshot, SNAPSHOT_MAGIC, SNAPSHOT_VERSION};
+
+        // Create a VmSnapshot with empty excluded_pages (no balloon scenario)
+        let header = SnapshotHeader {
+            magic: SNAPSHOT_MAGIC,
+            version: SNAPSHOT_VERSION,
+            vcpu_count: 2,
+            ram_regions: vec![(0x0, 0x100000)],
+            nested_enabled: false,
+        };
+
+        let original = VmSnapshot {
+            header: header.clone(),
+            vcpu_states: vec![vec![0x01], vec![0x02]],
+            device_states: vec![],
+            gic_state: None,
+            vm_state: None,
+            excluded_pages: Vec::new(), // No balloon-reclaimed pages
+        };
+
+        // Serialize
+        let serialized = bincode::serialize(&original).expect("serialization should succeed");
+
+        // Deserialize
+        let deserialized: VmSnapshot =
+            bincode::deserialize(&serialized).expect("deserialization should succeed");
+
+        // Verify the excluded_pages field round-tripped correctly
+        assert_eq!(
+            deserialized.excluded_pages.len(),
+            0,
+            "excluded_pages should be empty after round-trip"
+        );
+        assert_eq!(
+            deserialized.header.magic, SNAPSHOT_MAGIC,
+            "header.magic should match"
+        );
+        assert_eq!(
+            deserialized.vcpu_states.len(),
+            2,
+            "vCPU states should be preserved"
+        );
+    }
+
+    /// AC3.1 Unit: `test_incremental_snapshot_empty_reclaimed`
+    /// Verify that IncrementalSnapshot with empty reclaimed_pages round-trips correctly.
+    #[test]
+    #[cfg(feature = "snapshot")]
+    fn test_incremental_snapshot_empty_reclaimed() {
+        use crate::snapshot::{IncrementalSnapshot, SnapshotHeader, SNAPSHOT_MAGIC, SNAPSHOT_VERSION};
+
+        let header = SnapshotHeader {
+            magic: SNAPSHOT_MAGIC,
+            version: SNAPSHOT_VERSION,
+            vcpu_count: 1,
+            ram_regions: vec![(0x0, 0x100000)],
+            nested_enabled: false,
+        };
+
+        let original = IncrementalSnapshot {
+            header: header.clone(),
+            vcpu_states: vec![vec![0xFF]],
+            device_states: vec![],
+            dirty_pages: vec![],
+            gic_state: None,
+            vm_state: None,
+            reclaimed_pages: Vec::new(), // No reclaimed pages
+        };
+
+        // Serialize
+        let serialized = bincode::serialize(&original).expect("serialization should succeed");
+
+        // Deserialize
+        let deserialized: IncrementalSnapshot =
+            bincode::deserialize(&serialized).expect("deserialization should succeed");
+
+        // Verify the reclaimed_pages field round-tripped correctly
+        assert_eq!(
+            deserialized.reclaimed_pages.len(),
+            0,
+            "reclaimed_pages should be empty after round-trip"
+        );
+        assert_eq!(
+            deserialized.header.magic, SNAPSHOT_MAGIC,
+            "header.magic should match"
+        );
+    }
 }
