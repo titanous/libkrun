@@ -182,6 +182,8 @@ pub struct ContextConfig {
     #[cfg(feature = "tee")]
     tee_config_file: Option<PathBuf>,
     unix_ipc_port_map: Option<HashMap<u32, (PathBuf, bool)>>,
+    #[cfg(feature = "vhost-user")]
+    vhost_user_vsock: bool,
     shutdown_efd: Option<EventFd>,
     gpu_virgl_flags: Option<u32>,
     gpu_shm_size: Option<usize>,
@@ -2940,42 +2942,49 @@ impl Builder {
             }
         }
 
-        match &ctx_cfg.vsock_config {
-            VsockConfig::Disabled => (),
-            VsockConfig::Explicit { tsi_flags } => {
-                let vsock_device_config = VsockDeviceConfig {
-                    vsock_id: "vsock0".to_string(),
-                    guest_cid: 3,
-                    host_port_map: ctx_cfg.tsi_port_map,
-                    unix_ipc_port_map: ctx_cfg.unix_ipc_port_map.clone(),
-                    tsi_flags: *tsi_flags,
-                };
-                ctx_cfg.vmr.set_vsock_device(vsock_device_config).unwrap();
-            }
-            VsockConfig::Implicit => {
-                #[cfg(feature = "net")]
-                let enable_tsi =
-                    ctx_cfg.vmr.net.list.is_empty() && ctx_cfg.legacy_net_cfg.is_none();
-                #[cfg(not(feature = "net"))]
-                let enable_tsi = true;
+        #[cfg(feature = "vhost-user")]
+        let skip_userspace_vsock = ctx_cfg.vhost_user_vsock;
+        #[cfg(not(feature = "vhost-user"))]
+        let skip_userspace_vsock = false;
 
-                let has_ipc_map = ctx_cfg.unix_ipc_port_map.is_some();
-
-                if enable_tsi || has_ipc_map {
-                    let (tsi_flags, host_port_map) = if enable_tsi {
-                        (TsiFlags::HIJACK_INET, ctx_cfg.tsi_port_map)
-                    } else {
-                        (TsiFlags::empty(), None)
-                    };
-
+        if !skip_userspace_vsock {
+            match &ctx_cfg.vsock_config {
+                VsockConfig::Disabled => (),
+                VsockConfig::Explicit { tsi_flags } => {
                     let vsock_device_config = VsockDeviceConfig {
                         vsock_id: "vsock0".to_string(),
                         guest_cid: 3,
-                        host_port_map,
+                        host_port_map: ctx_cfg.tsi_port_map,
                         unix_ipc_port_map: ctx_cfg.unix_ipc_port_map.clone(),
-                        tsi_flags,
+                        tsi_flags: *tsi_flags,
                     };
                     ctx_cfg.vmr.set_vsock_device(vsock_device_config).unwrap();
+                }
+                VsockConfig::Implicit => {
+                    #[cfg(feature = "net")]
+                    let enable_tsi =
+                        ctx_cfg.vmr.net.list.is_empty() && ctx_cfg.legacy_net_cfg.is_none();
+                    #[cfg(not(feature = "net"))]
+                    let enable_tsi = true;
+
+                    let has_ipc_map = ctx_cfg.unix_ipc_port_map.is_some();
+
+                    if enable_tsi || has_ipc_map {
+                        let (tsi_flags, host_port_map) = if enable_tsi {
+                            (TsiFlags::HIJACK_INET, ctx_cfg.tsi_port_map)
+                        } else {
+                            (TsiFlags::empty(), None)
+                        };
+
+                        let vsock_device_config = VsockDeviceConfig {
+                            vsock_id: "vsock0".to_string(),
+                            guest_cid: 3,
+                            host_port_map,
+                            unix_ipc_port_map: ctx_cfg.unix_ipc_port_map.clone(),
+                            tsi_flags,
+                        };
+                        ctx_cfg.vmr.set_vsock_device(vsock_device_config).unwrap();
+                    }
                 }
             }
         }

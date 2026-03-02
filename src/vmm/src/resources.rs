@@ -28,6 +28,8 @@ use crate::vmm_config::machine_config::{VmConfig, VmConfigError};
 use crate::vmm_config::net::{NetBuilder, NetworkInterfaceConfig, NetworkInterfaceError};
 #[cfg(feature = "vhost-user")]
 use crate::vmm_config::vhost_user_fs::VhostUserFsConfig;
+#[cfg(feature = "vhost-user")]
+use crate::vmm_config::vhost_user_vsock::VhostUserVsockConfig;
 use crate::vmm_config::vsock::*;
 use crate::vstate::VcpuConfig;
 #[cfg(feature = "gpu")]
@@ -231,6 +233,9 @@ pub struct VmResources {
     #[cfg(feature = "vhost-user")]
     /// Vhost-user filesystem device configurations
     pub vhost_user_fs: Vec<VhostUserFsConfig>,
+    #[cfg(feature = "vhost-user")]
+    /// Vhost-user vsock device configuration
+    pub vhost_user_vsock: Option<VhostUserVsockConfig>,
     /// File to send console output.
     pub console_output: Option<PathBuf>,
     /// SMBIOS OEM Strings
@@ -386,6 +391,11 @@ impl VmResources {
         self.vhost_user_fs.push(config);
     }
 
+    #[cfg(feature = "vhost-user")]
+    pub fn set_vhost_user_vsock(&mut self, config: VhostUserVsockConfig) {
+        self.vhost_user_vsock = Some(config);
+    }
+
     #[cfg(feature = "blk")]
     pub fn add_block_device(&mut self, config: BlockDeviceConfig) -> Result<BlockConfigError> {
         self.block.insert(config)
@@ -492,6 +502,8 @@ mod tests {
             vhost_user_devices: Vec::new(),
             #[cfg(feature = "vhost-user")]
             vhost_user_fs: Vec::new(),
+            #[cfg(feature = "vhost-user")]
+            vhost_user_vsock: None,
             console_output: None,
             smbios_oem_strings: None,
             nested_enabled: false,

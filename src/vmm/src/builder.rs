@@ -66,6 +66,8 @@ use crate::vmm_config::fs::FsMount;
 use crate::vmm_config::kernel_cmdline::DEFAULT_KERNEL_CMDLINE;
 #[cfg(feature = "vhost-user")]
 use crate::vmm_config::vhost_user_fs::VhostUserFsConfig;
+#[cfg(feature = "vhost-user")]
+use crate::vmm_config::vhost_user_vsock::VhostUserVsockConfig;
 #[cfg(target_os = "linux")]
 use crate::vstate::KvmContext;
 #[cfg(all(target_os = "linux", feature = "tee"))]
@@ -244,6 +246,9 @@ pub enum StartMicrovmError {
     /// Cannot initialize a MMIO vhost-user FS device or add device to the MMIO Bus.
     #[cfg(feature = "vhost-user")]
     RegisterVhostUserFsDevice(device_manager::mmio::Error),
+    /// Cannot initialize a MMIO vhost-user vsock device or add device to the MMIO Bus.
+    #[cfg(feature = "vhost-user")]
+    RegisterVhostUserVsockDevice(device_manager::mmio::Error),
 }
 
 /// It's convenient to automatically convert `kernel::cmdline::Error`s
@@ -556,6 +561,10 @@ impl Display for StartMicrovmError {
             #[cfg(feature = "vhost-user")]
             RegisterVhostUserFsDevice(ref err) => {
                 write!(f, "Failed to initialize vhost-user FS device: {err}")
+            }
+            #[cfg(feature = "vhost-user")]
+            RegisterVhostUserVsockDevice(ref err) => {
+                write!(f, "Failed to initialize vhost-user vsock device: {err}")
             }
         }
     }
@@ -1384,6 +1393,11 @@ pub fn build_microvm(
         }
     }
 
+    #[cfg(feature = "vhost-user")]
+    if let Some(vhost_vsock_config) = vm_resources.vhost_user_vsock.take() {
+        attach_vhost_user_vsock_device(&mut vmm, vhost_vsock_config, intc.clone())?;
+    }
+
     #[cfg(feature = "net")]
     attach_net_devices(&mut vmm, &vm_resources.net, intc.clone())?;
     #[cfg(feature = "snd")]
@@ -1666,7 +1680,8 @@ fn load_payload(
 
             #[cfg(feature = "vhost-user")]
             let use_vhost_user = !_vm_resources.vhost_user_devices.is_empty()
-                || !_vm_resources.vhost_user_fs.is_empty();
+                || !_vm_resources.vhost_user_fs.is_empty()
+                || _vm_resources.vhost_user_vsock.is_some();
             #[cfg(not(feature = "vhost-user"))]
             let use_vhost_user = false;
 
@@ -1907,7 +1922,9 @@ pub fn create_guest_memory(
     // For vhost-user devices, we need file-backed memory so the backend can mmap it
     #[cfg(feature = "vhost-user")]
     let use_vhost_user =
-        !vm_resources.vhost_user_devices.is_empty() || !vm_resources.vhost_user_fs.is_empty();
+        !vm_resources.vhost_user_devices.is_empty()
+            || !vm_resources.vhost_user_fs.is_empty()
+            || vm_resources.vhost_user_vsock.is_some();
     #[cfg(not(feature = "vhost-user"))]
     let use_vhost_user = false;
 
@@ -2506,6 +2523,34 @@ fn attach_vhost_user_fs_device(
         }
         return Err(RegisterVhostUserFsDevice(e));
     }
+
+    Ok(())
+}
+
+#[cfg(not(feature = "tee"))]
+#[cfg(feature = "vhost-user")]
+fn attach_vhost_user_vsock_device(
+    vmm: &mut Vmm,
+    config: VhostUserVsockConfig,
+    intc: IrqChip,
+) -> std::result::Result<(), StartMicrovmError> {
+    use devices::virtio::vhost_user::VhostUserVsock;
+    use crate::vmm_config::vhost_user_vsock::VhostUserVsockConnection;
+    use StartMicrovmError::*;
+
+    let vhost_vsock = match config.connection {
+        VhostUserVsockConnection::SocketPath(ref path) => {
+            VhostUserVsock::new(path).map_err(RegisterVhostUserDevice)?
+        }
+        VhostUserVsockConnection::Stream(stream) => {
+            VhostUserVsock::from_stream(stream).map_err(RegisterVhostUserDevice)?
+        }
+    };
+
+    let device = Arc::new(Mutex::new(vhost_vsock));
+    let id = "virtio-vsock-vhost".to_string();
+    attach_mmio_device(vmm, id, intc, device)
+        .map_err(RegisterVhostUserVsockDevice)?;
 
     Ok(())
 }
