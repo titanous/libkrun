@@ -15,6 +15,7 @@ acpi_tables = "0.2.0"
 libc = ">=0.2.39"
 vm-memory = { version = "0.18", features = ["backend-mmap"] }
 vmm-sys-util = ">= 0.14"
+zerocopy = "0.8"
 
 arch_gen = { path = "../arch_gen" }
 smbios = { path = "../smbios" }

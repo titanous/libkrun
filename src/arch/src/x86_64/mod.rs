@@ -11,6 +11,8 @@ pub mod interrupts;
 /// Layout for the x86_64 system.
 pub mod layout;
 #[cfg(not(feature = "tee"))]
+mod acpi;
+#[cfg(not(feature = "tee"))]
 mod mptable;
 /// Logic for configuring x86_64 model specific registers (MSRs).
 pub mod msr;
@@ -45,6 +47,9 @@ pub enum Error {
     /// Error writing MP table to memory.
     #[cfg(not(feature = "tee"))]
     MpTableSetup(mptable::Error),
+    /// Error writing ACPI tables to memory.
+    #[cfg(not(feature = "tee"))]
+    AcpiSetup,
     /// Error writing the zero page of guest memory.
     ZeroPageSetup,
     /// Failed to compute initrd address.
@@ -266,6 +271,9 @@ pub fn configure_system(
     // Note that this puts the mptable at the last 1k of Linux's 640k base RAM
     #[cfg(not(feature = "tee"))]
     mptable::setup_mptable(guest_mem, num_cpus).map_err(Error::MpTableSetup)?;
+
+    #[cfg(not(feature = "tee"))]
+    acpi::setup_acpi_tables(guest_mem).map_err(|_| Error::AcpiSetup)?;
 
     let mut params: BootParamsWrapper = BootParamsWrapper(boot_params::default());
 

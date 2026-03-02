@@ -112,6 +112,7 @@ dependencies = [
  "utils",
  "vm-memory",
  "vmm-sys-util",
+ "zerocopy",
 ]
 
 [[package]]
