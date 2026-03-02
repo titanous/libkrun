@@ -250,6 +250,10 @@ pub struct Vmm {
     intc: IrqChip,
     #[cfg(all(target_os = "linux", target_arch = "aarch64", feature = "snapshot"))]
     intc: IrqChip,
+
+    // Balloon device reference for snapshot-time exclusion of reclaimed pages.
+    #[cfg(not(feature = "tee"))]
+    pub(crate) balloon: Option<std::sync::Arc<std::sync::Mutex<devices::virtio::balloon::Balloon>>>,
 }
 
 impl Vmm {
@@ -1522,6 +1526,28 @@ impl Vmm {
     pub fn remove_mapping(&self, reply_sender: Sender<bool>, guest_addr: u64, len: u64) {
         self.vm.remove_mapping(reply_sender, guest_addr, len);
     }
+}
+
+/// Check which pages in a memory range are resident in memory.
+/// Returns a Vec<bool> where true = page is resident, false = non-resident.
+/// This is a Linux-only function using the mincore(2) syscall.
+#[cfg(target_os = "linux")]
+#[cfg(not(feature = "tee"))]
+#[allow(dead_code)]
+fn mincore_check(host_addr: *const u8, len: usize) -> io::Result<Vec<bool>> {
+    let page_count = (len + 4095) / 4096;
+    let mut vec = vec![0u8; page_count];
+    let ret = unsafe {
+        libc::mincore(
+            host_addr as *mut libc::c_void,
+            len,
+            vec.as_mut_ptr(),
+        )
+    };
+    if ret != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(vec.iter().map(|&v| v & 1 != 0).collect())
 }
 
 impl Subscriber for Vmm {

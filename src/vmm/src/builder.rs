@@ -1270,6 +1270,8 @@ pub fn build_microvm(
         intc: intc.clone(),
         #[cfg(all(target_os = "linux", target_arch = "aarch64", feature = "snapshot"))]
         intc: intc.clone(),
+        #[cfg(not(feature = "tee"))]
+        balloon: None,
     };
 
     // Set raw mode for FDs that are connected to legacy serial devices.
@@ -2871,6 +2873,9 @@ fn attach_balloon_device(
         .map_err(RegisterEvent)?;
 
     let id = String::from(balloon.lock().unwrap().id());
+
+    // Store balloon reference on Vmm for snapshot-time access
+    vmm.balloon = Some(balloon.clone());
 
     // The device mutex mustn't be locked here otherwise it will deadlock.
     attach_mmio_device(vmm, id, intc.clone(), balloon).map_err(RegisterBalloonDevice)?;
