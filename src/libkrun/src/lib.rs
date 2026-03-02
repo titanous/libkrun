@@ -3643,26 +3643,18 @@ mod tests {
     #[test]
     #[cfg(feature = "vhost-user")]
     fn test_vsock_conflict_vhost_user_then_explicit() {
-        // AC2.3: calling krun_add_vsock() after add_vsock_vhost_user() returns error
-        // Simulate the Builder state after add_vsock_vhost_user()
+        // AC2.3: calling add_vsock_vhost_user() a second time returns VsockConflict
         let mut builder = Builder::new();
 
         // First configure vhost-user-vsock via Builder API
-        let result = builder.add_vsock_vhost_user("/tmp/vsock.sock");
-        assert!(result.is_ok(), "add_vsock_vhost_user() should succeed");
+        let result1 = builder.add_vsock_vhost_user("/tmp/vsock.sock");
+        assert!(result1.is_ok(), "first add_vsock_vhost_user() should succeed");
 
-        // Now try to configure explicit userspace vsock via direct field mutation
-        // (simulating what krun_add_vsock C API would try to do)
+        // Verify that a second call returns VsockConflict
+        let result2 = builder.add_vsock_vhost_user("/tmp/other.sock");
         assert!(
-            builder.config.vhost_user_vsock,
-            "vhost_user_vsock should be set after add_vsock_vhost_user()"
-        );
-
-        // The krun_add_vsock() function would check this and return -EEXIST
-        // We verify the flag is set so the C API can detect the conflict
-        assert!(
-            builder.config.vhost_user_vsock,
-            "vhost_user_vsock flag prevents krun_add_vsock() conflict"
+            matches!(result2, Err(StartError::VsockConflict)),
+            "second add_vsock_vhost_user() should fail with VsockConflict"
         );
     }
 
