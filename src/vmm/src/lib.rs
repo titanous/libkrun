@@ -1097,11 +1097,17 @@ impl Vmm {
 
     /// Private helper to dump guest memory and write to store, then close.
     /// Extracted to reduce code duplication between Linux and macOS snapshot_to_store.
+    ///
+    /// # Arguments
+    /// * `store` - The snapshot store to write to
+    /// * `vmstate_data` - Serialized VmSnapshot (including excluded_pages)
+    /// * `excluded_pages` - Set of guest page addresses to skip (balloon-reclaimed pages)
     #[cfg(feature = "snapshot")]
     fn dump_memory_to_store(
         &self,
         store: &dyn snapshot_store::SnapshotStore,
         vmstate_data: Vec<u8>,
+        excluded_pages: &std::collections::HashSet<u64>,
     ) -> std::result::Result<(), snapshot::SnapshotError> {
         use vm_memory::{Address, GuestMemoryBackend, GuestMemoryRegion};
 
@@ -1109,7 +1115,7 @@ impl Vmm {
         futures::executor::block_on(store.write_vmstate(vmstate_data))
             .map_err(snapshot::SnapshotError::Io)?;
 
-        // Dump memory and write pages
+        // Dump memory and write pages, skipping excluded pages
         let mut pages = Vec::new();
         for region in self.guest_memory.iter() {
             let host_addr = self
@@ -1118,9 +1124,22 @@ impl Vmm {
                 .map_err(|e| {
                     snapshot::SnapshotError::Serialize(format!("Invalid guest address: {e}"))
                 })?;
+            let region_start = region.start_addr().raw_value();
             let len = region.len() as usize;
-            let slice = unsafe { std::slice::from_raw_parts(host_addr, len) };
-            pages.push((region.start_addr().raw_value(), slice.to_vec()));
+
+            // Iterate through the region at 4KB page granularity
+            let mut chunk_start = region_start;
+            let chunk_end = region_start + len as u64;
+            while chunk_start < chunk_end {
+                if !excluded_pages.contains(&chunk_start) {
+                    // Page is not excluded, include it
+                    let offset = (chunk_start - region_start) as usize;
+                    let host_ptr = unsafe { host_addr.add(offset) };
+                    let page_data = unsafe { std::slice::from_raw_parts(host_ptr, 4096) };
+                    pages.push((chunk_start, page_data.to_vec()));
+                }
+                chunk_start += 4096;
+            }
         }
 
         futures::executor::block_on(store.write_pages(pages))
@@ -1138,6 +1157,9 @@ impl Vmm {
         &mut self,
         store: &dyn snapshot_store::SnapshotStore,
     ) -> std::result::Result<(), snapshot::SnapshotError> {
+        use std::collections::HashSet;
+        use vm_memory::GuestMemoryBackend;
+
         // Reuse the existing full snapshot creation, but write to store instead
         let mut device_states = self
             .mmio_device_manager
@@ -1178,6 +1200,73 @@ impl Vmm {
         #[cfg(not(target_arch = "x86_64"))]
         let vm_state = None;
 
+        // Query balloon device for reclaimed pages and build excluded set
+        #[cfg(not(feature = "tee"))]
+        let (excluded_pages, excluded_pages_vec) = {
+            let mut excluded = HashSet::new();
+            let mut excluded_vec = Vec::new();
+
+            if let Some(balloon) = self.balloon.as_ref() {
+                let balloon_guard = balloon.lock().unwrap();
+                let (inflated_bitmap, reported_free_bitmap) = balloon_guard.reclaimed_bitmaps();
+
+                // Always exclude inflated pages (AC2.3)
+                if let Some(bitmap) = inflated_bitmap {
+                    for pfn in bitmap.iter_set_pages() {
+                        let guest_addr = (pfn as u64) * 4096;
+                        excluded.insert(guest_addr);
+                        excluded_vec.push(guest_addr);
+                    }
+                }
+
+                // Verify and exclude reported-free pages (AC2.4, AC2.7)
+                if let Some(bitmap) = reported_free_bitmap {
+                    for pfn in bitmap.iter_set_pages() {
+                        let guest_addr = (pfn as u64) * 4096;
+
+                        // Check if page is resident via mincore
+                        let host_addr = self
+                            .guest_memory
+                            .get_host_address(vm_memory::GuestAddress(guest_addr))
+                            .ok();
+
+                        let should_exclude = if let Some(host_addr) = host_addr {
+                            match mincore_check(host_addr, 4096) {
+                                Ok(residency) => {
+                                    if residency.is_empty() || !residency[0] {
+                                        // Non-resident page: definitely zeros
+                                        true
+                                    } else {
+                                        // Page is resident: check if it's all zeros
+                                        // If all-zero, exclude; if non-zero, don't exclude (guest reused)
+                                        let slice = unsafe { std::slice::from_raw_parts(host_addr, 4096) };
+                                        slice.iter().all(|&b| b == 0)
+                                    }
+                                }
+                                Err(_) => {
+                                    // mincore failed; conservatively include the page
+                                    false
+                                }
+                            }
+                        } else {
+                            // Failed to get host address; conservatively include
+                            false
+                        };
+
+                        if should_exclude {
+                            excluded.insert(guest_addr);
+                            excluded_vec.push(guest_addr);
+                        }
+                    }
+                }
+            }
+
+            (excluded, excluded_vec)
+        };
+
+        #[cfg(feature = "tee")]
+        let (excluded_pages, excluded_pages_vec) = (std::collections::HashSet::new(), Vec::new());
+
         // Create VmSnapshot
         let vm_snapshot = snapshot::VmSnapshot {
             header: snapshot::SnapshotHeader {
@@ -1192,7 +1281,7 @@ impl Vmm {
             device_states,
             gic_state,
             vm_state,
-            excluded_pages: Vec::new(),
+            excluded_pages: excluded_pages_vec,
         };
 
         // Serialize vmstate
@@ -1200,7 +1289,7 @@ impl Vmm {
             .map_err(|e| snapshot::SnapshotError::Serialize(e.to_string()))?;
 
         // Use helper to dump memory and write to store
-        self.dump_memory_to_store(store, vmstate_data)
+        self.dump_memory_to_store(store, vmstate_data, &excluded_pages)
     }
 
     /// Create a full snapshot using a SnapshotStore. vCPUs must already be paused.
@@ -1251,7 +1340,9 @@ impl Vmm {
             .map_err(|e| snapshot::SnapshotError::Serialize(e.to_string()))?;
 
         // Use helper to dump memory and write to store
-        self.dump_memory_to_store(store, vmstate_data)
+        // macOS has no balloon support, so excluded_pages is always empty
+        let excluded_pages = std::collections::HashSet::new();
+        self.dump_memory_to_store(store, vmstate_data, &excluded_pages)
     }
 
     /// Create an incremental snapshot using a SnapshotStore. vCPUs must already be paused.
