@@ -1,4 +1,4 @@
-// Copyright 2024 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2026 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! VM Generation ID (VMGENID) Device
@@ -34,8 +34,13 @@ impl Vmgenid {
     /// * `mem` - Guest memory instance for writing the GUID
     ///
     /// # Returns
-    /// A new Vmgenid instance with the generated GUID already written to guest memory.
-    pub fn new(guid_page_addr: u64, guid_offset: u64, mem: &GuestMemoryMmap) -> Self {
+    /// A new Vmgenid instance with the generated GUID already written to guest memory,
+    /// or an error if the GUID write to guest memory fails.
+    pub fn new(
+        guid_page_addr: u64,
+        guid_offset: u64,
+        mem: &GuestMemoryMmap,
+    ) -> Result<Self, vm_memory::GuestMemoryError> {
         let mut guid = [0u8; GUID_SIZE];
         let mut rng = rand::rng();
         rng.fill(&mut guid);
@@ -47,9 +52,9 @@ impl Vmgenid {
         };
 
         // Write the initial GUID to guest memory.
-        vmgenid.write_guid_to_memory(mem);
+        vmgenid.write_guid_to_memory(mem)?;
 
-        vmgenid
+        Ok(vmgenid)
     }
 
     /// Updates the GUID with a new randomly generated value and writes it to guest memory.
@@ -58,8 +63,12 @@ impl Vmgenid {
     /// * `mem` - Guest memory instance for writing the new GUID
     ///
     /// # Returns
-    /// A tuple of `(old_guid, new_guid)` showing the previous and new GUID values.
-    pub fn update_guid(&mut self, mem: &GuestMemoryMmap) -> ([u8; 16], [u8; 16]) {
+    /// A tuple of `(old_guid, new_guid)` showing the previous and new GUID values,
+    /// or an error if the GUID write to guest memory fails.
+    pub fn update_guid(
+        &mut self,
+        mem: &GuestMemoryMmap,
+    ) -> Result<([u8; 16], [u8; 16]), vm_memory::GuestMemoryError> {
         let old_guid = self.guid;
 
         // Generate a new random GUID.
@@ -70,9 +79,9 @@ impl Vmgenid {
         self.guid = new_guid;
 
         // Write the new GUID to guest memory.
-        self.write_guid_to_memory(mem);
+        self.write_guid_to_memory(mem)?;
 
-        (old_guid, new_guid)
+        Ok((old_guid, new_guid))
     }
 
     /// Returns a reference to the current GUID value.
@@ -86,9 +95,9 @@ impl Vmgenid {
     }
 
     /// Writes the current GUID to guest memory at the configured address and offset.
-    fn write_guid_to_memory(&self, mem: &GuestMemoryMmap) {
+    fn write_guid_to_memory(&self, mem: &GuestMemoryMmap) -> Result<(), vm_memory::GuestMemoryError> {
         let addr = GuestAddress(self.guest_addr());
-        let _ = mem.write_slice(&self.guid, addr);
+        mem.write_slice(&self.guid, addr)
     }
 }
 
@@ -100,7 +109,7 @@ mod tests {
     #[test]
     fn test_new_generates_non_zero_guid() {
         let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x100000)]).unwrap();
-        let vmgenid = Vmgenid::new(0x1000, 40, &mem);
+        let vmgenid = Vmgenid::new(0x1000, 40, &mem).unwrap();
 
         // GUID should not be all zeros.
         assert_ne!(vmgenid.guid(), &[0u8; 16]);
@@ -109,7 +118,7 @@ mod tests {
     #[test]
     fn test_new_writes_guid_to_guest_memory() {
         let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x100000)]).unwrap();
-        let vmgenid = Vmgenid::new(0x1000, 40, &mem);
+        let vmgenid = Vmgenid::new(0x1000, 40, &mem).unwrap();
 
         // Read back the GUID from guest memory.
         let addr = GuestAddress(0x1000 + 40);
@@ -123,11 +132,11 @@ mod tests {
     #[test]
     fn test_update_guid_produces_different_guid() {
         let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x100000)]).unwrap();
-        let mut vmgenid = Vmgenid::new(0x2000, 50, &mem);
+        let mut vmgenid = Vmgenid::new(0x2000, 50, &mem).unwrap();
 
         let initial_guid = *vmgenid.guid();
 
-        let (old_guid, new_guid) = vmgenid.update_guid(&mem);
+        let (old_guid, new_guid) = vmgenid.update_guid(&mem).unwrap();
 
         // Old GUID should match initial.
         assert_eq!(old_guid, initial_guid);
@@ -142,9 +151,9 @@ mod tests {
     #[test]
     fn test_update_guid_writes_to_guest_memory() {
         let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x100000)]).unwrap();
-        let mut vmgenid = Vmgenid::new(0x3000, 60, &mem);
+        let mut vmgenid = Vmgenid::new(0x3000, 60, &mem).unwrap();
 
-        let (_old_guid, new_guid) = vmgenid.update_guid(&mem);
+        let (_old_guid, new_guid) = vmgenid.update_guid(&mem).unwrap();
 
         // Read back from guest memory.
         let addr = GuestAddress(0x3000 + 60);
@@ -158,11 +167,11 @@ mod tests {
     #[test]
     fn test_multiple_updates_produce_different_guids() {
         let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x100000)]).unwrap();
-        let mut vmgenid = Vmgenid::new(0x4000, 70, &mem);
+        let mut vmgenid = Vmgenid::new(0x4000, 70, &mem).unwrap();
 
-        let (_old1, guid1) = vmgenid.update_guid(&mem);
-        let (_old2, guid2) = vmgenid.update_guid(&mem);
-        let (_old3, guid3) = vmgenid.update_guid(&mem);
+        let (_old1, guid1) = vmgenid.update_guid(&mem).unwrap();
+        let (_old2, guid2) = vmgenid.update_guid(&mem).unwrap();
+        let (_old3, guid3) = vmgenid.update_guid(&mem).unwrap();
 
         // All should be different (with very high probability).
         assert_ne!(guid1, guid2);
@@ -173,9 +182,30 @@ mod tests {
     #[test]
     fn test_guest_addr_calculation() {
         let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x100000)]).unwrap();
-        let vmgenid = Vmgenid::new(0x5000, 80, &mem);
+        let vmgenid = Vmgenid::new(0x5000, 80, &mem).unwrap();
 
         // guest_addr should return page address + offset.
         assert_eq!(vmgenid.guest_addr(), 0x5000 + 80);
+    }
+
+    #[test]
+    fn test_new_handles_invalid_guest_address() {
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x100000)]).unwrap();
+        // Try to create with an address that's out of bounds.
+        let result = Vmgenid::new(0x200000, 0, &mem);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_update_guid_handles_invalid_guest_address() {
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x100000)]).unwrap();
+        let mut vmgenid = Vmgenid::new(0x50000, 0, &mem).unwrap();
+
+        // Manually set an invalid address by mutating the internal state.
+        // Since we can't do that with the current API, we just verify the signature accepts errors.
+        // This test validates that update_guid returns a Result type that can propagate errors.
+        vmgenid.guid_page_addr = 0x200000; // Out of bounds
+        let result = vmgenid.update_guid(&mem);
+        assert!(result.is_err());
     }
 }
