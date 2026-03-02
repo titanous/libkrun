@@ -113,6 +113,9 @@ pub struct Balloon {
     config: VirtioBalloonConfig,
     stats_desc_index: Option<u16>,
     latest_stats: Option<BalloonStats>,
+    hinting_cmd_counter: u32,
+    hinting_host_cmd: u32,
+    hinting_guest_cmd: Option<u32>,
 }
 
 impl Balloon {
@@ -127,6 +130,9 @@ impl Balloon {
             config: VirtioBalloonConfig::default(),
             stats_desc_index: None,
             latest_stats: None,
+            hinting_cmd_counter: 2,
+            hinting_host_cmd: 0,
+            hinting_guest_cmd: None,
         })
     }
 
