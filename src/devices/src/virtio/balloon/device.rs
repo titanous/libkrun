@@ -373,6 +373,107 @@ impl Balloon {
     pub fn stats(&self) -> Option<&BalloonStats> {
         self.latest_stats.as_ref()
     }
+
+    pub fn process_phq(&mut self) -> bool {
+        debug!("balloon: process_phq()");
+        let mem = match self.device_state {
+            DeviceState::Activated(ref mem, _) => mem,
+            // This should never happen, it's been already validated in the event handler.
+            DeviceState::Inactive => unreachable!(),
+        };
+
+        let queues = self
+            .queues
+            .as_mut()
+            .expect("queues should exist when activated");
+
+        let mut have_used = false;
+        let mut phq_complete = false;
+
+        while let Some(head) = queues[PHQ_INDEX].queue.pop(mem) {
+            let index = head.index;
+
+            for desc in head.into_iter() {
+                // Check if this is a 4-byte command ID descriptor
+                if desc.len == 4 {
+                    // Read the 4-byte command ID
+                    match mem.read_obj::<u32>(desc.addr) {
+                        Ok(cmd) => {
+                            debug!("balloon: PHQ received command ID: {}", cmd);
+                            self.hinting_guest_cmd = Some(cmd);
+
+                            // Check if this is a STOP or DONE command
+                            if cmd == uapi::VIRTIO_BALLOON_CMD_ID_STOP
+                                || cmd == uapi::VIRTIO_BALLOON_CMD_ID_DONE
+                            {
+                                phq_complete = true;
+                            }
+                        }
+                        Err(e) => {
+                            warn!("balloon: failed to read command ID from PHQ: {:?}", e);
+                        }
+                    }
+                } else if desc.len > 4 {
+                    // This is a page block descriptor - only process if we have an active host command
+                    // and the guest command matches the host command
+                    let should_process = self.hinting_host_cmd != uapi::VIRTIO_BALLOON_CMD_ID_STOP
+                        && self.hinting_host_cmd != uapi::VIRTIO_BALLOON_CMD_ID_DONE
+                        && self
+                            .hinting_guest_cmd
+                            .map_or(false, |guest_cmd| guest_cmd == self.hinting_host_cmd);
+
+                    if should_process {
+                        let host_addr = mem.get_host_address(desc.addr).unwrap();
+                        debug!(
+                            "balloon: releasing guest_addr={:?} host_addr={:p} len={}",
+                            desc.addr, host_addr, desc.len
+                        );
+                        unsafe {
+                            libc::madvise(
+                                host_addr as *mut libc::c_void,
+                                desc.len.try_into().unwrap(),
+                                libc::MADV_DONTNEED,
+                            )
+                        };
+                    }
+                }
+            }
+
+            have_used = true;
+            if let Err(e) = queues[PHQ_INDEX].queue.add_used(mem, index, 0) {
+                error!("failed to add used elements to the PHQ queue: {e:?}");
+            }
+        }
+
+        // If we received a STOP/DONE, transition to DONE state and signal config change
+        if phq_complete {
+            self.config.free_page_report_cmd_id = uapi::VIRTIO_BALLOON_CMD_ID_DONE;
+            self.hinting_host_cmd = uapi::VIRTIO_BALLOON_CMD_ID_DONE;
+            self.device_state.signal_config_change();
+        }
+
+        have_used
+    }
+
+    pub fn start_free_page_hinting(&mut self) {
+        debug!("balloon: start_free_page_hinting()");
+
+        // Generate new command ID (increment and wrap, but skip 0 and 1)
+        let cmd_id = self.hinting_cmd_counter;
+        self.hinting_cmd_counter = self.hinting_cmd_counter.wrapping_add(1);
+        // Skip reserved command IDs (0 and 1)
+        if self.hinting_cmd_counter <= 1 {
+            self.hinting_cmd_counter = 2;
+        }
+
+        // Write command ID to config space
+        self.config.free_page_report_cmd_id = cmd_id;
+        self.hinting_host_cmd = cmd_id;
+
+        // Signal config change to guest
+        self.device_state.signal_config_change();
+        debug!("balloon: initiated free page hinting with cmd_id: {}", cmd_id);
+    }
 }
 
 impl VirtioDevice for Balloon {
