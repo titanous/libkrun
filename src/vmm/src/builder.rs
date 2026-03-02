@@ -1344,29 +1344,32 @@ pub fn build_microvm(
     }
 
     #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
-    attach_fs_devices(
-        &mut vmm,
-        &mut vm_resources.fs,
-        &mut _shm_manager,
-        #[cfg(not(feature = "tee"))]
-        export_table,
-        intc.clone(),
-        exit_code,
-        #[cfg(target_os = "macos")]
-        _sender,
-    )?;
-    #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
-    #[cfg(feature = "vhost-user")]
     {
+        #[allow(unused_variables)]
         let fs_count = vm_resources.fs.len();
-        for (i, vhost_fs_config) in vm_resources.vhost_user_fs.iter().enumerate() {
-            attach_vhost_user_fs_device(
-                &mut vmm,
-                vhost_fs_config,
-                &mut _shm_manager,
-                fs_count + i,
-                intc.clone(),
-            )?;
+
+        attach_fs_devices(
+            &mut vmm,
+            &mut vm_resources.fs,
+            &mut _shm_manager,
+            #[cfg(not(feature = "tee"))]
+            export_table,
+            intc.clone(),
+            exit_code,
+            #[cfg(target_os = "macos")]
+            _sender,
+        )?;
+        #[cfg(feature = "vhost-user")]
+        {
+            for (i, vhost_fs_config) in vm_resources.vhost_user_fs.iter().enumerate() {
+                attach_vhost_user_fs_device(
+                    &mut vmm,
+                    vhost_fs_config,
+                    &mut _shm_manager,
+                    fs_count + i,
+                    intc.clone(),
+                )?;
+            }
         }
     }
     #[cfg(feature = "blk")]
