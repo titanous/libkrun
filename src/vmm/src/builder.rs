@@ -1280,7 +1280,11 @@ pub fn build_microvm(
     }
 
     #[cfg(not(feature = "tee"))]
-    attach_balloon_device(&mut vmm, event_manager, intc.clone())?;
+    let balloon_device = attach_balloon_device(&mut vmm, event_manager, intc.clone())?;
+    #[cfg(not(feature = "tee"))]
+    {
+        vmm.balloon = Some(balloon_device);
+    }
     #[cfg(not(feature = "tee"))]
     attach_rng_device(
         &mut vmm,
@@ -2863,7 +2867,7 @@ fn attach_balloon_device(
     vmm: &mut Vmm,
     event_manager: &mut EventManager,
     intc: IrqChip,
-) -> std::result::Result<(), StartMicrovmError> {
+) -> std::result::Result<Arc<Mutex<devices::virtio::Balloon>>, StartMicrovmError> {
     use self::StartMicrovmError::*;
 
     let balloon = Arc::new(Mutex::new(devices::virtio::Balloon::new().unwrap()));
@@ -2874,13 +2878,10 @@ fn attach_balloon_device(
 
     let id = String::from(balloon.lock().unwrap().id());
 
-    // Store balloon reference on Vmm for snapshot-time access
-    vmm.balloon = Some(balloon.clone());
-
     // The device mutex mustn't be locked here otherwise it will deadlock.
-    attach_mmio_device(vmm, id, intc.clone(), balloon).map_err(RegisterBalloonDevice)?;
+    attach_mmio_device(vmm, id, intc.clone(), balloon.clone()).map_err(RegisterBalloonDevice)?;
 
-    Ok(())
+    Ok(balloon)
 }
 
 #[cfg(feature = "blk")]
