@@ -1082,6 +1082,11 @@ impl Vmm {
 
         snapshot::apply_dirty_pages(&self.guest_memory, &incremental.dirty_pages)?;
 
+        // Zero-fill reclaimed pages (Task 7: AC2.6)
+        if !incremental.reclaimed_pages.is_empty() {
+            snapshot::apply_reclaimed_pages(&self.guest_memory, &incremental.reclaimed_pages)?;
+        }
+
         // Reuse shared helper for device/vCPU state restoration
         let vmstate = snapshot::VmSnapshot {
             header: incremental.header,
@@ -1419,6 +1424,82 @@ impl Vmm {
             }
         }
 
+        // Build reclaimed_pages from balloon bitmaps (Task 6: AC2.5)
+        #[cfg(not(feature = "tee"))]
+        let (dirty_pages, reclaimed_pages) = {
+            let mut reclaimed = Vec::new();
+            let mut dirty_set: std::collections::HashSet<u64> =
+                dirty_pages.iter().map(|p| p.guest_addr).collect();
+
+            if let Some(balloon) = self.balloon.as_ref() {
+                let balloon_guard = balloon.lock().unwrap();
+                let (inflated_bitmap, reported_free_bitmap) = balloon_guard.reclaimed_bitmaps();
+
+                // Dirty pages that are inflated: remove from dirty_pages and add to reclaimed
+                if let Some(bitmap) = inflated_bitmap {
+                    for pfn in bitmap.iter_set_pages() {
+                        let guest_addr = (pfn as u64) * 4096;
+                        if dirty_set.contains(&guest_addr) {
+                            reclaimed.push(guest_addr);
+                            dirty_set.remove(&guest_addr);
+                        }
+                    }
+                }
+
+                // Pages in reported-free bitmap that are verified-free and not in dirty_pages
+                if let Some(bitmap) = reported_free_bitmap {
+                    for pfn in bitmap.iter_set_pages() {
+                        let guest_addr = (pfn as u64) * 4096;
+                        if !dirty_set.contains(&guest_addr) {
+                            // Verify it's reported-free (non-resident or all-zeros)
+                            let host_addr = self
+                                .guest_memory
+                                .get_host_address(vm_memory::GuestAddress(guest_addr))
+                                .ok();
+
+                            let should_reclaim = if let Some(host_addr) = host_addr {
+                                match mincore_check(host_addr, 4096) {
+                                    Ok(residency) => {
+                                        if residency.is_empty() || !residency[0] {
+                                            // Non-resident page: definitely zeros
+                                            true
+                                        } else {
+                                            // Page is resident: check if it's all zeros
+                                            let slice =
+                                                unsafe { std::slice::from_raw_parts(host_addr, 4096) };
+                                            slice.iter().all(|&b| b == 0)
+                                        }
+                                    }
+                                    Err(_) => {
+                                        // mincore failed; conservatively skip this page
+                                        false
+                                    }
+                                }
+                            } else {
+                                // Failed to get host address; conservatively skip
+                                false
+                            };
+
+                            if should_reclaim {
+                                reclaimed.push(guest_addr);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Rebuild dirty_pages without reclaimed entries
+            let filtered_dirty_pages = dirty_pages
+                .into_iter()
+                .filter(|p| dirty_set.contains(&p.guest_addr))
+                .collect::<Vec<_>>();
+
+            (filtered_dirty_pages, reclaimed)
+        };
+
+        #[cfg(feature = "tee")]
+        let reclaimed_pages = Vec::new();
+
         let incremental = snapshot::IncrementalSnapshot {
             header: snapshot::SnapshotHeader {
                 magic: snapshot::SNAPSHOT_MAGIC,
@@ -1432,7 +1513,7 @@ impl Vmm {
             dirty_pages,
             gic_state,
             vm_state,
-            reclaimed_pages: Vec::new(),
+            reclaimed_pages,
         };
 
         // Serialize incremental snapshot
@@ -1541,6 +1622,7 @@ impl Vmm {
             dirty_pages,
             gic_state,
             vm_state: None,
+            reclaimed_pages: Vec::new(),
         };
 
         // Serialize incremental snapshot
