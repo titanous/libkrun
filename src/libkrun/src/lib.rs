@@ -2934,6 +2934,13 @@ impl Builder {
         self
     }
 
+    /// Enable the memory balloon device, exposing it through the Rust API via VmHandle::balloon().
+    #[cfg(not(feature = "tee"))]
+    pub fn enable_balloon(&mut self) -> &mut Self {
+        self.config.vmr.balloon_enabled = true;
+        self
+    }
+
     pub fn build(self) -> Result<Context, StartError> {
         let mut event_manager = EventManager::new().map_err(StartError::EventManager)?;
 
