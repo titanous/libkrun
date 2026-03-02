@@ -104,6 +104,29 @@ impl BalloonStats {
     }
 }
 
+/// Serializable balloon device state for snapshot/restore.
+///
+/// Contains device-specific fields not covered by MmioTransportState
+/// (which already handles queue states and acked_features).
+/// Reclaimed page bitmaps are NOT included — they are transient host state
+/// that starts empty after restore.
+#[cfg_attr(feature = "snapshot", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone)]
+struct BalloonState {
+    /// Config space: num_pages (inflation target set by host)
+    num_pages: u32,
+    /// Config space: actual (current inflation reported by guest)
+    actual: u32,
+    /// Config space: free_page_report_cmd_id
+    free_page_report_cmd_id: u32,
+    /// Config space: poison_val
+    poison_val: u32,
+    /// Free page hinting command counter (monotonically increasing)
+    hinting_cmd_counter: u32,
+    /// Current host-requested hinting command
+    hinting_host_cmd: u32,
+}
+
 pub struct Balloon {
     pub(crate) queues: Option<Vec<DeviceQueue>>,
     pub(crate) avail_features: u64,
@@ -680,6 +703,67 @@ impl VirtioDevice for Balloon {
 
     fn is_activated(&self) -> bool {
         self.device_state.is_activated()
+    }
+
+    fn save_backend_state(&self) -> Option<Vec<u8>> {
+        let state = BalloonState {
+            num_pages: self.config.num_pages,
+            actual: self.config.actual,
+            free_page_report_cmd_id: self.config.free_page_report_cmd_id,
+            poison_val: self.config.poison_val,
+            hinting_cmd_counter: self.hinting_cmd_counter,
+            hinting_host_cmd: self.hinting_host_cmd,
+        };
+
+        #[cfg(feature = "snapshot")]
+        {
+            match bincode::serialize(&state) {
+                Ok(data) => Some(data),
+                Err(e) => {
+                    log::error!("balloon: failed to serialize backend state: {e}");
+                    None
+                }
+            }
+        }
+        #[cfg(not(feature = "snapshot"))]
+        {
+            let _ = state;
+            None
+        }
+    }
+
+    fn restore_backend_state(&mut self, data: &[u8]) {
+        #[cfg(feature = "snapshot")]
+        {
+            match bincode::deserialize::<BalloonState>(data) {
+                Ok(state) => {
+                    self.config.num_pages = state.num_pages;
+                    self.config.actual = state.actual;
+                    self.config.free_page_report_cmd_id = state.free_page_report_cmd_id;
+                    self.config.poison_val = state.poison_val;
+                    self.hinting_cmd_counter = state.hinting_cmd_counter;
+                    self.hinting_host_cmd = state.hinting_host_cmd;
+                    // stats_desc_index is intentionally NOT restored — it refers to a
+                    // descriptor index in the stats queue which is re-initialized by
+                    // MmioTransport queue restore. The guest will re-push a stats buffer
+                    // after resume, providing a fresh descriptor index.
+                    self.stats_desc_index = None;
+
+                    log::debug!(
+                        "balloon: restored state: num_pages={}, actual={}",
+                        state.num_pages,
+                        state.actual
+                    );
+                }
+                Err(e) => {
+                    log::error!("balloon: failed to deserialize backend state: {e}");
+                }
+            }
+        }
+        #[cfg(not(feature = "snapshot"))]
+        {
+            let _ = data;
+        }
     }
 }
 
@@ -1937,5 +2021,108 @@ mod tests {
         } else {
             panic!("reported_free_bitmap should be initialized");
         }
+    }
+
+    /// Test AC4.5: Balloon device state survives snapshot/restore roundtrip
+    /// After save_backend_state() and restore_backend_state(), config and hinting fields match
+    #[test]
+    fn test_balloon_snapshot_roundtrip() {
+        // Create first balloon with distinctive values
+        let mut balloon1 = Balloon::new().expect("Failed to create balloon device");
+        balloon1.config.num_pages = 12345;
+        balloon1.config.actual = 6789;
+        balloon1.config.free_page_report_cmd_id = 42;
+        balloon1.config.poison_val = 0xDEADBEEF;
+        balloon1.hinting_cmd_counter = 10;
+        balloon1.hinting_host_cmd = 5;
+        balloon1.stats_desc_index = Some(3);
+
+        // Save the state
+        let saved_data = balloon1
+            .save_backend_state()
+            .expect("save_backend_state should return Some(data)");
+
+        // Create a second balloon
+        let mut balloon2 = Balloon::new().expect("Failed to create balloon device");
+
+        // Restore the state
+        balloon2.restore_backend_state(&saved_data);
+
+        // Copy packed struct fields to avoid alignment issues
+        let num_pages = balloon2.config.num_pages;
+        let actual = balloon2.config.actual;
+        let free_page_report_cmd_id = balloon2.config.free_page_report_cmd_id;
+        let poison_val = balloon2.config.poison_val;
+
+        // Verify config fields match
+        assert_eq!(num_pages, 12345, "num_pages should be restored");
+        assert_eq!(actual, 6789, "actual should be restored");
+        assert_eq!(
+            free_page_report_cmd_id, 42,
+            "free_page_report_cmd_id should be restored"
+        );
+        assert_eq!(
+            poison_val, 0xDEADBEEF,
+            "poison_val should be restored"
+        );
+
+        // Verify hinting fields match
+        assert_eq!(
+            balloon2.hinting_cmd_counter, 10,
+            "hinting_cmd_counter should be restored"
+        );
+        assert_eq!(
+            balloon2.hinting_host_cmd, 5,
+            "hinting_host_cmd should be restored"
+        );
+
+        // Verify stats_desc_index is reset to None (intentionally)
+        assert_eq!(
+            balloon2.stats_desc_index, None,
+            "stats_desc_index should be reset to None after restore"
+        );
+    }
+
+    /// Test AC4.5: restore_backend_state with empty data doesn't panic
+    /// Should log error but continue normally
+    #[test]
+    fn test_balloon_snapshot_empty_data_no_panic() {
+        let mut balloon = Balloon::new().expect("Failed to create balloon device");
+
+        // Set some initial values different from defaults
+        balloon.config.num_pages = 999;
+
+        // Call restore with empty data — should not panic
+        balloon.restore_backend_state(&[]);
+
+        // Config values should remain at whatever they were before (or defaults on error)
+        // The important thing is it doesn't panic
+    }
+
+    /// Test AC4.5: Reclaimed page bitmaps are not serialized
+    /// After save/restore, bitmaps are still None (not created during restore)
+    #[test]
+    fn test_balloon_snapshot_no_bitmaps() {
+        // Create first balloon
+        let mut balloon1 = Balloon::new().expect("Failed to create balloon device");
+        balloon1.config.num_pages = 100;
+
+        // Verify bitmaps are None initially
+        assert!(balloon1.inflated_bitmap.is_none());
+        assert!(balloon1.reported_free_bitmap.is_none());
+
+        // Save state
+        let saved_data = balloon1
+            .save_backend_state()
+            .expect("save_backend_state should return Some(data)");
+
+        // Create second balloon and restore
+        let mut balloon2 = Balloon::new().expect("Failed to create balloon device");
+        balloon2.restore_backend_state(&saved_data);
+
+        // Verify bitmaps are still None after restore
+        // (They would only be created during activate(), not restore)
+        assert!(balloon2.inflated_bitmap.is_none());
+        assert!(balloon2.reported_free_bitmap.is_none());
     }
 }
