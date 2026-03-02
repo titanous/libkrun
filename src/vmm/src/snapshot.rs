@@ -165,6 +165,9 @@ pub struct VmSnapshot {
     /// VM-level state (x86_64: PIT/PIC/IOAPIC/clock) as opaque serialized bytes.
     #[cfg_attr(feature = "snapshot", serde(default))]
     pub vm_state: Option<Vec<u8>>,
+    /// Guest addresses of pages excluded from snapshot (balloon-reclaimed).
+    #[cfg_attr(feature = "snapshot", serde(default))]
+    pub excluded_pages: Vec<u64>,
 }
 
 /// Dump guest memory to a file.
@@ -216,6 +219,21 @@ pub fn ram_layout(guest_memory: &GuestMemoryMmap) -> Vec<(u64, u64)> {
         .iter()
         .map(|r| (r.start_addr().raw_value(), r.len()))
         .collect()
+}
+
+/// Zero-fill reclaimed pages in guest memory.
+///
+/// For each guest address in `pages`, writes 4096 zeros to guest memory.
+/// Called during incremental restore to zero-fill pages that were reclaimed by the balloon.
+pub fn apply_reclaimed_pages(mem: &GuestMemoryMmap, pages: &[u64]) -> Result<(), SnapshotError> {
+    const PAGE_SIZE: usize = 4096;
+    let zeros = [0u8; PAGE_SIZE];
+
+    for &addr in pages {
+        mem.write_slice(&zeros, GuestAddress(addr))
+            .map_err(|e| SnapshotError::Serialize(format!("Failed to zero-fill page at 0x{:x}: {e}", addr)))?;
+    }
+    Ok(())
 }
 
 /// Save VM snapshot metadata to a file (vmstate).
@@ -282,6 +300,7 @@ pub fn create_full_snapshot(
         device_states,
         gic_state,
         vm_state,
+        excluded_pages: Vec::new(),
     };
 
     save_vmstate(&snapshot, &path.join("vmstate"))?;
@@ -315,6 +334,9 @@ pub struct IncrementalSnapshot {
     /// VM-level state (x86_64: PIT/PIC/IOAPIC/clock) as opaque serialized bytes.
     #[cfg_attr(feature = "snapshot", serde(default))]
     pub vm_state: Option<Vec<u8>>,
+    /// Guest addresses that should be zero-filled on restore.
+    #[cfg_attr(feature = "snapshot", serde(default))]
+    pub reclaimed_pages: Vec<u64>,
 }
 
 /// Combined interrupt controller snapshot: pending IRQs + GIC register state.
@@ -581,6 +603,7 @@ mod tests {
             device_states: vec![("test_device".to_string(), vec![0xCC; 512])], // One device
             gic_state: None,
             vm_state: None,
+            excluded_pages: Vec::new(),
         };
 
         // Create a temp file for vmstate
@@ -644,6 +667,7 @@ mod tests {
             dirty_pages,
             gic_state: None,
             vm_state: None,
+            reclaimed_pages: Vec::new(),
         };
 
         // Create a temp file for incremental snapshot

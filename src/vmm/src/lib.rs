@@ -1085,6 +1085,7 @@ impl Vmm {
             device_states: incremental.device_states,
             gic_state: incremental.gic_state,
             vm_state: incremental.vm_state,
+            excluded_pages: Vec::new(),
         };
         self.restore_device_and_vcpu_states(vmstate)?;
         Ok(())
@@ -1187,6 +1188,7 @@ impl Vmm {
             device_states,
             gic_state,
             vm_state,
+            excluded_pages: Vec::new(),
         };
 
         // Serialize vmstate
@@ -1335,6 +1337,7 @@ impl Vmm {
             dirty_pages,
             gic_state,
             vm_state,
+            reclaimed_pages: Vec::new(),
         };
 
         // Serialize incremental snapshot
