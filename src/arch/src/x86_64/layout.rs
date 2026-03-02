@@ -64,3 +64,21 @@ pub const FIRMWARE_SIZE: u64 = 65536;
 pub const FIRST_ADDR_PAST_32BITS: u64 = 1 << 32;
 pub const MEM_32BIT_GAP_SIZE: u64 = 768 << 20;
 pub const MMIO_MEM_START: u64 = FIRST_ADDR_PAST_32BITS - MEM_32BIT_GAP_SIZE;
+
+/// Start address for ACPI tables (in EBDA/ROM scan region).
+/// The kernel scans 0xE0000–0xFFFFF for the RSDP signature.
+pub const ACPI_START: u64 = 0xE0000;
+/// Maximum size reserved for ACPI tables (128 KB, to end of scan region).
+pub const ACPI_MAX_SIZE: u64 = 0x20000;
+
+/// Guest physical address of the VMGENID GUID page (4 KB).
+/// Placed in the ROM expansion region, outside E820 RAM entries.
+/// Address space layout (no overlaps):
+///   0x9FC00..~0x9FDFF  mptable (a few hundred bytes, scales with vCPU count)
+///   0xC0000..0xC0FFF   VMGENID GUID page (4 KB)
+///   0xE0000..0xFFFFF   ACPI tables (128 KB max)
+pub const VMGENID_GUID_PAGE: u64 = 0xC0000;
+/// Offset within the GUID page where the 128-bit GUID is stored.
+/// Matches the OVMF SDT Header Probe Suppressor convention (Linux vmgenid
+/// driver's ADDR method accounts for this offset).
+pub const VMGENID_GUID_OFFSET: u64 = 40;
