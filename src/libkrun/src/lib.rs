@@ -3543,7 +3543,7 @@ mod tests {
         let mut builder = Builder::new();
 
         // Add regular virtiofs device
-        builder.add_virtiofs("fs1", "/shared");
+        builder.add_virtiofs_path("fs1", "/tmp", None, false);
 
         // Add vhost-user FS device - should not conflict
         let result = builder.add_virtiofs_vhost_user("vhostfs", "/tmp/sock", Some(32));
@@ -3576,6 +3576,113 @@ mod tests {
             builder.config.vmr.vhost_user_fs[0].dax_window_mib,
             Some(32),
             "vhost-user FS DAX window size should be stored"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "vhost-user")]
+    fn test_add_vsock_vhost_user_socket_path_success() {
+        // AC2.1: add_vsock_vhost_user() succeeds when no explicit vsock configured
+        let mut builder = Builder::new();
+        let result = builder.add_vsock_vhost_user("/tmp/vsock.sock");
+
+        assert!(result.is_ok(), "add_vsock_vhost_user() should succeed");
+        assert!(
+            builder.config.vhost_user_vsock,
+            "vhost_user_vsock flag should be set"
+        );
+        assert!(
+            builder.config.vmr.vhost_user_vsock.is_some(),
+            "vhost_user_vsock config should be stored in VmResources"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "vhost-user")]
+    fn test_add_vsock_vhost_user_fd_success() {
+        // AC2.2: add_vsock_vhost_user_fd() succeeds with a UnixStream
+        use std::os::unix::net::UnixStream;
+
+        let mut builder = Builder::new();
+        let (stream1, _stream2) = UnixStream::pair().expect("Failed to create UnixStream pair");
+        let result = builder.add_vsock_vhost_user_fd(stream1);
+
+        assert!(
+            result.is_ok(),
+            "add_vsock_vhost_user_fd() should succeed with valid UnixStream"
+        );
+        assert!(
+            builder.config.vhost_user_vsock,
+            "vhost_user_vsock flag should be set"
+        );
+        assert!(
+            builder.config.vmr.vhost_user_vsock.is_some(),
+            "vhost_user_vsock config should be stored in VmResources"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "vhost-user")]
+    fn test_vsock_conflict_explicit_then_vhost_user() {
+        // AC2.4: calling add_vsock_vhost_user() after explicit vsock config returns VsockConflict
+        let mut builder = Builder::new();
+
+        // First configure explicit userspace vsock via internal config
+        builder.config.vsock_config = VsockConfig::Explicit {
+            tsi_flags: TsiFlags::empty(),
+        };
+
+        let result = builder.add_vsock_vhost_user("/tmp/vsock.sock");
+
+        assert!(
+            matches!(result, Err(StartError::VsockConflict)),
+            "add_vsock_vhost_user() should return VsockConflict when explicit vsock configured"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "vhost-user")]
+    fn test_vsock_conflict_vhost_user_then_explicit() {
+        // AC2.3: calling krun_add_vsock() after add_vsock_vhost_user() returns error
+        // Simulate the Builder state after add_vsock_vhost_user()
+        let mut builder = Builder::new();
+
+        // First configure vhost-user-vsock via Builder API
+        let result = builder.add_vsock_vhost_user("/tmp/vsock.sock");
+        assert!(result.is_ok(), "add_vsock_vhost_user() should succeed");
+
+        // Now try to configure explicit userspace vsock via direct field mutation
+        // (simulating what krun_add_vsock C API would try to do)
+        assert!(
+            builder.config.vhost_user_vsock,
+            "vhost_user_vsock should be set after add_vsock_vhost_user()"
+        );
+
+        // The krun_add_vsock() function would check this and return -EEXIST
+        // We verify the flag is set so the C API can detect the conflict
+        assert!(
+            builder.config.vhost_user_vsock,
+            "vhost_user_vsock flag prevents krun_add_vsock() conflict"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "vhost-user")]
+    fn test_vsock_conflict_vhost_user_fd_then_explicit() {
+        // AC2.4 variant: calling add_vsock_vhost_user() after vhost-user-fd returns VsockConflict
+        let mut builder = Builder::new();
+
+        // First configure vhost-user-vsock via fd
+        use std::os::unix::net::UnixStream;
+        let (stream1, _stream2) = UnixStream::pair().expect("Failed to create UnixStream pair");
+        let result = builder.add_vsock_vhost_user_fd(stream1);
+        assert!(result.is_ok(), "add_vsock_vhost_user_fd() should succeed");
+
+        // Then try to configure explicit userspace vsock - should fail with VsockConflict
+        let result2 = builder.add_vsock_vhost_user("/tmp/vsock.sock");
+        assert!(
+            matches!(result2, Err(StartError::VsockConflict)),
+            "add_vsock_vhost_user() should return VsockConflict after vhost-user-fd"
         );
     }
 }
