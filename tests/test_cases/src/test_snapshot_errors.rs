@@ -65,6 +65,8 @@ mod host {
         data.push(0u8);
         // vm_state: None = 0x00
         data.push(0u8);
+        // excluded_pages: empty Vec<u64> = length 0
+        data.extend_from_slice(&0u64.to_le_bytes());
 
         let mut f = fs::File::create(dir.join("vmstate")).unwrap();
         f.write_all(&data).unwrap();

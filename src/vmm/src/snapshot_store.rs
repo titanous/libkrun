@@ -180,18 +180,6 @@ impl FsSnapshotStore {
         }
     }
 
-    /// Set the excluded pages set (pages absent from snapshot).
-    /// Used during reading to know which pages to return None for.
-    /// Also used during writing to know which pages to write to page_index.
-    pub fn set_excluded_pages(&mut self, pages: Vec<u64>) {
-        self.excluded_pages.lock().unwrap().extend(pages);
-    }
-
-    /// Set the RAM regions for sparse file offset calculation during write.
-    /// Must be called before write_pages for stores created for writing.
-    pub fn set_ram_regions(&mut self, regions: Vec<(u64, u64)>) {
-        self.ram_regions = Arc::new(regions);
-    }
 }
 
 impl SnapshotStore for FsSnapshotStore {
@@ -451,6 +439,15 @@ impl SnapshotStore for FsSnapshotStore {
                     file.write_all(&page_data)?;
                 }
             }
+
+            // Ensure the file has exactly total_ram_size bytes so load_memory's size
+            // check passes even when the last pages of RAM are excluded (sparse holes).
+            // On Linux, set_len on a sparse file extends with a hole — no extra disk usage.
+            let total_size: u64 = ram_regions.iter().map(|(_, size)| size).sum();
+            if total_size > 0 {
+                file.set_len(total_size)?;
+            }
+
             file.sync_all()?;
 
             // Write page_index file with excluded page addresses
@@ -482,6 +479,14 @@ impl SnapshotStore for FsSnapshotStore {
             dir.sync_all()?;
             Ok(())
         })
+    }
+
+    fn set_excluded_pages(&mut self, pages: Vec<u64>) {
+        self.excluded_pages.lock().unwrap().extend(pages);
+    }
+
+    fn set_ram_regions(&mut self, regions: Vec<(u64, u64)>) {
+        self.ram_regions = Arc::new(regions);
     }
 }
 

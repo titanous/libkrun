@@ -21,7 +21,7 @@ impl SnapshotStore for EmptyPreloadStore {
         self.inner.read_vmstate()
     }
 
-    fn read_page(&self, guest_addr: u64) -> SendBoxFuture<'_, io::Result<Vec<u8>>> {
+    fn read_page(&self, guest_addr: u64) -> SendBoxFuture<'_, io::Result<Option<Vec<u8>>>> {
         self.inner.read_page(guest_addr)
     }
 
@@ -92,7 +92,7 @@ impl SnapshotStore for PartialPreloadStore {
         self.inner.read_vmstate()
     }
 
-    fn read_page(&self, guest_addr: u64) -> SendBoxFuture<'_, io::Result<Vec<u8>>> {
+    fn read_page(&self, guest_addr: u64) -> SendBoxFuture<'_, io::Result<Option<Vec<u8>>>> {
         self.inner.read_page(guest_addr)
     }
 
@@ -190,7 +190,7 @@ impl SnapshotStore for ErrorStore {
         self.inner.read_vmstate()
     }
 
-    fn read_page(&self, guest_addr: u64) -> SendBoxFuture<'_, io::Result<Vec<u8>>> {
+    fn read_page(&self, guest_addr: u64) -> SendBoxFuture<'_, io::Result<Option<Vec<u8>>>> {
         if guest_addr == self.error_addr {
             Box::pin(async move {
                 Err(io::Error::new(
@@ -288,7 +288,7 @@ impl SnapshotStore for DelayStore {
         self.inner.read_vmstate()
     }
 
-    fn read_page(&self, guest_addr: u64) -> SendBoxFuture<'_, io::Result<Vec<u8>>> {
+    fn read_page(&self, guest_addr: u64) -> SendBoxFuture<'_, io::Result<Option<Vec<u8>>>> {
         let inner = self.inner.as_ref();
         let delay_ms = self.delay_ms;
 

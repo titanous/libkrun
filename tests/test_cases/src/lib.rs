@@ -89,6 +89,15 @@ use test_uffd_error::TestUffdErrorHandling;
 mod test_uffd_parallel;
 use test_uffd_parallel::TestUffdParallelFaults;
 
+mod test_balloon_inflate;
+use test_balloon_inflate::TestBalloonInflateDeflateStats;
+
+mod test_balloon_snapshot;
+use test_balloon_snapshot::{TestBalloonIncrementalReclaimed, TestBalloonSnapshotExcludes};
+
+mod test_balloon_uffd;
+use test_balloon_uffd::TestBalloonUffdZeroFill;
+
 pub fn test_cases() -> Vec<TestCase> {
     // Register your test here:
     vec![
@@ -167,6 +176,19 @@ pub fn test_cases() -> Vec<TestCase> {
         TestCase::new("uffd-incremental-chain", Box::new(TestUffdIncrementalChain)),
         TestCase::new("uffd-error-handling", Box::new(TestUffdErrorHandling)),
         TestCase::new("uffd-parallel-faults", Box::new(TestUffdParallelFaults)),
+        TestCase::new(
+            "balloon-inflate-deflate-stats",
+            Box::new(TestBalloonInflateDeflateStats),
+        ),
+        TestCase::new(
+            "balloon-snapshot-excludes-pages",
+            Box::new(TestBalloonSnapshotExcludes),
+        ),
+        TestCase::new("balloon-uffd-zero-fill", Box::new(TestBalloonUffdZeroFill)),
+        TestCase::new(
+            "balloon-incremental-reclaimed",
+            Box::new(TestBalloonIncrementalReclaimed),
+        ),
     ]
 }
 
