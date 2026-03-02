@@ -473,6 +473,20 @@ impl MMIODeviceManager {
 
         ranges
     }
+
+    /// Register a platform device's info for FDT generation.
+    /// Unlike MMIO bus devices, platform devices have fixed addresses
+    /// and don't use the MMIO bus or dynamic IRQ allocation.
+    #[cfg(target_arch = "aarch64")]
+    pub fn register_platform_device_info(
+        &mut self,
+        type_id: (DeviceType, String),
+        addr: u64,
+        irq: u32,
+        len: u64,
+    ) {
+        self.id_to_dev_info.insert(type_id, MMIODeviceInfo { addr, _irq: irq, _len: len });
+    }
 }
 
 /// Private structure for storing information about the MMIO device registered at some address on the bus.

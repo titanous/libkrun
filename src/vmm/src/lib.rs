@@ -255,8 +255,8 @@ pub struct Vmm {
     #[cfg(not(feature = "tee"))]
     pub(crate) balloon: Option<std::sync::Arc<std::sync::Mutex<devices::virtio::balloon::Balloon>>>,
 
-    // VMGENID device for VM generation tracking (x86_64 only).
-    #[cfg(target_arch = "x86_64")]
+    // VMGENID device for VM generation tracking (x86_64 and aarch64).
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     pub(crate) vmgenid: Option<devices::vmgenid::Vmgenid>,
 }
 

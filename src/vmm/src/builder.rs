@@ -1197,6 +1197,33 @@ pub fn build_microvm(
         )?;
     }
 
+    // Create and register VMGENID device (aarch64 only)
+    #[cfg(target_arch = "aarch64")]
+    {
+        use arch::aarch64::layout::{VMGENID_GUID_PAGE, VMGENID_GUID_OFFSET, VMGENID_SPI};
+
+        let vmgenid = devices::vmgenid::Vmgenid::new(
+            VMGENID_GUID_PAGE,
+            VMGENID_GUID_OFFSET,
+            VMGENID_SPI,
+            &guest_memory,
+        ).map_err(StartMicrovmError::VmgenidCreation)?;
+
+        // Register irqfd: SPI number maps directly to KVM GSI for aarch64.
+        vm.fd().register_irqfd(vmgenid.interrupt_evt(), VMGENID_SPI)
+            .map_err(StartMicrovmError::RegisterIrqFd)?;
+
+        // Register platform device info for FDT generation
+        mmio_device_manager.register_platform_device_info(
+            (DeviceType::Vmgenid, "vmgenid".to_string()),
+            VMGENID_GUID_PAGE,
+            VMGENID_SPI,
+            0x1000,
+        );
+
+        vmm.vmgenid = Some(vmgenid);
+    }
+
     #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
     {
         intc = {
@@ -1289,7 +1316,7 @@ pub fn build_microvm(
         intc: intc.clone(),
         #[cfg(not(feature = "tee"))]
         balloon: None,
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         vmgenid: None,
     };
 
