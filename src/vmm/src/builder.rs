@@ -62,7 +62,7 @@ use crate::terminal::{term_restore_mode, term_set_raw_mode};
 #[cfg(feature = "blk")]
 use crate::vmm_config::block::BlockBuilder;
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
-use crate::vmm_config::fs::FsDeviceConfig;
+use crate::vmm_config::fs::FsMount;
 use crate::vmm_config::kernel_cmdline::DEFAULT_KERNEL_CMDLINE;
 #[cfg(feature = "vhost-user")]
 use crate::vmm_config::vhost_user_fs::VhostUserFsConfig;
@@ -1346,7 +1346,7 @@ pub fn build_microvm(
     #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
     attach_fs_devices(
         &mut vmm,
-        &vm_resources.fs,
+        &mut vm_resources.fs,
         &mut _shm_manager,
         #[cfg(not(feature = "tee"))]
         export_table,
@@ -1889,8 +1889,8 @@ pub fn create_guest_memory(
     let mut shm_manager = ShmManager::new(&arch_mem_info);
 
     #[cfg(not(feature = "tee"))]
-    for (index, fs) in vm_resources.fs.iter().enumerate() {
-        if let Some(shm_size) = fs.shm_size {
+    for (index, mount) in vm_resources.fs.iter().enumerate() {
+        if let Some(shm_size) = mount.shm_size {
             shm_manager
                 .create_fs_region(index, shm_size)
                 .map_err(StartMicrovmError::ShmCreate)?;
@@ -2373,22 +2373,21 @@ fn attach_mmio_device(
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 fn attach_fs_devices(
     vmm: &mut Vmm,
-    fs_devs: &[FsDeviceConfig],
+    fs_mounts: &mut Vec<FsMount>,
     shm_manager: &mut ShmManager,
     #[cfg(not(feature = "tee"))] export_table: Option<ExportTable>,
     intc: IrqChip,
     exit_code: Arc<AtomicI32>,
-    #[cfg(target_os = "macos")] map_sender: Sender<WorkerMessage>,
+    #[cfg(target_os = "macos")] _map_sender: Sender<WorkerMessage>,
 ) -> std::result::Result<(), StartMicrovmError> {
     use self::StartMicrovmError::*;
 
-    for (i, config) in fs_devs.iter().enumerate() {
+    for (i, mount) in fs_mounts.drain(..).enumerate() {
         let fs = Arc::new(Mutex::new(
             devices::virtio::Fs::new(
-                config.fs_id.clone(),
-                config.shared_dir.clone(),
+                mount.tag,
+                mount.fs,
                 exit_code.clone(),
-                config.allow_root_dir_delete,
             )
             .unwrap(),
         ));
@@ -2410,9 +2409,6 @@ fn attach_fs_devices(
         if let Some(export_table) = export_table.as_ref() {
             fs.lock().unwrap().set_export_table(export_table.clone());
         }
-
-        #[cfg(target_os = "macos")]
-        fs.lock().unwrap().set_map_sender(map_sender.clone());
 
         // The device mutex mustn't be locked here otherwise it will deadlock.
         attach_mmio_device(vmm, id, intc.clone(), fs).map_err(RegisterFsDevice)?;

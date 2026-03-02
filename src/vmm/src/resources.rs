@@ -198,7 +198,7 @@ pub struct VmResources {
     pub initrd_bundle: Option<InitrdBundle>,
     /// The fs device.
     #[cfg(not(feature = "tee"))]
-    pub fs: Vec<FsDeviceConfig>,
+    pub fs: Vec<FsMount>,
     /// The vsock device.
     pub vsock: VsockBuilder,
     /// The virtio-blk device.
@@ -377,8 +377,8 @@ impl VmResources {
     }
 
     #[cfg(not(feature = "tee"))]
-    pub fn add_fs_device(&mut self, config: FsDeviceConfig) {
-        self.fs.push(config)
+    pub fn add_fs_mount(&mut self, mount: FsMount) {
+        self.fs.push(mount)
     }
 
     #[cfg(feature = "vhost-user")]

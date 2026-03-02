@@ -1,7 +1,7 @@
-#[derive(Clone, Debug)]
-pub struct FsDeviceConfig {
-    pub fs_id: String,
-    pub shared_dir: String,
+use devices::virtio::fs::FileSystem;
+
+pub struct FsMount {
+    pub tag: String,
+    pub fs: Box<dyn FileSystem + Send + Sync>,
     pub shm_size: Option<usize>,
-    pub allow_root_dir_delete: bool,
 }

@@ -65,7 +65,7 @@ use vmm::vmm_config::external_kernel::{ExternalKernel, KernelFormat};
 #[cfg(not(feature = "tee"))]
 use vmm::vmm_config::firmware::FirmwareConfig;
 #[cfg(not(feature = "tee"))]
-use vmm::vmm_config::fs::FsDeviceConfig;
+use vmm::vmm_config::fs::FsMount;
 use vmm::vmm_config::kernel_bundle::KernelBundle;
 #[cfg(feature = "tee")]
 use vmm::vmm_config::kernel_bundle::{InitrdBundle, QbootBundle};
@@ -560,12 +560,7 @@ pub unsafe extern "C" fn krun_add_virtiofs(
     };
 
     with_builder(ctx_id, |cfg| {
-        cfg.config.vmr.add_fs_device(FsDeviceConfig {
-            fs_id: tag.to_string(),
-            shared_dir: path.to_string(),
-            shm_size: None,
-            allow_root_dir_delete: false,
-        });
+        cfg.add_virtiofs_path(tag, path, None, false);
         KRUN_SUCCESS
     })
 }
@@ -589,13 +584,7 @@ pub unsafe extern "C" fn krun_add_virtiofs2(
     };
 
     with_builder(ctx_id, |cfg| {
-        cfg.config.vmr.add_fs_device(FsDeviceConfig {
-            fs_id: tag.to_string(),
-            shared_dir: path.to_string(),
-            shm_size: Some(shm_size.try_into().unwrap()),
-            allow_root_dir_delete: false,
-        });
-
+        cfg.add_virtiofs_path(tag, path, Some(shm_size.try_into().unwrap()), false);
         KRUN_SUCCESS
     })
 }
@@ -2137,7 +2126,7 @@ pub unsafe extern "C" fn krun_set_root_disk_remount(
     };
 
     with_builder(ctx_id, |cfg| {
-        if cfg.config.vmr.fs.iter().any(|fs| fs.fs_id == "/dev/root") {
+        if cfg.config.vmr.fs.iter().any(|fs| fs.tag == "/dev/root") {
             error!("Root filesystem already configured");
             return -libc::EINVAL;
         }
@@ -2159,13 +2148,7 @@ pub unsafe extern "C" fn krun_set_root_disk_remount(
             return -libc::EINVAL;
         }
 
-        cfg.config.vmr.add_fs_device(FsDeviceConfig {
-            fs_id: "/dev/root".into(),
-            shared_dir: empty_root.to_string_lossy().into(),
-            // Default to a conservative 512 MB window.
-            shm_size: Some(1 << 29),
-            allow_root_dir_delete: true,
-        });
+        cfg.add_virtiofs_path("/dev/root", &empty_root.to_string_lossy(), Some(1 << 29), true);
 
         cfg.block_root(device, fstype, options);
 
@@ -2546,14 +2529,37 @@ impl Builder {
     }
 
     #[cfg(not(feature = "tee"))]
-    pub fn add_virtiofs(&mut self, tag: &str, host_path: &str) -> &mut Self {
-        self.config.vmr.add_fs_device(FsDeviceConfig {
-            fs_id: tag.to_string(),
-            shared_dir: host_path.to_string(),
-            shm_size: None,
-            allow_root_dir_delete: false,
+    pub fn add_virtiofs(
+        &mut self,
+        tag: &str,
+        fs: Box<dyn devices::virtio::fs::FileSystem + Send + Sync>,
+        shm_size: Option<usize>,
+    ) -> &mut Self {
+        self.config.vmr.add_fs_mount(FsMount {
+            tag: tag.to_string(),
+            fs,
+            shm_size,
         });
         self
+    }
+
+    /// Add a virtiofs device backed by a host directory (passthrough).
+    #[cfg(not(feature = "tee"))]
+    pub fn add_virtiofs_path(
+        &mut self,
+        tag: &str,
+        host_path: &str,
+        shm_size: Option<usize>,
+        allow_root_dir_delete: bool,
+    ) -> &mut Self {
+        let cfg = devices::virtio::fs::passthrough::Config {
+            root_dir: host_path.to_string(),
+            allow_root_dir_delete,
+            ..Default::default()
+        };
+        let pt = devices::virtio::fs::passthrough::PassthroughFs::new(cfg)
+            .expect("failed to create PassthroughFs");
+        self.add_virtiofs(tag, Box::new(pt), shm_size)
     }
 
     /// Configure a vhost-user filesystem device.
@@ -2655,17 +2661,8 @@ impl Builder {
 
     #[cfg(not(feature = "tee"))]
     pub fn set_root(&mut self, root_path: &str) -> &mut Self {
-        let fs_id = "/dev/root".to_string();
-        let shared_dir = root_path.to_string();
-
-        self.config.vmr.add_fs_device(FsDeviceConfig {
-            fs_id,
-            shared_dir,
-            // Default to a conservative 512 MB window.
-            shm_size: Some(1 << 29),
-            allow_root_dir_delete: false,
-        });
-
+        // Default to a conservative 512 MB window.
+        self.add_virtiofs_path("/dev/root", root_path, Some(1 << 29), false);
         self
     }
 
