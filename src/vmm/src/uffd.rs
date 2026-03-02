@@ -367,14 +367,29 @@ impl UffdHandler {
                                 }
                             }
                             Ok(None) => {
-                                // Page is excluded (absent from snapshot). Phase 5 will handle zero-fill.
-                                // For now, signal an error to avoid silent hang on excluded page faults.
-                                // TODO: Phase 5 will replace this with uffd.zeropage().
-                                log::error!("Excluded page fault at 0x{guest_addr:x} — unable to restore");
-                                signal_error(
-                                    &vm_exit,
-                                    format!("Excluded page fault at 0x{guest_addr:x} (Phase 5 will implement zeropage)"),
-                                );
+                                // Reclaimed page — resolve via zeropage ioctl.
+                                // Maps the kernel shared zero page — no data copy, no physical allocation.
+                                let result = unsafe {
+                                    uffd_clone.zeropage(host_addr as *mut _, 4096, true)
+                                };
+                                match result {
+                                    Ok(_) => {
+                                        if let Some(page_index) =
+                                            guest_addr_to_page_index(&regions_clone, guest_addr)
+                                        {
+                                            tracker_clone.mark_loaded(page_index, LoadSource::Zero);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        if !is_eexist(&e) {
+                                            signal_error(
+                                                &vm_exit,
+                                                format!("uffd zeropage failed: {e:?}"),
+                                            );
+                                        }
+                                        // Silently ignore EEXIST — race with preload or another fault (AC3.4)
+                                    }
+                                }
                             }
                             Err(e) => {
                                 // Fatal: read_page failed, signal VmExit::Error
@@ -413,7 +428,11 @@ impl std::os::unix::io::AsRawFd for UffdFd {
 
 /// Check if an error represents EEXIST (page already mapped).
 fn is_eexist(e: &userfaultfd::Error) -> bool {
-    matches!(e, userfaultfd::Error::CopyFailed(errno) if *errno as i32 == libc::EEXIST)
+    match e {
+        userfaultfd::Error::CopyFailed(errno) if *errno as i32 == libc::EEXIST => true,
+        userfaultfd::Error::ZeropageFailed(errno) if *errno as i32 == libc::EEXIST => true,
+        _ => false,
+    }
 }
 
 /// Signal a fatal error to the VM exit state.
@@ -425,13 +444,15 @@ fn signal_error(vm_exit: &SharedVmExit, message: String) {
     }
 }
 
-/// Source of page load: preload or demand fault.
+/// Source of page load: preload, demand fault, or zero-fill.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LoadSource {
     /// Page loaded via preload stream
     Preload,
     /// Page loaded via fault handler
     Fault,
+    /// Page zero-filled via uffd.zeropage()
+    Zero,
 }
 
 /// Statistics snapshot for restore progress monitoring.
@@ -445,6 +466,8 @@ pub struct PageTrackerStats {
     pub preload_pages: usize,
     /// Pages loaded via fault handler
     pub fault_pages: usize,
+    /// Pages zero-filled via zeropage
+    pub zero_pages: usize,
     /// Total fault events received (including EEXIST races)
     pub total_faults: usize,
     /// Progress percentage (loaded_pages / total_pages * 100.0)
@@ -466,6 +489,8 @@ pub struct PageTracker {
     preload_count: AtomicUsize,
     /// Number of pages loaded via fault handler
     fault_count: AtomicUsize,
+    /// Number of pages zero-filled via zeropage
+    zero_count: AtomicUsize,
     /// Total faults received (including EEXIST)
     total_faults: AtomicUsize,
 }
@@ -483,6 +508,7 @@ impl PageTracker {
             bitmap,
             preload_count: AtomicUsize::new(0),
             fault_count: AtomicUsize::new(0),
+            zero_count: AtomicUsize::new(0),
             total_faults: AtomicUsize::new(0),
         }
     }
@@ -511,6 +537,9 @@ impl PageTracker {
                 }
                 LoadSource::Fault => {
                     self.fault_count.fetch_add(1, Ordering::Relaxed);
+                }
+                LoadSource::Zero => {
+                    self.zero_count.fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
@@ -548,6 +577,7 @@ impl PageTracker {
 
         let preload_pages = self.preload_count.load(Ordering::Relaxed);
         let fault_pages = self.fault_count.load(Ordering::Relaxed);
+        let zero_pages = self.zero_count.load(Ordering::Relaxed);
         let total_faults = self.total_faults.load(Ordering::Relaxed);
 
         let progress_pct = if self.total_pages > 0 {
@@ -561,6 +591,7 @@ impl PageTracker {
             loaded_pages,
             preload_pages,
             fault_pages,
+            zero_pages,
             total_faults,
             progress_pct,
         }
@@ -1553,5 +1584,145 @@ mod tests {
         unsafe {
             libc::munmap(host_addr, size);
         }
+    }
+
+    #[test]
+    fn test_page_tracker_zero_source() {
+        // Verify that LoadSource::Zero is tracked correctly
+        let tracker = PageTracker::new(128);
+
+        // Mark pages from different sources
+        tracker.mark_loaded(0, LoadSource::Zero);
+        tracker.mark_loaded(1, LoadSource::Fault);
+        tracker.mark_loaded(2, LoadSource::Preload);
+
+        // All pages should be loaded
+        assert!(tracker.is_loaded(0), "Page 0 should be loaded");
+        assert!(tracker.is_loaded(1), "Page 1 should be loaded");
+        assert!(tracker.is_loaded(2), "Page 2 should be loaded");
+
+        // Verify stats
+        let stats = tracker.stats();
+        assert_eq!(stats.loaded_pages, 3, "Three pages should be loaded");
+        assert_eq!(stats.zero_pages, 1, "One page should be from Zero source");
+        assert_eq!(stats.fault_pages, 1, "One page should be from Fault source");
+        assert_eq!(stats.preload_pages, 1, "One page should be from Preload source");
+    }
+
+    #[test]
+    fn test_page_tracker_zero_duplicate_ignored() {
+        // Verify that marking the same page as Zero twice only counts once
+        let tracker = PageTracker::new(64);
+
+        tracker.mark_loaded(5, LoadSource::Zero);
+        tracker.mark_loaded(5, LoadSource::Zero);
+
+        let stats = tracker.stats();
+        assert_eq!(
+            stats.zero_pages, 1,
+            "Duplicate zero-fill should not double-count"
+        );
+        assert_eq!(stats.loaded_pages, 1, "Only one page should be loaded");
+    }
+
+    #[test]
+    fn test_mock_store_returns_none() {
+        // Verify that MockSnapshotStore can be configured to return Ok(None)
+        // for specific guest addresses, supporting the zero-fill path
+        struct MockSnapshotStoreWithAbsent {
+            absent_pages: std::collections::HashSet<u64>,
+            page_reads: Arc<AtomicUsize>,
+        }
+
+        impl MockSnapshotStoreWithAbsent {
+            fn new(absent_pages: std::collections::HashSet<u64>) -> Self {
+                MockSnapshotStoreWithAbsent {
+                    absent_pages,
+                    page_reads: Arc::new(AtomicUsize::new(0)),
+                }
+            }
+        }
+
+        impl SnapshotStore for MockSnapshotStoreWithAbsent {
+            fn read_vmstate(
+                &self,
+            ) -> crate::snapshot_store::SendBoxFuture<'_, std::io::Result<Vec<u8>>> {
+                Box::pin(async { Ok(vec![]) })
+            }
+
+            fn read_page(
+                &self,
+                guest_addr: u64,
+            ) -> crate::snapshot_store::SendBoxFuture<'_, std::io::Result<Option<Vec<u8>>>> {
+                self.page_reads.fetch_add(1, Ordering::SeqCst);
+                let is_absent = self.absent_pages.contains(&guest_addr);
+                if is_absent {
+                    Box::pin(async { Ok(None) })
+                } else {
+                    Box::pin(async { Ok(Some(vec![0u8; 4096])) })
+                }
+            }
+
+            fn preload(
+                &self,
+                _regions: Vec<(u64, u64)>,
+            ) -> crate::snapshot_store::BoxStream<'_, std::io::Result<(u64, Vec<u8>)>> {
+                Box::pin(futures::stream::iter(vec![]))
+            }
+
+            fn write_vmstate(
+                &self,
+                _data: Vec<u8>,
+            ) -> crate::snapshot_store::SendBoxFuture<'_, std::io::Result<()>> {
+                Box::pin(async { Ok(()) })
+            }
+
+            fn write_pages(
+                &self,
+                _pages: Vec<(u64, Vec<u8>)>,
+            ) -> crate::snapshot_store::SendBoxFuture<'_, std::io::Result<()>> {
+                Box::pin(async { Ok(()) })
+            }
+
+            fn close(&self) -> crate::snapshot_store::SendBoxFuture<'_, std::io::Result<()>> {
+                Box::pin(async { Ok(()) })
+            }
+        }
+
+        // Create store with some absent pages
+        let mut absent = std::collections::HashSet::new();
+        absent.insert(0x2000u64);
+        absent.insert(0x3000u64);
+
+        let store = Arc::new(MockSnapshotStoreWithAbsent::new(absent));
+
+        // Test reading an absent page
+        futures::executor::block_on(async {
+            let result = store.read_page(0x2000).await;
+            assert!(
+                result.is_ok(),
+                "read_page should not error for absent page"
+            );
+            assert_eq!(
+                result.unwrap(),
+                None,
+                "Absent page should return Ok(None)"
+            );
+        });
+
+        // Test reading a present page
+        futures::executor::block_on(async {
+            let result = store.read_page(0x1000).await;
+            assert!(
+                result.is_ok(),
+                "read_page should not error for present page"
+            );
+            let data = result.unwrap();
+            assert!(
+                data.is_some(),
+                "Present page should return Ok(Some(...))"
+            );
+            assert_eq!(data.unwrap().len(), 4096, "Page data should be 4096 bytes");
+        });
     }
 }
