@@ -75,7 +75,7 @@ pub fn arch_memory_regions(
         initrd_addr: fdt_addr - initrd_size,
         firmware_addr: FIRMWARE_START,
     };
-    let regions = if let Some(firmware_size) = firmware_size {
+    let mut regions = if let Some(firmware_size) = firmware_size {
         vec![
             // Space for loading the firmware
             (GuestAddress(0u64), align_upwards!(firmware_size, page_size)),
@@ -84,6 +84,12 @@ pub fn arch_memory_regions(
     } else {
         vec![(GuestAddress(ram_start_addr), dram_size)]
     };
+
+    // VMGENID GUID page: 4KB region below DRAM, used by the VMGENID device to
+    // store the 128-bit VM Generation ID. This is a separate KVM memory slot
+    // from DRAM — the guest kernel does not see it as usable RAM (it's not in
+    // the FDT /memory node). Not registered with UFFD for demand-paging.
+    regions.insert(0, (GuestAddress(layout::VMGENID_GUID_PAGE), 0x1000));
 
     (info, regions)
 }

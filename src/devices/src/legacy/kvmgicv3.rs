@@ -112,7 +112,7 @@ impl KvmGicV3 {
         };
         device_fd.set_device_attr(&attr)?;
 
-        let nr_irqs: u32 = arch::aarch64::layout::IRQ_MAX - arch::aarch64::layout::IRQ_BASE + 1;
+        let nr_irqs: u32 = arch::aarch64::layout::GIC_NR_IRQS;
         let nr_irqs_ptr = &nr_irqs as *const u32;
         let attr = kvm_bindings::kvm_device_attr {
             group: kvm_bindings::KVM_DEV_ARM_VGIC_GRP_NR_IRQS,
@@ -213,7 +213,7 @@ impl KvmGicV3 {
     fn save_gic_state(&self) -> Result<GicV3State, Error> {
         self.save_pending_tables()?;
 
-        let nr_irqs = (arch::aarch64::layout::IRQ_MAX - arch::aarch64::layout::IRQ_BASE + 1) as u64;
+        let nr_irqs = arch::aarch64::layout::GIC_NR_IRQS as u64;
         // Number of SPI (Shared Peripheral Interrupt) registers
         // SPIs start at IRQ 32, each register covers 32 IRQs
         let nr_spis = nr_irqs.saturating_sub(32);
@@ -314,7 +314,7 @@ impl KvmGicV3 {
     /// out, then write the saved IS* values to set the correct bits.
     #[cfg(feature = "snapshot")]
     fn restore_gic_state(&self, state: &GicV3State) -> Result<(), Error> {
-        let nr_irqs = (arch::aarch64::layout::IRQ_MAX - arch::aarch64::layout::IRQ_BASE + 1) as u64;
+        let nr_irqs = arch::aarch64::layout::GIC_NR_IRQS as u64;
         let nr_spis = nr_irqs.saturating_sub(32);
         let nr_spi_regs = (nr_spis + 31) / 32;
 

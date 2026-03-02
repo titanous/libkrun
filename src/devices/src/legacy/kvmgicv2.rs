@@ -57,7 +57,7 @@ impl KvmGicV2 {
         };
         device_fd.set_device_attr(&attr).unwrap();
 
-        let nr_irqs: u32 = arch::aarch64::layout::IRQ_MAX - arch::aarch64::layout::IRQ_BASE + 1;
+        let nr_irqs: u32 = arch::aarch64::layout::GIC_NR_IRQS;
         let nr_irqs_ptr = &nr_irqs as *const u32;
         let attr = kvm_bindings::kvm_device_attr {
             group: kvm_bindings::KVM_DEV_ARM_VGIC_GRP_NR_IRQS,

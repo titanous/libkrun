@@ -77,6 +77,27 @@ pub const IRQ_BASE: u32 = 32;
 /// Last usable interrupt on aarch64.
 pub const IRQ_MAX: u32 = 159;
 
+/// Guest physical address of the VMGENID GUID page (4 KB).
+/// Placed well below the GIC redistributor region (which grows downward
+/// from 0x09FF_0000) to avoid conflicts at any vCPU count.
+/// GICv3 redists reach 0x09FF_0000 - (0x20000 * vcpu_count); at 256 vCPUs
+/// they'd reach 0x07FF_0000. Address 0x0800_0000 is safe for up to ~255 vCPUs.
+/// This address is below DRAM start (0x8000_0000 for kernel boot, 0x4000_0000
+/// for EFI boot), so it is NOT in guest RAM and not registered with UFFD.
+pub const VMGENID_GUID_PAGE: u64 = 0x0800_0000;
+/// Offset within the GUID page where the 128-bit GUID is stored.
+pub const VMGENID_GUID_OFFSET: u64 = 40;
+/// Fixed GIC SPI number for the VMGENID interrupt.
+/// Allocated above the dynamic virtio SPI range (IRQ_BASE..IRQ_MAX = 32..159)
+/// to avoid conflicts with virtio device allocations.
+pub const VMGENID_SPI: u32 = 160;
+
+/// Total number of interrupts to configure on the KVM GIC.
+/// Must be a multiple of 32 (KVM requirement). Covers the dynamic virtio
+/// range (SPIs 0-127, INTID 32-159) plus platform-reserved SPIs like
+/// VMGENID_SPI (INTID 160). Value 192 supports INTIDs 0-191.
+pub const GIC_NR_IRQS: u32 = 192;
+
 /// Timer interrupts
 pub const GTIMER_SEC: u32 = 13;
 pub const GTIMER_HYP: u32 = 14;

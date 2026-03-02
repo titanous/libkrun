@@ -51,6 +51,9 @@ pub enum DeviceType {
     /// Device Type: RTC.
     #[cfg(target_arch = "aarch64")]
     RTC,
+    /// VMGENID platform device (not a virtio device).
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    Vmgenid,
 }
 
 impl fmt::Display for DeviceType {
