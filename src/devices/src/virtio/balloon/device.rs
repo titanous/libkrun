@@ -550,16 +550,6 @@ impl Balloon {
         self.config.actual
     }
 
-    /// Set the current actual size in pages (for testing).
-    pub fn set_actual_pages(&mut self, actual: u32) {
-        self.config.actual = actual;
-    }
-
-    /// Get the target number of pages.
-    pub fn get_num_pages(&self) -> u32 {
-        self.config.num_pages
-    }
-
     /// Set the target number of pages.
     pub fn set_num_pages(&mut self, num_pages: u32) {
         self.config.num_pages = num_pages;

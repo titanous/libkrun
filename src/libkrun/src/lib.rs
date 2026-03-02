@@ -3399,6 +3399,8 @@ pub enum BalloonError {
     Timeout { actual: u64 },
     /// Balloon device not activated
     DeviceNotActive,
+    /// Target size exceeds maximum (target_pages > u32::MAX)
+    TargetTooLarge { max_mb: u64 },
 }
 
 /// Handle for controlling a running VM from another thread.
@@ -3430,20 +3432,22 @@ impl BalloonHandle {
     /// The guest will inflate or deflate asynchronously toward the target.
     ///
     /// Returns `Err(BalloonError::DeviceNotActive)` if the device is not activated.
+    /// Returns `Err(BalloonError::TargetTooLarge { max_mb })` if target_mb exceeds u32::MAX pages.
     pub fn resize(&self, target_mb: u64) -> Result<(), BalloonError> {
+        // Convert MB to pages: (MB * 1024 * 1024) / 4096
+        let target_pages = (target_mb * 1024 * 1024) / 4096;
+
+        // Bounds check: ensure target_pages fits in u32 (before activation check)
+        if target_pages > u32::MAX as u64 {
+            let max_mb = (u32::MAX as u64) * 4096 / (1024 * 1024);
+            return Err(BalloonError::TargetTooLarge { max_mb });
+        }
+
         let mut balloon = self.balloon.lock().unwrap();
 
         // Check device is activated
         if !balloon.is_device_activated() {
             return Err(BalloonError::DeviceNotActive);
-        }
-
-        // Convert MB to pages: (MB * 1024 * 1024) / 4096
-        let target_pages = (target_mb * 1024 * 1024) / 4096;
-
-        // Bounds check: ensure target_pages fits in u32
-        if target_pages > u32::MAX as u64 {
-            return Err(BalloonError::DeviceNotActive); // Using DeviceNotActive as error for out-of-bounds
         }
 
         // Write num_pages to config
@@ -3888,19 +3892,24 @@ mod tests {
     #[test]
     #[cfg(not(feature = "tee"))]
     fn test_balloon_handle_resize_large_value() {
-        // Test bounds check behavior: very large target_mb should fail
+        // Test bounds check behavior: target_mb exceeding u32::MAX pages should fail
+        // with TargetTooLarge error, regardless of device activation state
         let balloon = Arc::new(Mutex::new(devices::virtio::Balloon::new().unwrap()));
         let condvar = balloon.lock().unwrap().actual_condvar();
         let handle = BalloonHandle::new(balloon, condvar);
 
-        // Try to resize to very large value when device is inactive
-        // This will fail due to inactive state check (which comes first)
-        let too_large = 100_000u64; // 100,000 MB
+        // Calculate the minimum target_mb that exceeds u32::MAX pages
+        // max_pages = u32::MAX = 4,294,967,295
+        // max_mb = (4,294,967,295 * 4096) / (1024 * 1024) = 17,592,186,044,416 MB
+        let max_mb = (u32::MAX as u64) * 4096 / (1024 * 1024);
+        let too_large = max_mb + 1;
+
         let result = handle.resize(too_large);
 
+        // Should fail with TargetTooLarge, not DeviceNotActive
         assert!(
-            result.is_err(),
-            "resize() should fail for inactive device"
+            matches!(result, Err(BalloonError::TargetTooLarge { max_mb: m }) if m == max_mb),
+            "resize() should fail with TargetTooLarge for target exceeding u32::MAX pages"
         );
     }
 
@@ -3950,25 +3959,83 @@ mod tests {
 
     #[test]
     #[cfg(not(feature = "tee"))]
-    fn test_balloon_handle_condvar_notification() {
-        // AC4.4/AC4.8: Test that actual_condvar is accessible and can be notified
+    fn test_balloon_handle_await_target_reached_with_notification() {
+        // AC4.4: Test that await_target() returns Reached when guest notifies actual >= target
+        use std::thread;
+        use std::sync::Arc;
+        use std::sync::Mutex;
+
         let balloon = Arc::new(Mutex::new(devices::virtio::Balloon::new().unwrap()));
         let condvar = balloon.lock().unwrap().actual_condvar();
         let handle = BalloonHandle::new(balloon, condvar);
 
-        // Verify we can access the condvar
-        let (lock, _cvar) = &*handle.actual_condvar;
+        let actual_condvar = handle.actual_condvar.clone();
 
-        // Verify we can update and read from it
-        {
-            let mut actual = lock.lock().unwrap();
-            *actual = 100;
-        }
+        // Spawn a thread that simulates guest inflating after a short delay
+        let guest_thread = thread::spawn(move || {
+            thread::sleep(std::time::Duration::from_millis(50));
 
-        // Read back the value to verify the condvar holds state
-        {
-            let actual = lock.lock().unwrap();
-            assert_eq!(*actual, 100, "condvar should hold the updated value");
-        }
+            // Simulate guest updating actual field
+            let (lock, cvar) = &*actual_condvar;
+            {
+                let mut actual = lock.lock().unwrap();
+                *actual = 512; // 512 pages (2 MB)
+                drop(actual);
+            }
+            cvar.notify_all();
+        });
+
+        // Main thread awaits target of 1 MB (256 pages)
+        let stall_timeout = std::time::Duration::from_millis(100);
+        let max_timeout = std::time::Duration::from_secs(2);
+        let result = handle.await_target(1, stall_timeout, Some(max_timeout));
+
+        guest_thread.join().unwrap();
+
+        // Should return Reached with actual >= target
+        assert!(
+            matches!(result, Ok(BalloonResult::Reached(actual_mb)) if actual_mb >= 1),
+            "await_target() should return Reached when guest notifies actual >= target"
+        );
+    }
+
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn test_balloon_handle_await_target_with_concurrent_updates() {
+        // AC4.8: Test that multiple threads can concurrently access balloon handle and await_target
+        use std::thread;
+        use std::sync::Arc;
+
+        let balloon = Arc::new(Mutex::new(devices::virtio::Balloon::new().unwrap()));
+        let condvar = balloon.lock().unwrap().actual_condvar();
+        let handle = BalloonHandle::new(balloon, condvar);
+
+        let handle_waiter = handle.clone();
+        let actual_condvar = handle.actual_condvar.clone();
+
+        // Spawn a thread that simulates guest updating actual
+        let guest_thread = thread::spawn(move || {
+            thread::sleep(std::time::Duration::from_millis(75));
+            let (lock, cvar) = &*actual_condvar;
+            {
+                let mut actual = lock.lock().unwrap();
+                *actual = 1024; // 4 MB
+                drop(actual);
+            }
+            cvar.notify_all();
+        });
+
+        // Main thread awaits target
+        let stall_timeout = std::time::Duration::from_millis(100);
+        let max_timeout = std::time::Duration::from_secs(2);
+        let result = handle_waiter.await_target(2, stall_timeout, Some(max_timeout));
+
+        guest_thread.join().unwrap();
+
+        // Should return Reached (4 MB >= 2 MB target)
+        assert!(
+            matches!(result, Ok(BalloonResult::Reached(actual_mb)) if actual_mb >= 2),
+            "await_target() should return Reached when guest notifies target met"
+        );
     }
 }
