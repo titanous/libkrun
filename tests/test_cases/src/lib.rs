@@ -98,6 +98,9 @@ use test_balloon_snapshot::{TestBalloonIncrementalReclaimed, TestBalloonSnapshot
 mod test_balloon_uffd;
 use test_balloon_uffd::TestBalloonUffdZeroFill;
 
+mod test_snapshot_rng_reseed;
+use test_snapshot_rng_reseed::TestSnapshotRngReseed;
+
 pub fn test_cases() -> Vec<TestCase> {
     // Register your test here:
     vec![
@@ -189,6 +192,7 @@ pub fn test_cases() -> Vec<TestCase> {
             "balloon-incremental-reclaimed",
             Box::new(TestBalloonIncrementalReclaimed),
         ),
+        TestCase::new("snapshot-rng-reseed", Box::new(TestSnapshotRngReseed)),
     ]
 }
 
