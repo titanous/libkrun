@@ -255,6 +255,9 @@ pub struct VmResources {
     /// Custom RNG backend
     #[cfg(not(feature = "tee"))]
     pub rng_backend: Option<Box<dyn devices::virtio::RngBackend>>,
+    /// Whether to enable the memory balloon device through the Rust API
+    #[cfg(not(feature = "tee"))]
+    pub balloon_enabled: bool,
 }
 
 impl VmResources {
