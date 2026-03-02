@@ -713,11 +713,12 @@ mod tests {
         assert_eq!(written_vmstate, test_vmstate);
 
         let written_memory = fs::read(&memory_path).unwrap();
-        // With sparse layout, the memory file should contain data at specific offsets.
-        // For our test regions: (0x1000, 0x1000) and (0x2000, 0x1000)
-        // Page at 0x1000 should be at file offset 0
-        // Page at 0x2000 should be at file offset 0x1000 (after first region)
-        let mut expected_memory = vec![0u8; 0x1000 + 256]; // first region + second page start
+        // With sparse layout, the memory file should be exactly total_ram_size bytes.
+        // For our test regions: (0x1000, 0x1000) and (0x2000, 0x1000), total = 0x2000.
+        // set_len(total_size) extends the file to 0x2000 even when written pages
+        // don't reach the end (ensuring load_memory's size check passes).
+        // Page at 0x1000 is at file offset 0; page at 0x2000 is at file offset 0x1000.
+        let mut expected_memory = vec![0u8; 0x2000]; // total region size
         expected_memory[0..256].copy_from_slice(&[0xAB; 256]); // page at 0x1000
         expected_memory[0x1000..0x1000 + 256].copy_from_slice(&[0xCD; 256]); // page at 0x2000
         assert_eq!(written_memory, expected_memory);
