@@ -6,7 +6,7 @@ use acpi_tables::xsdt::XSDT;
 use acpi_tables::sdt::Sdt;
 use acpi_tables::fadt::FADTBuilder;
 use acpi_tables::fadt::Flags;
-use acpi_tables::Aml;
+use acpi_tables::{Aml, AmlSink};
 use std::result;
 use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
 use zerocopy::IntoBytes as _;
@@ -17,13 +17,15 @@ use crate::x86_64::layout;
 #[derive(Debug, Eq, PartialEq)]
 pub enum Error {
     /// Failure to write RSDP to memory.
-    WriteRsdp,
+    Rsdp,
     /// Failure to write XSDT to memory.
-    WriteXsdt,
+    Xsdt,
     /// Failure to write FADT to memory.
-    WriteFadt,
+    Fadt,
     /// Failure to write DSDT to memory.
-    WriteDsdt,
+    Dsdt,
+    /// ACPI tables exceed maximum size.
+    Overflow,
 }
 
 pub type Result<T> = result::Result<T, Error>;
@@ -33,10 +35,10 @@ const OEM_ID: [u8; 6] = *b"LIBKRN";
 const OEM_TABLE_ID: [u8; 8] = *b"KRUNVMGN";
 const OEM_REVISION: u32 = 1;
 
-/// Simple AmlSink implementation for serializing FADT to bytes.
-struct AmlBytes(Vec<u8>);
+/// Simple wrapper for Vec<u8> to implement AmlSink for FADT serialization.
+struct AmlBuffer(Vec<u8>);
 
-impl acpi_tables::AmlSink for AmlBytes {
+impl AmlSink for AmlBuffer {
     fn byte(&mut self, byte: u8) {
         self.0.push(byte);
     }
@@ -50,75 +52,77 @@ pub fn setup_acpi_tables(guest_mem: &GuestMemoryMmap) -> Result<()> {
     // Create an empty DSDT (just the SDT header, no AML body yet).
     let dsdt = Sdt::new(*b"DSDT", 36, 2, OEM_ID, OEM_TABLE_ID, OEM_REVISION);
 
-    // Compute sizes:
-    // - DSDT: 36 bytes (SDT header only)
-    // - FADT: variable but typically ~276 bytes (will compute after building)
-    // - XSDT: 36 bytes header + 8 bytes per entry (1 entry = FADT)
-    // - RSDP: 36 bytes (v2 structure)
+    // Compute sizes sequentially (all sizes must be known before assigning addresses)
+    let rsdp_size: u64 = 36; // RSDP v2 fixed size
 
-    let dsdt_bytes = dsdt.as_slice();
-    let dsdt_size = dsdt_bytes.len() as u64;
-
-    // Build FADT with HW-reduced ACPI flag
+    // Build FADT to compute its size
     let fadt_builder = FADTBuilder::new(OEM_ID, OEM_TABLE_ID, OEM_REVISION)
         .flag(Flags::HwReducedAcpi)
         .flag(Flags::PwrButton)
         .flag(Flags::SlpButton);
 
-    // Compute DSDT address (will be placed after FADT and XSDT)
-    let rsdp_size: u64 = 36; // RSDP v2 fixed size
-    let xsdt_size: u64 = 44; // SDT header (36) + 1 entry (8)
-    let dsdt_addr = layout::ACPI_START + rsdp_size + xsdt_size;
+    // Placeholder DSDT address (will update below once real address is computed)
+    let fadt = fadt_builder.dsdt_64(0).finalize();
+    let mut fadt_bytes_buffer = AmlBuffer(Vec::new());
+    fadt.to_aml_bytes(&mut fadt_bytes_buffer);
+    let fadt_size = fadt_bytes_buffer.0.len() as u64;
 
-    let fadt = fadt_builder.dsdt_64(dsdt_addr).finalize();
+    // XSDT size is fixed: 36 byte header + 8 bytes per entry (1 FADT entry)
+    let xsdt_size: u64 = 44;
 
-    // Serialize FADT to bytes
-    let mut fadt_bytes_sink = AmlBytes(Vec::new());
-    fadt.to_aml_bytes(&mut fadt_bytes_sink);
-    let fadt_size = fadt_bytes_sink.0.len() as u64;
+    // DSDT size (SDT header only)
+    let dsdt_bytes = dsdt.as_slice();
+    let dsdt_size = dsdt_bytes.len() as u64;
 
-    // Compute XSDT and FADT addresses
-    let fadt_addr = layout::ACPI_START + rsdp_size;
+    // Assign sequential addresses (RSDP, FADT, XSDT, DSDT)
+    let rsdp_addr = layout::ACPI_START;
+    let fadt_addr = rsdp_addr + rsdp_size;
     let xsdt_addr = fadt_addr + fadt_size;
+    let dsdt_addr = xsdt_addr + xsdt_size;
 
-    // Verify tables fit within ACPI_MAX_SIZE
+    // Verify all tables fit within ACPI_MAX_SIZE
     let total_size = rsdp_size + fadt_size + xsdt_size + dsdt_size;
     if total_size > layout::ACPI_MAX_SIZE {
-        return Err(Error::WriteFadt); // Generic error for overflow
+        return Err(Error::Overflow);
     }
+
+    // Rebuild FADT with correct DSDT address
+    let fadt = fadt_builder.dsdt_64(dsdt_addr).finalize();
+    let mut fadt_bytes_sink = AmlBuffer(Vec::new());
+    fadt.to_aml_bytes(&mut fadt_bytes_sink);
 
     // Build XSDT with FADT address
     let mut xsdt = XSDT::new(OEM_ID, OEM_TABLE_ID, OEM_REVISION);
     xsdt.add_entry(fadt_addr);
 
     // Serialize XSDT to bytes
-    let mut xsdt_bytes_sink = AmlBytes(Vec::new());
+    let mut xsdt_bytes_sink = AmlBuffer(Vec::new());
     xsdt.to_aml_bytes(&mut xsdt_bytes_sink);
 
     // Build RSDP pointing to XSDT
     let rsdp = Rsdp::new(OEM_ID, xsdt_addr);
     let rsdp_bytes = rsdp.as_bytes();
 
-    // Write tables to guest memory in order: RSDP, FADT, XSDT, DSDT
-    let rsdp_addr = GuestAddress(layout::ACPI_START);
+    // Write tables to guest memory in sequential order
+    let rsdp_addr_guest = GuestAddress(rsdp_addr);
     guest_mem
-        .write_slice(rsdp_bytes, rsdp_addr)
-        .map_err(|_| Error::WriteRsdp)?;
+        .write_slice(rsdp_bytes, rsdp_addr_guest)
+        .map_err(|_| Error::Rsdp)?;
 
     let fadt_addr_guest = GuestAddress(fadt_addr);
     guest_mem
         .write_slice(&fadt_bytes_sink.0, fadt_addr_guest)
-        .map_err(|_| Error::WriteFadt)?;
+        .map_err(|_| Error::Fadt)?;
 
     let xsdt_addr_guest = GuestAddress(xsdt_addr);
     guest_mem
         .write_slice(&xsdt_bytes_sink.0, xsdt_addr_guest)
-        .map_err(|_| Error::WriteXsdt)?;
+        .map_err(|_| Error::Xsdt)?;
 
     let dsdt_addr_guest = GuestAddress(dsdt_addr);
     guest_mem
         .write_slice(dsdt_bytes, dsdt_addr_guest)
-        .map_err(|_| Error::WriteDsdt)?;
+        .map_err(|_| Error::Dsdt)?;
 
     Ok(())
 }

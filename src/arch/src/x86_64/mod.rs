@@ -49,7 +49,7 @@ pub enum Error {
     MpTableSetup(mptable::Error),
     /// Error writing ACPI tables to memory.
     #[cfg(not(feature = "tee"))]
-    AcpiSetup,
+    AcpiSetup(acpi::Error),
     /// Error writing the zero page of guest memory.
     ZeroPageSetup,
     /// Failed to compute initrd address.
@@ -273,7 +273,7 @@ pub fn configure_system(
     mptable::setup_mptable(guest_mem, num_cpus).map_err(Error::MpTableSetup)?;
 
     #[cfg(not(feature = "tee"))]
-    acpi::setup_acpi_tables(guest_mem).map_err(|_| Error::AcpiSetup)?;
+    acpi::setup_acpi_tables(guest_mem).map_err(Error::AcpiSetup)?;
 
     let mut params: BootParamsWrapper = BootParamsWrapper(boot_params::default());
 
