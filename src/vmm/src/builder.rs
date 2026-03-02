@@ -249,6 +249,12 @@ pub enum StartMicrovmError {
     /// Cannot initialize a MMIO vhost-user vsock device or add device to the MMIO Bus.
     #[cfg(feature = "vhost-user")]
     RegisterVhostUserVsockDevice(device_manager::mmio::Error),
+    /// Cannot create the VMGENID device.
+    #[cfg(target_arch = "x86_64")]
+    VmgenidCreation(vm_memory::GuestMemoryError),
+    /// Cannot register the GED IRQ with KVM.
+    #[cfg(target_arch = "x86_64")]
+    RegisterIrqFd(kvm_ioctls::Error),
 }
 
 /// It's convenient to automatically convert `kernel::cmdline::Error`s
@@ -565,6 +571,14 @@ impl Display for StartMicrovmError {
             #[cfg(feature = "vhost-user")]
             RegisterVhostUserVsockDevice(ref err) => {
                 write!(f, "Failed to initialize vhost-user vsock device: {err}")
+            }
+            #[cfg(target_arch = "x86_64")]
+            VmgenidCreation(ref err) => {
+                write!(f, "Cannot create the VMGENID device: {err}")
+            }
+            #[cfg(target_arch = "x86_64")]
+            RegisterIrqFd(ref err) => {
+                write!(f, "Cannot register the GED IRQ with KVM: {err}")
             }
         }
     }
@@ -1275,6 +1289,8 @@ pub fn build_microvm(
         intc: intc.clone(),
         #[cfg(not(feature = "tee"))]
         balloon: None,
+        #[cfg(target_arch = "x86_64")]
+        vmgenid: None,
     };
 
     // Set raw mode for FDs that are connected to legacy serial devices.
@@ -1288,6 +1304,26 @@ pub fn build_microvm(
     {
         vmm.balloon = Some(balloon_device);
     }
+
+    // Create and register VMGENID device (x86_64 only)
+    #[cfg(target_arch = "x86_64")]
+    {
+        use arch::x86_64::layout::{VMGENID_GUID_PAGE, VMGENID_GUID_OFFSET, GED_IRQ};
+
+        let vmgenid = devices::vmgenid::Vmgenid::new(
+            VMGENID_GUID_PAGE,
+            VMGENID_GUID_OFFSET,
+            GED_IRQ,
+            &vmm.guest_memory,
+        ).map_err(StartMicrovmError::VmgenidCreation)?;
+
+        // Register the GED EventFd with KVM irqchip
+        vmm.vm.fd().register_irqfd(vmgenid.interrupt_evt(), GED_IRQ)
+            .map_err(StartMicrovmError::RegisterIrqFd)?;
+
+        vmm.vmgenid = Some(vmgenid);
+    }
+
     #[cfg(not(feature = "tee"))]
     attach_rng_device(
         &mut vmm,
