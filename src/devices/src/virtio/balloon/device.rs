@@ -257,11 +257,31 @@ impl VirtioDevice for Balloon {
     }
 
     fn write_config(&mut self, offset: u64, data: &[u8]) {
-        warn!(
-            "balloon: guest driver attempted to write device config (offset={:x}, len={:x})",
-            offset,
-            data.len()
-        );
+        // Only accept writes to the `actual` field (offset 4-8)
+        // All other writes are silently ignored
+        let config_slice = self.config.as_mut_slice();
+        let config_len = config_slice.len() as u64;
+
+        // Check each byte in the write range
+        let end_offset = offset.saturating_add(data.len() as u64);
+        for (i, byte) in data.iter().enumerate() {
+            let byte_offset = offset + i as u64;
+            // Only copy bytes that fall within the `actual` field (4..8)
+            if byte_offset >= 4 && byte_offset < 8 && byte_offset < config_len {
+                config_slice[byte_offset as usize] = *byte;
+            }
+        }
+
+        // If the write touched the actual field, log the new value
+        if offset < 8 && end_offset > 4 {
+            let actual = u32::from_le_bytes([
+                config_slice[4],
+                config_slice[5],
+                config_slice[6],
+                config_slice[7],
+            ]);
+            debug!("balloon: guest wrote actual field = {}", actual);
+        }
     }
 
     fn activate(
@@ -292,5 +312,146 @@ impl VirtioDevice for Balloon {
 
     fn is_activated(&self) -> bool {
         self.device_state.is_activated()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test write_config updates the actual field (offset 4-8)
+    #[test]
+    fn test_write_config_actual_field() {
+        let mut balloon = Balloon::new().expect("Failed to create balloon device");
+
+        // Initial value should be 0
+        let config_slice = balloon.config.as_slice();
+        assert_eq!(config_slice[4], 0);
+        assert_eq!(config_slice[5], 0);
+        assert_eq!(config_slice[6], 0);
+        assert_eq!(config_slice[7], 0);
+
+        // Write new value to actual field
+        let new_value: [u8; 4] = 0x12345678u32.to_le_bytes();
+        balloon.write_config(4, &new_value);
+
+        // Verify the value was written
+        let config_slice = balloon.config.as_slice();
+        assert_eq!(config_slice[4], 0x78);
+        assert_eq!(config_slice[5], 0x56);
+        assert_eq!(config_slice[6], 0x34);
+        assert_eq!(config_slice[7], 0x12);
+
+        // Verify it reads back correctly
+        let actual = u32::from_le_bytes([
+            config_slice[4],
+            config_slice[5],
+            config_slice[6],
+            config_slice[7],
+        ]);
+        assert_eq!(actual, 0x12345678);
+    }
+
+    /// Test write_config silently ignores writes to num_pages (offset 0-4)
+    #[test]
+    fn test_write_config_num_pages_ignored() {
+        let mut balloon = Balloon::new().expect("Failed to create balloon device");
+
+        // Try to write to num_pages field
+        let new_value: [u8; 4] = 0xAABBCCDDu32.to_le_bytes();
+        balloon.write_config(0, &new_value);
+
+        // Verify num_pages was NOT changed
+        let config_slice = balloon.config.as_slice();
+        assert_eq!(config_slice[0], 0);
+        assert_eq!(config_slice[1], 0);
+        assert_eq!(config_slice[2], 0);
+        assert_eq!(config_slice[3], 0);
+    }
+
+    /// Test write_config silently ignores writes to free_page_hint_cmd_id (offset 8-12)
+    #[test]
+    fn test_write_config_free_page_hint_ignored() {
+        let mut balloon = Balloon::new().expect("Failed to create balloon device");
+
+        // Try to write to free_page_hint_cmd_id field
+        let new_value: [u8; 4] = 0xAABBCCDDu32.to_le_bytes();
+        balloon.write_config(8, &new_value);
+
+        // Verify free_page_hint_cmd_id was NOT changed
+        let config_slice = balloon.config.as_slice();
+        assert_eq!(config_slice[8], 0);
+        assert_eq!(config_slice[9], 0);
+        assert_eq!(config_slice[10], 0);
+        assert_eq!(config_slice[11], 0);
+    }
+
+    /// Test write_config handles partial writes to actual field correctly
+    #[test]
+    fn test_write_config_partial_write() {
+        let mut balloon = Balloon::new().expect("Failed to create balloon device");
+
+        // Write only 2 bytes at offset 6 (last 2 bytes of actual field)
+        let partial: [u8; 2] = [0x99, 0x88];
+        balloon.write_config(6, &partial);
+
+        // Verify only the specified bytes were written
+        let config_slice = balloon.config.as_slice();
+        assert_eq!(config_slice[4], 0); // Unchanged
+        assert_eq!(config_slice[5], 0); // Unchanged
+        assert_eq!(config_slice[6], 0x99); // Updated
+        assert_eq!(config_slice[7], 0x88); // Updated
+
+        // Read back the full value
+        let actual = u32::from_le_bytes([
+            config_slice[4],
+            config_slice[5],
+            config_slice[6],
+            config_slice[7],
+        ]);
+        assert_eq!(actual, 0x88990000u32);
+    }
+
+    /// Test write_config with write spanning multiple fields (only actual portion updated)
+    #[test]
+    fn test_write_config_spanning_write() {
+        let mut balloon = Balloon::new().expect("Failed to create balloon device");
+
+        // Write 4 bytes starting at offset 3 (spans num_pages and actual)
+        // Only the portion that overlaps with actual (4-7) should be updated
+        let spanning: [u8; 4] = [0x11, 0x22, 0x33, 0x44];
+        balloon.write_config(3, &spanning);
+
+        // Verify num_pages (0-3) was NOT changed
+        let config_slice = balloon.config.as_slice();
+        assert_eq!(config_slice[0], 0);
+        assert_eq!(config_slice[1], 0);
+        assert_eq!(config_slice[2], 0);
+        assert_eq!(config_slice[3], 0);
+
+        // Verify only byte 4 was updated (offset 4, which is at index 1 in spanning write)
+        assert_eq!(config_slice[4], 0x22); // Updated (index 1 in spanning)
+        assert_eq!(config_slice[5], 0x33); // Updated (index 2 in spanning)
+        assert_eq!(config_slice[6], 0x44); // Updated (index 3 in spanning)
+        assert_eq!(config_slice[7], 0); // Unchanged (beyond spanning write)
+    }
+
+    /// Test config space structure layout
+    #[test]
+    fn test_config_layout() {
+        let balloon = Balloon::new().expect("Failed to create balloon device");
+        let config_slice = balloon.config.as_slice();
+
+        // Verify config space is correct size (4 u32 fields = 16 bytes)
+        assert_eq!(config_slice.len(), 16);
+
+        // Verify initial values
+        // num_pages (0-3): 0
+        // actual (4-7): 0
+        // free_page_hint_cmd_id (8-11): 0
+        // poison_val (12-15): 0
+        for i in 0..16 {
+            assert_eq!(config_slice[i], 0, "config_slice[{}] should be 0", i);
+        }
     }
 }
