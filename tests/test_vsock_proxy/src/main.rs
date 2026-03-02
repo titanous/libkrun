@@ -9,24 +9,27 @@ use vhost::vhost_user::message::{
     VhostTransferStateDirection, VhostTransferStatePhase, VhostUserProtocolFeatures,
 };
 use vhost_user_backend::{VhostUserBackendMut, VhostUserDaemon, VringMutex, VringT};
-use virtio_queue::QueueOwnedT;
+use virtio_queue::{QueueOwnedT, QueueT};
 use vm_memory::{Bytes, GuestAddressSpace, GuestMemoryAtomic, GuestMemoryMmap};
 
 // Vsock operation constants
+#[allow(dead_code)]
 const VSOCK_OP_INVALID: u16 = 0;
 const VSOCK_OP_REQUEST: u16 = 1;
 const VSOCK_OP_RESPONSE: u16 = 2;
 const VSOCK_OP_RST: u16 = 3;
 const VSOCK_OP_SHUTDOWN: u16 = 4;
 const VSOCK_OP_RW: u16 = 5;
+#[allow(dead_code)]
 const VSOCK_OP_CREDIT_UPDATE: u16 = 6;
+#[allow(dead_code)]
 const VSOCK_OP_CREDIT_REQUEST: u16 = 7;
 
 const VSOCK_TYPE_STREAM: u16 = 1;
 const VSOCK_HDR_SIZE: usize = 44;
 
 // Vsock header structure (44 bytes, little-endian)
-#[repr(C)]
+#[repr(C, packed)]
 struct VsockHdr {
     src_cid: u64,
     dst_cid: u64,
@@ -155,12 +158,17 @@ impl VhostUserBackendMut for VsockProxyBackend {
         _thread_id: usize,
     ) -> std::io::Result<()> {
         // device_event = queue index (0 = RX, 1 = TX, 2 = Event)
-        if device_event == 1 {
-            // Process TX queue
-            if (device_event as usize) < vrings.len() {
-                let vring = &vrings[device_event as usize];
-                self.process_tx_queue(vring)?;
+        if (device_event as usize) >= vrings.len() {
+            return Ok(());
+        }
+        match device_event {
+            1 => {
+                // Process TX queue
+                let tx_vring = &vrings[1];
+                let rx_vring = &vrings[0];
+                self.process_tx_queue(tx_vring, rx_vring)?;
             }
+            _ => {}
         }
         Ok(())
     }
@@ -224,8 +232,13 @@ impl VsockProxyBackend {
         Ok(())
     }
 
-    fn process_tx_queue(&mut self, vring: &VringMutex) -> std::io::Result<()> {
-        let mut vring_lock = vring.get_mut();
+    fn process_tx_queue(
+        &mut self,
+        tx_vring: &VringMutex,
+        rx_vring: &VringMutex,
+    ) -> std::io::Result<()> {
+        let mut tx_vring_lock = tx_vring.get_mut();
+        let mut rx_vring_lock = rx_vring.get_mut();
         let mem_ref = self
             .mem
             .as_ref()
@@ -234,11 +247,11 @@ impl VsockProxyBackend {
         let guest_mem = mem_ref.memory();
         let guest_mem_deref = &*guest_mem;
 
-        // Collect all descriptor chains to process
+        // Collect all descriptor chains to process from TX queue
         let mut chains_to_process = Vec::new();
 
         {
-            let queue = vring_lock.get_queue_mut();
+            let queue = tx_vring_lock.get_queue_mut();
             if let Ok(iter) = queue.iter(guest_mem_deref) {
                 for desc_chain in iter {
                     chains_to_process.push(desc_chain);
@@ -246,8 +259,10 @@ impl VsockProxyBackend {
             }
         }
 
-        // Process each descriptor chain
+        // Process each descriptor chain from TX queue
         for desc_chain in chains_to_process {
+            let tx_head_index = desc_chain.head_index();
+
             // Read packet data from readable descriptors
             let mut packet_bytes = Vec::new();
             for desc in desc_chain.clone().readable() {
@@ -264,20 +279,32 @@ impl VsockProxyBackend {
 
             // Parse vsock header
             if packet_bytes.len() < VSOCK_HDR_SIZE {
+                // Mark TX descriptor as used even if we can't process it
+                tx_vring_lock
+                    .get_queue_mut()
+                    .add_used(guest_mem_deref, tx_head_index, 0)
+                    .ok();
                 continue;
             }
 
             if let Some(hdr) = VsockHdr::from_bytes(&packet_bytes) {
+                // Copy fields to avoid alignment issues with packed struct
+                let op = hdr.op;
+                let src_cid = hdr.src_cid;
+                let src_port = hdr.src_port;
+                let dst_cid = hdr.dst_cid;
+                let dst_port = hdr.dst_port;
+
                 debug!(
                     "RX: op={}, src_cid={}, src_port={}, dst_cid={}, dst_port={}",
-                    hdr.op, hdr.src_cid, hdr.src_port, hdr.dst_cid, hdr.dst_port
+                    op, src_cid, src_port, dst_cid, dst_port
                 );
 
-                // Handle different operation types
-                match hdr.op {
+                // Handle different operation types and write responses to RX queue
+                match op {
                     VSOCK_OP_REQUEST => {
-                        // Send RESPONSE
-                        let _resp_hdr = VsockHdr {
+                        // Send RESPONSE on RX queue
+                        let resp_hdr = VsockHdr {
                             src_cid: hdr.dst_cid,
                             dst_cid: hdr.src_cid,
                             src_port: hdr.dst_port,
@@ -290,6 +317,8 @@ impl VsockProxyBackend {
                             fwd_cnt: 0,
                         };
                         debug!("Responding to VSOCK_OP_REQUEST");
+                        let resp_bytes = resp_hdr.to_bytes();
+                        self.write_response_to_rx(&mut rx_vring_lock, guest_mem_deref, &resp_bytes)?;
                     }
                     VSOCK_OP_RW => {
                         // Echo the data back
@@ -300,20 +329,108 @@ impl VsockProxyBackend {
                         let bytes_to_echo = data_len.min(data.len());
                         self.state.borrow_mut().bytes_echoed += bytes_to_echo as u64;
 
+                        // Create echo response header with swapped CID/port
+                        let echo_hdr = VsockHdr {
+                            src_cid: hdr.dst_cid,
+                            dst_cid: hdr.src_cid,
+                            src_port: hdr.dst_port,
+                            dst_port: hdr.src_port,
+                            len: bytes_to_echo as u32,
+                            r#type: VSOCK_TYPE_STREAM,
+                            op: VSOCK_OP_RW,
+                            flags: 0,
+                            buf_alloc: 65536,
+                            fwd_cnt: 0,
+                        };
                         debug!(
                             "Echoing {} bytes, total echoed: {}",
                             bytes_to_echo,
                             self.state.borrow().bytes_echoed
                         );
+
+                        // Write header + echo data to RX queue
+                        let mut echo_packet = echo_hdr.to_bytes();
+                        echo_packet.extend_from_slice(&data[..bytes_to_echo]);
+                        self.write_response_to_rx(&mut rx_vring_lock, guest_mem_deref, &echo_packet)?;
                     }
                     VSOCK_OP_SHUTDOWN => {
-                        debug!("Responding to VSOCK_OP_SHUTDOWN");
+                        // Send RST response
+                        let rst_hdr = VsockHdr {
+                            src_cid: hdr.dst_cid,
+                            dst_cid: hdr.src_cid,
+                            src_port: hdr.dst_port,
+                            dst_port: hdr.src_port,
+                            len: 0,
+                            r#type: VSOCK_TYPE_STREAM,
+                            op: VSOCK_OP_RST,
+                            flags: 0,
+                            buf_alloc: 0,
+                            fwd_cnt: 0,
+                        };
+                        debug!("Responding to VSOCK_OP_SHUTDOWN with RST");
+                        let rst_bytes = rst_hdr.to_bytes();
+                        self.write_response_to_rx(&mut rx_vring_lock, guest_mem_deref, &rst_bytes)?;
                     }
                     _ => {
-                        debug!("Ignoring vsock operation: {}", hdr.op);
+                        debug!("Ignoring vsock operation: {}", op);
                     }
                 }
             }
+
+            // Mark TX descriptor as used
+            tx_vring_lock
+                .get_queue_mut()
+                .add_used(guest_mem_deref, tx_head_index, 0)
+                .ok();
+        }
+
+        // Signal TX vring (guest knows we processed TX)
+        tx_vring_lock.signal_used_queue().ok();
+
+        // Signal RX vring (guest knows we have responses available)
+        rx_vring_lock.signal_used_queue().ok();
+
+        Ok(())
+    }
+
+    fn write_response_to_rx(
+        &mut self,
+        rx_vring_lock: &mut vhost_user_backend::VringState,
+        guest_mem_deref: &GuestMemoryMmap,
+        packet_bytes: &[u8],
+    ) -> std::io::Result<()> {
+        let rx_queue = rx_vring_lock.get_queue_mut();
+
+        // Collect descriptor chains to write to
+        let mut chains_to_write = Vec::new();
+        if let Ok(iter) = rx_queue.iter(guest_mem_deref) {
+            for desc_chain in iter {
+                chains_to_write.push(desc_chain);
+            }
+        }
+
+        // Write to the first available descriptor chain
+        if let Some(desc_chain) = chains_to_write.first() {
+            let rx_head_index = desc_chain.head_index();
+
+            // Write packet to writable descriptors
+            let mut offset = 0;
+            for desc in desc_chain.clone().writable() {
+                let addr = desc.addr();
+                let len = desc.len() as usize;
+                if len > 0 && offset < packet_bytes.len() {
+                    let write_len = std::cmp::min(len, packet_bytes.len() - offset);
+                    guest_mem_deref
+                        .write_slice(&packet_bytes[offset..offset + write_len], addr)
+                        .map_err(|e| {
+                            std::io::Error::other(format!("failed to write to RX: {}", e))
+                        })?;
+                    offset += write_len;
+                }
+            }
+
+            // Mark RX descriptor as used with the number of bytes written
+            rx_queue.add_used(guest_mem_deref, rx_head_index, offset as u32).ok();
         }
 
         Ok(())
