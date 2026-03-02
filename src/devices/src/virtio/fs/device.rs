@@ -1,6 +1,6 @@
 use std::cmp;
 use std::io::Write;
-use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
+use std::sync::atomic::AtomicI32;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
@@ -11,7 +11,7 @@ use vm_memory::{ByteValued, GuestMemoryMmap};
 use super::super::{
     ActivateResult, DeviceQueue, DeviceState, FsError, QueueConfig, VirtioDevice, VirtioShmRegion,
 };
-use super::passthrough;
+use super::filesystem::FileSystem;
 use super::worker::FsWorker;
 use super::ExportTable;
 use super::{defs, defs::uapi};
@@ -41,7 +41,7 @@ pub struct Fs {
     device_state: DeviceState,
     config: VirtioFsConfig,
     shm_region: Option<VirtioShmRegion>,
-    passthrough_cfg: passthrough::Config,
+    fs_backend: Option<Box<dyn FileSystem + Send + Sync>>,
     worker_thread: Option<JoinHandle<()>>,
     worker_stopfd: EventFd,
     exit_code: Arc<AtomicI32>,
@@ -50,9 +50,8 @@ pub struct Fs {
 impl Fs {
     pub fn new(
         fs_id: String,
-        shared_dir: String,
+        fs_backend: Box<dyn FileSystem + Send + Sync>,
         exit_code: Arc<AtomicI32>,
-        allow_root_dir_delete: bool,
     ) -> super::Result<Fs> {
         let avail_features = (1u64 << VIRTIO_F_VERSION_1) | (1u64 << VIRTIO_RING_F_EVENT_IDX);
 
@@ -61,19 +60,13 @@ impl Fs {
         config.tag[..tag.len()].copy_from_slice(tag.as_slice());
         config.num_request_queues = 1;
 
-        let fs_cfg = passthrough::Config {
-            root_dir: shared_dir,
-            allow_root_dir_delete,
-            ..Default::default()
-        };
-
         Ok(Fs {
             avail_features,
             acked_features: 0,
             device_state: DeviceState::Inactive,
             config,
             shm_region: None,
-            passthrough_cfg: fs_cfg,
+            fs_backend: Some(fs_backend),
             worker_thread: None,
             worker_stopfd: EventFd::new(EFD_NONBLOCK).map_err(FsError::EventFd)?,
             exit_code,
@@ -89,12 +82,10 @@ impl Fs {
     }
 
     pub fn set_export_table(&mut self, export_table: ExportTable) -> u64 {
-        static FS_UNIQUE_ID: AtomicU64 = AtomicU64::new(0);
-
-        self.passthrough_cfg.export_fsid = FS_UNIQUE_ID.fetch_add(1, Ordering::Relaxed);
-        self.passthrough_cfg.export_table = Some(export_table);
-
-        self.passthrough_cfg.export_fsid
+        self.fs_backend
+            .as_mut()
+            .expect("fs_backend already taken")
+            .set_export_table(export_table)
     }
 }
 
@@ -163,13 +154,15 @@ impl VirtioDevice for Fs {
             queue_evts.push(dq.event);
         }
 
+        let fs_backend = self.fs_backend.take().expect("fs_backend already taken");
+
         let worker = FsWorker::new(
             worker_queues,
             queue_evts,
             interrupt.clone(),
             mem.clone(),
             self.shm_region.clone(),
-            self.passthrough_cfg.clone(),
+            fs_backend,
             self.worker_stopfd.try_clone().unwrap(),
             self.exit_code.clone(),
         );

@@ -61,13 +61,13 @@ impl io::Write for ZCWriter<'_> {
     }
 }
 
-pub struct Server<F: FileSystem + Sync> {
-    fs: F,
+pub struct Server {
+    fs: Box<dyn FileSystem + Send + Sync>,
     options: AtomicU64,
 }
 
-impl<F: FileSystem + Sync> Server<F> {
-    pub fn new(fs: F) -> Server<F> {
+impl Server {
+    pub fn new(fs: Box<dyn FileSystem + Send + Sync>) -> Server {
         Server {
             fs,
             options: AtomicU64::new(FsOptions::empty().bits()),
@@ -858,7 +858,7 @@ impl<F: FileSystem + Sync> Server<F> {
         }
 
         // These fuse features are supported by this server by default.
-        let mut supported = FsOptions::ASYNC_READ
+        let supported = FsOptions::ASYNC_READ
             | FsOptions::PARALLEL_DIROPS
             | FsOptions::BIG_WRITES
             | FsOptions::AUTO_INVAL_DATA
