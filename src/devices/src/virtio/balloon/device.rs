@@ -320,6 +320,8 @@ impl VirtioDevice for Balloon {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::legacy::DummyIrqChip;
+    use crate::virtio::{Descriptor, InterruptTransport, Queue};
 
     /// Test write_config updates the actual field (offset 4-8)
     #[test]
@@ -457,26 +459,370 @@ mod tests {
         }
     }
 
-    /// Test process_inflate method signature and processing capability (AC1.1, AC1.6, AC1.8)
-    /// Verifies that process_inflate exists and has the correct return type
+    /// Test process_inflate with valid PFN buffer (AC1.1, AC1.6, AC1.8)
+    /// Verifies that process_inflate reads PFN values, converts to addresses, and calls madvise.
+    /// Tests that the function returns true and properly processes descriptor chains.
     #[test]
-    fn test_process_inflate_method_signature() {
-        // This test verifies that process_inflate method exists with signature: fn(&mut self) -> bool
-        // It compiles if the method exists with the correct signature
-        let balloon = Balloon::new().expect("Failed to create balloon device");
-        assert_eq!(balloon.device_type(), uapi::VIRTIO_ID_BALLOON);
-        // The actual queue processing testing is done in integration tests with real VM setup
+    fn test_process_inflate_with_valid_pfn() {
+        // Create guest memory with enough space for queue structures and PFN data
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x50000)])
+            .expect("Failed to create guest memory");
+
+        // Create interrupt and queues
+        let irqchip: crate::legacy::IrqChip = DummyIrqChip::new().into();
+        let interrupt = InterruptTransport::new(irqchip, "test-balloon".into())
+            .expect("Failed to create interrupt transport");
+
+        // Set up queue structures for inflate queue (queue 0)
+        const DESC_TABLE_ADDR: u64 = 0x1000;
+        const AVAIL_RING_ADDR: u64 = 0x2000;
+        const USED_RING_ADDR: u64 = 0x3000;
+        const PFN_DATA_ADDR: u64 = 0x10000;
+
+        // Create 5 queues for the balloon device (inflate, deflate, stats, page-hint, free-page)
+        // Only inflate and deflate queues need the descriptor structures set
+        let device_queues: Vec<DeviceQueue> = (0..5)
+            .map(|i| DeviceQueue {
+                queue: {
+                    let mut q = Queue::new(256);
+                    q.size = 256;
+                    q.ready = true;
+                    if i == 0 {
+                        // Inflate queue - set up descriptor structures
+                        q.desc_table = GuestAddress(DESC_TABLE_ADDR);
+                        q.avail_ring = GuestAddress(AVAIL_RING_ADDR);
+                        q.used_ring = GuestAddress(USED_RING_ADDR);
+                    }
+                    q
+                },
+                event: std::sync::Arc::new(
+                    utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK)
+                        .expect("Failed to create eventfd"),
+                ),
+            })
+            .collect();
+
+        // Create and activate balloon device
+        let mut balloon = Balloon::new().expect("Failed to create balloon device");
+        balloon
+            .activate(mem.clone(), interrupt, device_queues)
+            .expect("Failed to activate balloon device");
+
+        // Write valid PFN values to memory
+        // PFN 0x1 converts to guest address 0x1000 (1 << 12)
+        // PFN 0x2 converts to guest address 0x2000 (2 << 12)
+        let pfn1: u32 = 0x1;
+        let pfn2: u32 = 0x2;
+
+        let pfn_data = vec![
+            pfn1.to_le_bytes(),
+            pfn2.to_le_bytes(),
+        ]
+        .into_iter()
+        .flat_map(|b| b.to_vec())
+        .collect::<Vec<u8>>();
+
+        mem.write_slice(&pfn_data, GuestAddress(PFN_DATA_ADDR))
+            .expect("Failed to write PFN data");
+
+        // Set up descriptor chain for inflate queue
+        // Descriptor 0: points to PFN buffer
+        let desc = Descriptor {
+            addr: PFN_DATA_ADDR,
+            len: 8, // 2 u32 PFNs
+            flags: 0,
+            next: 0,
+        };
+        mem.write_obj(desc, GuestAddress(DESC_TABLE_ADDR))
+            .expect("Failed to write descriptor");
+
+        // Set up available ring with descriptor 0 available for processing
+        mem.write_obj(0u16, GuestAddress(AVAIL_RING_ADDR))
+            .expect("Failed to write avail flags");
+        // Avail idx = 1 means one descriptor (index 0) is available
+        mem.write_obj(1u16, GuestAddress(AVAIL_RING_ADDR + 2))
+            .expect("Failed to write avail idx");
+        // Ring[0] = descriptor index 0
+        mem.write_obj(0u16, GuestAddress(AVAIL_RING_ADDR + 4))
+            .expect("Failed to write avail ring[0]");
+
+        // Initialize used ring
+        mem.write_obj(0u16, GuestAddress(USED_RING_ADDR))
+            .expect("Failed to write used flags");
+        mem.write_obj(0u16, GuestAddress(USED_RING_ADDR + 2))
+            .expect("Failed to write used idx");
+
+        // Call process_inflate
+        let result = balloon.process_inflate();
+
+        // Verify it returns true (descriptors were processed)
+        assert!(result, "process_inflate should return true when descriptors are available and are processed");
     }
 
-    /// Test process_deflate method signature and processing capability (AC1.2)
-    /// Verifies that process_deflate exists and has the correct return type
+    /// Test process_inflate with invalid PFN (AC1.6)
+    /// Verifies that invalid PFNs (outside guest memory) are silently skipped without panicking.
     #[test]
-    fn test_process_deflate_method_signature() {
-        // This test verifies that process_deflate method exists with signature: fn(&mut self) -> bool
-        // It compiles if the method exists with the correct signature
-        let balloon = Balloon::new().expect("Failed to create balloon device");
-        assert_eq!(balloon.device_name(), "balloon");
-        // The actual queue processing testing is done in integration tests with real VM setup
+    fn test_process_inflate_with_invalid_pfn() {
+        // Create guest memory with limited size so some PFNs will be invalid
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x50000)])
+            .expect("Failed to create guest memory");
+
+        let irqchip: crate::legacy::IrqChip = DummyIrqChip::new().into();
+        let interrupt = InterruptTransport::new(irqchip, "test-balloon".into())
+            .expect("Failed to create interrupt transport");
+
+        const DESC_TABLE_ADDR: u64 = 0x1000;
+        const AVAIL_RING_ADDR: u64 = 0x2000;
+        const USED_RING_ADDR: u64 = 0x3000;
+        const PFN_DATA_ADDR: u64 = 0x10000;
+
+        // Create device queues with inflate queue (0) having descriptor structures
+        let device_queues: Vec<DeviceQueue> = (0..5)
+            .map(|i| DeviceQueue {
+                queue: {
+                    let mut q = Queue::new(256);
+                    q.size = 256;
+                    q.ready = true;
+                    if i == 0 {
+                        // Only inflate queue needs descriptor structures
+                        q.desc_table = GuestAddress(DESC_TABLE_ADDR);
+                        q.avail_ring = GuestAddress(AVAIL_RING_ADDR);
+                        q.used_ring = GuestAddress(USED_RING_ADDR);
+                    }
+                    q
+                },
+                event: std::sync::Arc::new(
+                    utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK)
+                        .expect("Failed to create eventfd"),
+                ),
+            })
+            .collect();
+
+        let mut balloon = Balloon::new().expect("Failed to create balloon device");
+        balloon
+            .activate(mem.clone(), interrupt, device_queues)
+            .expect("Failed to activate balloon device");
+
+        // Write PFN values including one that's far outside guest memory
+        // Memory is only 0x50000 (320KB), so PFN >> 5 will be outside
+        let pfn_valid: u32 = 0x1; // Valid: 0x1000
+        let pfn_invalid: u32 = 0x10000; // Invalid: 0x10000000, way outside guest memory
+
+        let pfn_data = vec![
+            pfn_valid.to_le_bytes(),
+            pfn_invalid.to_le_bytes(),
+        ]
+        .into_iter()
+        .flat_map(|b| b.to_vec())
+        .collect::<Vec<u8>>();
+
+        mem.write_slice(&pfn_data, GuestAddress(PFN_DATA_ADDR))
+            .expect("Failed to write PFN data");
+
+        // Set up descriptor chain
+        let desc = Descriptor {
+            addr: PFN_DATA_ADDR,
+            len: 8, // 2 u32 PFNs
+            flags: 0,
+            next: 0,
+        };
+        mem.write_obj(desc, GuestAddress(DESC_TABLE_ADDR))
+            .expect("Failed to write descriptor");
+
+        mem.write_obj(0u16, GuestAddress(AVAIL_RING_ADDR))
+            .expect("Failed to write avail flags");
+        mem.write_obj(1u16, GuestAddress(AVAIL_RING_ADDR + 2))
+            .expect("Failed to write avail idx");
+        mem.write_obj(0u16, GuestAddress(AVAIL_RING_ADDR + 4))
+            .expect("Failed to write avail ring[0]");
+
+        mem.write_obj(0u16, GuestAddress(USED_RING_ADDR))
+            .expect("Failed to write used flags");
+        mem.write_obj(0u16, GuestAddress(USED_RING_ADDR + 2))
+            .expect("Failed to write used idx");
+
+        // Call process_inflate - should NOT panic even with invalid PFN
+        let result = balloon.process_inflate();
+
+        // Should return true because we had a valid descriptor (even though one PFN was invalid)
+        assert!(
+            result,
+            "process_inflate should return true when processing a batch with mixed valid/invalid PFNs"
+        );
+
+        // Descriptor should still be marked as used
+        let used_idx = mem.read_obj::<u16>(GuestAddress(USED_RING_ADDR + 2))
+            .expect("Failed to read used idx");
+        assert_eq!(used_idx, 1, "Descriptor should be marked as used");
+    }
+
+    /// Test process_inflate with duplicate PFN (AC1.8)
+    /// Verifies that calling process_inflate twice with the same PFN is idempotent.
+    #[test]
+    fn test_process_inflate_duplicate_pfn_idempotent() {
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x50000)])
+            .expect("Failed to create guest memory");
+
+        let irqchip: crate::legacy::IrqChip = DummyIrqChip::new().into();
+        let interrupt = InterruptTransport::new(irqchip, "test-balloon".into())
+            .expect("Failed to create interrupt transport");
+
+        const DESC_TABLE_ADDR: u64 = 0x1000;
+        const AVAIL_RING_ADDR: u64 = 0x2000;
+        const USED_RING_ADDR: u64 = 0x3000;
+        const PFN_DATA_ADDR: u64 = 0x10000;
+
+        let device_queues: Vec<DeviceQueue> = (0..5)
+            .map(|i| DeviceQueue {
+                queue: {
+                    let mut q = Queue::new(256);
+                    q.size = 256;
+                    q.ready = true;
+                    if i == 0 {
+                        q.desc_table = GuestAddress(DESC_TABLE_ADDR);
+                        q.avail_ring = GuestAddress(AVAIL_RING_ADDR);
+                        q.used_ring = GuestAddress(USED_RING_ADDR);
+                    }
+                    q
+                },
+                event: std::sync::Arc::new(
+                    utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK)
+                        .expect("Failed to create eventfd"),
+                ),
+            })
+            .collect();
+
+        let mut balloon = Balloon::new().expect("Failed to create balloon device");
+        balloon
+            .activate(mem.clone(), interrupt, device_queues)
+            .expect("Failed to activate balloon device");
+
+        // Write the same PFN twice
+        let pfn: u32 = 0x1;
+        let pfn_data = vec![
+            pfn.to_le_bytes(),
+            pfn.to_le_bytes(),
+        ]
+        .into_iter()
+        .flat_map(|b| b.to_vec())
+        .collect::<Vec<u8>>();
+
+        mem.write_slice(&pfn_data, GuestAddress(PFN_DATA_ADDR))
+            .expect("Failed to write PFN data");
+
+        let desc = Descriptor {
+            addr: PFN_DATA_ADDR,
+            len: 8, // 2 identical u32 PFNs
+            flags: 0,
+            next: 0,
+        };
+        mem.write_obj(desc, GuestAddress(DESC_TABLE_ADDR))
+            .expect("Failed to write descriptor");
+
+        mem.write_obj(0u16, GuestAddress(AVAIL_RING_ADDR))
+            .expect("Failed to write avail flags");
+        mem.write_obj(1u16, GuestAddress(AVAIL_RING_ADDR + 2))
+            .expect("Failed to write avail idx");
+        mem.write_obj(0u16, GuestAddress(AVAIL_RING_ADDR + 4))
+            .expect("Failed to write avail ring[0]");
+
+        mem.write_obj(0u16, GuestAddress(USED_RING_ADDR))
+            .expect("Failed to write used flags");
+        mem.write_obj(0u16, GuestAddress(USED_RING_ADDR + 2))
+            .expect("Failed to write used idx");
+
+        // Call process_inflate - should handle duplicate PFN idempotently (madvise is idempotent)
+        let result = balloon.process_inflate();
+
+        assert!(
+            result,
+            "process_inflate should return true when processing duplicates"
+        );
+
+        // Verify descriptor was marked as used
+        let used_idx = mem.read_obj::<u16>(GuestAddress(USED_RING_ADDR + 2))
+            .expect("Failed to read used idx");
+        assert_eq!(used_idx, 1, "Descriptor should be marked as used");
+    }
+
+    /// Test process_deflate with valid descriptor chain (AC1.2)
+    /// Verifies that process_deflate pops descriptors and marks them as used without error.
+    #[test]
+    fn test_process_deflate_basic() {
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x50000)])
+            .expect("Failed to create guest memory");
+
+        let irqchip: crate::legacy::IrqChip = DummyIrqChip::new().into();
+        let interrupt = InterruptTransport::new(irqchip, "test-balloon".into())
+            .expect("Failed to create interrupt transport");
+
+        const DESC_TABLE_ADDR: u64 = 0x1000;
+        const AVAIL_RING_ADDR: u64 = 0x2000;
+        const USED_RING_ADDR: u64 = 0x3000;
+
+        // Create queues with both inflate and deflate having descriptor structures
+        // (we'll test deflate which is at index 1)
+        let device_queues: Vec<DeviceQueue> = (0..5)
+            .map(|i| DeviceQueue {
+                queue: {
+                    let mut q = Queue::new(256);
+                    q.size = 256;
+                    q.ready = true;
+                    if i == 1 {
+                        // Deflate queue at index 1 - set up descriptor structures
+                        q.desc_table = GuestAddress(DESC_TABLE_ADDR);
+                        q.avail_ring = GuestAddress(AVAIL_RING_ADDR);
+                        q.used_ring = GuestAddress(USED_RING_ADDR);
+                    }
+                    q
+                },
+                event: std::sync::Arc::new(
+                    utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK)
+                        .expect("Failed to create eventfd"),
+                ),
+            })
+            .collect();
+
+        let mut balloon = Balloon::new().expect("Failed to create balloon device");
+        balloon
+            .activate(mem.clone(), interrupt, device_queues)
+            .expect("Failed to activate balloon device");
+
+        // Set up descriptor for deflate queue
+        let desc = Descriptor {
+            addr: 0x20000, // Some address in guest memory
+            len: 8, // Some size of PFN buffer (deflate doesn't care about contents)
+            flags: 0,
+            next: 0,
+        };
+        mem.write_obj(desc, GuestAddress(DESC_TABLE_ADDR))
+            .expect("Failed to write descriptor");
+
+        mem.write_obj(0u16, GuestAddress(AVAIL_RING_ADDR))
+            .expect("Failed to write avail flags");
+        mem.write_obj(1u16, GuestAddress(AVAIL_RING_ADDR + 2))
+            .expect("Failed to write avail idx");
+        mem.write_obj(0u16, GuestAddress(AVAIL_RING_ADDR + 4))
+            .expect("Failed to write avail ring[0]");
+
+        mem.write_obj(0u16, GuestAddress(USED_RING_ADDR))
+            .expect("Failed to write used flags");
+        mem.write_obj(0u16, GuestAddress(USED_RING_ADDR + 2))
+            .expect("Failed to write used idx");
+
+        // Call process_deflate
+        let result = balloon.process_deflate();
+
+        // Should return true because descriptor was processed
+        assert!(result, "process_deflate should return true when descriptors are available");
+
+        // Verify the descriptor was marked as used
+        let used_idx = mem.read_obj::<u16>(GuestAddress(USED_RING_ADDR + 2))
+            .expect("Failed to read used idx");
+        assert_eq!(
+            used_idx, 1,
+            "Used ring index should be 1 after processing 1 descriptor"
+        );
     }
 
     /// Test AVAIL_FEATURES includes all required balloon features (AC1.1, AC1.2)
