@@ -48,6 +48,62 @@ pub struct VirtioBalloonConfig {
 // Safe because it only has data and has no implicit padding.
 unsafe impl ByteValued for VirtioBalloonConfig {}
 
+#[derive(Copy, Clone, Debug, Default)]
+#[repr(C, packed)]
+struct BalloonStat {
+    tag: u16,
+    val: u64,
+}
+
+// SAFETY: BalloonStat only contains plain data with no padding.
+unsafe impl ByteValued for BalloonStat {}
+
+#[derive(Clone, Debug, Default)]
+pub struct BalloonStats {
+    pub swap_in: Option<u64>,
+    pub swap_out: Option<u64>,
+    pub major_faults: Option<u64>,
+    pub minor_faults: Option<u64>,
+    pub free_memory: Option<u64>,
+    pub total_memory: Option<u64>,
+    pub available_memory: Option<u64>,
+    pub memory_caches: Option<u64>,
+    pub htlb_allocations: Option<u64>,
+    pub htlb_failures: Option<u64>,
+    pub oom_kills: Option<u64>,
+    pub alloc_stalls: Option<u64>,
+    pub async_scans: Option<u64>,
+    pub direct_scans: Option<u64>,
+    pub async_reclaims: Option<u64>,
+    pub direct_reclaims: Option<u64>,
+}
+
+impl BalloonStats {
+    fn update_with_stat(&mut self, stat: &BalloonStat) {
+        match stat.tag {
+            uapi::VIRTIO_BALLOON_S_SWAP_IN => self.swap_in = Some(stat.val),
+            uapi::VIRTIO_BALLOON_S_SWAP_OUT => self.swap_out = Some(stat.val),
+            uapi::VIRTIO_BALLOON_S_MAJFLT => self.major_faults = Some(stat.val),
+            uapi::VIRTIO_BALLOON_S_MINFLT => self.minor_faults = Some(stat.val),
+            uapi::VIRTIO_BALLOON_S_MEMFREE => self.free_memory = Some(stat.val),
+            uapi::VIRTIO_BALLOON_S_MEMTOT => self.total_memory = Some(stat.val),
+            uapi::VIRTIO_BALLOON_S_AVAIL => self.available_memory = Some(stat.val),
+            uapi::VIRTIO_BALLOON_S_CACHES => self.memory_caches = Some(stat.val),
+            uapi::VIRTIO_BALLOON_S_HTLB_PGALLOC => self.htlb_allocations = Some(stat.val),
+            uapi::VIRTIO_BALLOON_S_HTLB_PGFAIL => self.htlb_failures = Some(stat.val),
+            uapi::VIRTIO_BALLOON_S_OOM_KILL => self.oom_kills = Some(stat.val),
+            uapi::VIRTIO_BALLOON_S_ALLOC_STALL => self.alloc_stalls = Some(stat.val),
+            uapi::VIRTIO_BALLOON_S_ASYNC_SCAN => self.async_scans = Some(stat.val),
+            uapi::VIRTIO_BALLOON_S_DIRECT_SCAN => self.direct_scans = Some(stat.val),
+            uapi::VIRTIO_BALLOON_S_ASYNC_RECLAIM => self.async_reclaims = Some(stat.val),
+            uapi::VIRTIO_BALLOON_S_DIRECT_RECLAIM => self.direct_reclaims = Some(stat.val),
+            _ => {
+                // Unknown tag, silently ignore
+            }
+        }
+    }
+}
+
 pub struct Balloon {
     pub(crate) queues: Option<Vec<DeviceQueue>>,
     pub(crate) avail_features: u64,
@@ -55,6 +111,8 @@ pub struct Balloon {
     pub(crate) activate_evt: EventFd,
     pub(crate) device_state: DeviceState,
     config: VirtioBalloonConfig,
+    stats_desc_index: Option<u16>,
+    latest_stats: Option<BalloonStats>,
 }
 
 impl Balloon {
@@ -67,6 +125,8 @@ impl Balloon {
                 .map_err(BalloonError::EventFd)?,
             device_state: DeviceState::Inactive,
             config: VirtioBalloonConfig::default(),
+            stats_desc_index: None,
+            latest_stats: None,
         })
     }
 
@@ -214,6 +274,98 @@ impl Balloon {
         }
 
         have_used
+    }
+
+    pub fn process_stats_queue(&mut self) -> bool {
+        debug!("balloon: process_stats_queue()");
+        let mem = match self.device_state {
+            DeviceState::Activated(ref mem, _) => mem,
+            // This should never happen, it's been already validated in the event handler.
+            DeviceState::Inactive => unreachable!(),
+        };
+
+        let queues = self
+            .queues
+            .as_mut()
+            .expect("queues should exist when activated");
+
+        // If there's a previous descriptor index, return it first (compliance requirement)
+        if let Some(prev_index) = self.stats_desc_index.take() {
+            if let Err(e) = queues[STQ_INDEX].queue.add_used(mem, prev_index, 0) {
+                error!("failed to add used elements to the stats queue: {e:?}");
+            }
+        }
+
+        // Pop new descriptor from the queue
+        if let Some(head) = queues[STQ_INDEX].queue.pop(mem) {
+            let index = head.index;
+
+            // Read BalloonStat entries from the descriptor buffer
+            let mut stats = BalloonStats::default();
+            const STAT_SIZE: u64 = std::mem::size_of::<BalloonStat>() as u64;
+
+            for desc in head.into_iter() {
+                // Iterate through each BalloonStat entry in the descriptor (10 bytes each)
+                let mut offset = 0u64;
+                while offset + STAT_SIZE <= desc.len as u64 {
+                    let addr = match desc.addr.checked_add(offset) {
+                        Some(a) => a,
+                        None => {
+                            warn!("balloon: stats buffer offset overflow");
+                            break;
+                        }
+                    };
+
+                    match mem.read_obj::<BalloonStat>(addr) {
+                        Ok(stat) => {
+                            stats.update_with_stat(&stat);
+                        }
+                        Err(e) => {
+                            warn!("balloon: failed to read BalloonStat from stats buffer: {:?}", e);
+                            break;
+                        }
+                    }
+                    offset += STAT_SIZE;
+                }
+            }
+
+            // Store the parsed stats and descriptor index for future request
+            self.latest_stats = Some(stats);
+            self.stats_desc_index = Some(index);
+
+            return true;
+        }
+
+        false
+    }
+
+    pub fn request_stats(&mut self) {
+        debug!("balloon: request_stats()");
+        let mem = match self.device_state {
+            DeviceState::Activated(ref mem, _) => mem,
+            DeviceState::Inactive => {
+                warn!("balloon: request_stats called but device is not activated");
+                return;
+            }
+        };
+
+        if let Some(index) = self.stats_desc_index.take() {
+            let queues = self
+                .queues
+                .as_mut()
+                .expect("queues should exist when activated");
+
+            if let Err(e) = queues[STQ_INDEX].queue.add_used(mem, index, 0) {
+                error!("failed to add used elements to the stats queue: {e:?}");
+            }
+            self.device_state.signal_used_queue();
+        } else {
+            warn!("balloon: request_stats called but no stats descriptor available");
+        }
+    }
+
+    pub fn stats(&self) -> Option<&BalloonStats> {
+        self.latest_stats.as_ref()
     }
 }
 
@@ -877,5 +1029,288 @@ mod tests {
 
         // Verify the feature is within available features
         assert!((balloon.avail_features() & test_features) == test_features);
+    }
+
+    /// Test stats() returns None before activation (AC1.7)
+    #[test]
+    fn test_stats_before_activation() {
+        let balloon = Balloon::new().expect("Failed to create balloon device");
+
+        // Before activation, stats() should return None
+        assert!(
+            balloon.stats().is_none(),
+            "stats() should return None before device activation"
+        );
+    }
+
+    /// Test stats() returns None before first stats descriptor arrives (AC1.7)
+    #[test]
+    fn test_stats_before_first_descriptor() {
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x50000)])
+            .expect("Failed to create guest memory");
+
+        let irqchip: crate::legacy::IrqChip = DummyIrqChip::new().into();
+        let interrupt = InterruptTransport::new(irqchip, "test-balloon".into())
+            .expect("Failed to create interrupt transport");
+
+        // Create device queues
+        let device_queues: Vec<DeviceQueue> = (0..5)
+            .map(|_| DeviceQueue {
+                queue: {
+                    let q = Queue::new(256);
+                    q
+                },
+                event: std::sync::Arc::new(
+                    utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK)
+                        .expect("Failed to create eventfd"),
+                ),
+            })
+            .collect();
+
+        let mut balloon = Balloon::new().expect("Failed to create balloon device");
+        balloon
+            .activate(mem, interrupt, device_queues)
+            .expect("Failed to activate balloon device");
+
+        // After activation but before any stats descriptor, stats() should return None
+        assert!(
+            balloon.stats().is_none(),
+            "stats() should return None before any stats descriptor arrives"
+        );
+    }
+
+    /// Test process_stats_queue() with valid stats descriptor (AC1.4)
+    #[test]
+    fn test_process_stats_queue_with_valid_stats() {
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x50000)])
+            .expect("Failed to create guest memory");
+
+        let irqchip: crate::legacy::IrqChip = DummyIrqChip::new().into();
+        let interrupt = InterruptTransport::new(irqchip, "test-balloon".into())
+            .expect("Failed to create interrupt transport");
+
+        const DESC_TABLE_ADDR: u64 = 0x1000;
+        const AVAIL_RING_ADDR: u64 = 0x2000;
+        const USED_RING_ADDR: u64 = 0x3000;
+        const STATS_DATA_ADDR: u64 = 0x10000;
+
+        // Create device queues with stats queue (2) having descriptor structures
+        let device_queues: Vec<DeviceQueue> = (0..5)
+            .map(|i| DeviceQueue {
+                queue: {
+                    let mut q = Queue::new(256);
+                    q.size = 256;
+                    q.ready = true;
+                    if i == 2 {
+                        // Stats queue at index 2
+                        q.desc_table = GuestAddress(DESC_TABLE_ADDR);
+                        q.avail_ring = GuestAddress(AVAIL_RING_ADDR);
+                        q.used_ring = GuestAddress(USED_RING_ADDR);
+                    }
+                    q
+                },
+                event: std::sync::Arc::new(
+                    utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK)
+                        .expect("Failed to create eventfd"),
+                ),
+            })
+            .collect();
+
+        let mut balloon = Balloon::new().expect("Failed to create balloon device");
+        balloon
+            .activate(mem.clone(), interrupt, device_queues)
+            .expect("Failed to activate balloon device");
+
+        // Create BalloonStat entries for MEMFREE, MEMTOT, and AVAIL
+        let stats_data = vec![
+            BalloonStat {
+                tag: uapi::VIRTIO_BALLOON_S_MEMFREE,
+                val: 1024 * 1024, // 1MB free
+            },
+            BalloonStat {
+                tag: uapi::VIRTIO_BALLOON_S_MEMTOT,
+                val: 2048 * 1024, // 2MB total
+            },
+            BalloonStat {
+                tag: uapi::VIRTIO_BALLOON_S_AVAIL,
+                val: 512 * 1024, // 512KB available
+            },
+        ];
+
+        // Write stats to memory
+        let mut stats_bytes = vec![];
+        for stat in &stats_data {
+            stats_bytes.extend_from_slice(stat.as_slice());
+        }
+
+        mem.write_slice(&stats_bytes, GuestAddress(STATS_DATA_ADDR))
+            .expect("Failed to write stats data");
+
+        // Set up descriptor chain for stats queue
+        let desc = Descriptor {
+            addr: STATS_DATA_ADDR,
+            len: stats_bytes.len() as u32,
+            flags: 0,
+            next: 0,
+        };
+        mem.write_obj(desc, GuestAddress(DESC_TABLE_ADDR))
+            .expect("Failed to write descriptor");
+
+        // Set up available ring
+        mem.write_obj(0u16, GuestAddress(AVAIL_RING_ADDR))
+            .expect("Failed to write avail flags");
+        mem.write_obj(1u16, GuestAddress(AVAIL_RING_ADDR + 2))
+            .expect("Failed to write avail idx");
+        mem.write_obj(0u16, GuestAddress(AVAIL_RING_ADDR + 4))
+            .expect("Failed to write avail ring[0]");
+
+        // Initialize used ring
+        mem.write_obj(0u16, GuestAddress(USED_RING_ADDR))
+            .expect("Failed to write used flags");
+        mem.write_obj(0u16, GuestAddress(USED_RING_ADDR + 2))
+            .expect("Failed to write used idx");
+
+        // Call process_stats_queue
+        let result = balloon.process_stats_queue();
+
+        // Should return true (descriptor was processed)
+        assert!(
+            result,
+            "process_stats_queue should return true when a descriptor is available"
+        );
+
+        // stats() should now return Some with the parsed values
+        let stats = balloon.stats().expect("stats() should return Some after processing");
+
+        // Verify the stats were parsed correctly
+        assert_eq!(
+            stats.free_memory, Some(1024 * 1024),
+            "MEMFREE stat should be 1MB"
+        );
+        assert_eq!(
+            stats.total_memory, Some(2048 * 1024),
+            "MEMTOT stat should be 2MB"
+        );
+        assert_eq!(
+            stats.available_memory, Some(512 * 1024),
+            "AVAIL stat should be 512KB"
+        );
+    }
+
+    /// Test process_stats_queue() with empty queue (no descriptor available)
+    #[test]
+    fn test_process_stats_queue_empty() {
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x50000)])
+            .expect("Failed to create guest memory");
+
+        let irqchip: crate::legacy::IrqChip = DummyIrqChip::new().into();
+        let interrupt = InterruptTransport::new(irqchip, "test-balloon".into())
+            .expect("Failed to create interrupt transport");
+
+        // Create device queues with empty stats queue
+        let device_queues: Vec<DeviceQueue> = (0..5)
+            .map(|_| DeviceQueue {
+                queue: Queue::new(256),
+                event: std::sync::Arc::new(
+                    utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK)
+                        .expect("Failed to create eventfd"),
+                ),
+            })
+            .collect();
+
+        let mut balloon = Balloon::new().expect("Failed to create balloon device");
+        balloon
+            .activate(mem, interrupt, device_queues)
+            .expect("Failed to activate balloon device");
+
+        // Call process_stats_queue with empty queue
+        let result = balloon.process_stats_queue();
+
+        // Should return false (no descriptor to process)
+        assert!(
+            !result,
+            "process_stats_queue should return false when queue is empty"
+        );
+
+        // stats() should still return None
+        assert!(
+            balloon.stats().is_none(),
+            "stats() should be None when no descriptor has been processed"
+        );
+    }
+
+    /// Test BalloonStats::update_with_stat() with all stat tags
+    #[test]
+    fn test_balloon_stats_update() {
+        let mut stats = BalloonStats::default();
+
+        // Test each stat tag individually
+        let tags = vec![
+            (uapi::VIRTIO_BALLOON_S_SWAP_IN, "SWAP_IN"),
+            (uapi::VIRTIO_BALLOON_S_SWAP_OUT, "SWAP_OUT"),
+            (uapi::VIRTIO_BALLOON_S_MAJFLT, "MAJFLT"),
+            (uapi::VIRTIO_BALLOON_S_MINFLT, "MINFLT"),
+            (uapi::VIRTIO_BALLOON_S_MEMFREE, "MEMFREE"),
+            (uapi::VIRTIO_BALLOON_S_MEMTOT, "MEMTOT"),
+            (uapi::VIRTIO_BALLOON_S_AVAIL, "AVAIL"),
+            (uapi::VIRTIO_BALLOON_S_CACHES, "CACHES"),
+            (uapi::VIRTIO_BALLOON_S_HTLB_PGALLOC, "HTLB_PGALLOC"),
+            (uapi::VIRTIO_BALLOON_S_HTLB_PGFAIL, "HTLB_PGFAIL"),
+            (uapi::VIRTIO_BALLOON_S_OOM_KILL, "OOM_KILL"),
+            (uapi::VIRTIO_BALLOON_S_ALLOC_STALL, "ALLOC_STALL"),
+            (uapi::VIRTIO_BALLOON_S_ASYNC_SCAN, "ASYNC_SCAN"),
+            (uapi::VIRTIO_BALLOON_S_DIRECT_SCAN, "DIRECT_SCAN"),
+            (uapi::VIRTIO_BALLOON_S_ASYNC_RECLAIM, "ASYNC_RECLAIM"),
+            (uapi::VIRTIO_BALLOON_S_DIRECT_RECLAIM, "DIRECT_RECLAIM"),
+        ];
+
+        for (tag, name) in tags {
+            let stat = BalloonStat {
+                tag,
+                val: 12345,
+            };
+            stats.update_with_stat(&stat);
+            // For each tag, verify that at least one field was set
+            match tag {
+                uapi::VIRTIO_BALLOON_S_SWAP_IN => {
+                    assert_eq!(stats.swap_in, Some(12345), "{} not updated", name);
+                }
+                uapi::VIRTIO_BALLOON_S_SWAP_OUT => {
+                    assert_eq!(stats.swap_out, Some(12345), "{} not updated", name);
+                }
+                uapi::VIRTIO_BALLOON_S_MEMFREE => {
+                    assert_eq!(stats.free_memory, Some(12345), "{} not updated", name);
+                }
+                uapi::VIRTIO_BALLOON_S_MEMTOT => {
+                    assert_eq!(stats.total_memory, Some(12345), "{} not updated", name);
+                }
+                uapi::VIRTIO_BALLOON_S_AVAIL => {
+                    assert_eq!(stats.available_memory, Some(12345), "{} not updated", name);
+                }
+                _ => {
+                    // Other tags - just verify no panic occurred
+                }
+            }
+        }
+    }
+
+    /// Test BalloonStats ignores unknown tags
+    #[test]
+    fn test_balloon_stats_unknown_tag() {
+        let mut stats = BalloonStats::default();
+
+        let unknown_stat = BalloonStat {
+            tag: 9999, // Unknown tag
+            val: 12345,
+        };
+
+        stats.update_with_stat(&unknown_stat);
+
+        // All fields should remain None since the tag was unknown
+        assert!(stats.swap_in.is_none());
+        assert!(stats.swap_out.is_none());
+        assert!(stats.free_memory.is_none());
+        assert!(stats.total_memory.is_none());
+        assert!(stats.available_memory.is_none());
     }
 }
