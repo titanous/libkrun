@@ -12,7 +12,7 @@ Host/guest integration test workspace. Tests run inside real microVMs to verify 
 
 ## Dependencies
 - **Uses**: `libkrun` crate (Rust API, with features: embedded_init, net, blk, snapshot, vhost-user, uffd), `krun-sys` (C API)
-- **Boundary**: `vm-memory` pinned to 0.16.2 in workspace deps (0.17 breaks upstream crates)
+- **Boundary**: Test daemons (test_daemon, test_vsock_proxy) use `vm-memory` 0.18 with vendored `virtio-queue` 0.17 and `vhost-user-backend` 0.21
 
 ## Running Tests
 ```
@@ -47,6 +47,9 @@ Tests are inherently flaky (VM + network timing). 5-6/6 passing is normal.
 - `uffd-error-handling` - UFFD error paths: store read failures during demand-paging
 - `uffd-parallel-faults` - UFFD concurrent fault resolution: multiple vCPUs faulting simultaneously
 - `virtiofs-generic-passthrough` - Generic virtiofs with `Box<dyn FileSystem>`: constructs `PassthroughFs` manually, passes via `Builder::add_virtiofs()`, verifies read/write through DAX
+- `vhost-user-vsock-echo` - Vhost-user vsock via socket path: guest sends data to echo port (9999), verifies echoed response
+- `vhost-user-vsock-fd` - Vhost-user vsock via pre-connected fd (`from_stream`): same echo test using fd-provisioned connection
+- `vhost-user-vsock-snapshot` - Vhost-user vsock snapshot/restore: echo test, snapshot, restore with new proxy, verify counter query port (9998) returns accumulated byte count
 
 ## Key Files
 - `test_cases/src/lib.rs` - Test case registry
@@ -64,4 +67,7 @@ Tests are inherently flaky (VM + network timing). 5-6/6 passing is normal.
 - `test_cases/src/test_uffd_error.rs` - UFFD error handling test
 - `test_cases/src/test_uffd_parallel.rs` - UFFD parallel faults test
 - `test_cases/src/test_virtiofs_generic_passthrough.rs` - Generic virtiofs integration test (host constructs PassthroughFs, guest reads/writes)
+- `test_cases/src/test_vhost_user_vsock.rs` - Vhost-user vsock integration tests (echo, fd, snapshot)
+- `test_cases/src/vsock_helpers.rs` - Shared vsock_connect helper with retry for guest-side tests
+- `test_vsock_proxy/` - Standalone vhost-user vsock proxy binary for integration testing (echo port 9999, counter query port 9998, DEVICE_STATE support)
 - `test_cases/Cargo.toml` - Feature flags and dependency pins

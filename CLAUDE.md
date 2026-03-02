@@ -23,8 +23,11 @@ Last verified: 2026-03-01
 - `src/arch/`, `src/kernel/` - Architecture and kernel loading support
 - `tests/` - Integration test workspace (host+guest test cases run inside VMs)
 - `init/` - C init binary compiled for guest (embedded when `embedded_init` feature on)
-- `vendor/vhost/` - Patched vhost 0.14.0 crate (adds DEVICE_STATE protocol methods); used via `[patch.crates-io]`
+- `vendor/vhost/` - Patched vhost 0.15.0 crate (adds DEVICE_STATE protocol methods); used via `[patch.crates-io]`
+- `vendor/vhost-user-backend/` - Patched vhost-user-backend 0.21.0 (vm-memory 0.18 compat); used by test daemons
+- `vendor/virtio-queue/` - Patched virtio-queue 0.17.0 (vm-memory 0.18 compat); used by test daemons
 - `tests/test_daemon/` - Vhost-user FS test daemon binary (used by integration tests)
+- `tests/test_vsock_proxy/` - Vhost-user vsock proxy binary (echo + counter ports, DEVICE_STATE; used by integration tests)
 
 ## Feature Flags (Cargo)
 - `embedded_init` - Embeds init binary in library; required for tests
@@ -32,7 +35,7 @@ Last verified: 2026-03-01
 - `blk` - Enables virtio-block backends (tokio, futures)
 - `snapshot` - Enables snapshot/restore (serde, bincode, futures, tokio); includes `SnapshotStore` trait and `FsSnapshotStore`
 - `efi` - EFI boot support (implies blk + net)
-- `vhost-user` - Enables vhost-user device support (virtio-fs over vhost-user with DAX); build with `VHOST_USER=1 make`
+- `vhost-user` - Enables vhost-user device support (virtio-fs with DAX, vsock); build with `VHOST_USER=1 make`
 - `uffd` - Enables userfaultfd demand-paging for snapshot restore (implies `snapshot`; Linux-only; adds `userfaultfd` crate)
 
 ## Conventions
@@ -47,6 +50,6 @@ Last verified: 2026-03-01
 
 ## Boundaries
 - `tests/Cargo.lock` is separate from root `Cargo.lock` (different workspace)
-- `vm-memory` must be pinned to 0.16.2 in tests workspace (0.17 breaks kernel/arch)
+- Root workspace uses `vm-memory` 0.18; test daemons also use 0.18 with vendored patches for compatibility
 - `init/init` is a C binary, not part of the Cargo workspace
-- `vendor/vhost/` is patched via `[patch.crates-io]` in root `Cargo.toml`; do not update vhost version without verifying DEVICE_STATE patches are preserved
+- `vendor/vhost/`, `vendor/vhost-user-backend/`, `vendor/virtio-queue/` are patched via `[patch.crates-io]` in root `Cargo.toml`; do not update versions without verifying patches (DEVICE_STATE, vm-memory compat) are preserved

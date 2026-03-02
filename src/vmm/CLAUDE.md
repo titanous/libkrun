@@ -25,8 +25,11 @@ Core virtual machine manager. Orchestrates VM lifecycle: build, run, snapshot/re
   - `VmResources::fs` stores `Vec<FsMount>` (`FsMount { tag, fs: Box<dyn FileSystem + Send + Sync>, shm_size }`); `add_fs_mount()` appends to it (replaces old `FsDeviceConfig`/`add_fs_device`)
   - `attach_fs_devices` takes `&mut Vec<FsMount>` and `.drain(..)`s it (moves ownership of `Box<dyn FileSystem>` into `Fs` device)
   - `VmResources::vhost_user_fs` stores `VhostUserFsConfig` list; `add_vhost_user_fs_device()` appends to it
-  - `StartMicrovmError` gains `MmapDaxWindow`, `RegisterDaxMemoryRegion`, `RegisterVhostUserDevice`, `RegisterVhostUserFsDevice` variants (behind `vhost-user` feature)
+  - `VmResources::vhost_user_vsock` stores `Option<VhostUserVsockConfig>`; `set_vhost_user_vsock()` sets it (only one vsock device per VM)
+  - `VhostUserVsockConfig` contains `VhostUserVsockConnection` enum: `SocketPath(String)` or `Stream(UnixStream)`
+  - `StartMicrovmError` gains `MmapDaxWindow`, `RegisterDaxMemoryRegion`, `RegisterVhostUserDevice`, `RegisterVhostUserFsDevice`, `RegisterVhostUserVsockDevice` variants (behind `vhost-user` feature)
   - `attach_vhost_user_fs_device` creates VhostUserFs, mmaps DAX memfd, registers DAX region with KVM, attaches to MMIO bus
+  - `attach_vhost_user_vsock_device` creates VhostUserVsock (via socket path or pre-connected stream), attaches to MMIO bus
   - `SnapshotStore` trait is object-safe (`dyn SnapshotStore`), `Send + Sync + 'static`; all async methods return `SendBoxFuture` (Send futures for tokio::spawn)
   - `SnapshotStoreFactory::create` consumes `Box<Self>` (factory is single-use)
   - `FsSnapshotStore` reads from directory-based layout: `base_path/vmstate`, `base_path/memory`, with ordered incremental directories each containing `vmstate`
@@ -45,7 +48,7 @@ Core virtual machine manager. Orchestrates VM lifecycle: build, run, snapshot/re
 - **Expects**: Valid `VmResources` from libkrun crate; KVM/HVF available at runtime
 
 ## Dependencies
-- **Uses**: `devices` (mmio device manager, virtio devices, VhostUserFs), `arch`, `kernel`, `vm-memory`, `userfaultfd` (behind `uffd` feature), `tokio` + `futures` (behind `snapshot` feature)
+- **Uses**: `devices` (mmio device manager, virtio devices, VhostUserFs, VhostUserVsock), `arch`, `kernel`, `vm-memory`, `userfaultfd` (behind `uffd` feature), `tokio` + `futures` (behind `snapshot` feature)
 - **Used by**: `libkrun` (public API crate)
 - **Boundary**: Does not know about C API; only receives structured `VmResources`
 
@@ -77,7 +80,7 @@ Core virtual machine manager. Orchestrates VM lifecycle: build, run, snapshot/re
 - PortIO device states are saved/restored alongside MMIO states in every snapshot operation (x86_64)
 - Virtio used ring dirty marking runs before `collect_dirty_pages` in incremental snapshots
 - DAX KVM memory slots are NOT tracked in `mem_slots` (intentionally excluded from dirty tracking; DAX is volatile cache)
-- When `vhost-user` feature is active, `create_guest_memory` creates memfd-backed regions; without the feature, anonymous mmap is used (no behavior change)
+- When `vhost-user` feature is active and any vhost-user device is configured (`vhost_user_devices`, `vhost_user_fs`, or `vhost_user_vsock`), `create_guest_memory` creates memfd-backed regions; without the feature, anonymous mmap is used (no behavior change)
 - UFFD handler signals `VmExit::Error` on fatal page fault errors (store read failure, copy failure); EEXIST is non-fatal
 - Preload errors are non-fatal; remaining pages are demand-paged via fault handler
 
@@ -96,6 +99,7 @@ Core virtual machine manager. Orchestrates VM lifecycle: build, run, snapshot/re
 - `resources.rs` - `VmResources`, `VmDeviceInfo`, `VhostUserDeviceConfig` configuration types
 - `vmm_config/fs.rs` - `FsMount` (tag, `Box<dyn FileSystem>`, shm_size)
 - `vmm_config/vhost_user_fs.rs` - `VhostUserFsConfig` (tag, socket_path, dax_window_mib)
+- `vmm_config/vhost_user_vsock.rs` - `VhostUserVsockConfig`, `VhostUserVsockConnection` (SocketPath or Stream)
 
 ## Gotchas
 - `create_full_snapshot` still hardcodes `nested_enabled: false` (pre-existing TODO)

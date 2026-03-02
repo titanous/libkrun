@@ -6,13 +6,17 @@ Last verified: 2026-03-01
 Public API crate providing both C FFI (`krun_*` functions) and Rust `Builder` API for configuring and starting microVMs.
 
 ## Contracts
-- **Exposes**: C API (`krun_set_vm_config`, `krun_start_enter`, etc.), Rust `Builder` struct, `Context` struct, `StartError` enum, `VmExit` enum (re-exported from vmm), `Builder::add_virtiofs_vhost_user()` (behind `vhost-user` feature), `vmm::snapshot_store` re-export (behind `snapshot` feature), `VmHandle::snapshot_to_store()`, `VmHandle::incremental_snapshot_to_store()` (behind `snapshot` feature), re-exports of `devices::virtio::fs::{FileSystem, passthrough, dax_mapper}` (behind `not(tee)` feature)
+- **Exposes**: C API (`krun_set_vm_config`, `krun_start_enter`, etc.), Rust `Builder` struct, `Context` struct, `StartError` enum, `VmExit` enum (re-exported from vmm), `Builder::add_virtiofs_vhost_user()` (behind `vhost-user` feature), `Builder::add_vsock_vhost_user()` and `Builder::add_vsock_vhost_user_fd()` (behind `vhost-user` feature), `vmm::snapshot_store` re-export (behind `snapshot` feature), `VmHandle::snapshot_to_store()`, `VmHandle::incremental_snapshot_to_store()` (behind `snapshot` feature), re-exports of `devices::virtio::fs::{FileSystem, passthrough, dax_mapper}` (behind `not(tee)` feature)
 - **Guarantees**:
   - `krun_set_vm_config` returns `-EINVAL` when `num_vcpus == 0`
   - `Builder::vm_config()` returns `Result<&mut Self, StartError>` (was infallible before)
   - `StartError::ZeroVcpus` variant for 0-vCPU validation
   - `StartError::TagTooLong(usize)` variant for filesystem tag > 36 bytes
   - `Builder::add_virtiofs_vhost_user(tag, socket_path, dax_window_mib)` returns `Err(TagTooLong)` if tag > 36 bytes; gated behind `vhost-user` + `not(tee)` features
+  - `Builder::add_vsock_vhost_user(socket_path)` configures vhost-user vsock via socket path; returns `Err(VsockConflict)` if explicit userspace vsock or another vhost-user vsock already configured
+  - `Builder::add_vsock_vhost_user_fd(stream)` configures vhost-user vsock via pre-connected `UnixStream`; same mutual exclusivity as socket path variant
+  - `StartError::VsockConflict` variant for mutual exclusivity between userspace vsock and vhost-user vsock
+  - When vhost-user vsock is configured, the implicit userspace vsock device is skipped during VM build (port configs stored via `krun_add_vsock_port` are accepted but unused)
   - `Builder::add_virtiofs(tag, Box<dyn FileSystem + Send + Sync>, shm_size)` accepts any filesystem backend; gated behind `not(tee)` feature
   - `Builder::add_virtiofs_path(tag, host_path, shm_size, allow_root_dir_delete)` convenience method creating `PassthroughFs` internally; gated behind `not(tee)` feature
   - `Context::run()` returns `Result<VmExit, StartError>` -- process stays alive after VM exits
@@ -23,7 +27,7 @@ Public API crate providing both C FFI (`krun_*` functions) and Rust `Builder` AP
 - **Expects**: Callers set vm_config before start; valid feature flags at compile time
 
 ## Dependencies
-- **Uses**: `vmm` (build_microvm, Vmm lifecycle, VmExit), `devices` (VirtioNetBackend, console, block, VhostUserFs, FileSystem, passthrough, dax_mapper)
+- **Uses**: `vmm` (build_microvm, Vmm lifecycle, VmExit), `devices` (VirtioNetBackend, console, block, VhostUserFs, VhostUserVsock, FileSystem, passthrough, dax_mapper)
 - **Used by**: External consumers via C API or Rust crate
 - **Boundary**: This is the outermost crate; nothing in src/ should depend on it
 
