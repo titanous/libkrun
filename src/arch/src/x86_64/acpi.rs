@@ -6,7 +6,7 @@ use acpi_tables::xsdt::XSDT;
 use acpi_tables::sdt::Sdt;
 use acpi_tables::fadt::FADTBuilder;
 use acpi_tables::fadt::Flags;
-use acpi_tables::{Aml, AmlSink};
+use acpi_tables::Aml;
 use std::result;
 use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
 use zerocopy::IntoBytes as _;
@@ -35,14 +35,6 @@ const OEM_ID: [u8; 6] = *b"LIBKRN";
 const OEM_TABLE_ID: [u8; 8] = *b"KRUNVMGN";
 const OEM_REVISION: u32 = 1;
 
-/// Simple wrapper for Vec<u8> to implement AmlSink for FADT serialization.
-struct AmlBuffer(Vec<u8>);
-
-impl AmlSink for AmlBuffer {
-    fn byte(&mut self, byte: u8) {
-        self.0.push(byte);
-    }
-}
 
 /// Sets up minimal ACPI tables for the guest.
 ///
@@ -63,9 +55,9 @@ pub fn setup_acpi_tables(guest_mem: &GuestMemoryMmap) -> Result<()> {
 
     // Placeholder DSDT address (will update below once real address is computed)
     let fadt = fadt_builder.dsdt_64(0).finalize();
-    let mut fadt_bytes_buffer = AmlBuffer(Vec::new());
+    let mut fadt_bytes_buffer = Vec::<u8>::new();
     fadt.to_aml_bytes(&mut fadt_bytes_buffer);
-    let fadt_size = fadt_bytes_buffer.0.len() as u64;
+    let fadt_size = fadt_bytes_buffer.len() as u64;
 
     // XSDT size is fixed: 36 byte header + 8 bytes per entry (1 FADT entry)
     let xsdt_size: u64 = 44;
@@ -88,7 +80,7 @@ pub fn setup_acpi_tables(guest_mem: &GuestMemoryMmap) -> Result<()> {
 
     // Rebuild FADT with correct DSDT address
     let fadt = fadt_builder.dsdt_64(dsdt_addr).finalize();
-    let mut fadt_bytes_sink = AmlBuffer(Vec::new());
+    let mut fadt_bytes_sink = Vec::<u8>::new();
     fadt.to_aml_bytes(&mut fadt_bytes_sink);
 
     // Build XSDT with FADT address
@@ -96,7 +88,7 @@ pub fn setup_acpi_tables(guest_mem: &GuestMemoryMmap) -> Result<()> {
     xsdt.add_entry(fadt_addr);
 
     // Serialize XSDT to bytes
-    let mut xsdt_bytes_sink = AmlBuffer(Vec::new());
+    let mut xsdt_bytes_sink = Vec::<u8>::new();
     xsdt.to_aml_bytes(&mut xsdt_bytes_sink);
 
     // Build RSDP pointing to XSDT
@@ -111,12 +103,12 @@ pub fn setup_acpi_tables(guest_mem: &GuestMemoryMmap) -> Result<()> {
 
     let fadt_addr_guest = GuestAddress(fadt_addr);
     guest_mem
-        .write_slice(&fadt_bytes_sink.0, fadt_addr_guest)
+        .write_slice(&fadt_bytes_sink, fadt_addr_guest)
         .map_err(|_| Error::Fadt)?;
 
     let xsdt_addr_guest = GuestAddress(xsdt_addr);
     guest_mem
-        .write_slice(&xsdt_bytes_sink.0, xsdt_addr_guest)
+        .write_slice(&xsdt_bytes_sink, xsdt_addr_guest)
         .map_err(|_| Error::Xsdt)?;
 
     let dsdt_addr_guest = GuestAddress(dsdt_addr);
