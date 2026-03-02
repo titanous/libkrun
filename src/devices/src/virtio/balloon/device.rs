@@ -539,6 +539,26 @@ impl Balloon {
     pub fn reclaimed_bitmaps(&self) -> (Option<&ReclaimedBitmap>, Option<&ReclaimedBitmap>) {
         (self.inflated_bitmap.as_ref(), self.reported_free_bitmap.as_ref())
     }
+
+    /// Check if the balloon device is active (activated and not inactive).
+    pub fn is_device_activated(&self) -> bool {
+        self.device_state.is_activated()
+    }
+
+    /// Get the current actual size in pages.
+    pub fn get_actual_pages(&self) -> u32 {
+        self.config.actual
+    }
+
+    /// Set the target number of pages.
+    pub fn set_num_pages(&mut self, num_pages: u32) {
+        self.config.num_pages = num_pages;
+    }
+
+    /// Signal a config change to the guest.
+    pub fn signal_config_changed(&mut self) {
+        self.device_state.signal_config_change();
+    }
 }
 
 impl VirtioDevice for Balloon {

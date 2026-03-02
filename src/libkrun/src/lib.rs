@@ -3188,9 +3188,22 @@ impl Context {
     /// Returns a `VmHandle` that can be used to pause/resume the VM from another thread.
     /// Must be called before `run()`, since `run()` consumes `self`.
     pub fn vm_handle(&self) -> VmHandle {
+        #[cfg(not(feature = "tee"))]
+        let balloon_handle = if self.built_vm.balloon_enabled {
+            let vmm = self.built_vm.vmm().lock().unwrap();
+            vmm.get_balloon().map(|b| {
+                let condvar = b.lock().unwrap().actual_condvar();
+                BalloonHandle::new(b.clone(), condvar)
+            })
+        } else {
+            None
+        };
+
         VmHandle {
             vmm: self.built_vm.vmm().clone(),
             shutdown_efd: self.shutdown_efd.clone(),
+            #[cfg(not(feature = "tee"))]
+            balloon: balloon_handle,
         }
     }
 
@@ -3357,6 +3370,37 @@ impl Context {
     }
 }
 
+#[cfg(not(feature = "tee"))]
+pub use devices::virtio::balloon::BalloonStats;
+
+/// Handle for controlling the memory balloon device.
+#[cfg(not(feature = "tee"))]
+#[derive(Clone)]
+pub struct BalloonHandle {
+    balloon: Arc<Mutex<devices::virtio::Balloon>>,
+    actual_condvar: Arc<(std::sync::Mutex<u64>, std::sync::Condvar)>,
+}
+
+/// Result of awaiting a balloon resize target.
+#[cfg(not(feature = "tee"))]
+#[derive(Debug)]
+pub enum BalloonResult {
+    /// Target reached — actual >= target
+    Reached(u64),
+    /// Guest stopped making progress — actual stalled at this value
+    Stalled(u64),
+}
+
+/// Error from balloon operations.
+#[cfg(not(feature = "tee"))]
+#[derive(Debug)]
+pub enum BalloonError {
+    /// Maximum timeout exceeded
+    Timeout { actual: u64 },
+    /// Balloon device not activated
+    DeviceNotActive,
+}
+
 /// Handle for controlling a running VM from another thread.
 ///
 /// Obtain via `Context::vm_handle()` before calling `Context::run()`.
@@ -3364,6 +3408,115 @@ impl Context {
 pub struct VmHandle {
     vmm: Arc<Mutex<vmm::Vmm>>,
     shutdown_efd: Option<Arc<EventFd>>,
+    #[cfg(not(feature = "tee"))]
+    balloon: Option<BalloonHandle>,
+}
+
+#[cfg(not(feature = "tee"))]
+impl BalloonHandle {
+    fn new(
+        balloon: Arc<Mutex<devices::virtio::Balloon>>,
+        actual_condvar: Arc<(std::sync::Mutex<u64>, std::sync::Condvar)>,
+    ) -> Self {
+        BalloonHandle {
+            balloon,
+            actual_condvar,
+        }
+    }
+
+    /// Resize the memory balloon to a target size in MB.
+    ///
+    /// This sets the target size and signals the guest to read the new value from config.
+    /// The guest will inflate or deflate asynchronously toward the target.
+    ///
+    /// Returns `Err(BalloonError::DeviceNotActive)` if the device is not activated.
+    pub fn resize(&self, target_mb: u64) -> Result<(), BalloonError> {
+        let mut balloon = self.balloon.lock().unwrap();
+
+        // Check device is activated
+        if !balloon.is_device_activated() {
+            return Err(BalloonError::DeviceNotActive);
+        }
+
+        // Convert MB to pages: (MB * 1024 * 1024) / 4096
+        let target_pages = (target_mb * 1024 * 1024) / 4096;
+
+        // Write num_pages to config
+        balloon.set_num_pages(target_pages as u32);
+
+        // Signal config change to guest
+        balloon.signal_config_changed();
+
+        Ok(())
+    }
+
+    /// Wait for the guest to inflate/deflate to a target size in MB.
+    ///
+    /// Returns:
+    /// - `Ok(BalloonResult::Reached(actual_mb))` when actual size reaches target
+    /// - `Ok(BalloonResult::Stalled(actual_mb))` when guest stops progressing for stall_timeout
+    /// - `Err(BalloonError::Timeout { actual: actual_mb })` when max_timeout is exceeded
+    ///
+    /// The stall_timeout detects when the guest hasn't made progress for a duration.
+    /// If max_timeout is None, will wait indefinitely but still returns Stalled when stalled.
+    pub fn await_target(
+        &self,
+        target_mb: u64,
+        stall_timeout: std::time::Duration,
+        max_timeout: Option<std::time::Duration>,
+    ) -> Result<BalloonResult, BalloonError> {
+        // Convert target to pages
+        let target_pages = (target_mb * 1024 * 1024) / 4096;
+
+        // Get condvar
+        let (lock, cvar) = &*self.actual_condvar;
+        let mut actual = lock.lock().unwrap();
+
+        // Record start time for max_timeout
+        let start = std::time::Instant::now();
+
+        loop {
+            // Check if target reached
+            if *actual >= target_pages {
+                return Ok(BalloonResult::Reached(*actual * 4096 / (1024 * 1024)));
+            }
+
+            // Check if max_timeout exceeded
+            if let Some(max_to) = max_timeout {
+                if start.elapsed() > max_to {
+                    return Err(BalloonError::Timeout {
+                        actual: *actual * 4096 / (1024 * 1024),
+                    });
+                }
+            }
+
+            // Wait on condvar with stall_timeout
+            let (new_actual, timeout_result) = cvar.wait_timeout(actual, stall_timeout).unwrap();
+            actual = new_actual;
+
+            // If condvar timed out, guest stalled
+            if timeout_result.timed_out() {
+                return Ok(BalloonResult::Stalled(*actual * 4096 / (1024 * 1024)));
+            }
+
+            // Condvar was signaled, re-check target in loop
+        }
+    }
+
+    /// Get the current actual memory size allocated to the guest in MB.
+    pub fn actual(&self) -> u64 {
+        let balloon = self.balloon.lock().unwrap();
+        let actual_pages = balloon.get_actual_pages() as u64;
+        actual_pages * 4096 / (1024 * 1024)
+    }
+
+    /// Get the current balloon statistics, if available.
+    ///
+    /// Returns `None` if statistics haven't been collected yet.
+    pub fn stats(&self) -> Option<BalloonStats> {
+        let balloon = self.balloon.lock().unwrap();
+        balloon.stats().cloned()
+    }
 }
 
 impl VmHandle {
@@ -3509,6 +3662,13 @@ impl VmHandle {
         vmm.resume_vcpus()
             .map_err(|e| StartError::Microvm(vmm::builder::StartMicrovmError::Internal(e)))?;
         result
+    }
+
+    /// Returns a handle for controlling the memory balloon device, if enabled.
+    /// Returns `None` if the balloon device was not enabled via `Builder::enable_balloon()`.
+    #[cfg(not(feature = "tee"))]
+    pub fn balloon(&self) -> Option<&BalloonHandle> {
+        self.balloon.as_ref()
     }
 }
 

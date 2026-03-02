@@ -257,6 +257,12 @@ pub struct Vmm {
 }
 
 impl Vmm {
+    /// Gets the balloon device reference if available.
+    #[cfg(not(feature = "tee"))]
+    pub fn get_balloon(&self) -> Option<&std::sync::Arc<std::sync::Mutex<devices::virtio::balloon::Balloon>>> {
+        self.balloon.as_ref()
+    }
+
     /// Gets the the specified bus device.
     pub fn get_bus_device(
         &self,

@@ -630,6 +630,9 @@ pub struct BuiltVm {
     #[cfg(target_os = "macos")]
     #[cfg_attr(not(feature = "snapshot"), allow(dead_code))]
     boot_senders: Vec<Sender<u64>>,
+    /// Whether the balloon device should be exposed via BalloonHandle.
+    #[cfg(not(feature = "tee"))]
+    pub balloon_enabled: bool,
 }
 
 impl BuiltVm {
@@ -1479,6 +1482,8 @@ pub fn build_microvm(
         vm_exit,
         #[cfg(target_os = "macos")]
         boot_senders,
+        #[cfg(not(feature = "tee"))]
+        balloon_enabled: vm_resources.balloon_enabled,
     })
 }
 
