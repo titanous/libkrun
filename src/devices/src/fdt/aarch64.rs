@@ -416,6 +416,30 @@ fn create_gpio_node<T: DeviceInfoForFDT + Clone + Debug>(
     Ok(())
 }
 
+fn create_vmgenid_node<T: DeviceInfoForFDT + Clone + Debug>(
+    fdt: &mut FdtWriter,
+    dev_info: &T,
+) -> Result<()> {
+    let vmgenid_node = fdt.begin_node(&format!("vmgenid@{:x}", dev_info.addr()))?;
+    fdt.property_string("compatible", "microsoft,vmgenid")?;
+
+    // reg = <addr 0x1000> (64-bit address, 64-bit size)
+    let reg = generate_prop64(&[dev_info.addr(), dev_info.length()]);
+    fdt.property("reg", &reg)?;
+
+    // interrupts = <GIC_SPI irq_num IRQ_TYPE_EDGE_RISING>
+    // Platform split: Linux uses GSI directly, macOS subtracts 32 (SPI offset).
+    // This matches the pattern in create_virtio_node, create_serial_node, etc.
+    #[cfg(target_os = "linux")]
+    let irq = generate_prop32(&[GIC_FDT_IRQ_TYPE_SPI, dev_info.irq(), IRQ_TYPE_EDGE_RISING]);
+    #[cfg(target_os = "macos")]
+    let irq = generate_prop32(&[GIC_FDT_IRQ_TYPE_SPI, dev_info.irq() - 32, IRQ_TYPE_EDGE_RISING]);
+    fdt.property("interrupts", &irq)?;
+
+    fdt.end_node(vmgenid_node)?;
+    Ok(())
+}
+
 fn create_devices_node<T: DeviceInfoForFDT + Clone + Debug>(
     fdt: &mut FdtWriter,
     dev_info: &HashMap<(DeviceType, String), T>,
@@ -428,6 +452,7 @@ fn create_devices_node<T: DeviceInfoForFDT + Clone + Debug>(
             DeviceType::Gpio => create_gpio_node(fdt, info)?,
             DeviceType::RTC => create_rtc_node(fdt, info)?,
             DeviceType::Serial => create_serial_node(fdt, info)?,
+            DeviceType::Vmgenid => create_vmgenid_node(fdt, info)?,
             DeviceType::Virtio(_) => {
                 ordered_virtio_device.push(info);
             }
