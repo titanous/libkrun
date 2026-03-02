@@ -82,3 +82,7 @@ pub const VMGENID_GUID_PAGE: u64 = 0xC0000;
 /// Matches the OVMF SDT Header Probe Suppressor convention (Linux vmgenid
 /// driver's ADDR method accounts for this offset).
 pub const VMGENID_GUID_OFFSET: u64 = 40;
+
+/// IRQ number for the ACPI Generic Event Device (GED).
+/// Allocated above the virtio IRQ range (5-15) on IOAPIC pin 16.
+pub const GED_IRQ: u32 = 16;
