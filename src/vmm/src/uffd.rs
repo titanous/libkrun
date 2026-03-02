@@ -335,7 +335,7 @@ impl UffdHandler {
 
                     tokio::spawn(async move {
                         match store_clone.read_page(guest_addr).await {
-                            Ok(data) => {
+                            Ok(Some(data)) => {
                                 let result = unsafe {
                                     uffd_clone.copy(
                                         data.as_ptr() as *const _,
@@ -365,6 +365,11 @@ impl UffdHandler {
                                         // Silently ignore EEXIST — race with preload or another fault
                                     }
                                 }
+                            }
+                            Ok(None) => {
+                                // Page is excluded (absent from snapshot). Phase 5 will handle zero-fill.
+                                // For now, this is a placeholder — Phase 5 will call uffd.zeropage().
+                                // TODO: Implement zero-fill for excluded pages (Phase 5)
                             }
                             Err(e) => {
                                 // Fatal: read_page failed, signal VmExit::Error

@@ -6,7 +6,7 @@
 //! Provides async traits for reading and writing VM snapshots to different
 //! storage backends (filesystem, memory, cloud, etc.).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -57,8 +57,9 @@ pub trait SnapshotStore: Send + Sync + 'static {
     /// # Arguments
     /// * `guest_addr` - Guest physical address of the page
     ///
-    /// Returns the raw page data.
-    fn read_page(&self, guest_addr: u64) -> SendBoxFuture<'_, io::Result<Vec<u8>>>;
+    /// Returns the raw page data, or None if the page is absent (excluded from snapshot).
+    fn read_page(&self, guest_addr: u64) -> SendBoxFuture<'_, io::Result<Option<Vec<u8>>>>;
+
 
     /// Preload a set of memory regions asynchronously.
     ///
@@ -128,6 +129,8 @@ pub struct FsSnapshotStore {
     incremental_snapshots: Arc<Vec<IncrementalSnapshot>>,
     /// Map: guest_addr -> (incremental_index, dirty_page_index) for O(1) lookup (newest-first)
     dirty_page_index: Arc<HashMap<u64, (usize, usize)>>,
+    /// Set of excluded page guest addresses (pages not present in snapshot)
+    excluded_pages: Arc<Mutex<HashSet<u64>>>,
 }
 
 impl FsSnapshotStore {
@@ -139,6 +142,7 @@ impl FsSnapshotStore {
             header: None,
             incremental_snapshots: Arc::new(Vec::new()),
             dirty_page_index: Arc::new(HashMap::new()),
+            excluded_pages: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -155,6 +159,17 @@ impl FsSnapshotStore {
             header: Some(header),
             incremental_snapshots: Arc::new(incremental_snapshots),
             dirty_page_index: Arc::new(dirty_page_index),
+            excluded_pages: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
+
+    /// Set the excluded pages set (pages absent from snapshot).
+    /// Used during reading to know which pages to return None for.
+    /// Also used during writing to know which pages to write to page_index.
+    pub fn set_excluded_pages(&mut self, pages: Vec<u64>) {
+        if let Ok(mut set) = self.excluded_pages.lock() {
+            set.clear();
+            set.extend(pages);
         }
     }
 }
@@ -192,6 +207,7 @@ impl SnapshotStore for FsSnapshotStore {
                     device_states: last_inc.device_states.clone(),
                     gic_state: last_inc.gic_state.clone(),
                     vm_state: last_inc.vm_state.clone(),
+                    excluded_pages: Vec::new(),
                 };
 
                 bincode::serialize(&merged_vmstate)
@@ -200,17 +216,25 @@ impl SnapshotStore for FsSnapshotStore {
         })
     }
 
-    fn read_page(&self, guest_addr: u64) -> SendBoxFuture<'_, io::Result<Vec<u8>>> {
+    fn read_page(&self, guest_addr: u64) -> SendBoxFuture<'_, io::Result<Option<Vec<u8>>>> {
         let base_path = self.base_path.clone();
         let incremental_snapshots = Arc::clone(&self.incremental_snapshots);
         let dirty_page_index = Arc::clone(&self.dirty_page_index);
         let header = self.header.clone();
+        let excluded_pages = Arc::clone(&self.excluded_pages);
 
         Box::pin(async move {
+            // Check if page is excluded (absent from snapshot)
+            if let Ok(set) = excluded_pages.lock() {
+                if set.contains(&guest_addr) {
+                    return Ok(None);
+                }
+            }
+
             // Check if page is in dirty_page_index (newest-first lookup)
             if let Some((inc_idx, page_idx)) = dirty_page_index.get(&guest_addr) {
                 let dirty_page = &incremental_snapshots[*inc_idx].dirty_pages[*page_idx];
-                return Ok(dirty_page.data.clone());
+                return Ok(Some(dirty_page.data.clone()));
             }
 
             // Not in incrementals: read from base memory file
@@ -247,7 +271,7 @@ impl SnapshotStore for FsSnapshotStore {
 
             let mut buffer = vec![0u8; page_size as usize];
             file.read_exact(&mut buffer)?;
-            Ok(buffer)
+            Ok(Some(buffer))
         })
     }
 
@@ -372,17 +396,37 @@ impl SnapshotStore for FsSnapshotStore {
 
     fn write_pages(&self, pages: Vec<(u64, Vec<u8>)>) -> SendBoxFuture<'_, io::Result<()>> {
         let path = self.base_path.clone();
-        Box::pin(async move {
-            if pages.is_empty() {
-                return Ok(());
-            }
+        let excluded_pages = Arc::clone(&self.excluded_pages);
 
+        Box::pin(async move {
             let memory_path = path.join("memory");
             let mut file = fs::File::create(memory_path)?;
-            for (_guest_addr, page_data) in pages {
-                file.write_all(&page_data)?;
+
+            // Write pages sequentially (sparse layout where excluded pages create file holes)
+            if !pages.is_empty() {
+                for (_guest_addr, page_data) in pages {
+                    file.write_all(&page_data)?;
+                }
             }
             file.sync_all()?;
+
+            // Write page_index file with excluded page addresses
+            if let Ok(set) = excluded_pages.lock() {
+                if !set.is_empty() {
+                    // Convert HashSet to sorted Vec for deterministic serialization
+                    let mut excluded_vec: Vec<u64> = set.iter().copied().collect();
+                    excluded_vec.sort_unstable();
+
+                    let page_index_data = bincode::serialize(&excluded_vec)
+                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+
+                    let page_index_path = path.join("page_index");
+                    let mut index_file = fs::File::create(page_index_path)?;
+                    index_file.write_all(&page_index_data)?;
+                    index_file.sync_all()?;
+                }
+            }
+
             Ok(())
         })
     }
@@ -453,12 +497,34 @@ impl SnapshotStoreFactory for FsSnapshotStoreFactory {
                 }
             }
 
-            let store = FsSnapshotStore::new_for_read(
-                self.base_path,
+            let mut store = FsSnapshotStore::new_for_read(
+                self.base_path.clone(),
                 header,
                 incremental_snapshots,
                 dirty_page_index,
             );
+
+            // Read page_index file if present and populate excluded_pages
+            let page_index_path = self.base_path.join("page_index");
+            if page_index_path.exists() {
+                match std::fs::read(&page_index_path) {
+                    Ok(data) => {
+                        match bincode::deserialize::<Vec<u64>>(&data) {
+                            Ok(excluded_pages) => {
+                                store.set_excluded_pages(excluded_pages);
+                            }
+                            Err(e) => {
+                                // Non-fatal: if page_index is corrupted, continue without excluded pages
+                                log::warn!("Failed to deserialize page_index: {e}");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        // Non-fatal: if page_index doesn't exist or can't be read, continue
+                        log::debug!("page_index file not found or unreadable: {e}");
+                    }
+                }
+            }
 
             Ok(Box::new(store) as Box<dyn SnapshotStore>)
         })
@@ -477,7 +543,7 @@ mod tests {
             Box::pin(async { Err(io::Error::new(io::ErrorKind::Unsupported, "mock")) })
         }
 
-        fn read_page(&self, _guest_addr: u64) -> SendBoxFuture<'_, io::Result<Vec<u8>>> {
+        fn read_page(&self, _guest_addr: u64) -> SendBoxFuture<'_, io::Result<Option<Vec<u8>>>> {
             Box::pin(async { Err(io::Error::new(io::ErrorKind::Unsupported, "mock")) })
         }
 
@@ -653,6 +719,7 @@ mod tests {
             device_states: vec![],
             gic_state: None,
             vm_state: None,
+            excluded_pages: Vec::new(),
         };
 
         let base_vmstate_bytes = bincode::serialize(&base_vmstate).unwrap();
@@ -681,6 +748,7 @@ mod tests {
             ],
             gic_state: None,
             vm_state: None,
+            reclaimed_pages: Vec::new(),
         };
         let inc1_bytes = bincode::serialize(&inc1).unwrap();
         fs::write(inc1_path.join("vmstate"), &inc1_bytes).unwrap();
@@ -704,6 +772,7 @@ mod tests {
             ],
             gic_state: None,
             vm_state: None,
+            reclaimed_pages: Vec::new(),
         };
         let inc2_bytes = bincode::serialize(&inc2).unwrap();
         fs::write(inc2_path.join("vmstate"), &inc2_bytes).unwrap();
@@ -716,7 +785,8 @@ mod tests {
 
         // Test read_page: page 0x1000 should come from inc2 (newest)
         let page_0x1000 = futures::executor::block_on(store.read_page(0x1000))
-            .expect("read_page(0x1000) should succeed");
+            .expect("read_page(0x1000) should succeed")
+            .expect("Page 0x1000 should be present");
         assert_eq!(
             page_0x1000,
             vec![0xDDu8; 4096],
@@ -725,7 +795,8 @@ mod tests {
 
         // Test read_page: page 0x2000 should come from inc1
         let page_0x2000 = futures::executor::block_on(store.read_page(0x2000))
-            .expect("read_page(0x2000) should succeed");
+            .expect("read_page(0x2000) should succeed")
+            .expect("Page 0x2000 should be present");
         assert_eq!(
             page_0x2000,
             vec![0xCCu8; 4096],
@@ -734,7 +805,8 @@ mod tests {
 
         // Test read_page: clean page should come from base memory
         let page_0x1800 = futures::executor::block_on(store.read_page(0x1800))
-            .expect("read_page(0x1800) should succeed");
+            .expect("read_page(0x1800) should succeed")
+            .expect("Page 0x1800 should be present");
         assert_eq!(
             page_0x1800[..],
             vec![0xAAu8; 4096][..],
@@ -776,6 +848,7 @@ mod tests {
             device_states: vec![],
             gic_state: None,
             vm_state: None,
+            excluded_pages: Vec::new(),
         };
 
         let base_vmstate_bytes = bincode::serialize(&base_vmstate).unwrap();
@@ -798,6 +871,7 @@ mod tests {
             }],
             gic_state: None,
             vm_state: None,
+            reclaimed_pages: Vec::new(),
         };
         let inc_bytes = bincode::serialize(&inc).unwrap();
         fs::write(inc_path.join("vmstate"), &inc_bytes).unwrap();
@@ -882,6 +956,7 @@ mod tests {
             device_states: vec![],
             gic_state: None,
             vm_state: None,
+            excluded_pages: Vec::new(),
         };
 
         let base_vmstate_bytes = bincode::serialize(&base_vmstate).unwrap();
@@ -904,6 +979,7 @@ mod tests {
             }],
             gic_state: None,
             vm_state: None,
+            reclaimed_pages: Vec::new(),
         };
         let inc1_bytes = bincode::serialize(&inc1).unwrap();
         fs::write(inc1_path.join("vmstate"), &inc1_bytes).unwrap();
@@ -920,6 +996,7 @@ mod tests {
             }],
             gic_state: None,
             vm_state: None,
+            reclaimed_pages: Vec::new(),
         };
         let inc2_bytes = bincode::serialize(&inc2).unwrap();
         fs::write(inc2_path.join("vmstate"), &inc2_bytes).unwrap();
@@ -986,6 +1063,7 @@ mod tests {
             device_states: vec![],
             gic_state: None,
             vm_state: None,
+            excluded_pages: Vec::new(),
         };
 
         let base_vmstate_bytes = bincode::serialize(&base_vmstate).unwrap();
