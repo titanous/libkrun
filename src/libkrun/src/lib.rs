@@ -2193,6 +2193,11 @@ pub extern "C" fn krun_add_vsock(ctx_id: u32, tsi_features: u32) -> i32 {
     }
 
     with_builder(ctx_id, |cfg| {
+        #[cfg(feature = "vhost-user")]
+        if cfg.config.vhost_user_vsock {
+            return -libc::EEXIST;
+        }
+
         if cfg.config.vsock_config != VsockConfig::Disabled {
             return -libc::EEXIST;
         }
@@ -2590,6 +2595,65 @@ impl Builder {
             tag: tag.to_string(),
             socket_path: socket_path.to_string(),
             dax_window_mib,
+        });
+        Ok(self)
+    }
+
+    /// Configure a vhost-user-vsock device via Unix socket path.
+    ///
+    /// The backend process must be listening at `socket_path` before the VM starts.
+    /// Cannot be used together with `krun_add_vsock()` (userspace vsock).
+    #[cfg(not(feature = "tee"))]
+    #[cfg(feature = "vhost-user")]
+    pub fn add_vsock_vhost_user(
+        &mut self,
+        socket_path: &str,
+    ) -> Result<&mut Self, StartError> {
+        use vmm::vmm_config::vhost_user_vsock::{VhostUserVsockConfig, VhostUserVsockConnection};
+
+        // Reject if explicit userspace vsock was already configured via krun_add_vsock()
+        if matches!(self.config.vsock_config, VsockConfig::Explicit { .. }) {
+            return Err(StartError::VsockConflict);
+        }
+        if self.config.vhost_user_vsock {
+            return Err(StartError::VsockConflict);
+        }
+
+        // Do NOT set vsock_config = Disabled — leave it as Implicit so that
+        // krun_add_vsock_port() still accepts port configs (stored but unused,
+        // per design: "The API does not error — the config is stored but unused").
+        // The build flow in lib.rs checks vhost_user_vsock to skip userspace vsock creation.
+        self.config.vhost_user_vsock = true;
+
+        self.config.vmr.set_vhost_user_vsock(VhostUserVsockConfig {
+            connection: VhostUserVsockConnection::SocketPath(socket_path.to_string()),
+        });
+        Ok(self)
+    }
+
+    /// Configure a vhost-user-vsock device via pre-provisioned file descriptor.
+    ///
+    /// The `stream` must be a connected UnixStream to the vhost-user backend.
+    /// Cannot be used together with `krun_add_vsock()` (userspace vsock).
+    #[cfg(not(feature = "tee"))]
+    #[cfg(feature = "vhost-user")]
+    pub fn add_vsock_vhost_user_fd(
+        &mut self,
+        stream: std::os::unix::net::UnixStream,
+    ) -> Result<&mut Self, StartError> {
+        use vmm::vmm_config::vhost_user_vsock::{VhostUserVsockConfig, VhostUserVsockConnection};
+
+        if matches!(self.config.vsock_config, VsockConfig::Explicit { .. }) {
+            return Err(StartError::VsockConflict);
+        }
+        if self.config.vhost_user_vsock {
+            return Err(StartError::VsockConflict);
+        }
+
+        self.config.vhost_user_vsock = true;
+
+        self.config.vmr.set_vhost_user_vsock(VhostUserVsockConfig {
+            connection: VhostUserVsockConnection::Stream(stream),
         });
         Ok(self)
     }
@@ -3098,6 +3162,8 @@ pub enum StartError {
     ZeroVcpus,
     #[error("tag too long: {} bytes (max 36)", .0)]
     TagTooLong(usize),
+    #[error("cannot configure both userspace vsock and vhost-user vsock")]
+    VsockConflict,
     #[error(transparent)]
     Microvm(#[from] StartMicrovmError),
     #[error("{0:?}")]
