@@ -578,7 +578,7 @@ impl Attr {
             mtimensec: st.st_mtime_nsec as u32,
             ctimensec: st.st_ctime_nsec as u32,
             mode: st.st_mode,
-            #[cfg(all(target_arch = "x86_64"))]
+            #[cfg(target_arch = "x86_64")]
             nlink: st.st_nlink as u32,
             #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
             nlink: st.st_nlink,
@@ -816,11 +816,9 @@ pub struct SetattrIn {
 unsafe impl ByteValued for SetattrIn {}
 
 impl From<SetattrIn> for bindings::stat64 {
-    #[allow(clippy::useless_conversion)]
     fn from(sai: SetattrIn) -> bindings::stat64 {
         let mut out: bindings::stat64 = unsafe { mem::zeroed() };
-        // We need this conversion on macOS.
-        out.st_mode = sai.mode.try_into().unwrap();
+        out.st_mode = sai.mode;
         out.st_uid = sai.uid;
         out.st_gid = sai.gid;
         out.st_size = sai.size as i64;
