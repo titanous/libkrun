@@ -17,7 +17,10 @@ pub use devices::virtio::block::{
 #[cfg(not(feature = "tee"))]
 pub use devices::virtio::fs::dax_mapper;
 #[cfg(not(feature = "tee"))]
-pub use devices::virtio::fs::filesystem::FileSystem;
+pub use devices::virtio::fs::filesystem::{
+    Context as FilesystemContext, DirEntry, Entry, FileSystem, Handle, Inode, OpenOptions,
+    ZeroCopyReader, ZeroCopyWriter,
+};
 #[cfg(not(feature = "tee"))]
 pub use devices::virtio::fs::passthrough;
 #[cfg(feature = "net")]

@@ -50,6 +50,16 @@ mod loopback_net;
 #[cfg(feature = "host")]
 mod mock_snapshot_store;
 
+#[cfg(feature = "host")]
+mod failing_block_backend;
+
+#[cfg(feature = "host")]
+mod slow_block_backend;
+
+// NOTE: minimal_filesystem deferred - requires exact FileSystem trait signature fixes
+// #[cfg(feature = "host")]
+// mod minimal_filesystem;
+
 mod test_custom_block_backend;
 use test_custom_block_backend::TestCustomBlockBackend;
 
@@ -100,6 +110,31 @@ use test_balloon_uffd::TestBalloonUffdZeroFill;
 
 mod test_snapshot_rng_reseed;
 use test_snapshot_rng_reseed::TestSnapshotRngReseed;
+
+mod test_block_backend_errors;
+use test_block_backend_errors::TestBlockBackendErrors;
+
+mod test_block_backend_slow;
+use test_block_backend_slow::TestBlockBackendSlow;
+
+// NOTE: test_virtiofs_minimal deferred - requires exact FileSystem trait signature fixes
+// mod test_virtiofs_minimal;
+// use test_virtiofs_minimal::TestVirtiofsMinimalFs;
+
+mod test_balloon_snapshot_uffd;
+use test_balloon_snapshot_uffd::TestBalloonSnapshotUffd;
+
+mod test_block_snapshot_uffd;
+use test_block_snapshot_uffd::TestBlockSnapshotUffd;
+
+mod test_virtiofs_dax_snapshot;
+use test_virtiofs_dax_snapshot::TestVirtiofsDaxSnapshot;
+
+mod test_balloon_snapshot_race;
+use test_balloon_snapshot_race::TestBalloonSnapshotRace;
+
+mod test_uffd_balloon_parallel;
+use test_uffd_balloon_parallel::TestUffdBalloonParallel;
 
 pub fn test_cases() -> Vec<TestCase> {
     // Register your test here:
@@ -193,6 +228,14 @@ pub fn test_cases() -> Vec<TestCase> {
             Box::new(TestBalloonIncrementalReclaimed),
         ),
         TestCase::new("snapshot-rng-reseed", Box::new(TestSnapshotRngReseed)),
+        TestCase::new("block-backend-errors", Box::new(TestBlockBackendErrors)),
+        TestCase::new("block-backend-slow", Box::new(TestBlockBackendSlow)),
+        // TestCase::new("virtiofs-minimal-fs", Box::new(TestVirtiofsMinimalFs)), // Deferred
+        TestCase::new("balloon-snapshot-uffd", Box::new(TestBalloonSnapshotUffd)),
+        TestCase::new("block-snapshot-uffd", Box::new(TestBlockSnapshotUffd)),
+        TestCase::new("virtiofs-dax-snapshot", Box::new(TestVirtiofsDaxSnapshot)),
+        TestCase::new("balloon-snapshot-race", Box::new(TestBalloonSnapshotRace)),
+        TestCase::new("uffd-balloon-parallel", Box::new(TestUffdBalloonParallel)),
     ]
 }
 

@@ -1,8 +1,9 @@
-//! In-memory AsyncBlockBackend for integration tests.
+//! AsyncBlockBackend that returns I/O errors on configured sectors.
 //!
-//! Data is stored in a shared Arc<Mutex<Vec<u8>>> so the host can inspect
-//! what the guest read/wrote after the VM exits.
+//! Used by test_block_backend_errors.rs to verify guest and VMM behavior
+//! when a block backend returns transient or permanent I/O errors.
 
+use std::collections::HashSet;
 use std::io;
 use std::sync::Arc;
 
@@ -11,38 +12,46 @@ use krun::{
     VolatileSliceGuard,
 };
 
-pub struct MemBlockBackend {
+/// A block backend that returns `ErrorKind::Other` for any sector included
+/// in the configured error set. All other sectors behave like MemBlockBackend.
+pub struct FailingBlockBackend {
     data: Arc<tokio::sync::Mutex<Vec<u8>>>,
     sector_count: u64,
+    /// Byte offsets (multiples of 512) at which reads/writes return an error.
+    error_offsets: Arc<HashSet<u64>>,
 }
 
-impl MemBlockBackend {
-    /// Create a backend with `sector_count` sectors (each 512 bytes), pre-filled with `fill`.
-    /// Returns the backend and a handle to inspect the data after the VM exits.
-    pub fn new(sector_count: u64, fill: u8) -> (Self, Arc<tokio::sync::Mutex<Vec<u8>>>) {
+impl FailingBlockBackend {
+    /// Create a backend with `sector_count` sectors pre-filled with `fill`.
+    ///
+    /// `error_sectors` is a list of sector indices (0-based) that will return
+    /// `io::Error` on reads and writes.
+    pub fn new(
+        sector_count: u64,
+        fill: u8,
+        error_sectors: impl IntoIterator<Item = u64>,
+    ) -> (Self, Arc<tokio::sync::Mutex<Vec<u8>>>) {
         let size = (sector_count * 512) as usize;
         let data = Arc::new(tokio::sync::Mutex::new(vec![fill; size]));
+        let error_offsets: HashSet<u64> = error_sectors.into_iter().map(|s| s * 512).collect();
         (
-            MemBlockBackend {
+            FailingBlockBackend {
                 data: data.clone(),
                 sector_count,
+                error_offsets: Arc::new(error_offsets),
             },
             data,
         )
     }
 
-    /// Create a backend from an existing data buffer (for phase-2 restore scenarios).
-    pub fn from_data(data: Arc<tokio::sync::Mutex<Vec<u8>>>) -> Self {
-        let sector_count = {
-            // Compute from current buffer size; caller must ensure it is sector-aligned
-            let guard = data.blocking_lock();
-            (guard.len() / 512) as u64
-        };
-        MemBlockBackend { data, sector_count }
+    fn has_error(&self, byte_offset: u64, len: u64) -> bool {
+        self.error_offsets
+            .iter()
+            .any(|&err| err >= byte_offset && err < byte_offset + len)
     }
 }
 
-impl AsyncBlockBackend for MemBlockBackend {
+impl AsyncBlockBackend for FailingBlockBackend {
     fn cache_type(&self) -> CacheType {
         CacheType::Writeback
     }
@@ -52,7 +61,7 @@ impl AsyncBlockBackend for MemBlockBackend {
     }
 
     fn image_id(&self) -> &[u8] {
-        b"mem-block-backend"
+        b"failing-block-backend"
     }
 
     fn read_vectored_at(
@@ -60,6 +69,15 @@ impl AsyncBlockBackend for MemBlockBackend {
         bufs: Vec<VolatileSliceGuard>,
         offset: u64,
     ) -> BoxFuture<'_, io::Result<usize>> {
+        let total_len: usize = bufs.iter().map(|b| b.len()).sum();
+        if self.has_error(offset, total_len as u64) {
+            return Box::pin(async move {
+                Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("simulated read error at offset {offset}"),
+                ))
+            });
+        }
         let data = self.data.clone();
         Box::pin(async move {
             let buf = data.lock().await;
@@ -68,7 +86,7 @@ impl AsyncBlockBackend for MemBlockBackend {
             for iov in &bufs {
                 let len = iov.len();
                 let src = &buf[pos..pos + len];
-                // SAFETY: `src` length == `iov.len()`; memory valid for duration of copy.
+                // SAFETY: src.len() == iov.len(); memory valid for duration of copy.
                 unsafe { iov.copy_from(src) };
                 pos += len;
                 total += len;
@@ -82,6 +100,15 @@ impl AsyncBlockBackend for MemBlockBackend {
         bufs: Vec<VolatileSliceGuard>,
         offset: u64,
     ) -> BoxFuture<'_, io::Result<usize>> {
+        let total_len: usize = bufs.iter().map(|b| b.len()).sum();
+        if self.has_error(offset, total_len as u64) {
+            return Box::pin(async move {
+                Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("simulated write error at offset {offset}"),
+                ))
+            });
+        }
         let data = self.data.clone();
         Box::pin(async move {
             let mut buf = data.lock().await;
@@ -90,7 +117,7 @@ impl AsyncBlockBackend for MemBlockBackend {
             for iov in &bufs {
                 let len = iov.len();
                 let dst = &mut buf[pos..pos + len];
-                // SAFETY: `dst` length == `iov.len()`; memory valid for duration of copy.
+                // SAFETY: dst.len() == iov.len(); memory valid for duration of copy.
                 unsafe { iov.copy_to(dst) };
                 pos += len;
                 total += len;
@@ -117,6 +144,14 @@ impl AsyncBlockBackend for MemBlockBackend {
         nbytes: u64,
         _unmap: bool,
     ) -> BoxFuture<'_, io::Result<()>> {
+        if self.has_error(offset, nbytes) {
+            return Box::pin(async move {
+                Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("simulated write_zeroes error at offset {offset}"),
+                ))
+            });
+        }
         let data = self.data.clone();
         Box::pin(async move {
             let mut buf = data.lock().await;
@@ -128,13 +163,13 @@ impl AsyncBlockBackend for MemBlockBackend {
     }
 }
 
-pub struct MemBlockBackendFactory {
+pub struct FailingBlockBackendFactory {
     sector_count: u64,
-    backend: Option<MemBlockBackend>,
+    backend: Option<FailingBlockBackend>,
 }
 
-impl MemBlockBackendFactory {
-    pub fn new(backend: MemBlockBackend) -> Self {
+impl FailingBlockBackendFactory {
+    pub fn new(backend: FailingBlockBackend) -> Self {
         let sector_count = backend.sector_count;
         Self {
             sector_count,
@@ -143,7 +178,7 @@ impl MemBlockBackendFactory {
     }
 }
 
-impl AsyncBlockBackendFactory for MemBlockBackendFactory {
+impl AsyncBlockBackendFactory for FailingBlockBackendFactory {
     fn nsectors(&self) -> u64 {
         self.sector_count
     }

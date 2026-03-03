@@ -1,48 +1,47 @@
-//! In-memory AsyncBlockBackend for integration tests.
+//! AsyncBlockBackend with configurable per-operation delay.
 //!
-//! Data is stored in a shared Arc<Mutex<Vec<u8>>> so the host can inspect
-//! what the guest read/wrote after the VM exits.
+//! Used by test_block_backend_slow.rs to exercise VMM behavior under
+//! a block backend with artificial latency.
 
 use std::io;
 use std::sync::Arc;
+use std::time::Duration;
 
 use krun::{
     AsyncBlockBackend, AsyncBlockBackendFactory, BoxFuture, CacheType, SendBoxFuture,
     VolatileSliceGuard,
 };
 
-pub struct MemBlockBackend {
+/// A block backend that inserts a fixed delay before every read or write,
+/// then delegates to an in-memory buffer.
+pub struct SlowBlockBackend {
     data: Arc<tokio::sync::Mutex<Vec<u8>>>,
     sector_count: u64,
+    delay: Duration,
 }
 
-impl MemBlockBackend {
-    /// Create a backend with `sector_count` sectors (each 512 bytes), pre-filled with `fill`.
-    /// Returns the backend and a handle to inspect the data after the VM exits.
-    pub fn new(sector_count: u64, fill: u8) -> (Self, Arc<tokio::sync::Mutex<Vec<u8>>>) {
+impl SlowBlockBackend {
+    /// Create a backend with `sector_count` sectors pre-filled with `fill` and
+    /// a `delay` applied before every read or write operation.
+    pub fn new(
+        sector_count: u64,
+        fill: u8,
+        delay: Duration,
+    ) -> (Self, Arc<tokio::sync::Mutex<Vec<u8>>>) {
         let size = (sector_count * 512) as usize;
         let data = Arc::new(tokio::sync::Mutex::new(vec![fill; size]));
         (
-            MemBlockBackend {
+            SlowBlockBackend {
                 data: data.clone(),
                 sector_count,
+                delay,
             },
             data,
         )
     }
-
-    /// Create a backend from an existing data buffer (for phase-2 restore scenarios).
-    pub fn from_data(data: Arc<tokio::sync::Mutex<Vec<u8>>>) -> Self {
-        let sector_count = {
-            // Compute from current buffer size; caller must ensure it is sector-aligned
-            let guard = data.blocking_lock();
-            (guard.len() / 512) as u64
-        };
-        MemBlockBackend { data, sector_count }
-    }
 }
 
-impl AsyncBlockBackend for MemBlockBackend {
+impl AsyncBlockBackend for SlowBlockBackend {
     fn cache_type(&self) -> CacheType {
         CacheType::Writeback
     }
@@ -52,7 +51,7 @@ impl AsyncBlockBackend for MemBlockBackend {
     }
 
     fn image_id(&self) -> &[u8] {
-        b"mem-block-backend"
+        b"slow-block-backend"
     }
 
     fn read_vectored_at(
@@ -61,14 +60,16 @@ impl AsyncBlockBackend for MemBlockBackend {
         offset: u64,
     ) -> BoxFuture<'_, io::Result<usize>> {
         let data = self.data.clone();
+        let delay = self.delay;
         Box::pin(async move {
+            tokio::time::sleep(delay).await;
             let buf = data.lock().await;
             let mut pos = offset as usize;
             let mut total = 0usize;
             for iov in &bufs {
                 let len = iov.len();
                 let src = &buf[pos..pos + len];
-                // SAFETY: `src` length == `iov.len()`; memory valid for duration of copy.
+                // SAFETY: src.len() == iov.len(); memory valid for duration of copy.
                 unsafe { iov.copy_from(src) };
                 pos += len;
                 total += len;
@@ -83,14 +84,16 @@ impl AsyncBlockBackend for MemBlockBackend {
         offset: u64,
     ) -> BoxFuture<'_, io::Result<usize>> {
         let data = self.data.clone();
+        let delay = self.delay;
         Box::pin(async move {
+            tokio::time::sleep(delay).await;
             let mut buf = data.lock().await;
             let mut pos = offset as usize;
             let mut total = 0usize;
             for iov in &bufs {
                 let len = iov.len();
                 let dst = &mut buf[pos..pos + len];
-                // SAFETY: `dst` length == `iov.len()`; memory valid for duration of copy.
+                // SAFETY: dst.len() == iov.len(); memory valid for duration of copy.
                 unsafe { iov.copy_to(dst) };
                 pos += len;
                 total += len;
@@ -118,7 +121,9 @@ impl AsyncBlockBackend for MemBlockBackend {
         _unmap: bool,
     ) -> BoxFuture<'_, io::Result<()>> {
         let data = self.data.clone();
+        let delay = self.delay;
         Box::pin(async move {
+            tokio::time::sleep(delay).await;
             let mut buf = data.lock().await;
             let start = offset as usize;
             let end = start + nbytes as usize;
@@ -128,13 +133,13 @@ impl AsyncBlockBackend for MemBlockBackend {
     }
 }
 
-pub struct MemBlockBackendFactory {
+pub struct SlowBlockBackendFactory {
     sector_count: u64,
-    backend: Option<MemBlockBackend>,
+    backend: Option<SlowBlockBackend>,
 }
 
-impl MemBlockBackendFactory {
-    pub fn new(backend: MemBlockBackend) -> Self {
+impl SlowBlockBackendFactory {
+    pub fn new(backend: SlowBlockBackend) -> Self {
         let sector_count = backend.sector_count;
         Self {
             sector_count,
@@ -143,7 +148,7 @@ impl MemBlockBackendFactory {
     }
 }
 
-impl AsyncBlockBackendFactory for MemBlockBackendFactory {
+impl AsyncBlockBackendFactory for SlowBlockBackendFactory {
     fn nsectors(&self) -> u64 {
         self.sector_count
     }
