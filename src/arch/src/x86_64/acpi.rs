@@ -58,7 +58,7 @@ pub fn setup_acpi_tables(guest_mem: &GuestMemoryMmap, guid_addr: u64, ged_irq: u
 
     // VMGENID device under \_SB
     let vgen = Device::new(
-        Path::new("\\_SB.VGEN"),
+        Path::new("\\_SB_.VGEN"),
         vec![
             &hid_name,
             &cid_name,
@@ -74,14 +74,14 @@ pub fn setup_acpi_tables(guest_mem: &GuestMemoryMmap, guid_addr: u64, ged_irq: u
     let ged_crs_resource = ResourceTemplate::new(vec![&interrupt]);
     let ged_crs_name = Name::new(Path::new("_CRS"), &ged_crs_resource);
     let equal_check = Equal::new(&Arg(0), &ged_irq_dword);
-    let vgen_path = Path::new("\\_SB.VGEN");
+    let vgen_path = Path::new("\\_SB_.VGEN");
     let notify_call = Notify::new(&vgen_path, &0x80u8);
     let evt_if = If::new(&equal_check, vec![&notify_call]);
     let evt_method = Method::new(Path::new("_EVT"), 1, true, vec![&evt_if]);
 
     // GED device under \_SB
     let ged = Device::new(
-        Path::new("\\_SB.GED"),
+        Path::new("\\_SB_.GED_"),
         vec![
             &ged_hid_name,
             &ged_crs_name,
@@ -90,7 +90,7 @@ pub fn setup_acpi_tables(guest_mem: &GuestMemoryMmap, guid_addr: u64, ged_irq: u
     );
 
     // Wrap devices in \_SB scope
-    let sb_scope = Scope::new(Path::new("\\_SB"), vec![&vgen, &ged]);
+    let sb_scope = Scope::new(Path::new("\\_SB_"), vec![&vgen, &ged]);
 
     // Serialize AML to bytes
     let mut dsdt_aml = Vec::<u8>::new();
