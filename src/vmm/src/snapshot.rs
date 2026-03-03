@@ -99,7 +99,8 @@ impl From<io::Error> for SnapshotError {
     }
 }
 
-pub(crate) fn validate_magic_and_version(header: &SnapshotHeader) -> Result<(), SnapshotError> {
+#[doc(hidden)]
+pub fn validate_magic_and_version(header: &SnapshotHeader) -> Result<(), SnapshotError> {
     if header.magic != SNAPSHOT_MAGIC {
         return Err(SnapshotError::InvalidMagic);
     }
