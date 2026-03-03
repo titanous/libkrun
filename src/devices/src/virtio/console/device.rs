@@ -421,6 +421,37 @@ impl VirtioDevice for Console {
         true
     }
 
+    fn begin_snapshot_quiesce(
+        &mut self,
+        _timeout: std::time::Duration,
+    ) -> Result<(), crate::snapshot::SnapshotError> {
+        // Shut down port threads so they stop reading/writing guest memory.
+        // This is critical for restore: without it, TX threads continue to
+        // read from guest RAM while load_memory overwrites it, causing stale
+        // descriptors to be processed (leaking binary data to the console).
+        for port in &mut self.ports {
+            port.shutdown();
+        }
+        Ok(())
+    }
+
+    fn abort_snapshot_quiesce(&mut self) {
+        // Restart port threads after a snapshot save (normal path).
+        // Port threads took queues via .take() before quiesce shut them down,
+        // so self.queues entries are None. Rebuild from snapshot_queues
+        // (which sync_queues_for_snapshot already updated with live indices).
+        for (i, opt_dq) in self.queues.iter_mut().enumerate() {
+            if opt_dq.is_none() && i < self.snapshot_queues.len() && i < self.queue_events.len() {
+                *opt_dq = Some(DeviceQueue::new(
+                    self.snapshot_queues[i].clone(),
+                    self.queue_events[i].clone(),
+                ));
+            }
+        }
+        // For restore, ports are restarted by post_restore_kick() instead.
+        self.restore_ports_after_snapshot();
+    }
+
     fn sync_queues_for_snapshot(&mut self) {
         let DeviceState::Activated(ref mem, _) = self.device_state else {
             return;
