@@ -238,14 +238,18 @@ impl FsBackend {
                     "[test-daemon] FUSE opcode={} nodeid={} unique={} len={}",
                     header.opcode, header.nodeid, header.unique, header.len
                 );
-                let response_body = match header.opcode {
-                    FUSE_INIT => self.handle_init(&header, &request_bytes),
+                let (error, response_body) = match header.opcode {
+                    FUSE_INIT => (0, self.handle_init(&header, &request_bytes)),
                     FUSE_LOOKUP => self.handle_lookup(&header, &request_bytes),
                     FUSE_GETATTR => self.handle_getattr(&header, &request_bytes),
-                    FUSE_OPEN => self.handle_open(&header, &request_bytes),
-                    FUSE_READ => self.handle_read(&header, &request_bytes),
-                    FUSE_SETUPMAPPING => self.handle_setupmapping(&header, &request_bytes),
-                    FUSE_REMOVEMAPPING => self.handle_removemapping(&header, &request_bytes),
+                    FUSE_SETATTR => self.handle_setattr(&header, &request_bytes),
+                    FUSE_OPEN => (0, self.handle_open(&header, &request_bytes)),
+                    FUSE_READ => (0, self.handle_read(&header, &request_bytes)),
+                    FUSE_WRITE => (0, self.handle_write(&header, &request_bytes)),
+                    FUSE_FLUSH | FUSE_RELEASE => (0, vec![]),
+                    FUSE_SETUPMAPPING => (0, self.handle_setupmapping(&header, &request_bytes)),
+                    FUSE_REMOVEMAPPING => (0, self.handle_removemapping(&header, &request_bytes)),
+                    FUSE_GETXATTR | FUSE_REMOVEXATTR => (-libc::ENODATA, vec![]),
                     FUSE_FORGET | FUSE_BATCH_FORGET => {
                         // No response - just mark as used with 0 bytes
                         vring_lock
@@ -254,13 +258,13 @@ impl FsBackend {
                             .ok();
                         continue;
                     }
-                    _ => vec![],
+                    _ => (0, vec![]),
                 };
 
                 // Build FuseOutHeader
                 let out_header = FuseOutHeader {
                     len: (std::mem::size_of::<FuseOutHeader>() + response_body.len()) as u32,
-                    error: 0,
+                    error,
                     unique: header.unique,
                 };
                 let mut response = struct_to_bytes(&out_header);
@@ -328,7 +332,7 @@ impl FsBackend {
         struct_to_bytes(&response)
     }
 
-    fn handle_lookup(&self, _header: &FuseInHeader, request_bytes: &[u8]) -> Vec<u8> {
+    fn handle_lookup(&self, _header: &FuseInHeader, request_bytes: &[u8]) -> (i32, Vec<u8>) {
         // Parse filename from request
         let filename = if request_bytes.len() > std::mem::size_of::<FuseInHeader>() {
             let name_start = std::mem::size_of::<FuseInHeader>();
@@ -374,27 +378,17 @@ impl FsBackend {
                     flags: if inode.dax_enabled { FUSE_ATTR_DAX } else { 0 },
                 },
             };
-            let bytes = struct_to_bytes(&response);
-            // Debug: verify flags field position (should be at offset 124 of FuseEntryOut)
-            if bytes.len() >= 128 {
-                let flags_bytes = &bytes[124..128];
-                let flags_val = u32::from_le_bytes([
-                    flags_bytes[0],
-                    flags_bytes[1],
-                    flags_bytes[2],
-                    flags_bytes[3],
-                ]);
-                eprintln!("[test-daemon] LOOKUP response: nodeid={} dax_enabled={} attr.flags={:#x} response_len={}",
-                    inode.nodeid, inode.dax_enabled, flags_val, bytes.len());
-            }
-            bytes
+            eprintln!(
+                "[test-daemon] LOOKUP response: nodeid={} dax_enabled={}",
+                inode.nodeid, inode.dax_enabled
+            );
+            (0, struct_to_bytes(&response))
         } else {
-            // ENOENT - return empty body with error in header
-            vec![]
+            (-libc::ENOENT, vec![])
         }
     }
 
-    fn handle_getattr(&self, header: &FuseInHeader, _request_bytes: &[u8]) -> Vec<u8> {
+    fn handle_getattr(&self, header: &FuseInHeader, _request_bytes: &[u8]) -> (i32, Vec<u8>) {
         let fs = self.fs.borrow();
         // Look up by nodeid
         if let Some(inode) = fs.inodes.get(&header.nodeid) {
@@ -421,10 +415,15 @@ impl FsBackend {
                     flags: if inode.dax_enabled { FUSE_ATTR_DAX } else { 0 },
                 },
             };
-            struct_to_bytes(&response)
+            (0, struct_to_bytes(&response))
         } else {
-            vec![]
+            (-libc::ENOENT, vec![])
         }
+    }
+
+    fn handle_setattr(&self, header: &FuseInHeader, _request_bytes: &[u8]) -> (i32, Vec<u8>) {
+        // Return current attributes (ignore the requested changes for this test daemon)
+        self.handle_getattr(header, _request_bytes)
     }
 
     fn handle_open(&self, header: &FuseInHeader, _request_bytes: &[u8]) -> Vec<u8> {
@@ -467,6 +466,40 @@ impl FsBackend {
             } else {
                 vec![]
             }
+        }
+    }
+
+    fn handle_write(&mut self, _header: &FuseInHeader, request_bytes: &[u8]) -> Vec<u8> {
+        let write_in: Option<FuseWriteIn> = if request_bytes.len()
+            >= std::mem::size_of::<FuseInHeader>() + std::mem::size_of::<FuseWriteIn>()
+        {
+            bytes_to_struct(&request_bytes[std::mem::size_of::<FuseInHeader>()..])
+        } else {
+            None
+        };
+
+        if let Some(write_in) = write_in {
+            let data_offset =
+                std::mem::size_of::<FuseInHeader>() + std::mem::size_of::<FuseWriteIn>();
+            let data = &request_bytes[data_offset..];
+            let size = std::cmp::min(write_in.size as usize, data.len());
+
+            // Store written data in filesystem
+            let mut fs = self.fs.borrow_mut();
+            let entry = fs.file_data.entry(write_in.fh).or_default();
+            let offset = write_in.offset as usize;
+            if offset + size > entry.len() {
+                entry.resize(offset + size, 0);
+            }
+            entry[offset..offset + size].copy_from_slice(&data[..size]);
+
+            let response = FuseWriteOut {
+                size: size as u32,
+                padding: 0,
+            };
+            struct_to_bytes(&response)
+        } else {
+            vec![]
         }
     }
 

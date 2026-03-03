@@ -5,8 +5,14 @@
 pub const FUSE_LOOKUP: u32 = 1;
 pub const FUSE_FORGET: u32 = 2;
 pub const FUSE_GETATTR: u32 = 3;
+pub const FUSE_SETATTR: u32 = 4;
 pub const FUSE_OPEN: u32 = 14;
 pub const FUSE_READ: u32 = 15;
+pub const FUSE_WRITE: u32 = 16;
+pub const FUSE_FLUSH: u32 = 25;
+pub const FUSE_RELEASE: u32 = 18;
+pub const FUSE_GETXATTR: u32 = 22;
+pub const FUSE_REMOVEXATTR: u32 = 24;
 pub const FUSE_INIT: u32 = 26;
 pub const FUSE_BATCH_FORGET: u32 = 42;
 pub const FUSE_SETUPMAPPING: u32 = 48;
@@ -133,6 +139,25 @@ pub struct FuseReadIn {
     pub read_flags: u32,
     pub lock_owner: u64,
     pub flags: u32,
+    pub padding: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct FuseWriteIn {
+    pub fh: u64,
+    pub offset: u64,
+    pub size: u32,
+    pub write_flags: u32,
+    pub lock_owner: u64,
+    pub flags: u32,
+    pub padding: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct FuseWriteOut {
+    pub size: u32,
     pub padding: u32,
 }
 
