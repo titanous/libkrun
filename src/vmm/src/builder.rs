@@ -1308,17 +1308,20 @@ pub fn build_microvm(
     // Create and register VMGENID device (x86_64 only)
     #[cfg(target_arch = "x86_64")]
     {
-        use arch::x86_64::layout::{VMGENID_GUID_PAGE, VMGENID_GUID_OFFSET, GED_IRQ};
+        use arch::x86_64::layout::{GED_IRQ, VMGENID_GUID_OFFSET, VMGENID_GUID_PAGE};
 
         let vmgenid = devices::vmgenid::Vmgenid::new(
             VMGENID_GUID_PAGE,
             VMGENID_GUID_OFFSET,
             GED_IRQ,
             &vmm.guest_memory,
-        ).map_err(StartMicrovmError::VmgenidCreation)?;
+        )
+        .map_err(StartMicrovmError::VmgenidCreation)?;
 
         // Register the GED EventFd with KVM irqchip
-        vmm.vm.fd().register_irqfd(vmgenid.interrupt_evt(), GED_IRQ)
+        vmm.vm
+            .fd()
+            .register_irqfd(vmgenid.interrupt_evt(), GED_IRQ)
             .map_err(StartMicrovmError::RegisterIrqFd)?;
 
         vmm.vmgenid = Some(vmgenid);
@@ -1327,17 +1330,20 @@ pub fn build_microvm(
     // Create and register VMGENID device (aarch64 only)
     #[cfg(target_arch = "aarch64")]
     {
-        use arch::aarch64::layout::{VMGENID_GUID_PAGE, VMGENID_GUID_OFFSET, VMGENID_SPI};
+        use arch::aarch64::layout::{VMGENID_GUID_OFFSET, VMGENID_GUID_PAGE, VMGENID_SPI};
 
         let vmgenid = devices::vmgenid::Vmgenid::new(
             VMGENID_GUID_PAGE,
             VMGENID_GUID_OFFSET,
             VMGENID_SPI,
             &vmm.guest_memory,
-        ).map_err(StartMicrovmError::VmgenidCreation)?;
+        )
+        .map_err(StartMicrovmError::VmgenidCreation)?;
 
         // Register irqfd: SPI number maps directly to KVM GSI for aarch64.
-        vmm.vm.fd().register_irqfd(vmgenid.interrupt_evt(), VMGENID_SPI)
+        vmm.vm
+            .fd()
+            .register_irqfd(vmgenid.interrupt_evt(), VMGENID_SPI)
             .map_err(StartMicrovmError::RegisterIrqFd)?;
 
         // Register platform device info for FDT generation
@@ -1769,10 +1775,7 @@ fn load_payload(
                     // SAFETY: memfd_create is called with a valid null-terminated C string and valid flags.
                     // File descriptor ownership is transferred to File::from_raw_fd below.
                     let memfd = unsafe {
-                        let fd = libc::memfd_create(
-                            b"kernel\0".as_ptr() as *const libc::c_char,
-                            libc::MFD_CLOEXEC,
-                        );
+                        let fd = libc::memfd_create(c"kernel".as_ptr(), libc::MFD_CLOEXEC);
                         if fd < 0 {
                             error!(
                                 "Failed to create memfd for kernel: {:?}",
@@ -1809,7 +1812,7 @@ fn load_payload(
                     // kernel_size bytes. Regions don't overlap as dest is newly allocated memfd-backed
                     // memory and source is from kernel bundle.
                     unsafe {
-                        let dest = region.as_ptr() as *mut u8;
+                        let dest = region.as_ptr();
                         std::ptr::copy_nonoverlapping(kernel_data.as_ptr(), dest, kernel_size);
                     }
                     debug!("Copied kernel data to file-backed region");
@@ -1995,10 +1998,9 @@ pub fn create_guest_memory(
 
     // For vhost-user devices, we need file-backed memory so the backend can mmap it
     #[cfg(feature = "vhost-user")]
-    let use_vhost_user =
-        !vm_resources.vhost_user_devices.is_empty()
-            || !vm_resources.vhost_user_fs.is_empty()
-            || vm_resources.vhost_user_vsock.is_some();
+    let use_vhost_user = !vm_resources.vhost_user_devices.is_empty()
+        || !vm_resources.vhost_user_fs.is_empty()
+        || vm_resources.vhost_user_vsock.is_some();
     #[cfg(not(feature = "vhost-user"))]
     let use_vhost_user = false;
 
@@ -2023,10 +2025,7 @@ pub fn create_guest_memory(
                     // SAFETY: memfd_create is called with a valid null-terminated C string and valid flags.
                     // File descriptor ownership is transferred to File::from_raw_fd below.
                     let memfd = unsafe {
-                        let fd = libc::memfd_create(
-                            b"guest_mem\0".as_ptr() as *const libc::c_char,
-                            libc::MFD_CLOEXEC,
-                        );
+                        let fd = libc::memfd_create(c"guest_mem".as_ptr(), libc::MFD_CLOEXEC);
                         if fd < 0 {
                             error!("Failed to create memfd: {:?}", io::Error::last_os_error());
                             return Err(io::Error::last_os_error());
@@ -2475,12 +2474,7 @@ fn attach_fs_devices(
 
     for (i, mount) in fs_mounts.drain(..).enumerate() {
         let fs = Arc::new(Mutex::new(
-            devices::virtio::Fs::new(
-                mount.tag,
-                mount.fs,
-                exit_code.clone(),
-            )
-            .unwrap(),
+            devices::virtio::Fs::new(mount.tag, mount.fs, exit_code.clone()).unwrap(),
         ));
 
         let id = format!("{}{}", String::from(fs.lock().unwrap().id()), i);
@@ -2608,8 +2602,8 @@ fn attach_vhost_user_vsock_device(
     config: VhostUserVsockConfig,
     intc: IrqChip,
 ) -> std::result::Result<(), StartMicrovmError> {
-    use devices::virtio::vhost_user::VhostUserVsock;
     use crate::vmm_config::vhost_user_vsock::VhostUserVsockConnection;
+    use devices::virtio::vhost_user::VhostUserVsock;
     use StartMicrovmError::*;
 
     let vhost_vsock = match config.connection {
@@ -2623,8 +2617,7 @@ fn attach_vhost_user_vsock_device(
 
     let device = Arc::new(Mutex::new(vhost_vsock));
     let id = "virtio-vsock-vhost".to_string();
-    attach_mmio_device(vmm, id, intc, device)
-        .map_err(RegisterVhostUserVsockDevice)?;
+    attach_mmio_device(vmm, id, intc, device).map_err(RegisterVhostUserVsockDevice)?;
 
     Ok(())
 }
