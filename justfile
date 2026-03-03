@@ -8,7 +8,7 @@ default: check
 # Format check + clippy
 check:
     cargo fmt --check
-    cargo check -p libkrun --features {{features}}
+    cargo clippy -p libkrun --features {{features}} -- -D warnings
 
 # Build the release library
 build:

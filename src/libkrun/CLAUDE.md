@@ -8,8 +8,7 @@ Public Rust API crate providing `Builder`, `Context`, and `VmHandle` for configu
 ## Contracts
 - **Exposes**: Rust `Builder` struct, `Context` struct, `StartError` enum, `VmExit` enum (re-exported from vmm), `Builder::add_virtiofs_vhost_user()` (behind `vhost-user` feature), `Builder::add_vsock_vhost_user()` and `Builder::add_vsock_vhost_user_fd()` (behind `vhost-user` feature), `vmm::snapshot_store` re-export (behind `snapshot` feature), `VmHandle::snapshot_to_store()`, `VmHandle::incremental_snapshot_to_store()` (behind `snapshot` feature), re-exports of `devices::virtio::fs::{FileSystem, passthrough, dax_mapper}` (behind `not(tee)` feature), `Builder::enable_balloon()`, `BalloonHandle`, `BalloonResult`, `BalloonError`, `VmHandle::balloon()` (behind `not(tee)` feature)
 - **Guarantees**:
-  - `krun_set_vm_config` returns `-EINVAL` when `num_vcpus == 0`
-  - `Builder::vm_config()` returns `Result<&mut Self, StartError>` (was infallible before)
+  - `Builder::vm_config()` returns `Result<&mut Self, StartError>` and validates num_vcpus > 0
   - `StartError::ZeroVcpus` variant for 0-vCPU validation
   - `StartError::TagTooLong(usize)` variant for filesystem tag > 36 bytes
   - `Builder::add_virtiofs_vhost_user(tag, socket_path, dax_window_mib)` returns `Err(TagTooLong)` if tag > 36 bytes; gated behind `vhost-user` + `not(tee)` features
@@ -34,14 +33,13 @@ Public Rust API crate providing `Builder`, `Context`, and `VmHandle` for configu
 
 ## Dependencies
 - **Uses**: `vmm` (build_microvm, Vmm lifecycle, VmExit), `devices` (VirtioNetBackend, console, block, Balloon, VhostUserFs, VhostUserVsock, FileSystem, passthrough, dax_mapper)
-- **Used by**: External consumers via C API or Rust crate
+- **Used by**: External consumers via Rust crate
 - **Boundary**: This is the outermost crate; nothing in src/ should depend on it
 
 ## Key Decisions
 - `Builder::vm_config()` changed from `&mut Self` to `Result<&mut Self, StartError>` for validation
-- C API and Rust API both validate num_vcpus > 0
+- Rust API validates num_vcpus > 0
 - `Builder::add_virtiofs()` signature changed from `(tag, host_path)` to `(tag, Box<dyn FileSystem>, shm_size)` -- old convenience path moved to `add_virtiofs_path()`
-- C API functions (`krun_add_virtiofs`, `krun_add_virtiofs2`) now delegate to `add_virtiofs_path()` internally
 - `FileSystem`, `passthrough`, `dax_mapper` re-exported from crate root for consumer use
 - `Context::run()` polls `SharedVmExit` after each event loop tick to detect VM exit
 - `Context` takes ownership of `SharedVmExit` from `BuiltVm` at construction time

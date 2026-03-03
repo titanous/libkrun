@@ -38,7 +38,7 @@ Last verified: 2026-03-03
 - `blk` - Enables virtio-block backends (tokio, futures)
 - `snapshot` - Enables snapshot/restore (serde, bincode, futures, tokio); includes `SnapshotStore` trait and `FsSnapshotStore`
 - `efi` - EFI boot support (implies blk + net)
-- `vhost-user` - Enables vhost-user device support (virtio-fs with DAX, vsock); build with `VHOST_USER=1 make`
+- `vhost-user` - Enables vhost-user device support (virtio-fs with DAX, vsock); gated by feature flag
 - `uffd` - Enables userfaultfd demand-paging for snapshot restore (implies `snapshot`; Linux-only; adds `userfaultfd` crate)
 
 ## Conventions

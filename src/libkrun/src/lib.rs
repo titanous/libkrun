@@ -1,12 +1,8 @@
-#[macro_use]
-extern crate log;
-
 use crossbeam_channel::unbounded;
 #[cfg(feature = "gpu")]
 use devices::virtio::gpu::display::DisplayInfo;
 #[cfg(feature = "blk")]
 pub use devices::virtio::CacheType;
-use env_logger::{Env, Target};
 #[cfg(feature = "gpu")]
 use krun_display::DisplayBackend;
 use std::ops::{Deref, DerefMut};
@@ -38,33 +34,23 @@ pub use devices::virtio::PortDescription;
 pub use devices::virtio::VmmExitObserver;
 use libc::{c_char, size_t};
 use polly::event_manager::EventManager;
-#[cfg(all(feature = "blk", not(feature = "tee")))]
-use rand::distr::{Alphanumeric, SampleString};
 use std::collections::HashMap;
 use std::convert::TryInto;
-use std::env;
-use std::fs::File;
-use std::io::IsTerminal;
-#[cfg(target_os = "linux")]
-use std::os::fd::AsRawFd;
-use std::os::fd::{BorrowedFd, FromRawFd, RawFd};
+#[cfg(feature = "net")]
+use std::os::fd::RawFd;
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex};
 use utils::eventfd::EventFd;
 use vmm::builder::StartMicrovmError;
 pub use vmm::resources::VirtioConsoleConfigMode;
 use vmm::resources::{
-    DefaultVirtioConsoleConfig, PortConfig, SerialConsoleConfig, TsiFlags, VmResources, VsockConfig,
+    TsiFlags, VmResources, VsockConfig,
 };
 #[cfg(feature = "snapshot")]
 pub use vmm::snapshot_store;
 pub use vmm::vm_exit::VmExit;
 #[cfg(feature = "blk")]
 pub use vmm::vmm_config::block::{BlockConfigError, BlockDeviceConfig, BlockRootConfig};
-#[cfg(not(feature = "tee"))]
-use vmm::vmm_config::external_kernel::{ExternalKernel, KernelFormat};
-#[cfg(not(feature = "tee"))]
-use vmm::vmm_config::firmware::FirmwareConfig;
 #[cfg(not(feature = "tee"))]
 use vmm::vmm_config::fs::FsMount;
 use vmm::vmm_config::kernel_bundle::KernelBundle;
@@ -140,6 +126,8 @@ impl KrunfwBindings {
 
 #[derive(Clone)]
 #[cfg(feature = "net")]
+#[allow(dead_code)]
+// Kept for backwards compatibility; only VirtioNetPasst is currently used
 enum LegacyNetworkConfig {
     VirtioNetPasst(RawFd),
     VirtioNetGvproxy(PathBuf),
@@ -177,6 +165,8 @@ pub struct ContextConfig {
     shutdown_efd: Option<EventFd>,
     gpu_virgl_flags: Option<u32>,
     gpu_shm_size: Option<usize>,
+    #[allow(dead_code)]
+    // Only read when 'snd' feature is enabled; keep field for API completeness
     enable_snd: bool,
     console_output: Option<PathBuf>,
     vmm_uid: Option<libc::uid_t>,
@@ -239,6 +229,8 @@ impl ContextConfig {
     }
 
     #[cfg(feature = "blk")]
+    #[allow(dead_code)]
+    // Kept for backwards compatibility; alternative API exists via Builder
     fn set_data_block_cfg(&mut self, block_cfg: BlockDeviceConfig) {
         self.data_block_cfg = Some(block_cfg);
     }
@@ -289,34 +281,34 @@ impl TryFrom<ContextConfig> for NitroEnclave {
         let vm_config = ctx.vmr.vm_config();
 
         let Some(mem_size_mib) = vm_config.mem_size_mib else {
-            error!("memory size not configured");
+            log::error!("memory size not configured");
             return Err(-libc::EINVAL);
         };
 
         let Some(vcpus) = vm_config.vcpu_count else {
-            error!("vCPU count not configured");
+            log::error!("vCPU count not configured");
             return Err(-libc::EINVAL);
         };
 
         let rootfs = if let Some(path) = &ctx.vmr.fs.first() {
             path.shared_dir.clone()
         } else {
-            error!("rootfs path required");
+            log::error!("rootfs path required");
             return Err(-libc::EINVAL);
         };
 
         let Some(exec_path) = ctx.exec_path else {
-            error!("exec path not specified");
+            log::error!("exec path not specified");
             return Err(-libc::EINVAL);
         };
 
         let Some(exec_env) = ctx.env else {
-            error!("execution env not specified");
+            log::error!("execution env not specified");
             return Err(-libc::EINVAL);
         };
 
         let Some(exec_args) = ctx.args else {
-            error!("execution args not specified");
+            log::error!("execution args not specified");
             return Err(-libc::EINVAL);
         };
 
@@ -332,7 +324,7 @@ impl TryFrom<ContextConfig> for NitroEnclave {
                     let fd = match device.backend() {
                         Some(VirtioNetBackend::UnixstreamFd(fd)) => RawFd::from(*fd),
                         _ => {
-                            error!("configured virtio-net backend must be unix stream fd");
+                            log::error!("configured virtio-net backend must be unix stream fd");
                             return Err(-libc::EINVAL);
                         }
                     };
@@ -340,7 +332,7 @@ impl TryFrom<ContextConfig> for NitroEnclave {
                     Some(fd)
                 }
                 _ => {
-                    error!(
+                    log::error!(
                         "more than one network interface configured (max 1 allowed, found {len})"
                     );
                     return Err(-libc::EINVAL);
@@ -349,7 +341,7 @@ impl TryFrom<ContextConfig> for NitroEnclave {
         };
 
         let Some(output_path) = ctx.console_output else {
-            error!("console output path not specified");
+            log::error!("console output path not specified");
             return Err(-libc::EINVAL);
         };
 

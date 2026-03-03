@@ -11,12 +11,12 @@ Host/guest integration test workspace. Tests run inside real microVMs to verify 
 - **Expects**: `embedded_init` feature enabled; libkrunfw available at runtime (symlinked in test-prefix)
 
 ## Dependencies
-- **Uses**: `libkrun` crate (Rust API, with features: embedded_init, net, blk, snapshot, vhost-user, uffd), `krun-sys` (C API)
+- **Uses**: `libkrun` crate (Rust API, with features: embedded_init, net, blk, snapshot, vhost-user, uffd)
 - **Boundary**: Test daemons (test_daemon, test_vsock_proxy) use `vm-memory` 0.18 with vendored `virtio-queue` 0.17 and `vhost-user-backend` 0.21
 
 ## Running Tests
 ```
-make test FEATURE_FLAGS="--features embedded_init"
+just integration
 ```
 Tests are inherently flaky (VM + network timing). 5-6/6 passing is normal.
 
