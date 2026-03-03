@@ -798,13 +798,7 @@ pub trait FileSystem {
     /// If this method returns an `ENOSYS` error then the kernel will treat it as success and all
     /// subsequent calls to `flush` will be handled by the kernel without being forwarded to the
     /// file system.
-    fn flush(
-        &self,
-        ctx: Context,
-        inode: Inode,
-        handle: Handle,
-        lock_owner: u64,
-    ) -> io::Result<()> {
+    fn flush(&self, ctx: Context, inode: Inode, handle: Handle, lock_owner: u64) -> io::Result<()> {
         Err(io::Error::from_raw_os_error(bindings::LINUX_ENOSYS))
     }
 
@@ -821,13 +815,7 @@ pub trait FileSystem {
     /// If this method returns an `ENOSYS` error then the kernel will treat it as success and all
     /// subsequent calls to `fsync` will be handled by the kernel without being forwarded to the
     /// file system.
-    fn fsync(
-        &self,
-        ctx: Context,
-        inode: Inode,
-        datasync: bool,
-        handle: Handle,
-    ) -> io::Result<()> {
+    fn fsync(&self, ctx: Context, inode: Inode, datasync: bool, handle: Handle) -> io::Result<()> {
         Err(io::Error::from_raw_os_error(bindings::LINUX_ENOSYS))
     }
 
@@ -1098,13 +1086,7 @@ pub trait FileSystem {
     /// undefined.
     ///
     /// `flags` contains used the flags used to open the directory in `opendir`.
-    fn releasedir(
-        &self,
-        ctx: Context,
-        inode: Inode,
-        flags: u32,
-        handle: Handle,
-    ) -> io::Result<()> {
+    fn releasedir(&self, ctx: Context, inode: Inode, flags: u32, handle: Handle) -> io::Result<()> {
         Err(io::Error::from_raw_os_error(bindings::LINUX_ENOSYS))
     }
 

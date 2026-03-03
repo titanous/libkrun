@@ -48,8 +48,6 @@ use riscv64::serial;
 
 #[cfg(target_arch = "x86_64")]
 pub use self::cmos::Cmos;
-#[cfg(target_arch = "x86_64")]
-pub use x86_64::pci_cfg::PciConfigSpace;
 #[cfg(target_os = "macos")]
 pub use self::gicv3::GicV3;
 #[cfg(target_arch = "aarch64")]
@@ -76,6 +74,8 @@ pub use self::rtc_pl031::RTC;
 pub use self::serial::Serial;
 #[cfg(target_os = "macos")]
 pub use self::vcpu::VcpuList;
+#[cfg(target_arch = "x86_64")]
+pub use x86_64::pci_cfg::PciConfigSpace;
 
 // Cannot use multiple types as bounds for a trait object, so we define our own trait
 // which is a composition of the desired bounds. In this case, io::Read and AsRawFd.

@@ -1,3 +1,4 @@
+pub mod dax_mapper;
 mod device;
 pub mod filesystem;
 pub mod fuse;
@@ -5,7 +6,6 @@ pub mod fuse;
 mod multikey;
 mod server;
 mod worker;
-pub mod dax_mapper;
 
 pub mod linux;
 pub use linux::fs_utils;
@@ -14,13 +14,13 @@ pub use linux::passthrough;
 use super::bindings;
 use super::descriptor_utils;
 
+pub use self::dax_mapper::DaxMapper;
 pub use self::defs::uapi::VIRTIO_ID_FS as TYPE_FS;
 pub use self::device::Fs;
 pub use self::filesystem::ExportTable;
-pub use self::dax_mapper::DaxMapper;
 pub use self::filesystem::{
-    Context, DirEntry, Entry, Extensions, FileSystem, GetxattrReply, Handle, Inode,
-    ListxattrReply, SecContext, ZeroCopyReader, ZeroCopyWriter,
+    Context, DirEntry, Entry, Extensions, FileSystem, GetxattrReply, Handle, Inode, ListxattrReply,
+    SecContext, ZeroCopyReader, ZeroCopyWriter,
 };
 
 mod defs {

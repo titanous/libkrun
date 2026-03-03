@@ -2157,7 +2157,11 @@ impl FileSystem for PassthroughFs {
             return Ok(());
         }
 
-        let open_flags = if writable { libc::O_RDWR } else { libc::O_RDONLY };
+        let open_flags = if writable {
+            libc::O_RDWR
+        } else {
+            libc::O_RDONLY
+        };
         let file = self.open_inode(inode, open_flags)?;
         mapper.map_file(moffset, len, file.as_raw_fd(), foffset, writable)?;
         Ok(())

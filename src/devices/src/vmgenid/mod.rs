@@ -52,8 +52,7 @@ impl Vmgenid {
         let mut rng = rand::rng();
         rng.fill(&mut guid);
 
-        let interrupt_evt = EventFd::new(0)
-            .expect("Failed to create EventFd for GED interrupt");
+        let interrupt_evt = EventFd::new(0).expect("Failed to create EventFd for GED interrupt");
 
         let vmgenid = Vmgenid {
             guid_page_addr,
@@ -122,7 +121,10 @@ impl Vmgenid {
     }
 
     /// Writes the current GUID to guest memory at the configured address and offset.
-    fn write_guid_to_memory(&self, mem: &GuestMemoryMmap) -> Result<(), vm_memory::GuestMemoryError> {
+    fn write_guid_to_memory(
+        &self,
+        mem: &GuestMemoryMmap,
+    ) -> Result<(), vm_memory::GuestMemoryError> {
         let addr = GuestAddress(self.guest_addr());
         mem.write_slice(&self.guid, addr)
     }

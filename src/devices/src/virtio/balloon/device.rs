@@ -3,7 +3,10 @@ use std::convert::TryInto;
 use std::io::Write;
 
 use utils::eventfd::EventFd;
-use vm_memory::{Address, ByteValued, Bytes, GuestAddress, GuestMemoryBackend, GuestMemoryMmap, GuestMemoryRegion};
+use vm_memory::{
+    Address, ByteValued, Bytes, GuestAddress, GuestMemoryBackend, GuestMemoryMmap,
+    GuestMemoryRegion,
+};
 
 use super::super::{
     ActivateError, ActivateResult, BalloonError, DeviceQueue, DeviceState, QueueConfig,
@@ -161,7 +164,10 @@ impl Balloon {
             hinting_guest_cmd: None,
             inflated_bitmap: None,
             reported_free_bitmap: None,
-            actual_condvar: std::sync::Arc::new((std::sync::Mutex::new(0), std::sync::Condvar::new())),
+            actual_condvar: std::sync::Arc::new((
+                std::sync::Mutex::new(0),
+                std::sync::Condvar::new(),
+            )),
         })
     }
 
@@ -401,7 +407,10 @@ impl Balloon {
                             stats.update_with_stat(&stat);
                         }
                         Err(e) => {
-                            warn!("balloon: failed to read BalloonStat from stats buffer: {:?}", e);
+                            warn!(
+                                "balloon: failed to read BalloonStat from stats buffer: {:?}",
+                                e
+                            );
                             break;
                         }
                     }
@@ -555,12 +564,18 @@ impl Balloon {
 
         // Signal config change to guest
         self.device_state.signal_config_change();
-        debug!("balloon: initiated free page hinting with cmd_id: {}", cmd_id);
+        debug!(
+            "balloon: initiated free page hinting with cmd_id: {}",
+            cmd_id
+        );
     }
 
     /// Query the reclaimed bitmaps for snapshot integration.
     pub fn reclaimed_bitmaps(&self) -> (Option<&ReclaimedBitmap>, Option<&ReclaimedBitmap>) {
-        (self.inflated_bitmap.as_ref(), self.reported_free_bitmap.as_ref())
+        (
+            self.inflated_bitmap.as_ref(),
+            self.reported_free_bitmap.as_ref(),
+        )
     }
 
     /// Check if the balloon device is active (activated and not inactive).
@@ -964,13 +979,10 @@ mod tests {
         let pfn1: u32 = 0x1;
         let pfn2: u32 = 0x2;
 
-        let pfn_data = vec![
-            pfn1.to_le_bytes(),
-            pfn2.to_le_bytes(),
-        ]
-        .into_iter()
-        .flat_map(|b| b.to_vec())
-        .collect::<Vec<u8>>();
+        let pfn_data = vec![pfn1.to_le_bytes(), pfn2.to_le_bytes()]
+            .into_iter()
+            .flat_map(|b| b.to_vec())
+            .collect::<Vec<u8>>();
 
         mem.write_slice(&pfn_data, GuestAddress(PFN_DATA_ADDR))
             .expect("Failed to write PFN data");
@@ -1006,7 +1018,10 @@ mod tests {
         let result = balloon.process_inflate();
 
         // Verify it returns true (descriptors were processed)
-        assert!(result, "process_inflate should return true when descriptors are available and are processed");
+        assert!(
+            result,
+            "process_inflate should return true when descriptors are available and are processed"
+        );
     }
 
     /// Test process_inflate with invalid PFN (AC1.6)
@@ -1058,13 +1073,10 @@ mod tests {
         let pfn_valid: u32 = 0x1; // Valid: 0x1000
         let pfn_invalid: u32 = 0x10000; // Invalid: 0x10000000, way outside guest memory
 
-        let pfn_data = vec![
-            pfn_valid.to_le_bytes(),
-            pfn_invalid.to_le_bytes(),
-        ]
-        .into_iter()
-        .flat_map(|b| b.to_vec())
-        .collect::<Vec<u8>>();
+        let pfn_data = vec![pfn_valid.to_le_bytes(), pfn_invalid.to_le_bytes()]
+            .into_iter()
+            .flat_map(|b| b.to_vec())
+            .collect::<Vec<u8>>();
 
         mem.write_slice(&pfn_data, GuestAddress(PFN_DATA_ADDR))
             .expect("Failed to write PFN data");
@@ -1101,7 +1113,8 @@ mod tests {
         );
 
         // Descriptor should still be marked as used
-        let used_idx = mem.read_obj::<u16>(GuestAddress(USED_RING_ADDR + 2))
+        let used_idx = mem
+            .read_obj::<u16>(GuestAddress(USED_RING_ADDR + 2))
             .expect("Failed to read used idx");
         assert_eq!(used_idx, 1, "Descriptor should be marked as used");
     }
@@ -1149,13 +1162,10 @@ mod tests {
 
         // Write the same PFN twice
         let pfn: u32 = 0x1;
-        let pfn_data = vec![
-            pfn.to_le_bytes(),
-            pfn.to_le_bytes(),
-        ]
-        .into_iter()
-        .flat_map(|b| b.to_vec())
-        .collect::<Vec<u8>>();
+        let pfn_data = vec![pfn.to_le_bytes(), pfn.to_le_bytes()]
+            .into_iter()
+            .flat_map(|b| b.to_vec())
+            .collect::<Vec<u8>>();
 
         mem.write_slice(&pfn_data, GuestAddress(PFN_DATA_ADDR))
             .expect("Failed to write PFN data");
@@ -1190,7 +1200,8 @@ mod tests {
         );
 
         // Verify descriptor was marked as used
-        let used_idx = mem.read_obj::<u16>(GuestAddress(USED_RING_ADDR + 2))
+        let used_idx = mem
+            .read_obj::<u16>(GuestAddress(USED_RING_ADDR + 2))
             .expect("Failed to read used idx");
         assert_eq!(used_idx, 1, "Descriptor should be marked as used");
     }
@@ -1241,7 +1252,7 @@ mod tests {
         // Set up descriptor for deflate queue
         let desc = Descriptor {
             addr: 0x20000, // Some address in guest memory
-            len: 8, // Some size of PFN buffer (deflate doesn't care about contents)
+            len: 8,        // Some size of PFN buffer (deflate doesn't care about contents)
             flags: 0,
             next: 0,
         };
@@ -1264,10 +1275,14 @@ mod tests {
         let result = balloon.process_deflate();
 
         // Should return true because descriptor was processed
-        assert!(result, "process_deflate should return true when descriptors are available");
+        assert!(
+            result,
+            "process_deflate should return true when descriptors are available"
+        );
 
         // Verify the descriptor was marked as used
-        let used_idx = mem.read_obj::<u16>(GuestAddress(USED_RING_ADDR + 2))
+        let used_idx = mem
+            .read_obj::<u16>(GuestAddress(USED_RING_ADDR + 2))
             .expect("Failed to read used idx");
         assert_eq!(
             used_idx, 1,
@@ -1478,19 +1493,24 @@ mod tests {
         );
 
         // stats() should now return Some with the parsed values
-        let stats = balloon.stats().expect("stats() should return Some after processing");
+        let stats = balloon
+            .stats()
+            .expect("stats() should return Some after processing");
 
         // Verify the stats were parsed correctly
         assert_eq!(
-            stats.free_memory, Some(1024 * 1024),
+            stats.free_memory,
+            Some(1024 * 1024),
             "MEMFREE stat should be 1MB"
         );
         assert_eq!(
-            stats.total_memory, Some(2048 * 1024),
+            stats.total_memory,
+            Some(2048 * 1024),
             "MEMTOT stat should be 2MB"
         );
         assert_eq!(
-            stats.available_memory, Some(512 * 1024),
+            stats.available_memory,
+            Some(512 * 1024),
             "AVAIL stat should be 512KB"
         );
     }
@@ -1563,10 +1583,7 @@ mod tests {
         ];
 
         for (tag, name) in tags {
-            let stat = BalloonStat {
-                tag,
-                val: 12345,
-            };
+            let stat = BalloonStat { tag, val: 12345 };
             stats.update_with_stat(&stat);
             // For each tag, verify that at least one field was set
             match tag {
@@ -1684,8 +1701,11 @@ mod tests {
             .expect("Failed to write page block");
 
         // Write STOP command ID (0 = CMD_ID_STOP)
-        mem.write_obj(uapi::VIRTIO_BALLOON_CMD_ID_STOP, GuestAddress(STOP_CMD_ADDR))
-            .expect("Failed to write stop cmd_id");
+        mem.write_obj(
+            uapi::VIRTIO_BALLOON_CMD_ID_STOP,
+            GuestAddress(STOP_CMD_ADDR),
+        )
+        .expect("Failed to write stop cmd_id");
 
         // Set up descriptor chain (3 descriptors: START, PAGE_BLOCK, STOP)
         // Descriptor 0 (START): 4 bytes
@@ -1756,7 +1776,8 @@ mod tests {
         );
 
         // Verify descriptor was marked as used
-        let used_idx = mem.read_obj::<u16>(GuestAddress(USED_RING_ADDR + 2))
+        let used_idx = mem
+            .read_obj::<u16>(GuestAddress(USED_RING_ADDR + 2))
             .expect("Failed to read used idx");
         assert_eq!(used_idx, 1, "Descriptor chain should be marked as used");
     }
@@ -2008,10 +2029,22 @@ mod tests {
         // Verify reported-free bitmap has the bits set for the range
         if let Some(ref bitmap) = balloon.reported_free_bitmap {
             // PFN 0x1, 0x2, 0x3, 0x4 should all be set
-            assert!(bitmap.is_set(0x1), "PFN 0x1 should be marked as reported-free");
-            assert!(bitmap.is_set(0x2), "PFN 0x2 should be marked as reported-free");
-            assert!(bitmap.is_set(0x3), "PFN 0x3 should be marked as reported-free");
-            assert!(bitmap.is_set(0x4), "PFN 0x4 should be marked as reported-free");
+            assert!(
+                bitmap.is_set(0x1),
+                "PFN 0x1 should be marked as reported-free"
+            );
+            assert!(
+                bitmap.is_set(0x2),
+                "PFN 0x2 should be marked as reported-free"
+            );
+            assert!(
+                bitmap.is_set(0x3),
+                "PFN 0x3 should be marked as reported-free"
+            );
+            assert!(
+                bitmap.is_set(0x4),
+                "PFN 0x4 should be marked as reported-free"
+            );
             // PFN 0x0 should NOT be set (outside range)
             assert!(
                 !bitmap.is_set(0x0),
@@ -2061,10 +2094,7 @@ mod tests {
             free_page_report_cmd_id, 42,
             "free_page_report_cmd_id should be restored"
         );
-        assert_eq!(
-            poison_val, 0xDEADBEEF,
-            "poison_val should be restored"
-        );
+        assert_eq!(poison_val, 0xDEADBEEF, "poison_val should be restored");
 
         // Verify hinting fields match
         assert_eq!(

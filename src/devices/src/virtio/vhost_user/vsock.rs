@@ -78,18 +78,16 @@ impl VhostUserVsock {
     }
 
     /// Shared construction: fetch guest_cid from backend config, build struct.
-    fn build_from_device(vhost_user: VhostUserDevice, socket_path: Option<String>) -> IoResult<Self> {
+    fn build_from_device(
+        vhost_user: VhostUserDevice,
+        socket_path: Option<String>,
+    ) -> IoResult<Self> {
         // Fetch guest_cid from backend via GET_CONFIG
         let guest_cid = {
             let mut frontend = vhost_user.frontend.lock().unwrap();
             let config_buf = [0u8; 8]; // virtio_vsock_config is 8 bytes (u64 guest_cid)
             let (_hdr, payload) = frontend
-                .get_config(
-                    0,
-                    8,
-                    VhostUserConfigFlags::empty(),
-                    &config_buf,
-                )
+                .get_config(0, 8, VhostUserConfigFlags::empty(), &config_buf)
                 .map_err(|e| io::Error::other(format!("get_config failed: {}", e)))?;
             if payload.len() < 8 {
                 return Err(io::Error::new(
@@ -305,11 +303,7 @@ impl VhostUserVsock {
             let stream = std::os::unix::net::UnixStream::connect(path)
                 .map_err(|_| ActivateError::BadActivate)?;
             self.vhost_user
-                .reconnect_for_restore(
-                    stream,
-                    state.acked_features,
-                    state.acked_protocol_features,
-                )
+                .reconnect_for_restore(stream, state.acked_features, state.acked_protocol_features)
                 .map_err(|_| ActivateError::BadActivate)?;
         }
 
@@ -506,11 +500,9 @@ mod tests {
         };
         device.pending_restore_state = Some(state);
 
-        let mem = vm_memory::GuestMemoryMmap::from_ranges(&[(
-            vm_memory::GuestAddress(0),
-            1024 * 1024,
-        )])
-        .expect("create guest memory");
+        let mem =
+            vm_memory::GuestMemoryMmap::from_ranges(&[(vm_memory::GuestAddress(0), 1024 * 1024)])
+                .expect("create guest memory");
 
         let queues: Vec<DeviceQueue> = (0..3)
             .map(|_| {

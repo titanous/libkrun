@@ -17,8 +17,8 @@ use super::bindings;
 use super::dax_mapper::LinuxDaxMapper;
 use super::descriptor_utils::{Reader, Writer};
 use super::filesystem::{
-    Context, DirEntry, Entry, Extensions, FileSystem, GetxattrReply,
-    ListxattrReply, SecContext, ZeroCopyReader, ZeroCopyWriter,
+    Context, DirEntry, Entry, Extensions, FileSystem, GetxattrReply, ListxattrReply, SecContext,
+    ZeroCopyReader, ZeroCopyWriter,
 };
 use super::fs_utils::einval;
 use super::fuse::*;
@@ -1422,7 +1422,10 @@ impl Server {
             );
         }
 
-        match self.fs.removemapping(Context::from(in_header), requests, mapper) {
+        match self
+            .fs
+            .removemapping(Context::from(in_header), requests, mapper)
+        {
             Ok(()) => reply_ok(None::<u8>, None, in_header.unique, w),
             Err(e) => reply_error(e, in_header.unique, w),
         }
