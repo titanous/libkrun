@@ -173,10 +173,39 @@ kani:
 kani-proof name:
     cargo kani --manifest-path kani-proofs/Cargo.toml --harness {{name}}
 
-mutants:
-    @echo "mutants: set up in Phase 8 (Mutation Testing)"
-    @exit 1
+# Mutation testing feature set (matches full build features)
+mutants_features := "embedded_init,snapshot,uffd,blk,vhost-user"
 
-mutants-diff:
-    @echo "mutants-diff: set up in Phase 8 (Mutation Testing)"
-    @exit 1
+# Excluded subsystems (no tests exist for these)
+mutants_excludes := "-e 'src/rutabaga_gfx' -e 'src/hvf' -e 'src/devices/src/virtio/gpu' -e 'src/devices/src/virtio/snd' -e 'src/devices/src/virtio/input'"
+
+# Run full mutation test suite. Produces mutants.out/outcomes.json.
+# timeout: seconds per mutant test run (default 3600 for full run, use 60 for quick checks)
+# jobs: parallel workers (default 4)
+mutants timeout="3600" jobs="4":
+    cargo mutants \
+      --features {{mutants_features}} \
+      {{mutants_excludes}} \
+      --timeout {{timeout}} \
+      --jobs {{jobs}}
+
+# Run mutation tests scoped to files changed vs origin/main.
+# Much faster than full run; suitable for CI on PRs.
+mutants-diff timeout="60" jobs="4":
+    cargo mutants \
+      --features {{mutants_features}} \
+      {{mutants_excludes}} \
+      --in-diff origin/main..HEAD \
+      --timeout {{timeout}} \
+      --jobs {{jobs}}
+
+# Preview mutants that will be generated (no tests run). Fast (~10s).
+mutants-list:
+    cargo mutants --list \
+      --features {{mutants_features}} \
+      {{mutants_excludes}} \
+      --json
+
+# Print summary of last mutation run from mutants.out/outcomes.json.
+mutants-summary:
+    jq '{total: length, caught: [.[] | select(.outcome == "caught")] | length, missed: [.[] | select(.outcome == "missed")] | length, unviable: [.[] | select(.outcome == "unviable")] | length, timeout: [.[] | select(.outcome == "timeout")] | length}' mutants.out/outcomes.json
