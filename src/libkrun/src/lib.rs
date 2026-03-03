@@ -952,6 +952,31 @@ impl Builder {
     }
 
     pub fn build(self) -> Result<Context, StartError> {
+        // Helper constants and functions for legacy network configuration
+        #[cfg(feature = "net")]
+        const NET_FEATURE_CSUM: u32 = 1 << 0;
+        #[cfg(feature = "net")]
+        const NET_COMPAT_FEATURES: u32 = NET_FEATURE_CSUM;
+
+        #[cfg(feature = "net")]
+        fn create_virtio_net(
+            ctx_cfg: &mut ContextConfig,
+            backend: VirtioNetBackend,
+            mac: [u8; 6],
+            features: u32,
+        ) {
+            let network_interface_config = NetworkInterfaceConfig {
+                iface_id: format!("eth{}", ctx_cfg.net_index),
+                backend,
+                mac,
+                features,
+            };
+            ctx_cfg.net_index += 1;
+            ctx_cfg
+                .vmr
+                .add_network_interface(network_interface_config)
+                .expect("Failed to create network interface");
+        }
         let mut event_manager = EventManager::new().map_err(StartError::EventManager)?;
 
         let mut ctx_cfg = self.config;

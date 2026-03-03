@@ -8,20 +8,16 @@ pub struct TestVmConfig {
 #[host]
 mod host {
     use super::*;
-
-    use crate::common::setup_fs_and_enter;
-    use crate::{krun_call, krun_call_u32};
+    use crate::krun_rust::setup_fs_builder;
     use crate::{Test, TestSetup};
-    use krun_sys::*;
 
     impl Test for TestVmConfig {
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
-            unsafe {
-                krun_call!(krun_set_log_level(KRUN_LOG_LEVEL_TRACE))?;
-                let ctx = krun_call_u32!(krun_create_ctx())?;
-                krun_call!(krun_set_vm_config(ctx, self.num_cpus, self.ram_mib))?;
-                setup_fs_and_enter(ctx, test_setup)?;
-            }
+            let mut builder = krun::Builder::new();
+            builder.vm_config(self.num_cpus, self.ram_mib)?;
+            setup_fs_builder(&mut builder, &test_setup)?;
+            let context = builder.build()?;
+            context.run()?;
             Ok(())
         }
     }

@@ -5,16 +5,13 @@ pub struct TestMultiportConsole;
 #[host]
 mod host {
     use super::*;
-
-    use crate::common::setup_fs_and_enter;
-    use crate::{krun_call, krun_call_u32};
+    use crate::krun_rust::setup_fs_builder;
     use crate::{Test, TestSetup};
-    use krun_sys::*;
-    use std::ffi::CString;
     use std::io::{BufRead, BufReader, Write};
     use std::os::fd::AsRawFd;
     use std::os::unix::net::UnixStream;
     use std::{mem, thread};
+    use krun::ConsoleDeviceInfo;
 
     fn spawn_ping_pong_responder(stream: UnixStream) {
         thread::spawn(move || {
@@ -30,18 +27,13 @@ mod host {
         });
     }
 
-    fn test_port(ctx: u32, console_id: u32, name: &str) -> anyhow::Result<()> {
+    fn test_port(
+        builder: &mut krun::Builder,
+        console_info: &ConsoleDeviceInfo,
+        name: &str,
+    ) -> anyhow::Result<()> {
         let (guest, host) = UnixStream::pair()?;
-        let name_cstring = CString::new(name)?;
-        unsafe {
-            krun_call!(krun_add_console_port_inout(
-                ctx,
-                console_id,
-                name_cstring.as_ptr(),
-                guest.as_raw_fd(),
-                guest.as_raw_fd()
-            ))?;
-        }
+        builder.add_port_fd(console_info, name, guest.as_raw_fd(), guest.as_raw_fd());
         mem::forget(guest);
         spawn_ping_pong_responder(host);
         Ok(())
@@ -49,29 +41,31 @@ mod host {
 
     impl Test for TestMultiportConsole {
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
-            unsafe {
-                krun_call!(krun_set_log_level(KRUN_LOG_LEVEL_TRACE))?;
-                let ctx = krun_call_u32!(krun_create_ctx())?;
+            let mut builder = krun::Builder::new();
 
-                krun_call!(krun_disable_implicit_console(ctx))?;
+            builder.disable_implicit_console()?;
 
-                // Add a default console (as with other tests this uses stdout for writing "OK")
-                krun_call!(krun_add_virtio_console_default(
-                    ctx,
-                    -1,
-                    std::io::stdout().as_raw_fd(),
-                    -1,
-                ))?;
+            // Add a default console routing output to stdout (replaces krun_add_virtio_console_default)
+            let default_console_info = builder.add_virtio_console();
+            builder.add_port_console_fd(
+                &default_console_info,
+                -1,
+                std::io::stdout().as_raw_fd(),
+                80,
+                24,
+            );
 
-                let console_id = krun_call_u32!(krun_add_virtio_console_multiport(ctx))?;
+            // Add the multiport console (replaces krun_add_virtio_console_multiport)
+            let multiport_console_info = builder.add_virtio_console();
 
-                test_port(ctx, console_id, "test-port-alpha")?;
-                test_port(ctx, console_id, "test-port-beta")?;
-                test_port(ctx, console_id, "test-port-gamma")?;
+            test_port(&mut builder, &multiport_console_info, "test-port-alpha")?;
+            test_port(&mut builder, &multiport_console_info, "test-port-beta")?;
+            test_port(&mut builder, &multiport_console_info, "test-port-gamma")?;
 
-                krun_call!(krun_set_vm_config(ctx, 1, 1024))?;
-                setup_fs_and_enter(ctx, test_setup)?;
-            }
+            builder.vm_config(1, 1024)?;
+            setup_fs_builder(&mut builder, &test_setup)?;
+            let context = builder.build()?;
+            context.run()?;
             Ok(())
         }
     }

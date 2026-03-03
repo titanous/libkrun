@@ -18,33 +18,27 @@ impl TestTsiTcpGuestListen {
 #[host]
 mod host {
     use super::*;
-    use crate::common::setup_fs_and_enter;
-    use crate::{krun_call, krun_call_u32, Test, TestSetup};
-    use krun_sys::*;
-    use std::ffi::CString;
-    use std::ptr::null;
+    use crate::krun_rust::setup_fs_builder;
+    use crate::{Test, TestSetup};
+    use std::collections::HashMap;
     use std::thread;
     use std::time::Duration;
 
     impl Test for TestTsiTcpGuestListen {
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
-            unsafe {
-                thread::spawn(move || {
-                    thread::sleep(Duration::from_secs(1));
-                    self.tcp_tester.run_client();
-                });
+            thread::spawn(move || {
+                thread::sleep(Duration::from_secs(1));
+                self.tcp_tester.run_client();
+            });
 
-                krun_call!(krun_set_log_level(KRUN_LOG_LEVEL_TRACE))?;
-                let ctx = krun_call_u32!(krun_create_ctx())?;
-                let port_mapping = format!("{PORT}:{PORT}");
-                let port_mapping = CString::new(port_mapping).unwrap();
-                let port_map = [port_mapping.as_ptr(), null()];
-
-                krun_call!(krun_set_port_map(ctx, port_map.as_ptr()))?;
-                krun_call!(krun_set_vm_config(ctx, 1, 512))?;
-                setup_fs_and_enter(ctx, test_setup)?;
-                println!("OK");
-            }
+            let mut builder = krun::Builder::new();
+            let mut port_mapping = HashMap::new();
+            port_mapping.insert(PORT, PORT);
+            builder.port_map(port_mapping).map_err(|_| anyhow::anyhow!("port_map failed"))?;
+            builder.vm_config(1, 512)?;
+            setup_fs_builder(&mut builder, &test_setup)?;
+            let context = builder.build()?;
+            context.run()?;
             Ok(())
         }
     }

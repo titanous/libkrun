@@ -32,15 +32,10 @@ const VSOCK_PORT: u32 = 1234;
 #[host]
 mod host {
     use super::*;
-
-    use crate::common::setup_fs_and_enter;
-    use crate::{krun_call, krun_call_u32};
+    use crate::krun_rust::setup_fs_builder;
     use crate::{Test, TestSetup};
-    use krun_sys::*;
-    use std::ffi::CString;
     use std::io::Write;
     use std::os::unix::net::UnixListener;
-    use std::os::unix::prelude::OsStrExt;
     use std::{mem, thread};
 
     fn server(listener: UnixListener) {
@@ -50,29 +45,22 @@ mod host {
         stream_expect_msg(&mut stream, b"pong!");
         stream_expect_wouldblock(&mut stream);
         stream.write_all(b"bye!").unwrap();
-        // Leak the socket fd, to make sure it is not closed early when we exit the thread
+        // Leak the socket fd to not close it early when we exit the thread
         mem::forget(stream);
     }
 
     impl Test for TestVsockGuestConnect {
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
             let sock_path = test_setup.tmp_dir.join("test.sock");
-            let sock_path_cstr = CString::new(sock_path.as_os_str().as_bytes())?;
-
             let listener = UnixListener::bind(&sock_path).unwrap();
-
             thread::spawn(move || server(listener));
-            unsafe {
-                krun_call!(krun_set_log_level(KRUN_LOG_LEVEL_TRACE))?;
-                let ctx = krun_call_u32!(krun_create_ctx())?;
-                krun_call!(krun_add_vsock_port(
-                    ctx,
-                    VSOCK_PORT,
-                    sock_path_cstr.as_ptr()
-                ))?;
-                krun_call!(krun_set_vm_config(ctx, 1, 1024))?;
-                setup_fs_and_enter(ctx, test_setup)?;
-            }
+
+            let mut builder = krun::Builder::new();
+            builder.add_vsock_port(VSOCK_PORT, sock_path, false);
+            builder.vm_config(1, 1024)?;
+            setup_fs_builder(&mut builder, &test_setup)?;
+            let context = builder.build()?;
+            context.run()?;
             Ok(())
         }
     }
