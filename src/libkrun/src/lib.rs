@@ -43,9 +43,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use utils::eventfd::EventFd;
 use vmm::builder::StartMicrovmError;
 pub use vmm::resources::VirtioConsoleConfigMode;
-use vmm::resources::{
-    TsiFlags, VmResources, VsockConfig,
-};
+use vmm::resources::{TsiFlags, VmResources, VsockConfig};
 #[cfg(feature = "snapshot")]
 pub use vmm::snapshot_store;
 pub use vmm::vm_exit::VmExit;

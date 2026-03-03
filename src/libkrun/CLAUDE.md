@@ -15,7 +15,7 @@ Public Rust API crate providing `Builder`, `Context`, and `VmHandle` for configu
   - `Builder::add_vsock_vhost_user(socket_path)` configures vhost-user vsock via socket path; returns `Err(VsockConflict)` if explicit userspace vsock or another vhost-user vsock already configured
   - `Builder::add_vsock_vhost_user_fd(stream)` configures vhost-user vsock via pre-connected `UnixStream`; same mutual exclusivity as socket path variant
   - `StartError::VsockConflict` variant for mutual exclusivity between userspace vsock and vhost-user vsock
-  - When vhost-user vsock is configured, the implicit userspace vsock device is skipped during VM build (port configs stored via `krun_add_vsock_port` are accepted but unused)
+  - When vhost-user vsock is configured, the implicit userspace vsock device is skipped during VM build (port configs added via `Builder::add_vsock_port()` are accepted but unused)
   - `Builder::add_virtiofs(tag, Box<dyn FileSystem + Send + Sync>, shm_size)` accepts any filesystem backend; gated behind `not(tee)` feature
   - `Builder::add_virtiofs_path(tag, host_path, shm_size, allow_root_dir_delete)` convenience method creating `PassthroughFs` internally; gated behind `not(tee)` feature
   - `Context::run()` returns `Result<VmExit, StartError>` -- process stays alive after VM exits
