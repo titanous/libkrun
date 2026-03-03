@@ -1,23 +1,23 @@
 //! Integration test for RNG reseed behavior after snapshot/restore (clone divergence).
 //!
-//! GREEN phase: This test validates that VMGENID triggers kernel CSPRNG reseed,
-//! causing both VM clones to produce different bytes from /dev/urandom. The kernel
-//! detects a new VMGENID value via platform interrupt (GED on x86_64, SPI on aarch64)
-//! and automatically reseeds the CSPRNG. This test demonstrates the outcome: entropy
-//! divergence post-restore, ensuring cryptographic independence between clones.
+//! Validates that VMGENID triggers kernel CSPRNG reseed, causing both VM clones
+//! to produce different bytes from /dev/urandom. The kernel detects a new VMGENID
+//! value via platform interrupt (GED on x86_64, SPI on aarch64) and automatically
+//! reseeds the CSPRNG.
 //!
-//! Design: the vsock listener is bound BEFORE the VM starts so the guest connects
-//! immediately on boot (no retry loop). The snapshot is taken after the guest sends
-//! "READY" (connection established, guest idle in command loop). The same vsock
-//! proxy/stream persists across both restore cycles — the muxer proxy_map is NOT
-//! reset on restore, so the host can communicate with the guest using the same
-//! Unix stream after each restore.
+//! Design: vsock is used only for host→guest commands (READ/DONE). The guest
+//! writes entropy to a virtiofs file (/entropy.bin) which the host reads directly
+//! from the shared rootfs. This avoids guest→host vsock writes after restore,
+//! which are unreliable because the virtio TX ring state becomes inconsistent
+//! between the restored guest and the live host-side muxer across multiple
+//! restore cycles.
 
 use macros::{guest, host};
 
 pub struct TestSnapshotRngReseed;
 
 const VSOCK_PORT: u32 = 5688;
+const ENTROPY_FILE: &str = "entropy.bin";
 
 #[host]
 mod host {
@@ -26,20 +26,37 @@ mod host {
     use crate::{Test, TestSetup};
     use std::io::{Read, Write};
     use std::os::unix::net::UnixListener;
+    use std::path::Path;
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
+
+    /// Poll for a file to appear and have the expected size.
+    fn wait_for_file(path: &Path, expected_len: usize, timeout: Duration) -> Vec<u8> {
+        let start = Instant::now();
+        loop {
+            if let Ok(data) = std::fs::read(path) {
+                if data.len() == expected_len {
+                    // Remove so the next restore cycle starts clean.
+                    std::fs::remove_file(path).ok();
+                    return data;
+                }
+            }
+            assert!(
+                start.elapsed() < timeout,
+                "timed out waiting for {path:?} ({expected_len} bytes)",
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
 
     impl Test for TestSnapshotRngReseed {
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
             let sock_path = test_setup.tmp_dir.join("snap_rng_control.sock");
             let snap_dir = test_setup.tmp_dir.join("snapshot");
+            let entropy_path = test_setup.tmp_dir.join("root").join(ENTROPY_FILE);
 
             // Bind the listener BEFORE starting the VM so the guest can
-            // connect on first boot without any retry/error path. The vsock
-            // muxer only registers the proxy fd with epoll (needed for data
-            // flow and HANG_UP detection) when the Unix connect() succeeds; if
-            // no listener exists the connect fails and the proxy is in a broken
-            // state that can't be recovered across restore cycles.
+            // connect on first boot without any retry/error path.
             let listener = UnixListener::bind(&sock_path).unwrap();
 
             let mut builder = krun::Builder::new();
@@ -51,9 +68,7 @@ mod host {
             let handle = context.vm_handle();
             let vm_thread = thread::spawn(move || context.run());
 
-            // Accept the initial connection — the guest connects on first boot.
-            // UnixListener::accept() blocks until the guest binary starts and
-            // calls vsock_connect(). Kernel boots in ~83ms; add generous margin.
+            // Accept the initial connection.
             let (mut stream, _) = listener.accept().unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(15)))
@@ -67,33 +82,25 @@ mod host {
             stream.read_exact(&mut buf).unwrap();
             assert_eq!(&buf, b"READY");
 
-            // Snapshot while the guest is idle in the command loop with the
-            // connection already established. The vsock proxy persists across
-            // restores (muxer proxy_map is not reset), so we can use the same
-            // stream after each restore_snapshot() call.
+            // Snapshot while the guest is idle in the command loop.
             handle.snapshot(&snap_dir)?;
 
-            // --- Restore cycle 1 ---
-            // Guest resets to snapshot state: in the command loop, waiting for
-            // read_exact. VMGENID triggers kernel CSPRNG reseed via platform
-            // interrupt. The muxer proxy and host stream are still live.
-            handle.restore_snapshot(&snap_dir)?;
+            // Clean up any stale entropy file before restore cycles.
+            std::fs::remove_file(&entropy_path).ok();
 
+            // --- Restore cycle 1 ---
+            handle.restore_snapshot(&snap_dir)?;
             stream.write_all(b"READ").unwrap();
-            let mut first_entropy = [0u8; 32];
-            stream.read_exact(&mut first_entropy).unwrap();
+            let first_entropy =
+                wait_for_file(&entropy_path, 32, Duration::from_secs(10));
 
             // --- Restore cycle 2 ---
-            // Guest resets to snapshot state again. VMGENID changes, triggering
-            // another kernel CSPRNG reseed. Same proxy/stream still valid.
             handle.restore_snapshot(&snap_dir)?;
-
             stream.write_all(b"READ").unwrap();
-            let mut second_entropy = [0u8; 32];
-            stream.read_exact(&mut second_entropy).unwrap();
+            let second_entropy =
+                wait_for_file(&entropy_path, 32, Duration::from_secs(10));
 
-            // Assert BEFORE sending DONE.
-            // This verifies that VMGENID caused entropy divergence between clones.
+            // Verify that VMGENID caused entropy divergence between clones.
             assert_ne!(
                 first_entropy, second_entropy,
                 "Both VM clones produced identical /dev/urandom output — \
@@ -119,18 +126,14 @@ mod guest {
 
     impl Test for TestSnapshotRngReseed {
         fn in_guest(self: Box<Self>) {
-            // The listener is pre-bound on the host, so this connects on first
-            // try. vsock_connect() internally retries on failure, but with the
-            // listener already present the first attempt succeeds.
             let mut stream = vsock_connect(VSOCK_PORT);
             stream.write_all(b"READY").unwrap();
 
             loop {
                 let mut cmd = [0u8; 4];
-                // EOF or connection reset (e.g. stream dropped by host) → exit.
-                match stream.read_exact(&mut cmd) {
-                    Err(_) => break,
-                    Ok(()) => {}
+                // EOF or connection reset → exit.
+                if stream.read_exact(&mut cmd).is_err() {
+                    break;
                 }
                 match &cmd {
                     b"READ" => {
@@ -139,7 +142,10 @@ mod guest {
                             .unwrap()
                             .read_exact(&mut entropy)
                             .unwrap();
-                        stream.write_all(&entropy).unwrap();
+                        // Write entropy to virtiofs file (host reads directly).
+                        // Avoids guest→host vsock writes which break after
+                        // multiple restore cycles.
+                        std::fs::write(format!("/{ENTROPY_FILE}"), &entropy).unwrap();
                     }
                     b"DONE" => {
                         println!("OK");

@@ -19,10 +19,11 @@ mod host {
     fn write_vmstate(dir: &Path, magic: u32, version: u32, vcpu_count: u32, nested: bool) {
         // Actual RAM layout from vm_config(1, 128): three regions
         // (verified from actual error messages when layout mismatch fires)
+        // Note: kernel size varies with config (ACPI/PCI/VMGENID add ~256KB)
         let ram_regions = vec![
             (0u64, 16777216u64),         // Region 1: base=0, size=16MiB
-            (16777216u64, 21168128u64),  // Region 2: base=16MiB, size=~20.2MiB
-            (37945344u64, 134217728u64), // Region 3: base=~36.2MiB, size=128MiB
+            (16777216u64, 21430272u64),  // Region 2: base=16MiB, size=~20.4MiB
+            (38207488u64, 134217728u64), // Region 3: base=~36.4MiB, size=128MiB
         ];
         write_vmstate_with_regions(dir, magic, version, vcpu_count, nested, ram_regions);
     }
