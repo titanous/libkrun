@@ -97,6 +97,9 @@ KCONFIG_EOF
 
             # stress testing for flakiness investigation
             stress-ng
+
+            # Task runner (replaces Makefile)
+            just
           ];
 
           # Point Rust's pkg_config crate at the shim so PKG_CONFIG_PATH set by
@@ -129,6 +132,9 @@ KCONFIG_EOF
             # Use the musl toolchain instead. The Makefile uses CC_LINUX=$(CC) on Linux.
             # Set here (in shellHook, after setup hooks run) to override buildInputs CC.
             export CC="${pkgs.pkgsMusl.stdenv.cc}/bin/cc"
+
+            # Add libclang to LD_LIBRARY_PATH so clang-sys can load it at build time
+            export LD_LIBRARY_PATH="${pkgs.llvmPackages.libclang.lib}/lib:$LD_LIBRARY_PATH"
           '';
         };
       }

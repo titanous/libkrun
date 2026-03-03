@@ -86,7 +86,6 @@ use devices::virtio::display::{DisplayInfoEdid, PhysicalSize, MAX_DISPLAYS};
 #[cfg(feature = "input")]
 use krun_input::{InputConfigBackend, InputEventProviderBackend};
 
-
 // krunfw library name for each context
 #[cfg(all(target_os = "linux", not(feature = "tee")))]
 const KRUNFW_NAME: &str = "libkrunfw.so.5";
