@@ -48,6 +48,25 @@ Last verified: 2026-03-02
 - Virtio-FS uses generic `FileSystem` trait (`Box<dyn FileSystem + Send + Sync>`); `PassthroughFs` is the built-in backend; Linux-only (no macOS virtiofs)
 - See domain CLAUDE.md files for crate-specific contracts
 
+## Debugging Guest Boot (earlycon)
+To see early kernel boot messages (before hvc0 console is ready), enable earlycon:
+
+1. Add to kernel cmdline in `src/vmm/src/vmm_config/kernel_cmdline.rs`:
+   `earlycon=uart8250,io,0x3f8,115200 loglevel=15`
+2. Add a debug serial else-block in `src/vmm/src/builder.rs` after the EFI serial setup:
+   ```rust
+   else {
+       let serial_log = std::fs::File::create("/tmp/serial_earlycon.log")
+           .expect("Failed to create serial log file");
+       serial_devices.push(setup_serial_device(
+           event_manager, None, Some(Box::new(serial_log)),
+       )?);
+   }
+   ```
+3. Boot output is written to `/tmp/serial_earlycon.log`. Earlycon stops when hvc0 takes over (`printk: legacy bootconsole [uart8250] disabled`).
+
+The guest kernel must have `CONFIG_SERIAL_8250=y`, `CONFIG_SERIAL_8250_CONSOLE=y`, and `CONFIG_SERIAL_EARLYCON=y` (already set in `flake.nix` libkrunfw overlay).
+
 ## Boundaries
 - `tests/Cargo.lock` is separate from root `Cargo.lock` (different workspace)
 - Root workspace uses `vm-memory` 0.18; test daemons also use 0.18 with vendored patches for compatibility
