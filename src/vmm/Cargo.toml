@@ -19,6 +19,7 @@ aws-nitro = []
 snapshot = ["serde", "serde_json", "bincode", "futures", "tokio", "devices/snapshot", "hvf?/snapshot"]
 vhost-user = ["devices/vhost-user"]
 uffd = ["snapshot", "userfaultfd", "futures", "tokio"]
+shuttle = []
 
 [dependencies]
 crossbeam-channel = ">=0.5.15"
@@ -74,3 +75,4 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
 devices = { path = "../devices", features = ["test_utils"] }
 proptest = "1.4"
 proptest-derive = "0.4"
+shuttle = "0.8"
