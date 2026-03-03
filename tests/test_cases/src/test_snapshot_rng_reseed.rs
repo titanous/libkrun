@@ -2,7 +2,7 @@
 //!
 //! Validates that VMGENID triggers kernel CSPRNG reseed, causing both VM clones
 //! to produce different bytes from /dev/urandom. The kernel detects a new VMGENID
-//! value via platform interrupt (GED on x86_64, SPI on aarch64) and automatically
+//! value via platform interrupt (PIC IRQ via irqfd on x86_64, SPI on aarch64) and automatically
 //! reseeds the CSPRNG.
 //!
 //! Design: vsock is used only for host→guest commands (READ/DONE). The guest

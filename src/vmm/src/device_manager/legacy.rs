@@ -103,17 +103,6 @@ impl PortIODeviceManager {
             .insert(self.cmos.clone(), 0x70, 0x8)
             .map_err(Error::BusError)?;
 
-        // PCI Type 1 config space (0xCF8 address + 0xCFC data): lets the kernel
-        // detect PCI mechanism and scan an empty bus instead of crashing when
-        // ACPI + CONFIG_PCI interact without a real PCI host bridge.
-        self.io_bus
-            .insert(
-                Arc::new(Mutex::new(devices::legacy::PciConfigSpace::new())),
-                0xCF8,
-                0x8,
-            )
-            .map_err(Error::BusError)?;
-
         if let Some(serial) = self.stdio_serial.first() {
             self.io_bus
                 .insert(serial.clone(), 0x3f8, 0x8)

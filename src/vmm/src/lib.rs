@@ -514,7 +514,7 @@ impl Vmm {
             snapshot::SnapshotError::Deserialize(format!("Failed to restore vCPU states: {e}"))
         })?;
 
-        // Signal the GED interrupt AFTER vCPU state restore. KVM_SET_LAPIC
+        // Signal the vmgenid interrupt AFTER vCPU state restore. KVM_SET_LAPIC
         // overwrites the LAPIC IRR, so any interrupt injected before that
         // would be lost.
         //

@@ -1,0 +1,125 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: libkrun <libkrun@libkrun.org>
+Date: Mon, 3 Mar 2026 00:00:00 +0000
+Subject: [PATCH] x86/vmgenid: add SETUP_VMGENID boot protocol support
+
+Add a new SETUP_VMGENID (type 10) setup_data entry that lets a
+hypervisor communicate the vmgenid GUID page address and notification
+IRQ without requiring ACPI. The kernel registers a platform device from
+the setup_data node; the vmgenid driver probes it via its existing
+platform-resource path.
+
+The vmgenid driver's probe condition is updated from checking
+dev->of_node (DT only) to !ACPI_COMPANION(dev), which covers both the
+DT path (existing) and the new setup_data path.
+
+Signed-off-by: libkrun <libkrun@libkrun.org>
+---
+ arch/x86/include/uapi/asm/setup_data.h | 13 +++++++++++++
+ arch/x86/kernel/setup.c                | 29 +++++++++++++++++++++++++++++
+ drivers/virt/vmgenid.c                 |  2 +-
+ 3 files changed, 43 insertions(+), 1 deletion(-)
+
+diff --git a/arch/x86/include/uapi/asm/setup_data.h b/arch/x86/include/uapi/asm/setup_data.h
+index 50c45ead4..6e4132c3d 100644
+--- a/arch/x86/include/uapi/asm/setup_data.h
++++ b/arch/x86/include/uapi/asm/setup_data.h
+@@ -13,7 +13,8 @@
+ #define SETUP_CC_BLOB			7
+ #define SETUP_IMA			8
+ #define SETUP_RNG_SEED			9
+-#define SETUP_ENUM_MAX			SETUP_RNG_SEED
++#define SETUP_VMGENID			10
++#define SETUP_ENUM_MAX			SETUP_VMGENID
+
+ #define SETUP_INDIRECT			(1<<31)
+ #define SETUP_TYPE_MAX			(SETUP_ENUM_MAX | SETUP_INDIRECT)
+@@ -78,6 +79,12 @@ struct ima_setup_data {
+ 	__u64 size;
+ } __attribute__((packed));
+
++struct vmgenid_setup_data {
++	__u64 guid_pa;		/* guest-physical address of the 16-byte GUID */
++	__u32 irq;		/* PIC IRQ for guest notification */
++	__u32 pad;
++} __attribute__((packed));
++
+ #endif /* __ASSEMBLER__ */
+
+ #endif /* _UAPI_ASM_X86_SETUP_DATA_H */
+diff --git a/arch/x86/kernel/setup.c b/arch/x86/kernel/setup.c
+index f1fea506e..2f2a54ce6 100644
+--- a/arch/x86/kernel/setup.c
++++ b/arch/x86/kernel/setup.c
+@@ -56,6 +56,7 @@
+ #include <asm/unwind.h>
+ #include <asm/vsyscall.h>
+ #include <linux/vmalloc.h>
++#include <linux/platform_device.h>
+
+ /*
+  * max_low_pfn_mapped: highest directly mapped pfn < 4 GB
+@@ -382,6 +383,9 @@ int __init ima_get_kexec_buffer(void **addr, size_t *size)
+ }
+ #endif
+
++static u64 x86_vmgenid_guid_pa __initdata;
++static u32 x86_vmgenid_irq __initdata;
++
+ static void __init parse_setup_data(void)
+ {
+ 	struct setup_data *data;
+@@ -419,6 +423,16 @@ static void __init parse_setup_data(void)
+ 			memzero_explicit(&data->len, sizeof(data->len));
+ 			early_memunmap(data, data_len);
+ 			break;
++		case SETUP_VMGENID: {
++			struct vmgenid_setup_data *vsd;
++
++			data = early_memremap(pa_data, data_len);
++			vsd = (struct vmgenid_setup_data *)data->data;
++			x86_vmgenid_guid_pa = vsd->guid_pa;
++			x86_vmgenid_irq = vsd->irq;
++			early_memunmap(data, data_len);
++			break;
++		}
+ 		default:
+ 			break;
+ 		}
+@@ -426,6 +440,23 @@ static void __init parse_setup_data(void)
+ 	}
+ }
+
++static int __init x86_vmgenid_init(void)
++{
++	struct resource res[] = {
++		DEFINE_RES_MEM(x86_vmgenid_guid_pa, 16),
++		DEFINE_RES_IRQ(x86_vmgenid_irq),
++	};
++
++	if (!x86_vmgenid_guid_pa)
++		return 0;
++
++	return PTR_ERR_OR_ZERO(
++		platform_device_register_resndata(NULL, "vmgenid", -1,
++						  res, ARRAY_SIZE(res),
++						  NULL, 0));
++}
++device_initcall(x86_vmgenid_init);
++
+ static void __init memblock_x86_reserve_range_setup_data(void)
+ {
+ 	struct setup_indirect *indirect;
+diff --git a/drivers/virt/vmgenid.c b/drivers/virt/vmgenid.c
+index 66135eac3..6e67780d9 100644
+--- a/drivers/virt/vmgenid.c
++++ b/drivers/virt/vmgenid.c
+@@ -142,7 +142,7 @@ static int vmgenid_add(struct platform_device *pdev)
+ 	if (!state)
+ 		return -ENOMEM;
+
+-	if (dev->of_node)
++	if (!ACPI_COMPANION(dev))
+ 		ret = vmgenid_add_of(pdev, state);
+ 	else
+ 		ret = vmgenid_add_acpi(dev, state);

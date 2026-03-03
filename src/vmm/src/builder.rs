@@ -252,7 +252,7 @@ pub enum StartMicrovmError {
     /// Cannot create the VMGENID device.
     #[cfg(target_arch = "x86_64")]
     VmgenidCreation(vm_memory::GuestMemoryError),
-    /// Cannot register the GED IRQ with KVM.
+    /// Cannot register the vmgenid IRQ with KVM.
     #[cfg(target_arch = "x86_64")]
     RegisterIrqFd(kvm_ioctls::Error),
 }
@@ -578,7 +578,7 @@ impl Display for StartMicrovmError {
             }
             #[cfg(target_arch = "x86_64")]
             RegisterIrqFd(ref err) => {
-                write!(f, "Cannot register the GED IRQ with KVM: {err}")
+                write!(f, "Cannot register the vmgenid IRQ with KVM: {err}")
             }
         }
     }
@@ -1308,20 +1308,20 @@ pub fn build_microvm(
     // Create and register VMGENID device (x86_64 only)
     #[cfg(target_arch = "x86_64")]
     {
-        use arch::x86_64::layout::{GED_IRQ, VMGENID_GUID_OFFSET, VMGENID_GUID_PAGE};
+        use arch::x86_64::layout::{VMGENID_GUID_OFFSET, VMGENID_GUID_PAGE, VMGENID_IRQ};
 
         let vmgenid = devices::vmgenid::Vmgenid::new(
             VMGENID_GUID_PAGE,
             VMGENID_GUID_OFFSET,
-            GED_IRQ,
+            VMGENID_IRQ,
             &vmm.guest_memory,
         )
         .map_err(StartMicrovmError::VmgenidCreation)?;
 
-        // Register the GED EventFd with KVM irqchip
+        // Register the vmgenid EventFd with KVM irqchip
         vmm.vm
             .fd()
-            .register_irqfd(vmgenid.interrupt_evt(), GED_IRQ)
+            .register_irqfd(vmgenid.interrupt_evt(), VMGENID_IRQ)
             .map_err(StartMicrovmError::RegisterIrqFd)?;
 
         vmm.vmgenid = Some(vmgenid);

@@ -26,7 +26,7 @@ pub const HIMEM_START: u64 = 0x0010_0000; //1 MB.
 /// First usable IRQ ID for virtio device interrupts on x86_64.
 pub const IRQ_BASE: u32 = 5;
 /// Last usable IRQ ID for virtio device interrupts on x86_64.
-/// Reduced from 15 to reserve IRQ 15 for the ACPI GED device.
+/// Stops at 14 to reserve IRQ 15 for the vmgenid interrupt.
 pub const IRQ_MAX: u32 = 14;
 
 /// Address for the TSS setup.
@@ -66,26 +66,22 @@ pub const FIRST_ADDR_PAST_32BITS: u64 = 1 << 32;
 pub const MEM_32BIT_GAP_SIZE: u64 = 768 << 20;
 pub const MMIO_MEM_START: u64 = FIRST_ADDR_PAST_32BITS - MEM_32BIT_GAP_SIZE;
 
-/// Start address for ACPI tables (in EBDA/ROM scan region).
-/// The kernel scans 0xE0000–0xFFFFF for the RSDP signature.
-pub const ACPI_START: u64 = 0xE0000;
-/// Maximum size reserved for ACPI tables (128 KB, to end of scan region).
-pub const ACPI_MAX_SIZE: u64 = 0x20000;
+/// Guest physical address for the SETUP_VMGENID setup_data node (32 bytes).
+/// Placed in the BIOS ROM scan region (0xE0000–0xFFFFF), which is excluded
+/// from E820 RAM entries so the kernel never allocates over it.
+pub const SETUP_DATA_ADDR: u64 = 0xE0000;
 
 /// Guest physical address of the VMGENID GUID page (4 KB).
 /// Placed in the ROM expansion region, outside E820 RAM entries.
 /// Address space layout (no overlaps):
 ///   0x9FC00..~0x9FDFF  mptable (a few hundred bytes, scales with vCPU count)
 ///   0xC0000..0xC0FFF   VMGENID GUID page (4 KB)
-///   0xE0000..0xFFFFF   ACPI tables (128 KB max)
+///   0xE0000..0xE001F   SETUP_VMGENID setup_data node (32 bytes)
 pub const VMGENID_GUID_PAGE: u64 = 0xC0000;
 /// Offset within the GUID page where the 128-bit GUID is stored.
-/// Matches the OVMF SDT Header Probe Suppressor convention (Linux vmgenid
-/// driver's ADDR method accounts for this offset).
 pub const VMGENID_GUID_OFFSET: u64 = 40;
 
-/// IRQ number for the ACPI Generic Event Device (GED).
-/// Must be in PIC range (0-15) because `pci=noacpi` forces PIC routing.
+/// IRQ number used to notify the guest vmgenid driver when the GUID changes.
 /// Uses IRQ 15 (secondary ATA, unused in this VM) to avoid conflict with
 /// virtio devices (IRQ_BASE..IRQ_MAX = 5..14).
-pub const GED_IRQ: u32 = 15;
+pub const VMGENID_IRQ: u32 = 15;

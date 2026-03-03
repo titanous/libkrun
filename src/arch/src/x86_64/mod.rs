@@ -6,7 +6,7 @@
 // found in the THIRD-PARTY file.
 
 #[cfg(not(feature = "tee"))]
-mod acpi;
+mod setup_data;
 mod gdt;
 /// Contains logic for setting up Advanced Programmable Interrupt Controller (local version).
 pub mod interrupts;
@@ -47,9 +47,9 @@ pub enum Error {
     /// Error writing MP table to memory.
     #[cfg(not(feature = "tee"))]
     MpTableSetup(mptable::Error),
-    /// Error writing ACPI tables to memory.
+    /// Error writing setup_data to memory.
     #[cfg(not(feature = "tee"))]
-    AcpiSetup(acpi::Error),
+    SetupData(setup_data::Error),
     /// Error writing the zero page of guest memory.
     ZeroPageSetup,
     /// Failed to compute initrd address.
@@ -273,18 +273,14 @@ pub fn configure_system(
     mptable::setup_mptable(guest_mem, num_cpus).map_err(Error::MpTableSetup)?;
 
     #[cfg(not(feature = "tee"))]
-    let acpi_rsdp_addr = {
-        use crate::x86_64::layout::{GED_IRQ, VMGENID_GUID_OFFSET, VMGENID_GUID_PAGE};
-        let guid_addr = VMGENID_GUID_PAGE + VMGENID_GUID_OFFSET;
-        acpi::setup_acpi_tables(guest_mem, guid_addr, GED_IRQ, num_cpus)
-            .map_err(Error::AcpiSetup)?
-    };
+    let setup_data_addr = setup_data::write_vmgenid_setup_data(guest_mem)
+        .map_err(Error::SetupData)?;
 
     let mut params: BootParamsWrapper = BootParamsWrapper(boot_params::default());
 
     #[cfg(not(feature = "tee"))]
     {
-        params.0.acpi_rsdp_addr = acpi_rsdp_addr;
+        params.0.hdr.setup_data = setup_data_addr;
     }
 
     params.0.hdr.type_of_loader = KERNEL_LOADER_OTHER;

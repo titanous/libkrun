@@ -24,10 +24,11 @@
           exec ${pkgs.pkg-config}/bin/pkg-config "$@"
         '';
 
-        # Rebuild libkrunfw 5.2.1 with ACPI + VMGENID enabled in the guest kernel.
-        # Upstream config has `# CONFIG_ACPI is not set`; we append the needed
-        # options and let `make olddefconfig` resolve dependencies.
-        libkrunfw-acpi = pkgs.libkrunfw.overrideAttrs (old: {
+        # Rebuild libkrunfw 5.2.1 / Linux 6.12.74 with VMGENID support via the
+        # SETUP_VMGENID setup_data boot protocol (no ACPI required).
+        # The kernel patch adds SETUP_VMGENID type 10 and a platform device
+        # initcall; the vmgenid driver probes the platform device directly.
+        libkrunfw-vmgenid = pkgs.libkrunfw.overrideAttrs (old: {
           version = "5.2.1";
           src = pkgs.fetchFromGitHub {
             owner = "containers";
@@ -36,22 +37,27 @@
             hash = "sha256-hRu9HEWTyToqntDkqBIvWEn+kAidQdspyWc6Le587qw=";
           };
           kernelSrc = pkgs.fetchurl {
-            url = "mirror://kernel/linux/kernel/v6.x/linux-6.12.68.tar.xz";
-            hash = "sha256-02fHUEvU2lIN0B6wgSXS0KwIi8ivTNVtI28gdN1CJbc=";
+            url = "mirror://kernel/linux/kernel/v6.x/linux-6.12.74.tar.xz";
+            hash = "sha256-O1busdyaQ38YnKVrgjvjdpmU9ZpOoIlbCOwNIKysoT4=";
           };
           postPatch = (old.postPatch or "") + ''
-            cat >> config-libkrunfw_x86_64 <<'ACPI_EOF'
-CONFIG_ACPI=y
-CONFIG_PCI=y
+            substituteInPlace Makefile \
+              --replace 'KERNEL_VERSION = linux-6.12.68' 'KERNEL_VERSION = linux-6.12.74'
+
+            cp ${./libkrunfw-patches/0022-vmgenid-setup-data.patch} patches/0022-vmgenid-setup-data.patch
+
+            cat >> config-libkrunfw_x86_64 <<'KCONFIG_EOF'
 CONFIG_VMGENID=y
 CONFIG_SERIAL_8250=y
 CONFIG_SERIAL_8250_CONSOLE=y
 CONFIG_SERIAL_EARLYCON=y
-ACPI_EOF
+KCONFIG_EOF
           '';
         });
       in
       {
+        packages.libkrunfw-vmgenid = libkrunfw-vmgenid;
+
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
             # Rust toolchain (resolved from rust-toolchain.toml via rust-overlay)
@@ -78,8 +84,8 @@ ACPI_EOF
             # ifconfig: used by tests/run.sh to configure loopback in network namespace
             nettools
 
-            # VM firmware with ACPI+VMGENID kernel support; loaded at runtime by libkrun
-            libkrunfw-acpi
+            # VM firmware with VMGENID support via SETUP_VMGENID boot protocol
+            libkrunfw-vmgenid
 
             # for --features snd (virtio-snd pipewire backend)
             pipewire.dev
@@ -115,7 +121,7 @@ ACPI_EOF
             # `make test` hardcodes LD_LIBRARY_PATH to test-prefix/lib64 only.
             # Symlink libkrunfw there so the test runner can find it alongside libkrun.
             mkdir -p test-prefix/lib64
-            for lib in ${libkrunfw-acpi}/lib64/libkrunfw*; do
+            for lib in ${libkrunfw-vmgenid}/lib/libkrunfw*; do
               ln -sf "$lib" "$(pwd)/test-prefix/lib64/$(basename "$lib")"
             done
 
