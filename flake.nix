@@ -23,6 +23,33 @@
           export PKG_CONFIG_PATH_x86_64_unknown_linux_gnu="''${PKG_CONFIG_PATH}''${PKG_CONFIG_PATH:+:}''${PKG_CONFIG_PATH_x86_64_unknown_linux_gnu:-}"
           exec ${pkgs.pkg-config}/bin/pkg-config "$@"
         '';
+
+        # Rebuild libkrunfw 5.2.1 with ACPI + VMGENID enabled in the guest kernel.
+        # Upstream config has `# CONFIG_ACPI is not set`; we append the needed
+        # options and let `make olddefconfig` resolve dependencies.
+        libkrunfw-acpi = pkgs.libkrunfw.overrideAttrs (old: {
+          version = "5.2.1";
+          src = pkgs.fetchFromGitHub {
+            owner = "containers";
+            repo = "libkrunfw";
+            tag = "v5.2.1";
+            hash = "sha256-hRu9HEWTyToqntDkqBIvWEn+kAidQdspyWc6Le587qw=";
+          };
+          kernelSrc = pkgs.fetchurl {
+            url = "mirror://kernel/linux/kernel/v6.x/linux-6.12.68.tar.xz";
+            hash = "sha256-02fHUEvU2lIN0B6wgSXS0KwIi8ivTNVtI28gdN1CJbc=";
+          };
+          postPatch = (old.postPatch or "") + ''
+            cat >> config-libkrunfw_x86_64 <<'ACPI_EOF'
+CONFIG_ACPI=y
+CONFIG_PCI=y
+CONFIG_VMGENID=y
+CONFIG_SERIAL_8250=y
+CONFIG_SERIAL_8250_CONSOLE=y
+CONFIG_SERIAL_EARLYCON=y
+ACPI_EOF
+          '';
+        });
       in
       {
         devShells.default = pkgs.mkShell {
@@ -51,8 +78,8 @@
             # ifconfig: used by tests/run.sh to configure loopback in network namespace
             nettools
 
-            # VM firmware bundled as a shared library; loaded at runtime by libkrun
-            libkrunfw
+            # VM firmware with ACPI+VMGENID kernel support; loaded at runtime by libkrun
+            libkrunfw-acpi
 
             # for --features snd (virtio-snd pipewire backend)
             pipewire.dev
@@ -88,7 +115,7 @@
             # `make test` hardcodes LD_LIBRARY_PATH to test-prefix/lib64 only.
             # Symlink libkrunfw there so the test runner can find it alongside libkrun.
             mkdir -p test-prefix/lib64
-            for lib in ${pkgs.libkrunfw}/lib64/libkrunfw*; do
+            for lib in ${libkrunfw-acpi}/lib64/libkrunfw*; do
               ln -sf "$lib" "$(pwd)/test-prefix/lib64/$(basename "$lib")"
             done
 
