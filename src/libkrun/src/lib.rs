@@ -2119,7 +2119,6 @@ mod tests {
         );
     }
 
-    #[cfg(test)]
     mod proptest_tests {
         use super::*;
         use proptest::prelude::*;

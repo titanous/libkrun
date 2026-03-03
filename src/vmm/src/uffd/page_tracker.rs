@@ -377,7 +377,7 @@ mod tests {
         assert_eq!(stats.progress_pct, 2.0);
     }
 
-    #[cfg(all(test, not(loom)))]
+    #[cfg(not(loom))]
     mod proptest_tests {
         use super::*;
         use proptest::prelude::*;

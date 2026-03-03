@@ -310,7 +310,7 @@ mod tests {
 
     #[cfg(not(loom))]
     mod proptest_tests {
-        use super::*;
+        use super::ReclaimedBitmap;
         use proptest::prelude::*;
 
         proptest! {

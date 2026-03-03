@@ -982,9 +982,15 @@ mod tests {
                 let deserialized: VmSnapshot = bincode::deserialize(&serialized)
                     .expect("deserialization failed");
 
+                prop_assert_eq!(snapshot.header.magic, deserialized.header.magic);
+                prop_assert_eq!(snapshot.header.version, deserialized.header.version);
                 prop_assert_eq!(snapshot.header.vcpu_count, deserialized.header.vcpu_count);
                 prop_assert_eq!(snapshot.header.ram_regions, deserialized.header.ram_regions);
+                prop_assert_eq!(snapshot.header.nested_enabled, deserialized.header.nested_enabled);
                 prop_assert_eq!(snapshot.vcpu_states, deserialized.vcpu_states);
+                prop_assert_eq!(snapshot.device_states, deserialized.device_states);
+                prop_assert_eq!(snapshot.gic_state, deserialized.gic_state);
+                prop_assert_eq!(snapshot.vm_state, deserialized.vm_state);
                 prop_assert_eq!(snapshot.excluded_pages, deserialized.excluded_pages);
             }
 
@@ -1003,11 +1009,12 @@ mod tests {
             /// validate_magic_and_version: wrong magic always fails.
             #[test]
             fn prop_invalid_magic_always_fails(
+                magic in any::<u32>().prop_filter("not valid magic", |m| *m != SNAPSHOT_MAGIC),
                 version in any::<u32>(),
                 vcpu_count in 1u32..16,
             ) {
                 let header = SnapshotHeader {
-                    magic: SNAPSHOT_MAGIC + 1,  // wrong magic
+                    magic,
                     version,
                     vcpu_count,
                     ram_regions: vec![],
