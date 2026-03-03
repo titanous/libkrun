@@ -159,11 +159,7 @@ integration-asan:
 # Default: 1000 iterations per test. Pass iterations=N to override.
 shuttle iterations="1000":
     SHUTTLE_ITERATIONS={{iterations}} \
-    cargo test -p devices --features net,shuttle -- shuttle_tests
-    SHUTTLE_ITERATIONS={{iterations}} \
-    cargo test -p devices --features shuttle -- \
-        balloon::device::shuttle_tests \
-        device::shuttle_tests
+    cargo test -p devices --features net,blk,shuttle -- shuttle_tests
 
 kani:
     @echo "kani: set up in Phase 6 (Kani Proofs)"
