@@ -38,8 +38,9 @@ all: check test miri proptest loom shuttle
 # Compound target: safety checks.
 # Phase 1: check
 # Phase 4: + fuzz-all (60s per target)
-# Later phases add: asan miri kani
-safety: check fuzz-all
+# Phase 5: + asan + shuttle
+# Phase 6: + kani
+safety: check fuzz-all asan shuttle kani
 
 # ── Stubs for tools added in later phases ────────────────────────────────────
 # These targets are extended by later implementation phases.
@@ -161,13 +162,16 @@ shuttle iterations="1000":
     SHUTTLE_ITERATIONS={{iterations}} \
     cargo test -p devices --features net,blk,shuttle -- shuttle_tests
 
+# Kani: bounded formal verification proofs.
+# Requires: cargo install --locked kani-verifier && cargo kani setup
+# All proofs in kani-proofs/:
 kani:
-    @echo "kani: set up in Phase 6 (Kani Proofs)"
-    @exit 1
+    cargo kani --manifest-path kani-proofs/Cargo.toml
 
+# Run a single named Kani proof.
+# Usage: just kani-proof proof_mark_dirty_no_panic
 kani-proof name:
-    @echo "kani-proof: set up in Phase 6 (Kani Proofs)"
-    @exit 1
+    cargo kani --manifest-path kani-proofs/Cargo.toml --harness {{name}}
 
 mutants:
     @echo "mutants: set up in Phase 8 (Mutation Testing)"
