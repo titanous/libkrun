@@ -21,3 +21,4 @@ test-prefix
 /linux-sysroot
 .worktrees/
 .reference/
+result
