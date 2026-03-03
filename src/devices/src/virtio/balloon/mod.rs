@@ -4,6 +4,7 @@ mod reclaimed_bitmap;
 
 pub use self::defs::uapi::VIRTIO_ID_BALLOON as TYPE_BALLOON;
 pub use self::device::{Balloon, BalloonStats};
+pub use self::reclaimed_bitmap::ReclaimedBitmap;
 
 mod defs {
     use super::super::QueueConfig;

@@ -6,7 +6,7 @@
 //! gdt_entry encodes (flags, base, limit) into a u64 GDT descriptor.
 //! kvm_segment_from_gdt decodes it back. The round-trip must preserve base and limit.
 
-use arch::x86_64::gdt::{gdt_entry, kvm_segment_from_gdt};
+use arch::x86_64::{gdt_entry, kvm_segment_from_gdt};
 
 /// Proof: gdt_entry/kvm_segment_from_gdt round-trip preserves base.
 ///

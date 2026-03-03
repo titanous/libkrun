@@ -6,8 +6,7 @@
 //! guest_to_host must return the correct host offset for in-range addresses
 //! and None for out-of-range addresses. Bound: up to 4 regions.
 
-// Post-Phase-2 import path:
-use vmm::uffd::page_tracker::{UffdRegion, guest_to_host};
+use vmm::uffd::{UffdRegion, guest_to_host};
 
 /// Proof: guest_to_host returns Some with correct offset for in-range addresses.
 ///

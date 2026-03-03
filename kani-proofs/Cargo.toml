@@ -11,7 +11,6 @@ publish = false
 [workspace]
 # Empty workspace declaration to make this package standalone
 
-
 [dependencies]
 vmm = { path = "../src/vmm", features = ["snapshot", "uffd"] }
 devices = { path = "../src/devices", features = ["net"] }

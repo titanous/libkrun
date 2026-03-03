@@ -6,6 +6,7 @@
 // found in the THIRD-PARTY file.
 
 mod gdt;
+pub use gdt::{gdt_entry, kvm_segment_from_gdt};
 /// Contains logic for setting up Advanced Programmable Interrupt Controller (local version).
 pub mod interrupts;
 /// Layout for the x86_64 system.

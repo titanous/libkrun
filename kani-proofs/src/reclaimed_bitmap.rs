@@ -5,7 +5,7 @@
 //!
 //! Verifies: mark/is_set round-trip, clear/is_set round-trip, count consistency.
 
-use devices::virtio::balloon::reclaimed_bitmap::ReclaimedBitmap;
+use devices::virtio::balloon::ReclaimedBitmap;
 
 /// Proof: mark(pfn) followed by is_set(pfn) returns true.
 ///

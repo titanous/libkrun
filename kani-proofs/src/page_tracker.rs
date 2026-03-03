@@ -6,10 +6,7 @@
 //! PageTracker::mark_loaded uses fetch_or to deduplicate: marking the same
 //! page twice must increment the counter exactly once, regardless of source.
 
-// Post-Phase-2 path (PageTracker in uffd/page_tracker.rs):
-use vmm::uffd::page_tracker::{LoadSource, PageTracker};
-// If Phase 2 has not run, use instead:
-// use vmm::uffd::{LoadSource, PageTracker};
+use vmm::uffd::{LoadSource, PageTracker};
 
 /// Proof: marking same page twice with same source increments counter exactly once.
 ///
