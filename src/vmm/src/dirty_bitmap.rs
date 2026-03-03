@@ -6,7 +6,10 @@
 //! Uses atomic operations so vCPU fault handlers can mark pages dirty
 //! without acquiring a lock.
 
+#[cfg(not(loom))]
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(loom)]
+use loom::sync::atomic::{AtomicU64, Ordering};
 
 /// Page size on Apple Silicon (16KB).
 pub const PAGE_SIZE: u64 = 16384;

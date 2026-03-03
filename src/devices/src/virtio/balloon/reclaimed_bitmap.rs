@@ -5,7 +5,10 @@
 //!
 //! Uses atomic operations so pages can be marked/cleared without acquiring a lock.
 
+#[cfg(not(loom))]
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(loom)]
+use loom::sync::atomic::{AtomicU64, Ordering};
 
 /// Balloon page size (4KB, virtio balloon PFN granularity).
 #[allow(dead_code)]

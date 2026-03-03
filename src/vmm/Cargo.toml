@@ -64,5 +64,8 @@ userfaultfd = { version = "0.8", optional = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 hvf = { path = "../hvf", optional = true }
 
+[target.'cfg(loom)'.dependencies]
+loom = { version = "0.7", features = ["checkpoint"] }
+
 [dev-dependencies]
 devices = { path = "../devices", features = ["test_utils"] }

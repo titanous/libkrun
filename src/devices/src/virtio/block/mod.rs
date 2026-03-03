@@ -3,6 +3,7 @@
 
 pub mod async_worker;
 pub mod device;
+pub mod request;
 mod worker;
 
 use std::io;
