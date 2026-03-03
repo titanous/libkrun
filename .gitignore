@@ -22,3 +22,7 @@ test-prefix
 .worktrees/
 .reference/
 result
+
+# cargo-mutants output
+mutants.out/
+mutants.out.old/

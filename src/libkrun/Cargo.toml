@@ -50,6 +50,7 @@ vm-memory = { version = "0.18", features = ["backend-mmap"] }
 
 [dev-dependencies]
 proptest = "1.4"
+mutants = "0.0.3"
 
 [lib]
 name = "krun"

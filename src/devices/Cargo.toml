@@ -72,6 +72,7 @@ loom = { version = "0.7", features = ["checkpoint"] }
 proptest = "1.4"
 proptest-derive = "0.4"
 shuttle = "0.8"
+mutants = "0.0.3"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }

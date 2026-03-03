@@ -76,3 +76,4 @@ devices = { path = "../devices", features = ["test_utils"] }
 proptest = "1.4"
 proptest-derive = "0.4"
 shuttle = "0.8"
+mutants = "0.0.3"
