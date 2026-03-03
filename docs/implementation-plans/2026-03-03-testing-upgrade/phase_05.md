@@ -703,12 +703,14 @@ shuttle iterations="1000":
 
 **Update the `all` compound target:**
 
-The `all` target in Phase 1 was defined as `all: check test`. Update it to include shuttle:
+By the time Phase 5 executes, Phase 3 has already updated `all:` to include `miri proptest loom`. Add `shuttle` to that existing list:
 
 ```just
 # Compound target: all fast tests
-all: check test shuttle
+all: check test miri proptest loom shuttle
 ```
+
+Note: Do not overwrite Phase 3's additions (`miri proptest loom`). The final `all:` target must include all five tools as required by AC5.5.
 
 **Verification:**
 
