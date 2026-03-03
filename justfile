@@ -32,8 +32,8 @@ integration test="all":
 # Compound target: all fast tests (extended in later phases)
 # Phase 1: check + unit tests
 # Phase 2: add miri proptest loom
-# Later phases add: shuttle
-all: check test miri proptest loom
+# Phase 5: add shuttle
+all: check test miri proptest loom shuttle
 
 # Compound target: safety checks.
 # Phase 1: check
@@ -111,17 +111,59 @@ fuzz-corpus target:
         echo "Run 'just fuzz {{target}}' to start generating one."; \
     fi
 
+# ASan: run unit tests under AddressSanitizer.
+# Requires nightly Rust. Detects buffer overflows, use-after-free, heap corruption.
+# Must use --target explicitly (ASan requires target triple even for host builds).
 asan:
-    @echo "asan: set up in Phase 5 (ASan + Shuttle)"
-    @exit 1
+    RUSTFLAGS="-Zsanitizer=address" \
+    cargo +nightly test \
+        --target x86_64-unknown-linux-gnu \
+        -p devices --features net,snapshot
+    RUSTFLAGS="-Zsanitizer=address" \
+    cargo +nightly test \
+        --target x86_64-unknown-linux-gnu \
+        -p vmm --features snapshot
 
+# integration-asan: run integration tests with ASan instrumentation on the runner binary.
+#
+# How it works:
+#   1. Sets RUSTFLAGS="-Zsanitizer=address" and RUSTUP_TOOLCHAIN=nightly so that
+#      all `cargo build` calls inside tests/run.sh compile with ASan.
+#   2. The runner, test-daemon, and test-vsock-proxy binaries are built with ASan.
+#   3. The guest-agent binary is musl-compiled (x86_64-unknown-linux-musl);
+#      musl + ASan is unsupported — that build will fail if RUSTFLAGS is set
+#      unconditionally. run.sh must be patched (see note below) or the guest-agent
+#      build must be separated from the ASan build.
+#   4. Calls tests/run.sh with FEATURE_FLAGS="--features embedded_init".
+#
+# Note on guest-agent: musl + ASan is not supported by the ASan runtime.
+# The workaround is to build guest-agent before entering ASan mode, or to
+# modify run.sh to skip the RUSTFLAGS env when building for the musl target.
+# See implementation note below.
 integration-asan:
-    @echo "integration-asan: set up in Phase 5 (ASan + Shuttle)"
-    @exit 1
+    mkdir -p test-prefix/lib64
+    cd tests && \
+        GUEST_TARGET_ARCH="$(uname -m)-unknown-linux-musl" \
+        cargo build --target="$(uname -m)-unknown-linux-musl" -p guest-agent && \
+        RUSTFLAGS="-Zsanitizer=address" \
+        RUSTUP_TOOLCHAIN=nightly \
+        KRUN_TEST_GUEST_AGENT_PATH="target/$(uname -m)-unknown-linux-musl/debug/guest-agent" \
+        KRUN_NO_RUN_SH_GUEST_AGENT=1 \
+        FEATURE_FLAGS="--features embedded_init" \
+        LD_LIBRARY_PATH="$(realpath ../test-prefix/lib64/)" \
+        ./run.sh test
 
+# Shuttle: randomized concurrency testing for complex multi-threaded coordination.
+# Uses shuttle crate to sample thread interleavings (not exhaustive like loom).
+# Targets: block worker quiesce handshake, balloon condvar, device state transitions.
+# Default: 1000 iterations per test. Pass iterations=N to override.
 shuttle iterations="1000":
-    @echo "shuttle: set up in Phase 5 (ASan + Shuttle)"
-    @exit 1
+    SHUTTLE_ITERATIONS={{iterations}} \
+    cargo test -p devices --features net,shuttle -- shuttle_tests
+    SHUTTLE_ITERATIONS={{iterations}} \
+    cargo test -p devices --features shuttle -- \
+        balloon::device::shuttle_tests \
+        device::shuttle_tests
 
 kani:
     @echo "kani: set up in Phase 6 (Kani Proofs)"

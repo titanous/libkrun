@@ -11,7 +11,9 @@ cargo test -p test_cases --features guest
 
 GUEST_TARGET_ARCH="$(uname -m)-unknown-linux-musl"
 
-cargo build --target=$GUEST_TARGET_ARCH -p guest-agent
+if [ -z "${KRUN_NO_RUN_SH_GUEST_AGENT}" ]; then
+    cargo build --target=$GUEST_TARGET_ARCH -p guest-agent
+fi
 cargo build -p runner
 cargo build -p test-daemon
 cargo build -p test-vsock-proxy
