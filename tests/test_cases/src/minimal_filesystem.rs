@@ -14,8 +14,8 @@ use std::io;
 use std::sync::RwLock;
 
 use krun::{
-    FilesystemContext as Context, DirEntry, Entry, FileSystem, Handle, Inode, OpenOptions,
-    ZeroCopyReader, ZeroCopyWriter,
+    DirEntry, Entry, FileSystem, FilesystemContext as Context, Handle, Inode, OpenOptions,
+    ZeroCopyWriter,
 };
 
 /// A minimal read-only in-memory filesystem.
@@ -25,11 +25,9 @@ use krun::{
 /// All other operations return ENOSYS.
 pub struct MinimalFileSystem {
     /// Map from filename to (inode, content)
-    files: HashMap<String, (Inode, Vec<u8>)>,
+    files: HashMap<String, (u64, Vec<u8>)>,
     /// Map from inode to content (for reads)
-    inodes: RwLock<HashMap<Inode, Vec<u8>>>,
-    /// Next inode to allocate
-    next_inode: std::sync::atomic::AtomicU64,
+    inodes: RwLock<HashMap<u64, Vec<u8>>>,
 }
 
 impl MinimalFileSystem {
@@ -56,7 +54,6 @@ impl MinimalFileSystem {
         MinimalFileSystem {
             files: file_map,
             inodes: RwLock::new(inode_map),
-            next_inode: std::sync::atomic::AtomicU64::new(next_ino),
         }
     }
 }
@@ -64,10 +61,12 @@ impl MinimalFileSystem {
 impl FileSystem for MinimalFileSystem {
     fn lookup(&self, _ctx: Context, parent: Inode, name: &CStr) -> io::Result<Entry> {
         // Only support lookups in root (inode 1)
-        if parent != 1 {
+        if parent != Inode(1) {
             return Err(io::Error::from_raw_os_error(libc::ENOENT));
         }
-        let name_str = name.to_str().map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+        let name_str = name
+            .to_str()
+            .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
         if let Some(&(ino, ref data)) = self.files.get(name_str) {
             Ok(Entry {
                 inode: ino,
@@ -95,7 +94,7 @@ impl FileSystem for MinimalFileSystem {
     ) -> io::Result<usize> {
         let inodes = self.inodes.read().unwrap();
         let data = inodes
-            .get(&inode)
+            .get(&inode.0)
             .ok_or_else(|| io::Error::from_raw_os_error(libc::ENOENT))?;
 
         let start = offset as usize;
@@ -115,7 +114,7 @@ impl FileSystem for MinimalFileSystem {
         _handle: Option<Handle>,
     ) -> io::Result<(libc::stat64, std::time::Duration)> {
         // Root inode
-        if inode == 1 {
+        if inode == Inode(1) {
             let mut attr: libc::stat64 = unsafe { std::mem::zeroed() };
             attr.st_ino = 1;
             attr.st_mode = libc::S_IFDIR | 0o755;
@@ -124,17 +123,20 @@ impl FileSystem for MinimalFileSystem {
         }
         let inodes = self.inodes.read().unwrap();
         let data = inodes
-            .get(&inode)
+            .get(&inode.0)
             .ok_or_else(|| io::Error::from_raw_os_error(libc::ENOENT))?;
-        Ok((file_attr(inode, data.len() as u64), std::time::Duration::from_secs(3600)))
+        Ok((
+            file_attr(inode.0, data.len() as u64),
+            std::time::Duration::from_secs(3600),
+        ))
     }
 
     fn open(
         &self,
         _ctx: Context,
         _inode: Inode,
+        _kill_priv: bool,
         _flags: u32,
-        _fuse_flags: u32,
     ) -> io::Result<(Option<Handle>, OpenOptions)> {
         // No handle needed for a simple in-memory read
         Ok((None, OpenOptions::empty()))
@@ -154,15 +156,15 @@ impl FileSystem for MinimalFileSystem {
         _ctx: Context,
         inode: Inode,
         _handle: Handle,
-        size: u32,
+        _size: u32,
         offset: u64,
-        add_entry: &mut dyn FnMut(DirEntry, Entry) -> io::Result<usize>,
+        add_entry: &mut dyn FnMut(DirEntry) -> io::Result<usize>,
     ) -> io::Result<()> {
-        if inode != 1 {
+        if inode != Inode(1) {
             return Err(io::Error::from_raw_os_error(libc::ENOTDIR));
         }
         let mut cur_offset = 0u64;
-        for (name, &(ino, ref data)) in &self.files {
+        for (name, &(ino, _)) in &self.files {
             cur_offset += 1;
             if cur_offset <= offset {
                 continue;
@@ -173,26 +175,17 @@ impl FileSystem for MinimalFileSystem {
                 type_: libc::DT_REG as u32,
                 name: name.as_bytes(),
             };
-            let attr = Entry {
-                inode: ino,
-                generation: 0,
-                attr: file_attr(ino, data.len() as u64),
-                attr_flags: 0,
-                attr_timeout: std::time::Duration::from_secs(3600),
-                entry_timeout: std::time::Duration::from_secs(3600),
-            };
-            match add_entry(entry, attr) {
+            match add_entry(entry) {
                 Ok(0) => break, // buffer full
                 Ok(_) => {}
                 Err(e) => return Err(e),
             }
-            let _ = size; // size check handled by fuse layer
         }
         Ok(())
     }
 }
 
-fn file_attr(inode: Inode, size: u64) -> libc::stat64 {
+fn file_attr(inode: u64, size: u64) -> libc::stat64 {
     let mut attr: libc::stat64 = unsafe { std::mem::zeroed() };
     attr.st_ino = inode;
     attr.st_mode = libc::S_IFREG | 0o644;

@@ -9,7 +9,6 @@ pub struct TestVirtiofsMinimalFs;
 
 const VSOCK_PORT: u32 = 5720;
 const FS_TAG: &str = "minimalfs";
-const MOUNT_POINT: &str = "/mnt/minimal";
 const TEST_FILE: &str = "hello.txt";
 const TEST_CONTENT: &[u8] = b"minimal filesystem content";
 
@@ -45,7 +44,9 @@ mod host {
             let vm_thread = thread::spawn(move || context.run());
 
             let (mut stream, _) = listener.accept().unwrap();
-            stream.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(30)))
+                .unwrap();
             let mut buf = vec![0u8; 2];
             stream.read_exact(&mut buf).unwrap();
             assert_eq!(&buf, b"OK", "expected OK from guest virtiofs minimal test");
@@ -64,6 +65,8 @@ mod guest {
     use std::ffi::CString;
     use std::fs;
     use std::io::Write;
+
+    const MOUNT_POINT: &str = "/mnt/minimal";
 
     impl Test for TestVirtiofsMinimalFs {
         fn in_guest(self: Box<Self>) {
@@ -92,7 +95,11 @@ mod guest {
             // Read the test file
             let path = format!("{}/{}", MOUNT_POINT, TEST_FILE);
             let content = fs::read(&path).expect("read test file from minimal virtiofs");
-            assert_eq!(&content, TEST_CONTENT, "content mismatch: got {:?}", &content);
+            assert_eq!(
+                &content, TEST_CONTENT,
+                "content mismatch: got {:?}",
+                &content
+            );
 
             // Verify ENOSYS for unimplemented ops (write returns EROFS or ENOSYS)
             let write_result = fs::write(&path, b"should fail");

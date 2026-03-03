@@ -10,8 +10,6 @@ pub struct TestVirtiofsDaxSnapshot;
 
 const VSOCK_PORT: u32 = 5723;
 const FS_TAG: &str = "daxfs";
-const MOUNT_POINT: &str = "/mnt/dax";
-const DAX_WINDOW_SIZE: usize = 1 << 29; // 512 MiB
 
 #[host]
 mod host {
@@ -22,6 +20,8 @@ mod host {
     use std::os::unix::net::UnixListener;
     use std::thread;
     use std::time::Duration;
+
+    const DAX_WINDOW_SIZE: usize = 1 << 29; // 512 MiB
 
     impl Test for TestVirtiofsDaxSnapshot {
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
@@ -60,7 +60,9 @@ mod host {
             let vm_thread = thread::spawn(move || context.run());
 
             let (mut stream, _) = listener.accept().unwrap();
-            stream.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(30)))
+                .unwrap();
 
             // Phase 1: wait for guest to write file
             let mut buf = vec![0u8; 7];
@@ -94,6 +96,8 @@ mod guest {
     use std::fs;
     use std::io::{Read, Write};
 
+    const MOUNT_POINT: &str = "/mnt/dax";
+
     impl Test for TestVirtiofsDaxSnapshot {
         fn in_guest(self: Box<Self>) {
             // Mount the DAX-enabled virtiofs
@@ -112,7 +116,11 @@ mod guest {
                     std::ptr::null(),
                 )
             };
-            assert!(ret == 0, "mount virtiofs failed: {}", std::io::Error::last_os_error());
+            assert!(
+                ret == 0,
+                "mount virtiofs failed: {}",
+                std::io::Error::last_os_error()
+            );
 
             // Verify pre-existing file
             let pre_path = format!("{}/pre-existing.txt", MOUNT_POINT);

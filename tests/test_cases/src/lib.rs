@@ -56,9 +56,8 @@ mod failing_block_backend;
 #[cfg(feature = "host")]
 mod slow_block_backend;
 
-// NOTE: minimal_filesystem deferred - requires exact FileSystem trait signature fixes
-// #[cfg(feature = "host")]
-// mod minimal_filesystem;
+#[cfg(feature = "host")]
+mod minimal_filesystem;
 
 mod test_custom_block_backend;
 use test_custom_block_backend::TestCustomBlockBackend;
@@ -117,9 +116,8 @@ use test_block_backend_errors::TestBlockBackendErrors;
 mod test_block_backend_slow;
 use test_block_backend_slow::TestBlockBackendSlow;
 
-// NOTE: test_virtiofs_minimal deferred - requires exact FileSystem trait signature fixes
-// mod test_virtiofs_minimal;
-// use test_virtiofs_minimal::TestVirtiofsMinimalFs;
+mod test_virtiofs_minimal;
+use test_virtiofs_minimal::TestVirtiofsMinimalFs;
 
 mod test_balloon_snapshot_uffd;
 use test_balloon_snapshot_uffd::TestBalloonSnapshotUffd;
@@ -203,7 +201,10 @@ pub fn test_cases() -> Vec<TestCase> {
         TestCase::new("vhost-user-fs-dax-never", Box::new(TestVhostUserFsDaxNever)),
         TestCase::new("vhost-user-vsock-echo", Box::new(TestVhostUserVsockEcho)),
         TestCase::new("vhost-user-vsock-fd", Box::new(TestVhostUserVsockFd)),
-        TestCase::new("vhost-user-vsock-snapshot", Box::new(TestVhostUserVsockSnapshot)),
+        TestCase::new(
+            "vhost-user-vsock-snapshot",
+            Box::new(TestVhostUserVsockSnapshot),
+        ),
         TestCase::new(
             "virtiofs-generic-passthrough",
             Box::new(TestVirtiofsGenericPassthrough),
@@ -230,7 +231,7 @@ pub fn test_cases() -> Vec<TestCase> {
         TestCase::new("snapshot-rng-reseed", Box::new(TestSnapshotRngReseed)),
         TestCase::new("block-backend-errors", Box::new(TestBlockBackendErrors)),
         TestCase::new("block-backend-slow", Box::new(TestBlockBackendSlow)),
-        // TestCase::new("virtiofs-minimal-fs", Box::new(TestVirtiofsMinimalFs)), // Deferred
+        TestCase::new("virtiofs-minimal-fs", Box::new(TestVirtiofsMinimalFs)),
         TestCase::new("balloon-snapshot-uffd", Box::new(TestBalloonSnapshotUffd)),
         TestCase::new("block-snapshot-uffd", Box::new(TestBlockSnapshotUffd)),
         TestCase::new("virtiofs-dax-snapshot", Box::new(TestVirtiofsDaxSnapshot)),
