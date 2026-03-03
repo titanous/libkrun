@@ -67,5 +67,9 @@ vm-fdt = ">= 0.2.0"
 [target.'cfg(loom)'.dependencies]
 loom = { version = "0.7", features = ["checkpoint"] }
 
+[dev-dependencies]
+proptest = "1.4"
+proptest-derive = "0.4"
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }

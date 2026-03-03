@@ -72,3 +72,5 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
 
 [dev-dependencies]
 devices = { path = "../devices", features = ["test_utils"] }
+proptest = "1.4"
+proptest-derive = "0.4"

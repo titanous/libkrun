@@ -99,7 +99,7 @@ impl From<io::Error> for SnapshotError {
     }
 }
 
-fn validate_magic_and_version(header: &SnapshotHeader) -> Result<(), SnapshotError> {
+pub(crate) fn validate_magic_and_version(header: &SnapshotHeader) -> Result<(), SnapshotError> {
     if header.magic != SNAPSHOT_MAGIC {
         return Err(SnapshotError::InvalidMagic);
     }
@@ -517,6 +517,7 @@ mod tests {
 
     /// AC1.6: Memory file size mismatch via load_memory
     #[cfg(feature = "snapshot")]
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn test_memory_file_size_mismatch() {
         use std::io::Write;
@@ -549,6 +550,7 @@ mod tests {
 
     /// AC1.7: Truncated/Invalid vmstate file
     #[cfg(feature = "snapshot")]
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn test_truncated_vmstate_file() {
         use std::io::Write;
@@ -592,6 +594,7 @@ mod tests {
 
     /// AC5.1: VmSnapshot save/load round-trip with valid snapshot under 10MB
     #[cfg(feature = "snapshot")]
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn test_vmstate_roundtrip() {
         let mem = make_memory(&[(0x1000, 0x2000)]);
@@ -644,6 +647,7 @@ mod tests {
 
     /// AC5.3: IncrementalSnapshot save/load round-trip with valid snapshot under 10MB
     #[cfg(feature = "snapshot")]
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn test_incremental_snapshot_roundtrip() {
         let mem = make_memory(&[(0x1000, 0x2000)]);
@@ -719,6 +723,7 @@ mod tests {
 
     /// AC5.2: vmstate file exceeding 10MB size limit
     #[cfg(feature = "snapshot")]
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn test_load_vmstate_exceeds_size_limit() {
         use std::io::Write;
@@ -751,6 +756,7 @@ mod tests {
 
     /// AC5.4: incremental snapshot file exceeding 10MB size limit
     #[cfg(feature = "snapshot")]
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn test_load_incremental_snapshot_exceeds_size_limit() {
         use std::io::Write;
@@ -783,6 +789,7 @@ mod tests {
 
     /// AC2.5: Incremental snapshot records reclaimed pages in the snapshot metadata
     #[cfg(feature = "snapshot")]
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn test_incremental_snapshot_with_reclaimed_pages() {
         let mem = make_memory(&[(0x1000, 0x4000)]);
@@ -839,6 +846,7 @@ mod tests {
 
     /// AC2.6: Restore zero-fills reclaimed pages in guest memory
     #[cfg(feature = "snapshot")]
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn test_apply_reclaimed_pages_zero_fills() {
         let mem = make_memory(&[(0x0, 0x8000)]); // 32KB region
@@ -885,6 +893,7 @@ mod tests {
 
     /// AC2.6 variant: Empty reclaimed_pages list (backward compat with old snapshots)
     #[cfg(feature = "snapshot")]
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn test_apply_reclaimed_pages_empty_list() {
         let mem = make_memory(&[(0x0, 0x4000)]);
@@ -905,5 +914,101 @@ mod tests {
             buf.iter().all(|&b| b == 0xFF),
             "Page should be unchanged with empty reclaimed list"
         );
+    }
+
+    #[cfg(all(not(loom), feature = "snapshot"))]
+    mod proptest_tests {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn arb_snapshot_header() -> impl Strategy<Value = SnapshotHeader> {
+            (
+                any::<u32>(),       // magic (arbitrary for round-trip)
+                any::<u32>(),       // version (arbitrary for round-trip)
+                1u32..=16u32,       // vcpu_count (at least 1)
+                prop::collection::vec(
+                    (any::<u64>(), 1u64..=(1u64 << 30)),  // (addr, size) pairs
+                    0..4
+                ),
+                any::<bool>(),      // nested_enabled
+            ).prop_map(|(magic, version, vcpu_count, ram_regions, nested_enabled)| {
+                SnapshotHeader {
+                    magic,
+                    version,
+                    vcpu_count,
+                    ram_regions,
+                    nested_enabled,
+                }
+            })
+        }
+
+        fn arb_vm_snapshot() -> impl Strategy<Value = VmSnapshot> {
+            (
+                arb_snapshot_header(),
+                prop::collection::vec(prop::collection::vec(any::<u8>(), 0..128), 0..4),
+                prop::collection::vec(
+                    ("[a-z]{1,8}".prop_map(|s: String| s), prop::collection::vec(any::<u8>(), 0..64))
+                        .prop_map(|(id, state)| (id, state)),
+                    0..4
+                ),
+                proptest::option::of(prop::collection::vec(any::<u8>(), 0..32)),
+                proptest::option::of(prop::collection::vec(any::<u8>(), 0..32)),
+                prop::collection::vec(any::<u64>(), 0..8),
+            ).prop_map(|(header, vcpu_states, device_states, gic_state, vm_state, excluded_pages)| {
+                VmSnapshot {
+                    header,
+                    vcpu_states,
+                    device_states,
+                    gic_state,
+                    vm_state,
+                    excluded_pages,
+                }
+            })
+        }
+
+        proptest! {
+            /// VmSnapshot serializes and deserializes with identity (bincode round-trip).
+            #[test]
+            fn prop_vm_snapshot_bincode_roundtrip(snapshot in arb_vm_snapshot()) {
+                let serialized = bincode::serialize(&snapshot)
+                    .expect("serialization failed");
+                let deserialized: VmSnapshot = bincode::deserialize(&serialized)
+                    .expect("deserialization failed");
+
+                prop_assert_eq!(snapshot.header.vcpu_count, deserialized.header.vcpu_count);
+                prop_assert_eq!(snapshot.header.ram_regions, deserialized.header.ram_regions);
+                prop_assert_eq!(snapshot.vcpu_states, deserialized.vcpu_states);
+                prop_assert_eq!(snapshot.excluded_pages, deserialized.excluded_pages);
+            }
+
+            /// SnapshotHeader round-trip preserves all fields.
+            #[test]
+            fn prop_snapshot_header_roundtrip(header in arb_snapshot_header()) {
+                let serialized = bincode::serialize(&header).expect("serialize");
+                let recovered: SnapshotHeader = bincode::deserialize(&serialized).expect("deserialize");
+                prop_assert_eq!(header.magic, recovered.magic);
+                prop_assert_eq!(header.version, recovered.version);
+                prop_assert_eq!(header.vcpu_count, recovered.vcpu_count);
+                prop_assert_eq!(header.ram_regions, recovered.ram_regions);
+                prop_assert_eq!(header.nested_enabled, recovered.nested_enabled);
+            }
+
+            /// validate_magic_and_version: wrong magic always fails.
+            #[test]
+            fn prop_invalid_magic_always_fails(
+                version in any::<u32>(),
+                vcpu_count in 1u32..16,
+            ) {
+                let header = SnapshotHeader {
+                    magic: SNAPSHOT_MAGIC + 1,  // wrong magic
+                    version,
+                    vcpu_count,
+                    ram_regions: vec![],
+                    nested_enabled: false,
+                };
+                let result = validate_magic_and_version(&header);
+                prop_assert!(result.is_err());
+            }
+        }
     }
 }

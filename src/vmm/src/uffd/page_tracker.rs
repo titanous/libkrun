@@ -13,7 +13,7 @@ use crate::snapshot_store::system_page_size;
 use userfaultfd;
 
 /// Represents a guest memory region registered with UFFD.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct UffdRegion {
     /// Guest physical address
     pub guest_addr: u64,
@@ -375,5 +375,76 @@ mod tests {
 
         let stats = tracker.stats();
         assert_eq!(stats.progress_pct, 2.0);
+    }
+
+    #[cfg(all(test, not(loom)))]
+    mod proptest_tests {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn arb_region() -> impl Strategy<Value = UffdRegion> {
+            (
+                0u64..0x8000_0000,      // guest_addr (up to 2GB)
+                1u64..0x1000_0000,      // size (up to 256MB, must be > 0)
+                0u64..0x8000_0000,      // host_addr
+            ).prop_map(|(guest_addr, size, host_addr)| UffdRegion {
+                guest_addr,
+                host_addr,
+                size,
+                page_offset: 0,
+            })
+        }
+
+        proptest! {
+            /// guest_to_host returns Some for addresses inside the region.
+            #[test]
+            fn prop_guest_to_host_in_range(
+                region in arb_region(),
+                offset in 0u64..0x1000_0000u64,
+            ) {
+                let addr = region.guest_addr.saturating_add(offset % region.size);
+                let regions = vec![region.clone()];
+                let result = guest_to_host(&regions, addr);
+                prop_assert!(result.is_some(), "expected Some for addr={addr:#x} in region [{:#x},{:#x})", region.guest_addr, region.guest_addr + region.size);
+            }
+
+            /// guest_to_host returns None for addresses before the region.
+            #[test]
+            fn prop_guest_to_host_before_region(region in arb_region()) {
+                // Only test if there's address space before the region
+                prop_assume!(region.guest_addr > 0);
+                let addr = region.guest_addr - 1;
+                let regions = vec![region];
+                let result = guest_to_host(&regions, addr);
+                prop_assert!(result.is_none());
+            }
+
+            /// guest_to_host returns None for addresses after the region.
+            #[test]
+            fn prop_guest_to_host_after_region(region in arb_region()) {
+                let addr = region.guest_addr.saturating_add(region.size);
+                // Skip if overflow (saturating_add would wrap to a valid address)
+                prop_assume!(addr > region.guest_addr);
+                let regions = vec![region];
+                let result = guest_to_host(&regions, addr);
+                prop_assert!(result.is_none());
+            }
+
+            /// PageTracker mark_loaded deduplication: marking same page twice doesn't double-count.
+            #[test]
+            fn prop_mark_loaded_deduplication(
+                total_pages in 1usize..256,
+                page_index in 0usize..256,
+            ) {
+                prop_assume!(page_index < total_pages);
+                let tracker = PageTracker::new(total_pages);
+                tracker.mark_loaded(page_index, LoadSource::Preload);
+                tracker.mark_loaded(page_index, LoadSource::Preload);
+                // Count should be 1, not 2
+                let stats = tracker.stats();
+                prop_assert_eq!(stats.preload_pages, 1);
+                prop_assert_eq!(stats.loaded_pages, 1);
+            }
+        }
     }
 }

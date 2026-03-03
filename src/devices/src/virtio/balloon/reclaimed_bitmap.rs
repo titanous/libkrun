@@ -307,4 +307,53 @@ mod tests {
         // Pages 50+ would be out of bounds (silently ignored)
         assert!(!bitmap.is_set(50));
     }
+
+    #[cfg(not(loom))]
+    mod proptest_tests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            /// mark_range then count returns exactly the marked count.
+            #[test]
+            fn prop_mark_range_count(
+                start in 0u32..100,
+                count in 0u32..50,
+            ) {
+                let total = start.saturating_add(count) as usize + 1;
+                let bitmap = ReclaimedBitmap::new(total);
+                bitmap.mark_range(start, count);
+                // Pages in [start, start+count) should all be set
+                let actual_count = bitmap.count();
+                prop_assert_eq!(actual_count, count as usize);
+            }
+
+            /// mark_range then iter_set_pages returns exactly those PFNs.
+            #[test]
+            fn prop_mark_range_iter(
+                start in 0u32..50,
+                count in 1u32..20,
+            ) {
+                let total = start.saturating_add(count) as usize + 1;
+                let bitmap = ReclaimedBitmap::new(total);
+                bitmap.mark_range(start, count);
+
+                let pages = bitmap.iter_set_pages();
+                let expected: Vec<u32> = (start..start.saturating_add(count)).collect();
+                let mut got = pages.clone();
+                got.sort();
+                prop_assert_eq!(got, expected);
+            }
+
+            /// mark then clear is a round-trip: is_set returns false.
+            #[test]
+            fn prop_mark_clear_roundtrip(pfn in 0u32..100) {
+                let bitmap = ReclaimedBitmap::new(101);
+                bitmap.mark(pfn);
+                prop_assert!(bitmap.is_set(pfn));
+                bitmap.clear(pfn);
+                prop_assert!(!bitmap.is_set(pfn));
+            }
+        }
+    }
 }

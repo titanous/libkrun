@@ -112,4 +112,41 @@ mod tests {
         assert_eq!(0xfffff, seg.limit);
         assert_eq!(0x0, seg.unusable);
     }
+
+    #[cfg(not(loom))]
+    mod proptest_tests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            /// get_base(gdt_entry(flags, base, limit)) == base for all valid inputs.
+            ///
+            /// GDT base is a 32-bit field embedded across bytes 2, 4, 5 of the 8-byte GDT entry.
+            /// base is valid for values 0..=0xFF_FFFF (24-bit embedded portion).
+            /// Full 32-bit base is encoded: bits 31-24 in byte 7, bits 23-16 in byte 4, bits 15-0 in bytes 2-3.
+            #[test]
+            fn prop_gdt_base_roundtrip(
+                flags in 0u16..0xFFFF,
+                base in 0u32..=u32::MAX,
+                limit in 0u32..=0xFFFFF,  // 20-bit limit field
+            ) {
+                let entry = gdt_entry(flags, base, limit);
+                let recovered_base = get_base(entry);
+                prop_assert_eq!(recovered_base, base as u64);
+            }
+
+            /// kvm_segment_from_gdt preserves base.
+            #[test]
+            fn prop_kvm_segment_base_preserved(
+                flags in 0u16..0xFFFF,
+                base in 0u32..=u32::MAX,
+                limit in 0u32..=0xFFFFF,
+                table_index in 0u8..8,
+            ) {
+                let entry = gdt_entry(flags, base, limit);
+                let seg = kvm_segment_from_gdt(entry, table_index);
+                prop_assert_eq!(seg.base, base as u64);
+            }
+        }
+    }
 }

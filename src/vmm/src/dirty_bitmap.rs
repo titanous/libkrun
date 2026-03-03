@@ -240,4 +240,59 @@ mod tests {
         let pages = bitmap.drain_dirty_pages();
         assert!(!pages.is_empty());
     }
+
+    #[cfg(not(loom))]
+    mod proptest_tests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            /// Mark N distinct pages, drain_dirty_pages returns exactly those N addresses.
+            #[test]
+            fn prop_mark_then_drain_returns_all_pages(
+                // Generate up to 32 distinct page indices in range [0, 63]
+                page_indices in prop::collection::hash_set(0usize..64, 0..32)
+            ) {
+                let bitmap = DirtyBitmap::new(0x0, 64 * PAGE_SIZE);
+                for &idx in &page_indices {
+                    let addr = idx as u64 * PAGE_SIZE;
+                    bitmap.mark_dirty(addr);
+                }
+                let drained = bitmap.drain_dirty_pages();
+                prop_assert_eq!(drained.len(), page_indices.len());
+
+                let drained_indices: std::collections::HashSet<usize> = drained
+                    .iter()
+                    .map(|&addr| (addr / PAGE_SIZE) as usize)
+                    .collect();
+                prop_assert_eq!(drained_indices, page_indices);
+            }
+
+            /// After drain, bitmap is empty.
+            #[test]
+            fn prop_drain_empties_bitmap(
+                page_indices in prop::collection::hash_set(0usize..64, 1..32)
+            ) {
+                let bitmap = DirtyBitmap::new(0x0, 64 * PAGE_SIZE);
+                for &idx in &page_indices {
+                    bitmap.mark_dirty(idx as u64 * PAGE_SIZE);
+                }
+                let _ = bitmap.drain_dirty_pages();
+                // Second drain should return empty
+                let second_drain = bitmap.drain_dirty_pages();
+                prop_assert!(second_drain.is_empty());
+            }
+
+            /// mark_dirty is idempotent: marking same page twice yields count of 1.
+            #[test]
+            fn prop_mark_idempotent(page_idx in 0usize..64) {
+                let bitmap = DirtyBitmap::new(0x0, 64 * PAGE_SIZE);
+                let addr = page_idx as u64 * PAGE_SIZE;
+                bitmap.mark_dirty(addr);
+                bitmap.mark_dirty(addr);
+                let drained = bitmap.drain_dirty_pages();
+                prop_assert_eq!(drained.len(), 1);
+            }
+        }
+    }
 }

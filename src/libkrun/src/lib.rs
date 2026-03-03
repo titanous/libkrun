@@ -2118,4 +2118,45 @@ mod tests {
             "BalloonHandle::resize() num_pages computation contract verified"
         );
     }
+
+    #[cfg(test)]
+    mod proptest_tests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            /// vm_config with 0 vCPUs always returns ZeroVcpus error.
+            #[test]
+            fn prop_zero_vcpus_always_fails(ram_mib in 1u32..65536) {
+                let mut builder = Builder::new();
+                let result = builder.vm_config(0, ram_mib);
+                prop_assert!(matches!(result, Err(StartError::ZeroVcpus)));
+            }
+
+            /// vm_config with non-zero vCPUs does not return ZeroVcpus.
+            #[test]
+            fn prop_nonzero_vcpus_succeeds_validation(
+                num_vcpus in 1u8..=16,
+                ram_mib in 128u32..65536,
+            ) {
+                let mut builder = Builder::new();
+                let result = builder.vm_config(num_vcpus, ram_mib);
+                prop_assert!(!matches!(result, Err(StartError::ZeroVcpus)));
+            }
+        }
+
+        /// add_virtiofs_vhost_user with tag > 36 bytes returns TagTooLong.
+        /// Not proptest (exact boundary test), but added here for completeness.
+        #[test]
+        #[cfg(all(feature = "vhost-user", not(feature = "tee")))]
+        fn tag_too_long_boundary() {
+            let mut builder = Builder::new();
+            let tag_36 = "a".repeat(36);
+            let tag_37 = "a".repeat(37);
+            assert!(builder.add_virtiofs_vhost_user(&tag_36, "/tmp/sock", None).is_ok());
+            let mut builder2 = Builder::new();
+            let result = builder2.add_virtiofs_vhost_user(&tag_37, "/tmp/sock", None);
+            assert!(matches!(result, Err(StartError::TagTooLong(37))));
+        }
+    }
 }
