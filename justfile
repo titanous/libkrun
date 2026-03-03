@@ -35,10 +35,11 @@ integration test="all":
 # Later phases add: shuttle
 all: check test miri proptest loom
 
-# Compound target: safety checks (extended in later phases)
-# Phase 1: check only
-# Later phases add: asan miri fuzz-all kani
-safety: check
+# Compound target: safety checks.
+# Phase 1: check
+# Phase 4: + fuzz-all (60s per target)
+# Later phases add: asan miri kani
+safety: check fuzz-all
 
 # ── Stubs for tools added in later phases ────────────────────────────────────
 # These targets are extended by later implementation phases.
@@ -78,21 +79,37 @@ loom:
     RUSTFLAGS="--cfg loom" cargo test --release -p vmm --features uffd -- uffd::page_tracker::tests::loom_tests
     RUSTFLAGS="--cfg loom" cargo test --release -p devices --features net -- virtio::balloon::reclaimed_bitmap::tests::loom_tests
 
-fuzz target:
-    @echo "fuzz: set up in Phase 4 (Fuzzing)"
-    @exit 1
+# Run a single fuzz target for a given duration.
+# Usage: just fuzz fuzz_snapshot_deser
+#        just fuzz fuzz_fuse_parsing 120
+fuzz target duration="60":
+    cargo +nightly fuzz run --manifest-path fuzz/Cargo.toml {{target}} -- -max_total_time={{duration}}
 
+# Run all fuzz targets sequentially, each for the given duration.
+# Usage: just fuzz-all
+#        just fuzz-all 300
 fuzz-all duration="60":
-    @echo "fuzz-all: set up in Phase 4 (Fuzzing)"
-    @exit 1
+    for target in $(just fuzz-list); do \
+        echo "--- Fuzzing $target for {{duration}}s ---"; \
+        just fuzz $target {{duration}}; \
+    done
 
+# List all available fuzz targets.
 fuzz-list:
-    @echo "fuzz-list: set up in Phase 4 (Fuzzing)"
-    @exit 1
+    @cargo +nightly fuzz list --manifest-path fuzz/Cargo.toml 2>/dev/null \
+        || grep '^name = ' fuzz/Cargo.toml | grep -v 'libkrun-fuzz' | sed 's/name = "\(.*\)"/\1/'
 
+# Show corpus statistics for a fuzz target.
+# Usage: just fuzz-corpus fuzz_snapshot_deser
 fuzz-corpus target:
-    @echo "fuzz-corpus: set up in Phase 4 (Fuzzing)"
-    @exit 1
+    @if [ -d "fuzz/corpus/{{target}}" ]; then \
+        echo "Corpus for {{target}}:"; \
+        ls -lh fuzz/corpus/{{target}}/; \
+        echo "Total: $(ls fuzz/corpus/{{target}}/ | wc -l) files"; \
+    else \
+        echo "No corpus directory yet: fuzz/corpus/{{target}}/"; \
+        echo "Run 'just fuzz {{target}}' to start generating one."; \
+    fi
 
 asan:
     @echo "asan: set up in Phase 5 (ASan + Shuttle)"

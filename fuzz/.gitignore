@@ -1,0 +1,8 @@
+# Corpus directories grow large — store locally, not in git.
+# Seed corpora in fuzz/corpus/<target>/ ARE committed (manually curated).
+corpus/
+# cargo-fuzz artifact directories (crashes, slow inputs).
+# Commit triaged reproducers to fuzz/artifacts/<target>/ manually.
+artifacts/
+# Build output.
+target/

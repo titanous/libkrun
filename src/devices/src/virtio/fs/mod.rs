@@ -5,7 +5,7 @@ pub mod fuse;
 mod fuse_dispatch;
 #[allow(dead_code)]
 mod multikey;
-mod server;
+pub(crate) mod server;
 mod worker;
 
 pub mod linux;

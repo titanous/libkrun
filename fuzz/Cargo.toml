@@ -1,0 +1,51 @@
+[workspace]
+
+[package]
+name = "libkrun-fuzz"
+version = "0.0.1"
+publish = false
+edition = "2021"
+
+# cargo-fuzz requires nightly and uses a separate workspace.
+# This Cargo.toml is intentionally NOT listed in the root workspace members.
+# Run with: cargo +nightly fuzz run <target>
+
+[dependencies]
+libfuzzer-sys = "0.4"
+bincode = "1.3"
+vm-memory = { version = "0.18", features = ["backend-mmap"] }
+
+# Crates under test.
+# Include all features needed by the fuzz targets.
+devices = { path = "../src/devices", features = ["blk", "vhost-user"] }
+vmm = { path = "../src/vmm", features = ["snapshot"] }
+
+[[bin]]
+name = "fuzz_snapshot_deser"
+path = "fuzz_targets/fuzz_snapshot_deser.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_block_request"
+path = "fuzz_targets/fuzz_block_request.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_descriptor_chain"
+path = "fuzz_targets/fuzz_descriptor_chain.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_fuse_parsing"
+path = "fuzz_targets/fuzz_fuse_parsing.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_vhost_user_msg"
+path = "fuzz_targets/fuzz_vhost_user_msg.rs"
+test = false
+doc = false

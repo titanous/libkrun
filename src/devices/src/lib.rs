@@ -22,6 +22,7 @@ pub mod virtio;
 pub mod vmgenid;
 
 pub use self::bus::{Bus, BusDevice, Error as BusError};
+pub use self::virtio::fs::server::Server;
 
 #[derive(Debug)]
 pub enum Error {
