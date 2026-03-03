@@ -4,15 +4,15 @@
 //! Pure VIRTIO block request data structures: headers, parsed requests, metrics.
 //! No I/O; testable under Miri and with proptest.
 
-#[cfg(not(loom))]
-use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(loom)]
-use loom::sync::atomic::{AtomicU64, Ordering};
+use loom::sync::atomic::AtomicU64;
+#[cfg(not(loom))]
+use std::sync::atomic::AtomicU64;
 
 use std::io;
 use vm_memory::ByteValued;
 
-use super::{AsyncBlockBackend, VolatileSliceGuard};
+use super::VolatileSliceGuard;
 
 /// Metrics for the async block worker.
 pub struct AsyncWorkerMetrics {

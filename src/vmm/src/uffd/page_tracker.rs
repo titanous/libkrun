@@ -4,10 +4,10 @@
 //! Pure page tracking logic: bitmap, statistics, and address translation.
 //! No syscalls; testable under Miri and loom.
 
-#[cfg(not(loom))]
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 #[cfg(loom)]
 use loom::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+#[cfg(not(loom))]
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crate::snapshot_store::system_page_size;
 use userfaultfd;
@@ -273,10 +273,7 @@ mod tests {
         // Assuming 4096 byte pages
         let page_size = 4096u64;
         assert_eq!(guest_addr_to_page_index(&regions, 0x0), Some(0));
-        assert_eq!(
-            guest_addr_to_page_index(&regions, page_size),
-            Some(1)
-        );
+        assert_eq!(guest_addr_to_page_index(&regions, page_size), Some(1));
     }
 
     #[test]

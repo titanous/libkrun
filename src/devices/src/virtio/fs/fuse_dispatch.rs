@@ -6,7 +6,7 @@
 
 use super::fuse::Opcode;
 
-pub const MAX_BUFFER_SIZE: u32 = 1 << 20;
+pub(super) const MAX_BUFFER_SIZE: u32 = 1 << 20;
 pub(super) const BUFFER_HEADER_SIZE: u32 = 0x1000;
 
 /// Validate that a FUSE message length is within the allowed limit.
@@ -88,9 +88,12 @@ mod tests {
     #[test]
     fn test_classify_opcode_known() {
         // Opcode::Lookup == 1 per FUSE protocol
-        assert!(classify_opcode(Opcode::Lookup as u32).is_some());
-        assert!(classify_opcode(Opcode::Init as u32).is_some());
-        assert!(classify_opcode(Opcode::Destroy as u32).is_some());
+        assert_eq!(classify_opcode(Opcode::Lookup as u32), Some(Opcode::Lookup));
+        assert_eq!(classify_opcode(Opcode::Init as u32), Some(Opcode::Init));
+        assert_eq!(
+            classify_opcode(Opcode::Destroy as u32),
+            Some(Opcode::Destroy)
+        );
     }
 
     #[test]

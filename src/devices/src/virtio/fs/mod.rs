@@ -1,8 +1,8 @@
 pub mod dax_mapper;
 mod device;
-mod fuse_dispatch;
 pub mod filesystem;
 pub mod fuse;
+mod fuse_dispatch;
 #[allow(dead_code)]
 mod multikey;
 mod server;

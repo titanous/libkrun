@@ -12,14 +12,14 @@ use tokio::sync::mpsc;
 use tokio::task::{JoinHandle, LocalSet};
 use utils::eventfd::EventFd;
 use virtio_bindings::virtio_blk::*;
-use vm_memory::{Address, ByteValued, Bytes, GuestMemoryMmap};
+use vm_memory::{Address, Bytes, GuestMemoryMmap};
 
 use super::super::Queue;
-use super::{AsyncBlockBackend, AsyncBlockBackendFactory, CacheType, VolatileSliceGuard};
 use super::request::{
     AsyncWorkerMetrics, BatchWriteResult, DiscardWriteData, ParsedRequest, QueuedWrite, Request,
     RequestError, RequestHeader, RequestResult,
 };
+use super::{AsyncBlockBackend, AsyncBlockBackendFactory, CacheType, VolatileSliceGuard};
 use crate::virtio::descriptor_utils::{Reader, Writer};
 use crate::virtio::InterruptTransport;
 

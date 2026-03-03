@@ -22,8 +22,8 @@ use super::filesystem::{
 };
 use super::fs_utils::einval;
 use super::fuse::*;
-use super::{FsError as Error, Result};
 use super::fuse_dispatch::{self, MAX_BUFFER_SIZE};
+use super::{FsError as Error, Result};
 use crate::virtio::VirtioShmRegion;
 
 const DIRENT_PADDING: [u8; 8] = [0; 8];
