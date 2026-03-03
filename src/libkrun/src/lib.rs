@@ -2156,7 +2156,12 @@ pub unsafe extern "C" fn krun_set_root_disk_remount(
             return -libc::EINVAL;
         }
 
-        cfg.add_virtiofs_path("/dev/root", &empty_root.to_string_lossy(), Some(1 << 29), true);
+        cfg.add_virtiofs_path(
+            "/dev/root",
+            &empty_root.to_string_lossy(),
+            Some(1 << 29),
+            true,
+        );
 
         cfg.block_root(device, fstype, options);
 
@@ -2605,10 +2610,7 @@ impl Builder {
     /// Cannot be used together with `krun_add_vsock()` (userspace vsock).
     #[cfg(not(feature = "tee"))]
     #[cfg(feature = "vhost-user")]
-    pub fn add_vsock_vhost_user(
-        &mut self,
-        socket_path: &str,
-    ) -> Result<&mut Self, StartError> {
+    pub fn add_vsock_vhost_user(&mut self, socket_path: &str) -> Result<&mut Self, StartError> {
         use vmm::vmm_config::vhost_user_vsock::{VhostUserVsockConfig, VhostUserVsockConnection};
 
         // Reject if explicit userspace vsock was already configured via krun_add_vsock()
@@ -3824,7 +3826,10 @@ mod tests {
 
         // First configure vhost-user-vsock via Builder API
         let result1 = builder.add_vsock_vhost_user("/tmp/vsock.sock");
-        assert!(result1.is_ok(), "first add_vsock_vhost_user() should succeed");
+        assert!(
+            result1.is_ok(),
+            "first add_vsock_vhost_user() should succeed"
+        );
 
         // Verify that a second call returns VsockConflict
         let result2 = builder.add_vsock_vhost_user("/tmp/other.sock");
@@ -3961,9 +3966,9 @@ mod tests {
     #[cfg(not(feature = "tee"))]
     fn test_balloon_handle_await_target_reached_with_notification() {
         // AC4.4: Test that await_target() returns Reached when guest notifies actual >= target
-        use std::thread;
         use std::sync::Arc;
         use std::sync::Mutex;
+        use std::thread;
 
         let balloon = Arc::new(Mutex::new(devices::virtio::Balloon::new().unwrap()));
         let condvar = balloon.lock().unwrap().actual_condvar();
@@ -4003,8 +4008,8 @@ mod tests {
     #[cfg(not(feature = "tee"))]
     fn test_balloon_handle_await_target_with_concurrent_updates() {
         // AC4.8: Test that multiple threads can concurrently access balloon handle and await_target
-        use std::thread;
         use std::sync::Arc;
+        use std::thread;
 
         let balloon = Arc::new(Mutex::new(devices::virtio::Balloon::new().unwrap()));
         let condvar = balloon.lock().unwrap().actual_condvar();
@@ -4086,6 +4091,9 @@ mod tests {
 
         // The contract is verified: resize() computes target_pages = target_mb * 256
         // This test verifies the API contract and error handling
-        assert!(true, "BalloonHandle::resize() num_pages computation contract verified");
+        assert!(
+            true,
+            "BalloonHandle::resize() num_pages computation contract verified"
+        );
     }
 }
