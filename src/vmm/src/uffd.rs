@@ -369,9 +369,8 @@ impl UffdHandler {
                             Ok(None) => {
                                 // Reclaimed page — resolve via zeropage ioctl.
                                 // Maps the kernel shared zero page — no data copy, no physical allocation.
-                                let result = unsafe {
-                                    uffd_clone.zeropage(host_addr as *mut _, 4096, true)
-                                };
+                                let result =
+                                    unsafe { uffd_clone.zeropage(host_addr as *mut _, 4096, true) };
                                 match result {
                                     Ok(_) => {
                                         if let Some(page_index) =
@@ -1606,7 +1605,10 @@ mod tests {
         assert_eq!(stats.loaded_pages, 3, "Three pages should be loaded");
         assert_eq!(stats.zero_pages, 1, "One page should be from Zero source");
         assert_eq!(stats.fault_pages, 1, "One page should be from Fault source");
-        assert_eq!(stats.preload_pages, 1, "One page should be from Preload source");
+        assert_eq!(
+            stats.preload_pages, 1,
+            "One page should be from Preload source"
+        );
     }
 
     #[test]
@@ -1653,7 +1655,8 @@ mod tests {
             fn read_page(
                 &self,
                 guest_addr: u64,
-            ) -> crate::snapshot_store::SendBoxFuture<'_, std::io::Result<Option<Vec<u8>>>> {
+            ) -> crate::snapshot_store::SendBoxFuture<'_, std::io::Result<Option<Vec<u8>>>>
+            {
                 self.page_reads.fetch_add(1, Ordering::SeqCst);
                 let is_absent = self.absent_pages.contains(&guest_addr);
                 if is_absent {
@@ -1699,15 +1702,8 @@ mod tests {
         // Test reading an absent page
         futures::executor::block_on(async {
             let result = store.read_page(0x2000).await;
-            assert!(
-                result.is_ok(),
-                "read_page should not error for absent page"
-            );
-            assert_eq!(
-                result.unwrap(),
-                None,
-                "Absent page should return Ok(None)"
-            );
+            assert!(result.is_ok(), "read_page should not error for absent page");
+            assert_eq!(result.unwrap(), None, "Absent page should return Ok(None)");
         });
 
         // Test reading a present page
@@ -1718,10 +1714,7 @@ mod tests {
                 "read_page should not error for present page"
             );
             let data = result.unwrap();
-            assert!(
-                data.is_some(),
-                "Present page should return Ok(Some(...))"
-            );
+            assert!(data.is_some(), "Present page should return Ok(Some(...))");
             assert_eq!(data.unwrap().len(), 4096, "Page data should be 4096 bytes");
         });
     }
@@ -1757,7 +1750,8 @@ mod tests {
             fn read_page(
                 &self,
                 _guest_addr: u64,
-            ) -> crate::snapshot_store::SendBoxFuture<'_, std::io::Result<Option<Vec<u8>>>> {
+            ) -> crate::snapshot_store::SendBoxFuture<'_, std::io::Result<Option<Vec<u8>>>>
+            {
                 self.page_reads.fetch_add(1, Ordering::SeqCst);
                 Box::pin(async { Ok(Some(vec![0u8; 4096])) })
             }

@@ -61,7 +61,6 @@ pub trait SnapshotStore: Any + Send + Sync + 'static {
     /// Returns the raw page data, or None if the page is absent (excluded from snapshot).
     fn read_page(&self, guest_addr: u64) -> SendBoxFuture<'_, io::Result<Option<Vec<u8>>>>;
 
-
     /// Preload a set of memory regions asynchronously.
     ///
     /// # Arguments
@@ -110,7 +109,6 @@ pub trait SnapshotStore: Any + Send + Sync + 'static {
     /// Default no-op implementation for stores that don't need this.
     /// Called during snapshot writes to ensure correct file layout.
     fn set_ram_regions(&mut self, _regions: Vec<(u64, u64)>) {}
-
 }
 
 /// Factory trait for creating snapshot store instances.
@@ -179,7 +177,6 @@ impl FsSnapshotStore {
             ram_regions: Arc::new(ram_regions),
         }
     }
-
 }
 
 impl SnapshotStore for FsSnapshotStore {

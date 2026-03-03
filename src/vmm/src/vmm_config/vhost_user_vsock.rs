@@ -19,16 +19,14 @@ pub struct VhostUserVsockConfig {
 impl std::fmt::Debug for VhostUserVsockConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.connection {
-            VhostUserVsockConnection::SocketPath(path) => {
-                f.debug_struct("VhostUserVsockConfig")
-                    .field("connection", &format!("SocketPath({})", path))
-                    .finish()
-            }
-            VhostUserVsockConnection::Stream(_) => {
-                f.debug_struct("VhostUserVsockConfig")
-                    .field("connection", &"Stream(<fd>)")
-                    .finish()
-            }
+            VhostUserVsockConnection::SocketPath(path) => f
+                .debug_struct("VhostUserVsockConfig")
+                .field("connection", &format!("SocketPath({})", path))
+                .finish(),
+            VhostUserVsockConnection::Stream(_) => f
+                .debug_struct("VhostUserVsockConfig")
+                .field("connection", &"Stream(<fd>)")
+                .finish(),
         }
     }
 }

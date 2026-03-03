@@ -485,7 +485,14 @@ impl MMIODeviceManager {
         irq: u32,
         len: u64,
     ) {
-        self.id_to_dev_info.insert(type_id, MMIODeviceInfo { addr, _irq: irq, _len: len });
+        self.id_to_dev_info.insert(
+            type_id,
+            MMIODeviceInfo {
+                addr,
+                _irq: irq,
+                _len: len,
+            },
+        );
     }
 }
 

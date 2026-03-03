@@ -230,8 +230,9 @@ pub fn apply_reclaimed_pages(mem: &GuestMemoryMmap, pages: &[u64]) -> Result<(),
     let zeros = [0u8; PAGE_SIZE];
 
     for &addr in pages {
-        mem.write_slice(&zeros, GuestAddress(addr))
-            .map_err(|e| SnapshotError::Serialize(format!("Failed to zero-fill page at 0x{:x}: {e}", addr)))?;
+        mem.write_slice(&zeros, GuestAddress(addr)).map_err(|e| {
+            SnapshotError::Serialize(format!("Failed to zero-fill page at 0x{:x}: {e}", addr))
+        })?;
     }
     Ok(())
 }
@@ -863,14 +864,23 @@ mod tests {
         assert!(buf.iter().all(|&b| b == 0), "Page at 0x0 should be zeroed");
 
         mem.read_slice(&mut buf, GuestAddress(0x1000)).unwrap();
-        assert!(buf.iter().all(|&b| b == 0), "Page at 0x1000 should be zeroed");
+        assert!(
+            buf.iter().all(|&b| b == 0),
+            "Page at 0x1000 should be zeroed"
+        );
 
         // Verify other pages are unchanged
         mem.read_slice(&mut buf, GuestAddress(0x2000)).unwrap();
-        assert!(buf.iter().all(|&b| b == 0xAA), "Page at 0x2000 should be unchanged");
+        assert!(
+            buf.iter().all(|&b| b == 0xAA),
+            "Page at 0x2000 should be unchanged"
+        );
 
         mem.read_slice(&mut buf, GuestAddress(0x3000)).unwrap();
-        assert!(buf.iter().all(|&b| b == 0xAA), "Page at 0x3000 should be unchanged");
+        assert!(
+            buf.iter().all(|&b| b == 0xAA),
+            "Page at 0x3000 should be unchanged"
+        );
     }
 
     /// AC2.6 variant: Empty reclaimed_pages list (backward compat with old snapshots)
@@ -891,6 +901,9 @@ mod tests {
         // Verify data is unchanged
         let mut buf = vec![0u8; 4096];
         mem.read_slice(&mut buf, GuestAddress(0x0)).unwrap();
-        assert!(buf.iter().all(|&b| b == 0xFF), "Page should be unchanged with empty reclaimed list");
+        assert!(
+            buf.iter().all(|&b| b == 0xFF),
+            "Page should be unchanged with empty reclaimed list"
+        );
     }
 }
