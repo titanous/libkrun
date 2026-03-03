@@ -230,4 +230,14 @@ mod tests {
         assert_eq!(dirty.len(), 1);
         assert_eq!(dirty[0], page_addr);
     }
+
+    #[test]
+    fn miri_spike_pure_atomics() {
+        // Miri spike: verify DirtyBitmap pure atomic ops are Miri-compatible.
+        let bitmap = DirtyBitmap::new(0x0, 4);
+        bitmap.mark_dirty(0x0);
+        bitmap.mark_dirty(0x1000);
+        let pages = bitmap.drain_dirty_pages();
+        assert!(!pages.is_empty());
+    }
 }

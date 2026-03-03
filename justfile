@@ -31,8 +31,9 @@ integration test="all":
 
 # Compound target: all fast tests (extended in later phases)
 # Phase 1: check + unit tests
-# Later phases add: miri proptest loom shuttle
-all: check test
+# Phase 2: add miri proptest loom
+# Later phases add: shuttle
+all: check test miri proptest loom
 
 # Compound target: safety checks (extended in later phases)
 # Phase 1: check only
@@ -43,21 +44,27 @@ safety: check
 # These targets are extended by later implementation phases.
 # Running them before the corresponding phase is complete will exit with an error.
 
+# Miri: run pure-logic unit tests under Miri (requires nightly)
 miri:
-    @echo "miri: set up in Phase 3 (Miri + proptest + Loom)"
-    @exit 1
+    MIRIFLAGS="-Zmiri-backtrace=full" \
+    cargo +nightly miri test -p vmm -- dirty_bitmap
+    MIRIFLAGS="-Zmiri-backtrace=full" \
+    cargo +nightly miri test -p devices --features net -- balloon::reclaimed_bitmap
 
+# proptest: property-based tests for bitmap invariants and address translation (Phase 3 adds tests)
 proptest:
-    @echo "proptest: set up in Phase 3 (Miri + proptest + Loom)"
-    @exit 1
+    cargo test -p vmm --features snapshot -- proptest
+    cargo test -p devices --features net -- proptest
 
+# proptest-long: extended proptest runs (10x cases)
 proptest-long:
-    @echo "proptest-long: set up in Phase 3 (Miri + proptest + Loom)"
-    @exit 1
+    PROPTEST_CASES=10000 cargo test -p vmm --features snapshot -- proptest
+    PROPTEST_CASES=10000 cargo test -p devices --features net -- proptest
 
+# Loom: exhaustive concurrency testing on bitmap types (Phase 3 adds tests)
 loom:
-    @echo "loom: set up in Phase 3 (Miri + proptest + Loom)"
-    @exit 1
+    RUSTFLAGS="--cfg loom" cargo test --release -p vmm -- dirty_bitmap
+    RUSTFLAGS="--cfg loom" cargo test --release -p devices --features net -- balloon::reclaimed_bitmap
 
 fuzz target:
     @echo "fuzz: set up in Phase 4 (Fuzzing)"

@@ -17,7 +17,6 @@ extern crate log;
 pub mod builder;
 pub(crate) mod device_manager;
 /// Dirty page bitmap for incremental snapshots.
-#[cfg(target_os = "macos")]
 pub mod dirty_bitmap;
 /// Resource store for configured microVM resources.
 pub mod resources;
