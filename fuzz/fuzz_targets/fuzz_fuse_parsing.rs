@@ -1,6 +1,6 @@
 #![no_main]
 
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::AtomicI32;
 use std::sync::Arc;
 
 use libfuzzer_sys::fuzz_target;

@@ -29,7 +29,6 @@ unsafe impl ByteValued for VhostUserMsgHeaderReplica {}
 const VERSION_MASK: u32 = 0x3;
 const REPLY_FLAG: u32 = 0x4;
 const NEED_REPLY_FLAG: u32 = 0x8;
-const ALL_FLAGS: u32 = 0xc;
 const RESERVED_BITS: u32 = !0xf;
 
 // Known FrontendReq variants (from message.rs enum definition).

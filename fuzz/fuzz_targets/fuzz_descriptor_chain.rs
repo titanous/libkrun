@@ -15,7 +15,6 @@ use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
 /// We write the fuzzer input into the descriptor table region, then let the
 /// descriptor chain parser interpret whatever bytes were placed there.
 const DESC_TABLE_ADDR: u64 = 0x0;
-const DATA_START_ADDR: u64 = 0x100;
 const QUEUE_SIZE: u16 = 16;
 const MEM_SIZE: usize = 0x8000;
 
