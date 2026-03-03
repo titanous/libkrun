@@ -26,7 +26,8 @@ pub const HIMEM_START: u64 = 0x0010_0000; //1 MB.
 /// First usable IRQ ID for virtio device interrupts on x86_64.
 pub const IRQ_BASE: u32 = 5;
 /// Last usable IRQ ID for virtio device interrupts on x86_64.
-pub const IRQ_MAX: u32 = 15;
+/// Reduced from 15 to reserve IRQ 15 for the ACPI GED device.
+pub const IRQ_MAX: u32 = 14;
 
 /// Address for the TSS setup.
 pub const KVM_TSS_ADDRESS: u64 = 0xfffb_d000;
@@ -84,5 +85,7 @@ pub const VMGENID_GUID_PAGE: u64 = 0xC0000;
 pub const VMGENID_GUID_OFFSET: u64 = 40;
 
 /// IRQ number for the ACPI Generic Event Device (GED).
-/// Allocated above the virtio IRQ range (5-15) on IOAPIC pin 16.
-pub const GED_IRQ: u32 = 16;
+/// Must be in PIC range (0-15) because `pci=noacpi` forces PIC routing.
+/// Uses IRQ 15 (secondary ATA, unused in this VM) to avoid conflict with
+/// virtio devices (IRQ_BASE..IRQ_MAX = 5..14).
+pub const GED_IRQ: u32 = 15;

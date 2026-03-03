@@ -273,13 +273,18 @@ pub fn configure_system(
     mptable::setup_mptable(guest_mem, num_cpus).map_err(Error::MpTableSetup)?;
 
     #[cfg(not(feature = "tee"))]
-    {
+    let acpi_rsdp_addr = {
         use crate::x86_64::layout::{VMGENID_GUID_PAGE, VMGENID_GUID_OFFSET, GED_IRQ};
         let guid_addr = VMGENID_GUID_PAGE + VMGENID_GUID_OFFSET;
-        acpi::setup_acpi_tables(guest_mem, guid_addr, GED_IRQ).map_err(Error::AcpiSetup)?;
-    }
+        acpi::setup_acpi_tables(guest_mem, guid_addr, GED_IRQ, num_cpus).map_err(Error::AcpiSetup)?
+    };
 
     let mut params: BootParamsWrapper = BootParamsWrapper(boot_params::default());
+
+    #[cfg(not(feature = "tee"))]
+    {
+        params.0.acpi_rsdp_addr = acpi_rsdp_addr;
+    }
 
     params.0.hdr.type_of_loader = KERNEL_LOADER_OTHER;
     params.0.hdr.boot_flag = KERNEL_BOOT_FLAG_MAGIC;

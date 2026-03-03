@@ -1033,7 +1033,7 @@ pub fn build_microvm(
             // Uncomment this to get EFI output when debugging EDK2.
             //Some(Box::new(io::stdout())),
         )?);
-    };
+    }
 
     // We can't call to `setup_terminal_raw_mode` until `Vmm` is created,
     // so let's keep track of FDs connected to legacy serial devices here

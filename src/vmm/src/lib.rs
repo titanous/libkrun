@@ -491,8 +491,10 @@ impl Vmm {
             })?;
         self.mmio_device_manager.resume_all_device_workers();
 
-        // Update VMGENID: write new GUID and fire interrupt before vCPUs resume.
-        if let Some(ref mut vmgenid) = self.vmgenid {
+        // Write the new GUID to guest memory before vCPU state restore.
+        // The GUID must be visible when the guest reads it after the interrupt.
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        let vmgenid_guid_updated = if let Some(ref mut vmgenid) = self.vmgenid {
             let (old, new) = vmgenid.update_guid(&self.guest_memory).map_err(|e| {
                 snapshot::SnapshotError::Deserialize(format!("vmgenid: failed to update GUID: {e}"))
             })?;
@@ -500,16 +502,29 @@ impl Vmm {
                 "vmgenid: updated GUID from {:02x?} to {:02x?}",
                 &old[..4], &new[..4]
             );
-            vmgenid.signal_interrupt().map_err(|e| {
-                snapshot::SnapshotError::Deserialize(format!(
-                    "vmgenid: interrupt injection failed: {e}"
-                ))
-            })?;
-        }
+            true
+        } else {
+            false
+        };
 
         self.restore_vcpu_states(vmstate.vcpu_states).map_err(|e| {
             snapshot::SnapshotError::Deserialize(format!("Failed to restore vCPU states: {e}"))
         })?;
+
+        // Signal the GED interrupt AFTER vCPU state restore. KVM_SET_LAPIC
+        // overwrites the LAPIC IRR, so any interrupt injected before that
+        // would be lost.
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        if vmgenid_guid_updated {
+            if let Some(ref vmgenid) = self.vmgenid {
+                vmgenid.signal_interrupt().map_err(|e| {
+                    snapshot::SnapshotError::Deserialize(format!(
+                        "vmgenid: interrupt injection failed: {e}"
+                    ))
+                })?;
+            }
+        }
+
         Ok(())
     }
 

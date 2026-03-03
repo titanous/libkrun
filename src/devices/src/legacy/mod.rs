@@ -48,6 +48,8 @@ use riscv64::serial;
 
 #[cfg(target_arch = "x86_64")]
 pub use self::cmos::Cmos;
+#[cfg(target_arch = "x86_64")]
+pub use x86_64::pci_cfg::PciConfigSpace;
 #[cfg(target_os = "macos")]
 pub use self::gicv3::GicV3;
 #[cfg(target_arch = "aarch64")]

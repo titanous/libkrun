@@ -4,6 +4,7 @@
 use std::fmt::{Display, Formatter, Result};
 
 pub const DEFAULT_KERNEL_CMDLINE: &str = "reboot=k panic=-1 panic_print=31 nomodule console=hvc0 \
+                                          pci=noacpi \
                                           rootfstype=virtiofs rw no-kvmapf";
 
 /// Strongly typed data structure used to configure the boot source of the
