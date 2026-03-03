@@ -92,7 +92,7 @@ Ok(())
 - `const MAX_ARGS: usize = 4096;` (C API argument limit)
 - Run `cargo check --features embedded_init,snapshot,uffd,blk,vhost-user` and fix any remaining unused import warnings
 
-**Crate type:** Change `crate-type = ["cdylib", "lib"]` to `crate-type = ["lib"]` in `src/libkrun/Cargo.toml:54-55` — no longer produces a C shared library.
+**Crate type:** Change `crate-type = ["cdylib", "lib"]` to `crate-type = ["lib"]` in `src/libkrun/Cargo.toml:56-57` — no longer produces a C shared library.
 
 **justfile `integration` target:** Does not need to build `test-prefix` (no longer installs C library). Only needs `LD_LIBRARY_PATH` pointing to `test-prefix/lib64/` for `libkrunfw.so` (symlinked there by the nix shellHook). Does NOT need `PKG_CONFIG_PATH` (was only for krun-sys).
 

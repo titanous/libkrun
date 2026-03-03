@@ -15,6 +15,8 @@
 - testing-upgrade.AC2.6e: GDT round-trip proof: `get_base(gdt_entry(flags, base, limit)) == base` and `get_limit` equivalent
 - testing-upgrade.AC2.6f: Address translation proof: `guest_to_host` returns correct offset for in-range, None for out-of-range (bound: 4 regions)
 
+**Note:** AC2.6a-AC2.6f are plan-level decompositions of the single design-document criterion `testing-upgrade.AC2.6`.
+
 **Done when:** `just kani` completes with all 6 proofs reporting VERIFICATION SUCCESSFUL. `just kani-proof <name>` runs a single named proof.
 
 **Dependencies:** Phase 2 complete (pure logic extracted to `src/vmm/src/uffd/page_tracker.rs`). Note: Phase 6 harnesses work against whichever layout is current — if Phase 2 has not yet split `uffd.rs`, the uffd proof paths in `kani-proofs/Cargo.toml` reference the monolithic `uffd.rs` module instead.

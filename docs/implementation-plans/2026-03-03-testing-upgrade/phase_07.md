@@ -8,14 +8,15 @@
 
 **Acceptance criteria addressed:**
 
-- testing-upgrade.AC7.1: Custom `AsyncBlockBackend` returning errors on configured sectors is testable
-- testing-upgrade.AC7.2: Custom `AsyncBlockBackend` with artificial delays exercises timeout paths
-- testing-upgrade.AC7.3: `FileSystem` impl with only lookup+read (ENOSYS otherwise) mounts and serves files
-- testing-upgrade.AC7.4: Balloon inflate followed by full snapshot followed by UFFD cold restore verifies zero-filled absent pages
-- testing-upgrade.AC7.5: Block write before snapshot then UFFD cold restore verifies data consistency
-- testing-upgrade.AC7.6: Custom `FileSystem` with DAX enabled survives snapshot/hot-restore cycle
-- testing-upgrade.AC7.7: Rapid inflate/deflate during snapshot does not corrupt state
-- testing-upgrade.AC7.8: Multiple vCPUs faulting on balloon-reclaimed addresses after UFFD restore complete without SIGBUS
+- testing-upgrade.AC3.1: Custom `AsyncBlockBackend` returning errors on configured sectors is testable
+- testing-upgrade.AC3.2: Custom `AsyncBlockBackend` with artificial delays exercises timeout paths
+- testing-upgrade.AC3.3: `FileSystem` impl with only lookup+read (ENOSYS otherwise) mounts and serves files
+- testing-upgrade.AC3.4: Balloon inflate followed by full snapshot followed by UFFD cold restore verifies zero-filled absent pages
+- testing-upgrade.AC3.5: Block write before snapshot then UFFD cold restore verifies data consistency
+- testing-upgrade.AC3.6: Custom `FileSystem` with DAX enabled survives snapshot/hot-restore cycle
+- testing-upgrade.AC3.7: Rapid inflate/deflate during snapshot does not corrupt state
+- testing-upgrade.AC3.8: Multiple vCPUs faulting on balloon-reclaimed addresses after UFFD restore complete without SIGBUS
+- testing-upgrade.AC3.9: Integration tests with complex cross-feature scenarios cover diverse VM configurations
 
 **Done when:** All 9 test files and 3 helper modules compile under both `host` and `guest` feature sets; all tests are registered in `lib.rs`; `just integration <name>` runs each new test successfully (5-6/9 passing in CI is acceptable given VM timing sensitivity).
 
@@ -1088,7 +1089,7 @@ TestCase::new("virtiofs-minimal-fs", Box::new(TestVirtiofsMinimalFs)),
 
 **Test name:** `balloon-snapshot-uffd`
 
-**What it tests (AC7.4):** Inflate balloon to 64MB → full snapshot → cold UFFD restore (empty preload). Verifies:
+**What it tests (AC3.4):** Inflate balloon to 64MB → full snapshot → cold UFFD restore (empty preload). Verifies:
 1. The UFFD fault handler correctly zero-fills absent (balloon-reclaimed) pages instead of crashing
 2. Non-reclaimed static data (set before snapshot) is restored correctly from store
 3. Guest can allocate and use heap memory post-restore
@@ -1100,7 +1101,7 @@ This test combines the balloon+UFFD patterns from `test_balloon_uffd.rs` but exp
 **File:** `tests/test_cases/src/test_balloon_snapshot_uffd.rs`
 
 ```rust
-//! Integration test: balloon inflate → snapshot → UFFD cold restore (AC7.4).
+//! Integration test: balloon inflate → snapshot → UFFD cold restore (AC3.4).
 //!
 //! Phase 1: Boot VM with balloon, set known static values, inflate 64MB,
 //!          snapshot, exit.
@@ -1279,7 +1280,7 @@ TestCase::new("balloon-snapshot-uffd", Box::new(TestBalloonSnapshotUffd)),
 
 **Test name:** `block-snapshot-uffd`
 
-**What it tests (AC7.5):** Write via custom `AsyncBlockBackend` → full snapshot → cold UFFD restore → read back the data and verify consistency.
+**What it tests (AC3.5):** Write via custom `AsyncBlockBackend` → full snapshot → cold UFFD restore → read back the data and verify consistency.
 
 **Vsock port:** 5722
 
@@ -1290,7 +1291,7 @@ The block device backend is an in-memory `MemBlockBackend`. The guest writes a k
 **File:** `tests/test_cases/src/test_block_snapshot_uffd.rs`
 
 ```rust
-//! Integration test: block write → snapshot → UFFD cold restore → verify (AC7.5).
+//! Integration test: block write → snapshot → UFFD cold restore → verify (AC3.5).
 //!
 //! Phase 1: Boot VM with in-memory block backend. Guest writes known pattern
 //!          to sector 0, signals WRITTEN, then exits (host takes snapshot).
@@ -1376,7 +1377,7 @@ mod host {
             {
                 let data = data_handle.blocking_lock();
                 assert_eq!(
-                    &data[..7],
+                    &data[..8],
                     b"BLOCKWRT",
                     "block backend should contain written pattern after phase 1"
                 );
@@ -1526,14 +1527,14 @@ TestCase::new("block-snapshot-uffd", Box::new(TestBlockSnapshotUffd)),
 
 **Test name:** `virtiofs-dax-snapshot`
 
-**What it tests (AC7.6):** Mount a custom `PassthroughFs` with DAX window enabled → guest writes a file → hot snapshot → hot restore → guest reads file back and verifies content. This is the generic `FileSystem` equivalent of the vhost-user DAX tests, exercising the in-process virtiofs DAX path through snapshot/restore.
+**What it tests (AC3.6):** Mount a custom `PassthroughFs` with DAX window enabled → guest writes a file → hot snapshot → hot restore → guest reads file back and verifies content. This is the generic `FileSystem` equivalent of the vhost-user DAX tests, exercising the in-process virtiofs DAX path through snapshot/restore.
 
 **Vsock port:** 5723
 
 **File:** `tests/test_cases/src/test_virtiofs_dax_snapshot.rs`
 
 ```rust
-//! Integration test: virtiofs with DAX window + snapshot/restore (AC7.6).
+//! Integration test: virtiofs with DAX window + snapshot/restore (AC3.6).
 //!
 //! Uses a PassthroughFs (generic FileSystem) with a 512 MiB DAX window.
 //! Guest writes a file, host takes a hot snapshot and restores, guest reads
@@ -1737,7 +1738,7 @@ TestCase::new("virtiofs-dax-snapshot", Box::new(TestVirtiofsDaxSnapshot)),
 
 **Test name:** `balloon-snapshot-race`
 
-**What it tests (AC7.7):** Rapidly alternate inflate/deflate operations while taking a snapshot. The snapshot must succeed (no panic, no corrupt state). The VM must exit cleanly after the snapshot/restore cycle.
+**What it tests (AC3.7):** Rapidly alternate inflate/deflate operations while taking a snapshot. The snapshot must succeed (no panic, no corrupt state). The VM must exit cleanly after the snapshot/restore cycle.
 
 **Vsock port:** 5724
 
@@ -1746,7 +1747,7 @@ The host inflates+deflates in a tight loop (with short sleeps) on a background t
 **File:** `tests/test_cases/src/test_balloon_snapshot_race.rs`
 
 ```rust
-//! Integration test: rapid balloon inflate/deflate during snapshot (AC7.7).
+//! Integration test: rapid balloon inflate/deflate during snapshot (AC3.7).
 //!
 //! Verifies that taking a snapshot while balloon operations are in flight
 //! does not corrupt VM state. The guest verifies static data after restore.
@@ -1901,7 +1902,7 @@ TestCase::new("balloon-snapshot-race", Box::new(TestBalloonSnapshotRace)),
 
 **Test name:** `uffd-balloon-parallel`
 
-**What it tests (AC7.8):** Multiple vCPUs faulting on balloon-reclaimed addresses after UFFD cold restore. Uses 2 vCPUs. Phase 1 inflates the balloon to 64MB, takes a snapshot. Phase 2 cold UFFD restores with empty preload. The guest launches 2 threads (one per vCPU) that each allocate and access memory concurrently, exercising the zero-fill path for absent pages from multiple vCPUs simultaneously.
+**What it tests (AC3.8):** Multiple vCPUs faulting on balloon-reclaimed addresses after UFFD cold restore. Uses 2 vCPUs. Phase 1 inflates the balloon to 64MB, takes a snapshot. Phase 2 cold UFFD restores with empty preload. The guest launches 2 threads (one per vCPU) that each allocate and access memory concurrently, exercising the zero-fill path for absent pages from multiple vCPUs simultaneously.
 
 **Vsock port:** 5725
 
@@ -1909,7 +1910,7 @@ TestCase::new("balloon-snapshot-race", Box::new(TestBalloonSnapshotRace)),
 
 ```rust
 //! Integration test: multiple vCPUs faulting on balloon-reclaimed pages
-//! after UFFD cold restore (AC7.8).
+//! after UFFD cold restore (AC3.8).
 //!
 //! Phase 1: 2-vCPU VM, balloon inflated 64MB → snapshot → exit.
 //! Phase 2: Cold UFFD restore. 2 guest threads each fault on memory

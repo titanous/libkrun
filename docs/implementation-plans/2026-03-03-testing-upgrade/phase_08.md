@@ -14,12 +14,12 @@
 
 This phase implements and tests:
 
-### testing-upgrade.AC8: Mutation testing baseline
-- **testing-upgrade.AC8.1 Success:** `just mutants` runs cargo-mutants with the full feature set and produces `mutants.out/outcomes.json`
-- **testing-upgrade.AC8.2 Success:** `just mutants-diff` runs cargo-mutants scoped to changed files vs `origin/main`
-- **testing-upgrade.AC8.3 Success:** Baseline mutation score is recorded in `docs/mutation-baseline.md`
-- **testing-upgrade.AC8.4 Success:** Surviving mutants are triaged with documented justification for each category
-- **testing-upgrade.AC8.5 Edge:** `#[mutants::skip]` is applied only where code is genuinely unreachable or intentionally untested; not used to hide coverage gaps
+### testing-upgrade.AC2.9: Mutation testing baseline
+- **testing-upgrade.AC2.9 Success:** `just mutants` runs cargo-mutants with the full feature set and produces `mutants.out/outcomes.json`
+- **testing-upgrade.AC2.9 Success:** `just mutants-diff` runs cargo-mutants scoped to changed files vs `origin/main`
+- **testing-upgrade.AC2.9 Success:** Baseline mutation score is recorded in `docs/mutation-baseline.md`
+- **testing-upgrade.AC2.9 Success:** Surviving mutants are triaged with documented justification for each category
+- **testing-upgrade.AC2.9 Edge:** `#[mutants::skip]` is applied only where code is genuinely unreachable or intentionally untested; not used to hide coverage gaps
 
 **Done when:** `just mutants` produces a report, baseline mutation score is recorded in `docs/mutation-baseline.md`, and surviving mutants are triaged with documented categories.
 

@@ -9,12 +9,12 @@ request header parsing.
 **Design reference:** `docs/design-plans/2026-03-03-testing-upgrade.md` — `<!-- START_PHASE_4 -->`
 
 **Acceptance criteria addressed:**
-- testing-upgrade.AC3.1: `just fuzz <target>` runs a named fuzz target
-- testing-upgrade.AC3.2: `just fuzz-all [duration=60]` runs all 5 targets sequentially
-- testing-upgrade.AC3.3: `just fuzz-list` lists available targets
-- testing-upgrade.AC3.4: `just fuzz-corpus <target>` shows corpus for a target
-- testing-upgrade.AC3.5: All 5 targets build without errors
-- testing-upgrade.AC3.6: Initial 60-second runs produce no crashes
+- testing-upgrade.AC2.2: `just fuzz <target>` runs a named fuzz target
+- testing-upgrade.AC2.2: `just fuzz-all [duration=60]` runs all 5 targets sequentially
+- testing-upgrade.AC2.2: `just fuzz-list` lists available targets
+- testing-upgrade.AC2.2: `just fuzz-corpus <target>` shows corpus for a target
+- testing-upgrade.AC2.2: All 5 targets build without errors
+- testing-upgrade.AC2.10: Initial 60-second runs produce no crashes
 
 **Done when:** All 5 fuzz targets build (`cargo +nightly fuzz build`). Initial 60-second
 runs of all 5 targets produce no crashes. Justfile targets are functional.
@@ -48,7 +48,7 @@ runs of all 5 targets produce no crashes. Justfile targets are functional.
 <!-- START_TASK_1 -->
 ## Task 1: Create `fuzz/` directory infrastructure
 
-**Verifies:** testing-upgrade.AC3.5 (fuzz targets build)
+**Verifies:** testing-upgrade.AC2.2 (fuzz targets build)
 
 **Files:**
 - Create: `fuzz/Cargo.toml`
@@ -157,7 +157,7 @@ output.
 <!-- START_TASK_2 -->
 ## Task 2: `fuzz_snapshot_deser.rs` — snapshot deserialization fuzzing
 
-**Verifies:** testing-upgrade.AC3.5, testing-upgrade.AC3.6
+**Verifies:** testing-upgrade.AC2.2, testing-upgrade.AC2.10
 
 **Files:**
 - Create: `fuzz/fuzz_targets/fuzz_snapshot_deser.rs`
@@ -274,7 +274,7 @@ Expected: Runs for 10 seconds, produces no crashes (`SUMMARY: libFuzzer: no cras
 <!-- START_TASK_3 -->
 ## Task 3: `fuzz_block_request.rs` — virtio block request header fuzzing
 
-**Verifies:** testing-upgrade.AC3.5, testing-upgrade.AC3.6
+**Verifies:** testing-upgrade.AC2.2, testing-upgrade.AC2.10
 
 **Files:**
 - Create: `fuzz/fuzz_targets/fuzz_block_request.rs`
@@ -414,7 +414,7 @@ Expected: Runs 10 seconds, no crashes.
 <!-- START_TASK_4 -->
 ## Task 4: `fuzz_descriptor_chain.rs` — virtio descriptor chain fuzzing
 
-**Verifies:** testing-upgrade.AC3.5, testing-upgrade.AC3.6
+**Verifies:** testing-upgrade.AC2.2, testing-upgrade.AC2.10
 
 **Files:**
 - Create: `fuzz/fuzz_targets/fuzz_descriptor_chain.rs`
@@ -576,7 +576,7 @@ which is correct.
 <!-- START_TASK_5 -->
 ## Task 5: `fuzz_fuse_parsing.rs` — FUSE message parsing fuzzing
 
-**Verifies:** testing-upgrade.AC3.5, testing-upgrade.AC3.6
+**Verifies:** testing-upgrade.AC2.2, testing-upgrade.AC2.10
 
 **Files:**
 - Create: `fuzz/fuzz_targets/fuzz_fuse_parsing.rs`
@@ -780,7 +780,7 @@ Expected: Runs 10 seconds, no crashes. The majority of inputs will fail at
 <!-- START_TASK_6 -->
 ## Task 6: `fuzz_vhost_user_msg.rs` — vhost-user message struct fuzzing
 
-**Verifies:** testing-upgrade.AC3.5, testing-upgrade.AC3.6
+**Verifies:** testing-upgrade.AC2.2, testing-upgrade.AC2.10
 
 **Files:**
 - Create: `fuzz/fuzz_targets/fuzz_vhost_user_msg.rs`
@@ -940,7 +940,7 @@ Expected: Runs 10 seconds, no crashes.
 <!-- START_TASK_7 -->
 ## Task 7: Update justfile fuzz targets
 
-**Verifies:** testing-upgrade.AC3.1, testing-upgrade.AC3.2, testing-upgrade.AC3.3, testing-upgrade.AC3.4
+**Verifies:** testing-upgrade.AC2.2 (all fuzzing targets testable)
 
 **Files:**
 - Modify: `justfile` at project root (replace stub fuzz targets from Phase 1)
@@ -1062,7 +1062,7 @@ Expected: Runs `fuzz_block_request` for 5 seconds, no crashes.
 <!-- START_TASK_8 -->
 ## Task 8: Run full 60-second fuzz session on all targets
 
-**Verifies:** testing-upgrade.AC3.6 (no crashes in initial 60-second runs)
+**Verifies:** testing-upgrade.AC2.10 (no crashes in initial 60-second runs)
 
 **Files:** None (verification only)
 

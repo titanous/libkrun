@@ -221,6 +221,8 @@ impl Default for AsyncWorkerMetrics {
 //   QueuedWrite, BatchWriteResult — change from private to pub(super))
 ```
 
+**Note:** The loom shim for std::sync::atomic (lines 177-180 above) is forward-looking. No loom tests for `AsyncWorkerMetrics` are planned in Phase 3, but the shim enables future loom coverage of the block async worker.
+
 **Visibility changes summary:**
 
 | Type | Before (async_worker.rs) | After (request.rs) |
@@ -669,7 +671,7 @@ proptest-long:
 Update `just all` to include the new targets:
 
 ```just
-all: build test miri loom proptest
+all: check test miri proptest loom shuttle
 ```
 
 ---

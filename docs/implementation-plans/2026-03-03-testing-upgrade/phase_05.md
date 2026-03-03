@@ -8,8 +8,8 @@
 
 **Acceptance criteria addressed:**
 - testing-upgrade.AC2.4: `just shuttle` runs randomized concurrency tests on block quiesce, balloon resize, device activation and passes
-- testing-upgrade.AC3.1: `just asan` runs unit tests under AddressSanitizer and passes
-- testing-upgrade.AC3.2: `just integration-asan` runs integration tests under AddressSanitizer and passes
+- testing-upgrade.AC2.7: `just asan` runs unit tests under AddressSanitizer and passes
+- testing-upgrade.AC2.8: `just integration-asan` runs integration tests under AddressSanitizer and passes
 
 **Done when:** `just asan` passes, `just integration-asan` passes, `just shuttle` passes.
 
@@ -540,7 +540,7 @@ Expected: Both shuttle tests pass.
 
 ## Task 5: Add `just asan` justfile target
 
-**Verifies:** testing-upgrade.AC3.1
+**Verifies:** testing-upgrade.AC2.7
 
 **Files:**
 - Modify: `justfile` (project root)
@@ -592,7 +592,7 @@ Fix any violations before proceeding to Task 6.
 
 ## Task 6: Add `just integration-asan` justfile target
 
-**Verifies:** testing-upgrade.AC3.2
+**Verifies:** testing-upgrade.AC2.8
 
 **Files:**
 - Modify: `justfile` (project root)

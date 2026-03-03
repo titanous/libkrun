@@ -80,6 +80,14 @@ Add to `[dev-dependencies]` (create section if absent):
 proptest = "1.4"
 ```
 
+### Step 1.4 — `src/arch/Cargo.toml`
+
+Add to `[dev-dependencies]` (create section if absent):
+```toml
+[dev-dependencies]
+proptest = "1.4"
+```
+
 ---
 
 ## Task 2: Mark snapshot.rs I/O tests as Miri-incompatible
@@ -306,6 +314,8 @@ mod proptest_tests {
 ---
 
 ## Task 6: proptest for snapshot round-trips
+
+Change `fn validate_magic_and_version` to `pub(crate) fn validate_magic_and_version` in `src/vmm/src/snapshot.rs` (line ~102). This is needed because the proptest tests in this task will call this function.
 
 Add a new proptest module to `src/vmm/src/snapshot.rs` inside the `#[cfg(test)]` block (requires `feature = "snapshot"`):
 
@@ -801,7 +811,7 @@ loom:
     RUSTFLAGS="--cfg loom" cargo test --release -p devices --features net -- balloon::reclaimed_bitmap::loom_tests
 
 # all: run all quality checks
-all: build test miri loom proptest
+all: check test miri proptest loom shuttle
 ```
 
 ---
@@ -841,7 +851,7 @@ just test
 
 - **`SNAPSHOT_MAGIC` constant:** Verify the exact constant name in snapshot.rs before using it in proptest_tests. The investigation references it but doesn't confirm the variable name.
 
-- **`DirtyBitmap::PAGE_SIZE` in loom tests:** The loom tests use `PAGE_SIZE` constant from dirty_bitmap.rs (currently `16384` for Apple Silicon). This is fine for x86_64 tests too since the tests just need a positive size.
+- **`DirtyBitmap::PAGE_SIZE` in loom tests:** The loom tests use `PAGE_SIZE` constant from dirty_bitmap.rs (currently `16384`, hardcoded in `dirty_bitmap.rs`, not platform-dependent). This is fine for x86_64 tests too since the tests just need a positive size.
 
 - **`arch` crate name in justfile:** Verify the Cargo package name for `src/arch/` via `src/arch/Cargo.toml` — use the exact `[package] name` value in the `-p` flag.
 
