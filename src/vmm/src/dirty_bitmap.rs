@@ -295,4 +295,74 @@ mod tests {
             }
         }
     }
+
+    #[cfg(loom)]
+    mod loom_tests {
+        use super::*;
+        use loom::sync::Arc;
+        use loom::thread;
+
+        /// Concurrent mark_dirty and drain_dirty_pages: no page lost.
+        ///
+        /// One thread marks a page dirty (Relaxed fetch_or).
+        /// Another thread drains all dirty pages (AcqRel swap).
+        /// After both complete, the page must appear in exactly one place.
+        #[test]
+        fn loom_mark_and_drain_no_page_lost() {
+            loom::model(|| {
+                // Use a small bitmap to keep loom's state space manageable.
+                let bitmap = Arc::new(DirtyBitmap::new(0x0, 2 * PAGE_SIZE));
+
+                let b1 = Arc::clone(&bitmap);
+                let marker = thread::spawn(move || {
+                    b1.mark_dirty(0x0); // page 0
+                });
+
+                let b2 = Arc::clone(&bitmap);
+                let drainer = thread::spawn(move || b2.drain_dirty_pages());
+
+                marker.join().unwrap();
+                let drained = drainer.join().unwrap();
+
+                // After both threads complete, collect remaining.
+                // The page must be in drained OR in a subsequent drain (never lost).
+                let remaining = bitmap.drain_dirty_pages();
+                let page_found = drained.contains(&0x0) || remaining.contains(&0x0);
+                assert!(
+                    page_found,
+                    "page 0x0 was lost: drained={:?}, remaining={:?}",
+                    drained, remaining
+                );
+            });
+        }
+
+        /// Two concurrent marker threads: both pages must be present after draining.
+        #[test]
+        fn loom_two_markers_both_present() {
+            loom::model(|| {
+                let bitmap = Arc::new(DirtyBitmap::new(0x0, 2 * PAGE_SIZE));
+
+                let b1 = Arc::clone(&bitmap);
+                let m1 = thread::spawn(move || {
+                    b1.mark_dirty(0x0);
+                });
+
+                let b2 = Arc::clone(&bitmap);
+                let m2 = thread::spawn(move || {
+                    b2.mark_dirty(PAGE_SIZE);
+                });
+
+                m1.join().unwrap();
+                m2.join().unwrap();
+
+                let drained = bitmap.drain_dirty_pages();
+                assert_eq!(
+                    drained.len(),
+                    2,
+                    "expected 2 dirty pages, got {:?}",
+                    drained
+                );
+            });
+        }
+    }
 }

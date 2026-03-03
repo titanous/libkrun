@@ -384,15 +384,16 @@ mod tests {
 
         fn arb_region() -> impl Strategy<Value = UffdRegion> {
             (
-                0u64..0x8000_0000,      // guest_addr (up to 2GB)
-                1u64..0x1000_0000,      // size (up to 256MB, must be > 0)
-                0u64..0x8000_0000,      // host_addr
-            ).prop_map(|(guest_addr, size, host_addr)| UffdRegion {
-                guest_addr,
-                host_addr,
-                size,
-                page_offset: 0,
-            })
+                0u64..0x8000_0000, // guest_addr (up to 2GB)
+                1u64..0x1000_0000, // size (up to 256MB, must be > 0)
+                0u64..0x8000_0000, // host_addr
+            )
+                .prop_map(|(guest_addr, size, host_addr)| UffdRegion {
+                    guest_addr,
+                    host_addr,
+                    size,
+                    page_offset: 0,
+                })
         }
 
         proptest! {
@@ -445,6 +446,80 @@ mod tests {
                 prop_assert_eq!(stats.preload_pages, 1);
                 prop_assert_eq!(stats.loaded_pages, 1);
             }
+        }
+    }
+
+    #[cfg(loom)]
+    mod loom_tests {
+        use super::*;
+        use loom::sync::Arc;
+        use loom::thread;
+
+        /// Concurrent Preload + Fault mark_loaded on same page: exactly one counter increment.
+        ///
+        /// Two threads both call mark_loaded for page_index=0 from different LoadSources.
+        /// Because mark_loaded uses fetch_or + conditional counter increment, exactly one
+        /// should increment its counter, and loaded_pages must be 1 (not 2).
+        #[test]
+        fn loom_mark_loaded_dedup_concurrent() {
+            loom::model(|| {
+                let tracker = Arc::new(PageTracker::new(64));
+
+                let t1 = Arc::clone(&tracker);
+                let preloader = thread::spawn(move || {
+                    t1.mark_loaded(0, LoadSource::Preload);
+                });
+
+                let t2 = Arc::clone(&tracker);
+                let fault_handler = thread::spawn(move || {
+                    t2.mark_loaded(0, LoadSource::Fault);
+                });
+
+                preloader.join().unwrap();
+                fault_handler.join().unwrap();
+
+                let stats = tracker.stats();
+                // loaded_pages must be exactly 1 (deduplication via fetch_or)
+                assert_eq!(
+                    stats.loaded_pages, 1,
+                    "expected exactly 1 loaded page, got {} (preload={}, fault={})",
+                    stats.loaded_pages, stats.preload_pages, stats.fault_pages
+                );
+                // The total counter (preload + fault) must also be 1
+                assert_eq!(
+                    stats.preload_pages + stats.fault_pages,
+                    1,
+                    "preload={} fault={} — should sum to 1",
+                    stats.preload_pages,
+                    stats.fault_pages
+                );
+            });
+        }
+
+        /// Concurrent marks on different pages: both must be tracked.
+        #[test]
+        fn loom_mark_loaded_different_pages() {
+            loom::model(|| {
+                let tracker = Arc::new(PageTracker::new(64));
+
+                let t1 = Arc::clone(&tracker);
+                let t_a = thread::spawn(move || {
+                    t1.mark_loaded(0, LoadSource::Preload);
+                });
+
+                let t2 = Arc::clone(&tracker);
+                let t_b = thread::spawn(move || {
+                    t2.mark_loaded(1, LoadSource::Fault);
+                });
+
+                t_a.join().unwrap();
+                t_b.join().unwrap();
+
+                let stats = tracker.stats();
+                assert_eq!(stats.loaded_pages, 2);
+                assert_eq!(stats.preload_pages, 1);
+                assert_eq!(stats.fault_pages, 1);
+            });
         }
     }
 }

@@ -47,24 +47,36 @@ safety: check
 # Miri: run pure-logic unit tests under Miri (requires nightly)
 miri:
     MIRIFLAGS="-Zmiri-backtrace=full" \
-    cargo +nightly miri test -p vmm -- dirty_bitmap
+    cargo +nightly miri test -p arch -- gdt
+    MIRIFLAGS="-Zmiri-backtrace=full" \
+    cargo +nightly miri test -p vmm --features snapshot -- dirty_bitmap snapshot::tests::test_header
+    MIRIFLAGS="-Zmiri-backtrace=full" \
+    cargo +nightly miri test -p vmm --features uffd,snapshot -- uffd::page_tracker
     MIRIFLAGS="-Zmiri-backtrace=full" \
     cargo +nightly miri test -p devices --features net -- balloon::reclaimed_bitmap
+    MIRIFLAGS="-Zmiri-backtrace=full" \
+    cargo +nightly miri test -p devices --features blk -- virtio::block::request
 
-# proptest: property-based tests for bitmap invariants and address translation (Phase 3 adds tests)
+# proptest: property-based tests for bitmap invariants, GDT, address translation, round-trips
 proptest:
-    cargo test -p vmm --features snapshot -- proptest
-    cargo test -p devices --features net -- proptest
+    cargo test -p vmm --features snapshot -- proptest_tests
+    cargo test -p vmm --features uffd,snapshot -- uffd::page_tracker::tests::proptest_tests
+    cargo test -p devices --features net -- virtio::balloon::reclaimed_bitmap::tests::proptest_tests
+    cargo test -p arch -- x86_64::gdt::tests::proptest_tests
+    cargo test -p libkrun --features {{features}} -- tests::proptest_tests
 
-# proptest-long: extended proptest runs (10x cases)
+# proptest-long: extended runs (10x cases)
 proptest-long:
-    PROPTEST_CASES=10000 cargo test -p vmm --features snapshot -- proptest
-    PROPTEST_CASES=10000 cargo test -p devices --features net -- proptest
+    PROPTEST_CASES=10000 cargo test -p vmm --features snapshot -- proptest_tests
+    PROPTEST_CASES=10000 cargo test -p vmm --features uffd,snapshot -- uffd::page_tracker::tests::proptest_tests
+    PROPTEST_CASES=10000 cargo test -p devices --features net -- virtio::balloon::reclaimed_bitmap::tests::proptest_tests
 
-# Loom: exhaustive concurrency testing on bitmap types (Phase 3 adds tests)
+# Loom: exhaustive concurrency testing on all bitmap/tracker types
+# Requires --release for performance (loom is computationally intensive).
 loom:
-    RUSTFLAGS="--cfg loom" cargo test --release -p vmm -- dirty_bitmap
-    RUSTFLAGS="--cfg loom" cargo test --release -p devices --features net -- balloon::reclaimed_bitmap
+    RUSTFLAGS="--cfg loom" cargo test --release -p vmm -- dirty_bitmap::tests::loom_tests
+    RUSTFLAGS="--cfg loom" cargo test --release -p vmm --features uffd -- uffd::page_tracker::tests::loom_tests
+    RUSTFLAGS="--cfg loom" cargo test --release -p devices --features net -- virtio::balloon::reclaimed_bitmap::tests::loom_tests
 
 fuzz target:
     @echo "fuzz: set up in Phase 4 (Fuzzing)"

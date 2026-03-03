@@ -923,23 +923,24 @@ mod tests {
 
         fn arb_snapshot_header() -> impl Strategy<Value = SnapshotHeader> {
             (
-                any::<u32>(),       // magic (arbitrary for round-trip)
-                any::<u32>(),       // version (arbitrary for round-trip)
-                1u32..=16u32,       // vcpu_count (at least 1)
+                any::<u32>(), // magic (arbitrary for round-trip)
+                any::<u32>(), // version (arbitrary for round-trip)
+                1u32..=16u32, // vcpu_count (at least 1)
                 prop::collection::vec(
-                    (any::<u64>(), 1u64..=(1u64 << 30)),  // (addr, size) pairs
-                    0..4
+                    (any::<u64>(), 1u64..=(1u64 << 30)), // (addr, size) pairs
+                    0..4,
                 ),
-                any::<bool>(),      // nested_enabled
-            ).prop_map(|(magic, version, vcpu_count, ram_regions, nested_enabled)| {
-                SnapshotHeader {
-                    magic,
-                    version,
-                    vcpu_count,
-                    ram_regions,
-                    nested_enabled,
-                }
-            })
+                any::<bool>(), // nested_enabled
+            )
+                .prop_map(
+                    |(magic, version, vcpu_count, ram_regions, nested_enabled)| SnapshotHeader {
+                        magic,
+                        version,
+                        vcpu_count,
+                        ram_regions,
+                        nested_enabled,
+                    },
+                )
         }
 
         fn arb_vm_snapshot() -> impl Strategy<Value = VmSnapshot> {
@@ -947,23 +948,29 @@ mod tests {
                 arb_snapshot_header(),
                 prop::collection::vec(prop::collection::vec(any::<u8>(), 0..128), 0..4),
                 prop::collection::vec(
-                    ("[a-z]{1,8}".prop_map(|s: String| s), prop::collection::vec(any::<u8>(), 0..64))
+                    (
+                        "[a-z]{1,8}".prop_map(|s: String| s),
+                        prop::collection::vec(any::<u8>(), 0..64),
+                    )
                         .prop_map(|(id, state)| (id, state)),
-                    0..4
+                    0..4,
                 ),
                 proptest::option::of(prop::collection::vec(any::<u8>(), 0..32)),
                 proptest::option::of(prop::collection::vec(any::<u8>(), 0..32)),
                 prop::collection::vec(any::<u64>(), 0..8),
-            ).prop_map(|(header, vcpu_states, device_states, gic_state, vm_state, excluded_pages)| {
-                VmSnapshot {
-                    header,
-                    vcpu_states,
-                    device_states,
-                    gic_state,
-                    vm_state,
-                    excluded_pages,
-                }
-            })
+            )
+                .prop_map(
+                    |(header, vcpu_states, device_states, gic_state, vm_state, excluded_pages)| {
+                        VmSnapshot {
+                            header,
+                            vcpu_states,
+                            device_states,
+                            gic_state,
+                            vm_state,
+                            excluded_pages,
+                        }
+                    },
+                )
         }
 
         proptest! {

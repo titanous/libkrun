@@ -2153,7 +2153,9 @@ mod tests {
             let mut builder = Builder::new();
             let tag_36 = "a".repeat(36);
             let tag_37 = "a".repeat(37);
-            assert!(builder.add_virtiofs_vhost_user(&tag_36, "/tmp/sock", None).is_ok());
+            assert!(builder
+                .add_virtiofs_vhost_user(&tag_36, "/tmp/sock", None)
+                .is_ok());
             let mut builder2 = Builder::new();
             let result = builder2.add_virtiofs_vhost_user(&tag_37, "/tmp/sock", None);
             assert!(matches!(result, Err(StartError::TagTooLong(37))));

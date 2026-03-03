@@ -356,4 +356,63 @@ mod tests {
             }
         }
     }
+
+    #[cfg(loom)]
+    mod loom_tests {
+        use super::*;
+        use loom::sync::Arc;
+        use loom::thread;
+
+        /// Concurrent mark and clear: is_set result consistent with operations.
+        ///
+        /// Property: count() must be 0 or 1 after concurrent mark + clear on the same PFN.
+        #[test]
+        fn loom_mark_clear_consistency() {
+            loom::model(|| {
+                let bitmap = Arc::new(ReclaimedBitmap::new(64));
+
+                let b1 = Arc::clone(&bitmap);
+                let marker = thread::spawn(move || {
+                    b1.mark(0);
+                });
+
+                let b2 = Arc::clone(&bitmap);
+                let clearer = thread::spawn(move || {
+                    b2.clear(0);
+                });
+
+                marker.join().unwrap();
+                clearer.join().unwrap();
+
+                // After concurrent mark+clear, count must be 0 or 1 (never 2, never negative)
+                let count = bitmap.count();
+                assert!(count <= 1, "count out of range: {}", count);
+            });
+        }
+
+        /// Concurrent marks on different PFNs: both must be set.
+        #[test]
+        fn loom_concurrent_distinct_marks() {
+            loom::model(|| {
+                let bitmap = Arc::new(ReclaimedBitmap::new(64));
+
+                let b1 = Arc::clone(&bitmap);
+                let m1 = thread::spawn(move || {
+                    b1.mark(0);
+                });
+
+                let b2 = Arc::clone(&bitmap);
+                let m2 = thread::spawn(move || {
+                    b2.mark(1);
+                });
+
+                m1.join().unwrap();
+                m2.join().unwrap();
+
+                assert!(bitmap.is_set(0), "pfn 0 not set");
+                assert!(bitmap.is_set(1), "pfn 1 not set");
+                assert_eq!(bitmap.count(), 2);
+            });
+        }
+    }
 }
