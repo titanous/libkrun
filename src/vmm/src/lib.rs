@@ -263,7 +263,9 @@ pub struct Vmm {
 impl Vmm {
     /// Gets the balloon device reference if available.
     #[cfg(not(feature = "tee"))]
-    pub fn get_balloon(&self) -> Option<&std::sync::Arc<std::sync::Mutex<devices::virtio::balloon::Balloon>>> {
+    pub fn get_balloon(
+        &self,
+    ) -> Option<&std::sync::Arc<std::sync::Mutex<devices::virtio::balloon::Balloon>>> {
         self.balloon.as_ref()
     }
 
@@ -500,7 +502,8 @@ impl Vmm {
             })?;
             log::info!(
                 "vmgenid: updated GUID from {:02x?} to {:02x?}",
-                &old[..4], &new[..4]
+                &old[..4],
+                &new[..4]
             );
             true
         } else {
@@ -514,12 +517,27 @@ impl Vmm {
         // Signal the GED interrupt AFTER vCPU state restore. KVM_SET_LAPIC
         // overwrites the LAPIC IRR, so any interrupt injected before that
         // would be lost.
+        //
+        // Use the synchronous KVM_IRQ_LINE ioctl instead of the eventfd/irqfd
+        // path (signal_interrupt). The irqfd mechanism processes events
+        // asynchronously via a kernel workqueue, so there is a race between
+        // the irqfd worker injecting the interrupt and resume_vcpus() making
+        // the vCPU enter KVM_RUN. When the vCPU wins the race, the guest
+        // runs without seeing the VMGENID change, producing identical CSPRNG
+        // output across VM clones. KVM_IRQ_LINE is synchronous: the interrupt
+        // is in the LAPIC before this call returns.
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         if vmgenid_guid_updated {
             if let Some(ref vmgenid) = self.vmgenid {
-                vmgenid.signal_interrupt().map_err(|e| {
+                let irq = vmgenid.irq();
+                self.vm.fd().set_irq_line(irq, true).map_err(|e| {
                     snapshot::SnapshotError::Deserialize(format!(
-                        "vmgenid: interrupt injection failed: {e}"
+                        "vmgenid: KVM_IRQ_LINE assert failed (irq {irq}): {e}"
+                    ))
+                })?;
+                self.vm.fd().set_irq_line(irq, false).map_err(|e| {
+                    snapshot::SnapshotError::Deserialize(format!(
+                        "vmgenid: KVM_IRQ_LINE deassert failed (irq {irq}): {e}"
                     ))
                 })?;
             }
@@ -1306,7 +1324,8 @@ impl Vmm {
                                     } else {
                                         // Page is resident: check if it's all zeros
                                         // If all-zero, exclude; if non-zero, don't exclude (guest reused)
-                                        let slice = unsafe { std::slice::from_raw_parts(host_addr, 4096) };
+                                        let slice =
+                                            unsafe { std::slice::from_raw_parts(host_addr, 4096) };
                                         slice.iter().all(|&b| b == 0)
                                     }
                                 }
@@ -1528,8 +1547,9 @@ impl Vmm {
                                             true
                                         } else {
                                             // Page is resident: check if it's all zeros
-                                            let slice =
-                                                unsafe { std::slice::from_raw_parts(host_addr, 4096) };
+                                            let slice = unsafe {
+                                                std::slice::from_raw_parts(host_addr, 4096)
+                                            };
                                             slice.iter().all(|&b| b == 0)
                                         }
                                     }
@@ -1773,13 +1793,7 @@ impl Vmm {
 fn mincore_check(host_addr: *const u8, len: usize) -> io::Result<Vec<bool>> {
     let page_count = len.div_ceil(4096);
     let mut vec = vec![0u8; page_count];
-    let ret = unsafe {
-        libc::mincore(
-            host_addr as *mut libc::c_void,
-            len,
-            vec.as_mut_ptr(),
-        )
-    };
+    let ret = unsafe { libc::mincore(host_addr as *mut libc::c_void, len, vec.as_mut_ptr()) };
     if ret != 0 {
         return Err(io::Error::last_os_error());
     }
@@ -1977,7 +1991,7 @@ mod tests {
     #[test]
     #[cfg(feature = "snapshot")]
     fn test_apply_reclaimed_pages_zeros_memory() {
-        use vm_memory::{GuestAddress, GuestMemoryMmap, Bytes};
+        use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
 
         // Create a small guest memory region
         let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 16384)])
@@ -1996,13 +2010,15 @@ mod tests {
         assert_eq!(verify[0], 0xDE);
 
         // Now apply_reclaimed_pages to zero that page
-        snapshot::apply_reclaimed_pages(&mem, &[4096u64])
-            .expect("apply_reclaimed_pages failed");
+        snapshot::apply_reclaimed_pages(&mem, &[4096u64]).expect("apply_reclaimed_pages failed");
 
         // Verify the page is now zeros
         mem.read_slice(&mut verify, page_addr)
             .expect("Failed to read after reclaim");
-        assert!(verify.iter().all(|&b| b == 0), "Page should be all zeros after reclaim");
+        assert!(
+            verify.iter().all(|&b| b == 0),
+            "Page should be all zeros after reclaim"
+        );
     }
 
     /// Test sparse file offset calculation.
@@ -2011,14 +2027,13 @@ mod tests {
     #[test]
     #[cfg(feature = "snapshot")]
     fn test_sparse_file_offset_calculation() {
-
         // Simulate RAM regions: (guest_addr, size)
         let ram_regions = vec![(0u64, 4096u64), (4096u64, 4096u64), (8192u64, 4096u64)];
 
         // Test offset calculation for various guest addresses
         let test_cases = vec![
             // (guest_addr, expected_offset)
-            (0u64, 0u64),      // First region, start
+            (0u64, 0u64),       // First region, start
             (4096u64, 4096u64), // Second region, start
             (8192u64, 8192u64), // Third region, start
         ];
@@ -2034,8 +2049,16 @@ mod tests {
                 }
                 offset += region_size;
             }
-            assert!(found, "Address 0x{:x} should be in one of the regions", guest_addr);
-            assert_eq!(offset, expected_offset, "Offset mismatch for address 0x{:x}", guest_addr);
+            assert!(
+                found,
+                "Address 0x{:x} should be in one of the regions",
+                guest_addr
+            );
+            assert_eq!(
+                offset, expected_offset,
+                "Offset mismatch for address 0x{:x}",
+                guest_addr
+            );
         }
     }
 
@@ -2044,7 +2067,6 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn test_mincore_check_after_madvise() {
-
         // Allocate anonymous memory
         let size = 8192; // 2 pages
         let host_addr = unsafe {
@@ -2072,7 +2094,8 @@ mod tests {
         }
 
         // Call madvise(MADV_DONTNEED) to discard the page
-        let ret = unsafe { libc::madvise(host_addr as *mut libc::c_void, 4096, libc::MADV_DONTNEED) };
+        let ret =
+            unsafe { libc::madvise(host_addr as *mut libc::c_void, 4096, libc::MADV_DONTNEED) };
         assert_eq!(ret, 0, "madvise should succeed");
 
         // Check residency using mincore_check
@@ -2094,7 +2117,6 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn test_mincore_reused_page_not_excluded() {
-
         // Allocate anonymous memory
         let size = 8192; // 2 pages
         let host_addr = unsafe {
@@ -2117,7 +2139,8 @@ mod tests {
         let host_addr = host_addr as *const u8;
 
         // Call madvise(MADV_DONTNEED) to discard the page
-        let ret = unsafe { libc::madvise(host_addr as *mut libc::c_void, 4096, libc::MADV_DONTNEED) };
+        let ret =
+            unsafe { libc::madvise(host_addr as *mut libc::c_void, 4096, libc::MADV_DONTNEED) };
         assert_eq!(ret, 0, "madvise should succeed");
 
         // Write non-zero data to the page (making it resident again)
@@ -2193,7 +2216,9 @@ mod tests {
     #[test]
     #[cfg(feature = "snapshot")]
     fn test_incremental_snapshot_empty_reclaimed() {
-        use crate::snapshot::{IncrementalSnapshot, SnapshotHeader, SNAPSHOT_MAGIC, SNAPSHOT_VERSION};
+        use crate::snapshot::{
+            IncrementalSnapshot, SnapshotHeader, SNAPSHOT_MAGIC, SNAPSHOT_VERSION,
+        };
 
         let header = SnapshotHeader {
             magic: SNAPSHOT_MAGIC,
