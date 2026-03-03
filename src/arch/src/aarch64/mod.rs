@@ -121,10 +121,7 @@ mod tests {
         let (_mem_info, regions) = arch_memory_regions(1usize << 29, 0, None);
         assert_eq!(2, regions.len());
         // GUID page region at index 0
-        assert_eq!(
-            GuestAddress(super::layout::VMGENID_GUID_PAGE),
-            regions[0].0
-        );
+        assert_eq!(GuestAddress(super::layout::VMGENID_GUID_PAGE), regions[0].0);
         assert_eq!(0x1000, regions[0].1);
         // DRAM region at index 1
         assert_eq!(
@@ -139,10 +136,7 @@ mod tests {
         let (_mem_info, regions) = arch_memory_regions(1usize << 41, 0, None);
         assert_eq!(2, regions.len());
         // GUID page region at index 0
-        assert_eq!(
-            GuestAddress(super::layout::VMGENID_GUID_PAGE),
-            regions[0].0
-        );
+        assert_eq!(GuestAddress(super::layout::VMGENID_GUID_PAGE), regions[0].0);
         assert_eq!(0x1000, regions[0].1);
         // DRAM region at index 1
         assert_eq!(

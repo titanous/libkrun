@@ -1,9 +1,9 @@
 // Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use acpi_tables::aml::*;
 use acpi_tables::rsdp::Rsdp;
 use acpi_tables::sdt::Sdt;
-use acpi_tables::aml::*;
 use acpi_tables::Aml;
 use std::result;
 use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
@@ -58,7 +58,12 @@ const ACPI_MADT_IO_APIC: u8 = 1;
 ///
 /// Table layout follows the cloud-hypervisor approach: all tables built
 /// using raw Sdt with manual field writes at ACPI-spec offsets.
-pub fn setup_acpi_tables(guest_mem: &GuestMemoryMmap, guid_addr: u64, ged_irq: u32, num_cpus: u8) -> Result<u64> {
+pub fn setup_acpi_tables(
+    guest_mem: &GuestMemoryMmap,
+    guid_addr: u64,
+    ged_irq: u32,
+    num_cpus: u8,
+) -> Result<u64> {
     // Build AML for VMGENID and GED devices
     let guid_addr_qword: u64 = guid_addr;
     let ged_irq_dword: u32 = ged_irq;
@@ -76,13 +81,7 @@ pub fn setup_acpi_tables(guest_mem: &GuestMemoryMmap, guid_addr: u64, ged_irq: u
     // VMGENID device under \_SB
     let vgen = Device::new(
         Path::new("\\_SB_.VGEN"),
-        vec![
-            &hid_name,
-            &cid_name,
-            &ddn_name,
-            &sta_method,
-            &addr_method,
-        ],
+        vec![&hid_name, &cid_name, &ddn_name, &sta_method, &addr_method],
     );
 
     // Build GED device children
@@ -99,11 +98,7 @@ pub fn setup_acpi_tables(guest_mem: &GuestMemoryMmap, guid_addr: u64, ged_irq: u
     // GED device under \_SB
     let ged = Device::new(
         Path::new("\\_SB_.GED_"),
-        vec![
-            &ged_hid_name,
-            &ged_crs_name,
-            &evt_method,
-        ],
+        vec![&ged_hid_name, &ged_crs_name, &evt_method],
     );
 
     // Wrap devices in \_SB scope
@@ -177,8 +172,11 @@ pub fn setup_acpi_tables(guest_mem: &GuestMemoryMmap, guid_addr: u64, ged_irq: u
     let rsdp = Rsdp::new(OEM_ID, xsdt_addr);
 
     // Verify all tables fit within ACPI_MAX_SIZE
-    let total_size = Rsdp::len() as u64 + dsdt.len() as u64 + fadt.len() as u64
-        + madt.len() as u64 + xsdt.len() as u64;
+    let total_size = Rsdp::len() as u64
+        + dsdt.len() as u64
+        + fadt.len() as u64
+        + madt.len() as u64
+        + xsdt.len() as u64;
     if total_size > layout::ACPI_MAX_SIZE {
         return Err(Error::Overflow);
     }
@@ -231,17 +229,19 @@ mod tests {
 
         // Create guest memory covering the ACPI region.
         let acpi_end = layout::ACPI_START + layout::ACPI_MAX_SIZE;
-        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(layout::ACPI_START), acpi_end as usize)])
-            .expect("create guest memory");
+        let mem =
+            GuestMemoryMmap::from_ranges(&[(GuestAddress(layout::ACPI_START), acpi_end as usize)])
+                .expect("create guest memory");
 
-        let rsdp_addr = setup_acpi_tables(&mem, guid_addr, ged_irq, num_cpus)
-            .expect("setup_acpi_tables");
+        let rsdp_addr =
+            setup_acpi_tables(&mem, guid_addr, ged_irq, num_cpus).expect("setup_acpi_tables");
         assert_eq!(rsdp_addr, layout::ACPI_START);
 
         // Read RSDP from guest memory.
         let rsdp_len = Rsdp::len();
         let mut rsdp_bytes = vec![0u8; rsdp_len];
-        mem.read_slice(&mut rsdp_bytes, GuestAddress(rsdp_addr)).unwrap();
+        mem.read_slice(&mut rsdp_bytes, GuestAddress(rsdp_addr))
+            .unwrap();
 
         assert_eq!(&rsdp_bytes[0..8], b"RSD PTR ", "RSDP signature");
         assert_eq!(rsdp_bytes[15], 2, "RSDP revision = 2");
@@ -252,14 +252,16 @@ mod tests {
 
         // Read XSDT header to get length, then read full table.
         let mut xsdt_hdr = [0u8; 8];
-        mem.read_slice(&mut xsdt_hdr, GuestAddress(xsdt_addr)).unwrap();
+        mem.read_slice(&mut xsdt_hdr, GuestAddress(xsdt_addr))
+            .unwrap();
         assert_eq!(&xsdt_hdr[0..4], b"XSDT", "XSDT signature");
         let xsdt_len = read_u32(&xsdt_hdr, 4) as usize;
         // XSDT = 36-byte header + two 8-byte entries (FADT + MADT)
         assert_eq!(xsdt_len, 36 + 2 * 8, "XSDT has 2 entries");
 
         let mut xsdt_bytes = vec![0u8; xsdt_len];
-        mem.read_slice(&mut xsdt_bytes, GuestAddress(xsdt_addr)).unwrap();
+        mem.read_slice(&mut xsdt_bytes, GuestAddress(xsdt_addr))
+            .unwrap();
         assert_eq!(checksum(&xsdt_bytes), 0, "XSDT checksum");
 
         let fadt_addr = read_u64(&xsdt_bytes, 36);
@@ -267,32 +269,41 @@ mod tests {
 
         // Validate FADT.
         let mut fadt_hdr = [0u8; 8];
-        mem.read_slice(&mut fadt_hdr, GuestAddress(fadt_addr)).unwrap();
+        mem.read_slice(&mut fadt_hdr, GuestAddress(fadt_addr))
+            .unwrap();
         assert_eq!(&fadt_hdr[0..4], b"FACP", "FADT signature");
         let fadt_len = read_u32(&fadt_hdr, 4) as usize;
         assert_eq!(fadt_len, 276, "FADT length");
 
         let mut fadt_bytes = vec![0u8; fadt_len];
-        mem.read_slice(&mut fadt_bytes, GuestAddress(fadt_addr)).unwrap();
+        mem.read_slice(&mut fadt_bytes, GuestAddress(fadt_addr))
+            .unwrap();
         assert_eq!(fadt_bytes[8], 6, "FADT revision 6");
         assert_eq!(checksum(&fadt_bytes), 0, "FADT checksum");
-        assert_ne!(read_u32(&fadt_bytes, FADT_FIELD_FLAGS) & (1 << 20), 0, "HW_REDUCED_ACPI set");
+        assert_ne!(
+            read_u32(&fadt_bytes, FADT_FIELD_FLAGS) & (1 << 20),
+            0,
+            "HW_REDUCED_ACPI set"
+        );
 
         let dsdt_addr = read_u64(&fadt_bytes, FADT_FIELD_X_DSDT);
 
         // Validate DSDT.
         let mut dsdt_hdr = [0u8; 8];
-        mem.read_slice(&mut dsdt_hdr, GuestAddress(dsdt_addr)).unwrap();
+        mem.read_slice(&mut dsdt_hdr, GuestAddress(dsdt_addr))
+            .unwrap();
         assert_eq!(&dsdt_hdr[0..4], b"DSDT", "DSDT signature");
         let dsdt_len = read_u32(&dsdt_hdr, 4) as usize;
 
         let mut dsdt_bytes = vec![0u8; dsdt_len];
-        mem.read_slice(&mut dsdt_bytes, GuestAddress(dsdt_addr)).unwrap();
+        mem.read_slice(&mut dsdt_bytes, GuestAddress(dsdt_addr))
+            .unwrap();
         assert_eq!(checksum(&dsdt_bytes), 0, "DSDT checksum");
 
         // Validate MADT.
         let mut madt_hdr = [0u8; 8];
-        mem.read_slice(&mut madt_hdr, GuestAddress(madt_addr)).unwrap();
+        mem.read_slice(&mut madt_hdr, GuestAddress(madt_addr))
+            .unwrap();
         assert_eq!(&madt_hdr[0..4], b"APIC", "MADT signature");
         let madt_len = read_u32(&madt_hdr, 4) as usize;
         // MADT = 44-byte header + num_cpus * 8 (LAPIC entries) + 12 (I/O APIC entry)
@@ -300,29 +311,49 @@ mod tests {
         assert_eq!(madt_len, expected_madt_len, "MADT length");
 
         let mut madt_bytes = vec![0u8; madt_len];
-        mem.read_slice(&mut madt_bytes, GuestAddress(madt_addr)).unwrap();
+        mem.read_slice(&mut madt_bytes, GuestAddress(madt_addr))
+            .unwrap();
         assert_eq!(madt_bytes[8], 5, "MADT revision 5");
         assert_eq!(checksum(&madt_bytes), 0, "MADT checksum");
-        assert_eq!(read_u32(&madt_bytes, MADT_FIELD_LOCAL_APIC_ADDR), LOCAL_APIC_ADDR, "LAPIC addr");
-        assert_eq!(read_u32(&madt_bytes, MADT_FIELD_FLAGS), 1, "PCAT_COMPAT flag");
+        assert_eq!(
+            read_u32(&madt_bytes, MADT_FIELD_LOCAL_APIC_ADDR),
+            LOCAL_APIC_ADDR,
+            "LAPIC addr"
+        );
+        assert_eq!(
+            read_u32(&madt_bytes, MADT_FIELD_FLAGS),
+            1,
+            "PCAT_COMPAT flag"
+        );
 
         // Validate LAPIC entries (starting at offset 44).
         for i in 0..num_cpus {
             let off = 44 + (i as usize) * 8;
-            assert_eq!(madt_bytes[off], ACPI_MADT_LOCAL_APIC, "LAPIC entry type for CPU {i}");
+            assert_eq!(
+                madt_bytes[off], ACPI_MADT_LOCAL_APIC,
+                "LAPIC entry type for CPU {i}"
+            );
             assert_eq!(madt_bytes[off + 1], 8, "LAPIC entry length");
             assert_eq!(madt_bytes[off + 2], i, "ACPI processor ID {i}");
             assert_eq!(madt_bytes[off + 3], i, "APIC ID {i}");
             assert_eq!(
-                read_u32(&madt_bytes, off + 4), MADT_CPU_ENABLE_FLAG,
+                read_u32(&madt_bytes, off + 4),
+                MADT_CPU_ENABLE_FLAG,
                 "LAPIC enabled flag for CPU {i}"
             );
         }
 
         // Validate I/O APIC entry (after LAPIC entries).
         let ioapic_off = 44 + (num_cpus as usize) * 8;
-        assert_eq!(madt_bytes[ioapic_off], ACPI_MADT_IO_APIC, "I/O APIC entry type");
+        assert_eq!(
+            madt_bytes[ioapic_off], ACPI_MADT_IO_APIC,
+            "I/O APIC entry type"
+        );
         assert_eq!(madt_bytes[ioapic_off + 1], 12, "I/O APIC entry length");
-        assert_eq!(read_u32(&madt_bytes, ioapic_off + 4), IO_APIC_ADDR, "I/O APIC addr");
+        assert_eq!(
+            read_u32(&madt_bytes, ioapic_off + 4),
+            IO_APIC_ADDR,
+            "I/O APIC addr"
+        );
     }
 }

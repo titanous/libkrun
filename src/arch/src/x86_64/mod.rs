@@ -5,13 +5,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the THIRD-PARTY file.
 
+#[cfg(not(feature = "tee"))]
+mod acpi;
 mod gdt;
 /// Contains logic for setting up Advanced Programmable Interrupt Controller (local version).
 pub mod interrupts;
 /// Layout for the x86_64 system.
 pub mod layout;
-#[cfg(not(feature = "tee"))]
-mod acpi;
 #[cfg(not(feature = "tee"))]
 mod mptable;
 /// Logic for configuring x86_64 model specific registers (MSRs).
@@ -274,9 +274,10 @@ pub fn configure_system(
 
     #[cfg(not(feature = "tee"))]
     let acpi_rsdp_addr = {
-        use crate::x86_64::layout::{VMGENID_GUID_PAGE, VMGENID_GUID_OFFSET, GED_IRQ};
+        use crate::x86_64::layout::{GED_IRQ, VMGENID_GUID_OFFSET, VMGENID_GUID_PAGE};
         let guid_addr = VMGENID_GUID_PAGE + VMGENID_GUID_OFFSET;
-        acpi::setup_acpi_tables(guest_mem, guid_addr, GED_IRQ, num_cpus).map_err(Error::AcpiSetup)?
+        acpi::setup_acpi_tables(guest_mem, guid_addr, GED_IRQ, num_cpus)
+            .map_err(Error::AcpiSetup)?
     };
 
     let mut params: BootParamsWrapper = BootParamsWrapper(boot_params::default());
