@@ -2157,4 +2157,107 @@ mod tests {
         assert!(balloon2.inflated_bitmap.is_none());
         assert!(balloon2.reported_free_bitmap.is_none());
     }
+
+    #[cfg(feature = "shuttle")]
+    mod shuttle_tests {
+        use shuttle::sync::{Arc, Condvar, Mutex};
+        use shuttle::thread;
+
+        /// Shuttle test for the balloon actual-pages condvar pattern.
+        ///
+        /// Models BalloonHandle::await_target + guest config-write handler coordination:
+        ///   - "guest" thread: sets actual_pages and signals condvar
+        ///     (device.rs lines 671-674: *val = actual_pages; cvar.notify_all())
+        ///   - "VMM" thread: waits on condvar until actual >= target
+        ///     (lib.rs await_target: cvar.wait(actual) loop)
+        ///
+        /// Verifies: condvar wait terminates, no deadlock, correct final value.
+        ///
+        /// Note: Uses cvar.wait (not wait_timeout) since shuttle does not respect
+        /// real wall-clock durations. The stall_timeout path is tested separately
+        /// in unit tests (test_balloon_handle_await_target_stalled_no_progress).
+        #[test]
+        fn shuttle_balloon_condvar_no_deadlock() {
+            shuttle::check_random(
+                || {
+                    // actual_condvar: Arc<(Mutex<u64>, Condvar)>
+                    // Mirrors device.rs actual_condvar structure (line 147)
+                    let actual_condvar: Arc<(Mutex<u64>, Condvar)> =
+                        Arc::new((Mutex::new(0u64), Condvar::new()));
+
+                    let target_pages: u64 = 64; // arbitrary target
+
+                    // "Guest" thread: writes actual and signals (device.rs lines 671-674)
+                    let condvar_guest = Arc::clone(&actual_condvar);
+                    let guest = thread::spawn(move || {
+                        let (lock, cvar) = &*condvar_guest;
+                        let mut val = lock.lock().unwrap();
+                        *val = target_pages;
+                        cvar.notify_all();
+                    });
+
+                    // "VMM" thread: await_target loop (lib.rs lines 3483-3514, wait path only)
+                    let condvar_vmm = Arc::clone(&actual_condvar);
+                    let vmm = thread::spawn(move || {
+                        let (lock, cvar) = &*condvar_vmm;
+                        let mut actual = lock.lock().unwrap();
+                        while *actual < target_pages {
+                            actual = cvar.wait(actual).unwrap();
+                        }
+                        assert!(
+                            *actual >= target_pages,
+                            "await_target must observe actual >= target after condvar wait, got {}",
+                            *actual
+                        );
+                    });
+
+                    guest.join().unwrap();
+                    vmm.join().unwrap();
+                },
+                1000,
+            );
+        }
+
+        /// Shuttle test: multiple guest updates, VMM observes final value.
+        ///
+        /// Models incremental inflation: guest sends multiple actual updates before
+        /// reaching target. Verifies VMM loop terminates correctly.
+        #[test]
+        fn shuttle_balloon_incremental_updates_no_deadlock() {
+            shuttle::check_random(
+                || {
+                    let actual_condvar: Arc<(Mutex<u64>, Condvar)> =
+                        Arc::new((Mutex::new(0u64), Condvar::new()));
+
+                    let target_pages: u64 = 3;
+
+                    // Guest sends three incremental updates
+                    let condvar_guest = Arc::clone(&actual_condvar);
+                    let guest = thread::spawn(move || {
+                        for pages in 1u64..=target_pages {
+                            let (lock, cvar) = &*condvar_guest;
+                            let mut val = lock.lock().unwrap();
+                            *val = pages;
+                            cvar.notify_all();
+                        }
+                    });
+
+                    // VMM waits until actual reaches target
+                    let condvar_vmm = Arc::clone(&actual_condvar);
+                    let vmm = thread::spawn(move || {
+                        let (lock, cvar) = &*condvar_vmm;
+                        let mut actual = lock.lock().unwrap();
+                        while *actual < target_pages {
+                            actual = cvar.wait(actual).unwrap();
+                        }
+                        assert!(*actual >= target_pages);
+                    });
+
+                    guest.join().unwrap();
+                    vmm.join().unwrap();
+                },
+                500,
+            );
+        }
+    }
 }
