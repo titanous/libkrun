@@ -173,10 +173,8 @@ kani:
 kani-proof name:
     cargo kani --manifest-path kani-proofs/Cargo.toml --harness {{name}}
 
-# Mutation testing feature set (matches full build features)
-mutants_features := "embedded_init,snapshot,uffd,blk,vhost-user"
-
 # Excluded subsystems (no tests exist for these)
+# Note: mutants_excludes relies on sh -c word splitting to expand multiple -e flags.
 mutants_excludes := "-e 'src/rutabaga_gfx' -e 'src/hvf' -e 'src/devices/src/virtio/gpu' -e 'src/devices/src/virtio/snd' -e 'src/devices/src/virtio/input'"
 
 # Run full mutation test suite. Produces mutants.out/outcomes.json.
@@ -184,7 +182,7 @@ mutants_excludes := "-e 'src/rutabaga_gfx' -e 'src/hvf' -e 'src/devices/src/virt
 # jobs: parallel workers (default 4)
 mutants timeout="3600" jobs="4":
     cargo mutants \
-      --features {{mutants_features}} \
+      --features {{features}} \
       {{mutants_excludes}} \
       --timeout {{timeout}} \
       --jobs {{jobs}}
@@ -193,7 +191,7 @@ mutants timeout="3600" jobs="4":
 # Much faster than full run; suitable for CI on PRs.
 mutants-diff timeout="60" jobs="4":
     cargo mutants \
-      --features {{mutants_features}} \
+      --features {{features}} \
       {{mutants_excludes}} \
       --in-diff origin/main..HEAD \
       --timeout {{timeout}} \
@@ -202,7 +200,7 @@ mutants-diff timeout="60" jobs="4":
 # Preview mutants that will be generated (no tests run). Fast (~10s).
 mutants-list:
     cargo mutants --list \
-      --features {{mutants_features}} \
+      --features {{features}} \
       {{mutants_excludes}} \
       --json
 
