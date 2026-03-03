@@ -1,12 +1,12 @@
 # libkrun Crate
 
-Last verified: 2026-03-02
+Last verified: 2026-03-03
 
 ## Purpose
-Public API crate providing both C FFI (`krun_*` functions) and Rust `Builder` API for configuring and starting microVMs.
+Public Rust API crate providing `Builder`, `Context`, and `VmHandle` for configuring and starting microVMs. C API removed.
 
 ## Contracts
-- **Exposes**: C API (`krun_set_vm_config`, `krun_start_enter`, etc.), Rust `Builder` struct, `Context` struct, `StartError` enum, `VmExit` enum (re-exported from vmm), `Builder::add_virtiofs_vhost_user()` (behind `vhost-user` feature), `Builder::add_vsock_vhost_user()` and `Builder::add_vsock_vhost_user_fd()` (behind `vhost-user` feature), `vmm::snapshot_store` re-export (behind `snapshot` feature), `VmHandle::snapshot_to_store()`, `VmHandle::incremental_snapshot_to_store()` (behind `snapshot` feature), re-exports of `devices::virtio::fs::{FileSystem, passthrough, dax_mapper}` (behind `not(tee)` feature), `Builder::enable_balloon()`, `BalloonHandle`, `BalloonResult`, `BalloonError`, `VmHandle::balloon()` (behind `not(tee)` feature)
+- **Exposes**: Rust `Builder` struct, `Context` struct, `StartError` enum, `VmExit` enum (re-exported from vmm), `Builder::add_virtiofs_vhost_user()` (behind `vhost-user` feature), `Builder::add_vsock_vhost_user()` and `Builder::add_vsock_vhost_user_fd()` (behind `vhost-user` feature), `vmm::snapshot_store` re-export (behind `snapshot` feature), `VmHandle::snapshot_to_store()`, `VmHandle::incremental_snapshot_to_store()` (behind `snapshot` feature), re-exports of `devices::virtio::fs::{FileSystem, passthrough, dax_mapper}` (behind `not(tee)` feature), `Builder::enable_balloon()`, `BalloonHandle`, `BalloonResult`, `BalloonError`, `VmHandle::balloon()` (behind `not(tee)` feature)
 - **Guarantees**:
   - `krun_set_vm_config` returns `-EINVAL` when `num_vcpus == 0`
   - `Builder::vm_config()` returns `Result<&mut Self, StartError>` (was infallible before)

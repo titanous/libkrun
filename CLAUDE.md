@@ -1,23 +1,26 @@
 # libkrun
 
-Last verified: 2026-03-02
+Last verified: 2026-03-03
 
 ## Tech Stack
 - Language: Rust (workspace) + C (init binary)
 - Hypervisor: KVM (Linux), HVF (macOS)
 - Network stack: tokio (async workers)
 - Serialization: bincode (snapshots)
-- Build: Makefile + Cargo workspace
+- Build: justfile + Cargo workspace
 
 ## Commands
-- `make` - Build release library (auto-builds init with `embedded_init` feature)
-- `make test FEATURE_FLAGS="--features embedded_init"` - Run integration tests (embedded_init required or init.krun is empty)
+- `just check` - Format check + cargo check (replaces `make`)
+- `just build` - Build release library (replaces `make`)
+- `just test` - Run unit tests for all crates
+- `just integration` - Run all integration tests (embedded_init required; libkrunfw must be in test-prefix/lib64/)
+- `just integration <name>` - Run a single named integration test
 - `cargo test -p devices --features net` - Run devices crate unit tests (net feature needed for async_worker tests)
 - `cargo test -p devices --features net,snapshot` - Devices tests including snapshot-dependent tests
 - `cargo test -p vmm --features snapshot` - VMM crate unit tests (snapshot feature for snapshot.rs tests)
 
 ## Project Structure
-- `src/libkrun/` - Public C API (`krun_*` functions) and Rust `Builder` API
+- `src/libkrun/` - Public Rust API (`Builder`, `Context`, `VmHandle`) — C API removed
 - `src/vmm/` - Virtual machine manager: builder, snapshot/restore, dirty tracking
 - `src/devices/` - Virtio and legacy device implementations (net, console, block, balloon, vsock, fs, vhost-user, serial, CMOS, i8042, RTC)
 - `src/arch/`, `src/kernel/` - Architecture and kernel loading support
