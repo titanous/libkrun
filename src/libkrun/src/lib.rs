@@ -1,11 +1,11 @@
 use crossbeam_channel::unbounded;
-use log::info;
 #[cfg(feature = "gpu")]
 use devices::virtio::gpu::display::DisplayInfo;
 #[cfg(feature = "blk")]
 pub use devices::virtio::CacheType;
 #[cfg(feature = "gpu")]
 use krun_display::DisplayBackend;
+use log::info;
 use std::ops::{Deref, DerefMut};
 
 #[cfg(feature = "blk")]
@@ -1267,7 +1267,8 @@ impl Context {
         let mut first_event_logged = false;
         // Run the event loop
         loop {
-            let n = self.event_manager
+            let n = self
+                .event_manager
                 .run()
                 .map_err(StartError::EventManagerRun)?;
             if n > 0 && !first_event_logged {

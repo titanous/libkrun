@@ -849,7 +849,10 @@ struct BootTimer {
 impl BootTimer {
     fn new() -> Self {
         let now = std::time::Instant::now();
-        Self { start: now, last: now }
+        Self {
+            start: now,
+            last: now,
+        }
     }
     fn checkpoint(&mut self, name: &str) {
         let now = std::time::Instant::now();
