@@ -7,3 +7,6 @@ edition = "2021"
 vm-memory = { version = "0.18", features = ["backend-mmap"] }
 
 utils = { path = "../utils" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }

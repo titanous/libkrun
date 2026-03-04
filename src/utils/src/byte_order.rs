@@ -113,6 +113,7 @@ mod verification {
     use super::*;
 
     #[kani::proof]
+    #[kani::solver(cadical)]
     #[kani::unwind(3)]
     fn proof_le_u16_roundtrip() {
         let val: u16 = kani::any();
@@ -124,6 +125,7 @@ mod verification {
     }
 
     #[kani::proof]
+    #[kani::solver(cadical)]
     #[kani::unwind(5)]
     fn proof_le_u32_roundtrip() {
         let val: u32 = kani::any();
@@ -135,6 +137,7 @@ mod verification {
     }
 
     #[kani::proof]
+    #[kani::solver(cadical)]
     #[kani::unwind(9)]
     fn proof_le_u64_roundtrip() {
         let val: u64 = kani::any();
@@ -146,6 +149,7 @@ mod verification {
     }
 
     #[kani::proof]
+    #[kani::solver(cadical)]
     #[kani::unwind(5)]
     fn proof_le_i32_roundtrip() {
         let val: i32 = kani::any();
@@ -157,6 +161,7 @@ mod verification {
     }
 
     #[kani::proof]
+    #[kani::solver(cadical)]
     #[kani::unwind(3)]
     fn proof_be_u16_roundtrip() {
         let val: u16 = kani::any();
@@ -168,6 +173,7 @@ mod verification {
     }
 
     #[kani::proof]
+    #[kani::solver(cadical)]
     #[kani::unwind(5)]
     fn proof_be_u32_roundtrip() {
         let val: u32 = kani::any();

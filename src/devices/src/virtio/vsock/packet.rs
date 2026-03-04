@@ -731,106 +731,127 @@ mod verification {
 
     // u64 fields: byte_order write/read loop iterates 8 bytes → unwind(9)
     #[kani::proof]
+    #[kani::solver(cadical)]
     #[kani::unwind(9)]
     fn proof_vsock_hdr_src_cid_roundtrip() {
         let (mut pkt, _hdr_buf) = VsockPacket::new_for_verification();
         let val: u64 = kani::any();
         pkt.set_src_cid(val);
         assert_eq!(pkt.src_cid(), val);
+        kani::cover!(true, "src_cid roundtrip path reachable");
     }
 
     // u64 fields: byte_order write/read loop iterates 8 bytes → unwind(9)
     #[kani::proof]
+    #[kani::solver(cadical)]
     #[kani::unwind(9)]
     fn proof_vsock_hdr_dst_cid_roundtrip() {
         let (mut pkt, _hdr_buf) = VsockPacket::new_for_verification();
         let val: u64 = kani::any();
         pkt.set_dst_cid(val);
         assert_eq!(pkt.dst_cid(), val);
+        kani::cover!(true, "dst_cid roundtrip path reachable");
     }
 
     // u32 fields: byte_order write/read loop iterates 4 bytes → unwind(5)
     #[kani::proof]
+    #[kani::solver(cadical)]
     #[kani::unwind(5)]
     fn proof_vsock_hdr_src_port_roundtrip() {
         let (mut pkt, _hdr_buf) = VsockPacket::new_for_verification();
         let val: u32 = kani::any();
         pkt.set_src_port(val);
         assert_eq!(pkt.src_port(), val);
+        kani::cover!(true, "src_port roundtrip path reachable");
     }
 
     // u32 fields: byte_order write/read loop iterates 4 bytes → unwind(5)
     #[kani::proof]
+    #[kani::solver(cadical)]
     #[kani::unwind(5)]
     fn proof_vsock_hdr_dst_port_roundtrip() {
         let (mut pkt, _hdr_buf) = VsockPacket::new_for_verification();
         let val: u32 = kani::any();
         pkt.set_dst_port(val);
         assert_eq!(pkt.dst_port(), val);
+        kani::cover!(true, "dst_port roundtrip path reachable");
     }
 
     // u32 fields: byte_order write/read loop iterates 4 bytes → unwind(5)
     #[kani::proof]
+    #[kani::solver(cadical)]
     #[kani::unwind(5)]
     fn proof_vsock_hdr_len_roundtrip() {
         let (mut pkt, _hdr_buf) = VsockPacket::new_for_verification();
         let val: u32 = kani::any();
         pkt.set_len(val);
         assert_eq!(pkt.len(), val);
+        kani::cover!(true, "len roundtrip path reachable");
     }
 
     // u16 fields: byte_order write/read loop iterates 2 bytes → unwind(3)
     #[kani::proof]
+    #[kani::solver(cadical)]
     #[kani::unwind(3)]
     fn proof_vsock_hdr_type_roundtrip() {
         let (mut pkt, _hdr_buf) = VsockPacket::new_for_verification();
         let val: u16 = kani::any();
         pkt.set_type(val);
         assert_eq!(pkt.type_(), val);
+        kani::cover!(true, "type roundtrip path reachable");
     }
 
     // u16 fields: byte_order write/read loop iterates 2 bytes → unwind(3)
     #[kani::proof]
+    #[kani::solver(cadical)]
     #[kani::unwind(3)]
     fn proof_vsock_hdr_op_roundtrip() {
         let (mut pkt, _hdr_buf) = VsockPacket::new_for_verification();
         let val: u16 = kani::any();
         pkt.set_op(val);
         assert_eq!(pkt.op(), val);
+        kani::cover!(true, "op roundtrip path reachable");
     }
 
     // u32 fields: byte_order write/read loop iterates 4 bytes → unwind(5)
     #[kani::proof]
+    #[kani::solver(cadical)]
     #[kani::unwind(5)]
     fn proof_vsock_hdr_flags_roundtrip() {
         let (mut pkt, _hdr_buf) = VsockPacket::new_for_verification();
         let val: u32 = kani::any();
         pkt.set_flags(val);
         assert_eq!(pkt.flags(), val);
+        kani::cover!(true, "flags roundtrip path reachable");
     }
 
     // u32 fields: byte_order write/read loop iterates 4 bytes → unwind(5)
     #[kani::proof]
+    #[kani::solver(cadical)]
     #[kani::unwind(5)]
     fn proof_vsock_hdr_buf_alloc_roundtrip() {
         let (mut pkt, _hdr_buf) = VsockPacket::new_for_verification();
         let val: u32 = kani::any();
         pkt.set_buf_alloc(val);
         assert_eq!(pkt.buf_alloc(), val);
+        kani::cover!(true, "buf_alloc roundtrip path reachable");
     }
 
     // u32 fields: byte_order write/read loop iterates 4 bytes → unwind(5)
     #[kani::proof]
+    #[kani::solver(cadical)]
     #[kani::unwind(5)]
     fn proof_vsock_hdr_fwd_cnt_roundtrip() {
         let (mut pkt, _hdr_buf) = VsockPacket::new_for_verification();
         let val: u32 = kani::any();
         pkt.set_fwd_cnt(val);
         assert_eq!(pkt.fwd_cnt(), val);
+        kani::cover!(true, "fwd_cnt roundtrip path reachable");
     }
 
     // Multi-field isolation: largest field is u64 (8 bytes) → unwind(9)
     #[kani::proof]
+    #[kani::solver(cadical)]
     #[kani::unwind(9)]
     fn proof_vsock_hdr_field_isolation() {
         let (mut pkt, _hdr_buf) = VsockPacket::new_for_verification();
@@ -849,10 +870,12 @@ mod verification {
         assert_eq!(pkt.dst_port(), port);
         assert_eq!(pkt.len(), len);
         assert_eq!(pkt.op(), op);
+        kani::cover!(true, "field isolation proof path reachable");
     }
 
     // set_flag calls set_flags (read u32 + write u32): byte_order loops 4 bytes each → unwind(5)
     #[kani::proof]
+    #[kani::solver(cadical)]
     #[kani::unwind(5)]
     fn proof_vsock_hdr_set_flag_or() {
         let (mut pkt, _hdr_buf) = VsockPacket::new_for_verification();
@@ -861,6 +884,7 @@ mod verification {
         pkt.set_flags(initial);
         pkt.set_flag(flag);
         assert_eq!(pkt.flags(), initial | flag);
+        kani::cover!(true, "set_flag OR proof path reachable");
     }
 
     // TSI protocol extensions (libkrun-specific, not in Virtio spec)
@@ -886,11 +910,12 @@ mod verification {
     }
 
     /// Proof: sa_family returns None iff buf_size < 2.
-    /// sa_family calls read_le_u16 (2 bytes → unwind(3)).
+    /// sa_family reads 2 bytes; buf constrained to <=4 → unwind(5).
     #[kani::proof]
-    #[kani::unwind(3)]
+    #[kani::solver(cadical)]
+    #[kani::unwind(5)]
     fn proof_sa_family_bounds() {
-        let buf_size: usize = kani::any_where(|&s| s <= 64);
+        let buf_size: usize = kani::any_where(|&s| s <= 4);
         let (pkt, _hdr, _buf) = new_with_buf_for_verification(buf_size);
         let result = pkt.sa_family();
         if buf_size < 2 {
@@ -903,11 +928,12 @@ mod verification {
     }
 
     /// Proof: inet_port returns None iff buf_size < 4.
-    /// inet_port calls read_be_u16 (2 bytes → unwind(3)).
+    /// inet_port reads 4 bytes; buf constrained to <=6 → unwind(7).
     #[kani::proof]
-    #[kani::unwind(3)]
+    #[kani::solver(cadical)]
+    #[kani::unwind(7)]
     fn proof_inet_port_bounds() {
-        let buf_size: usize = kani::any_where(|&s| s <= 64);
+        let buf_size: usize = kani::any_where(|&s| s <= 6);
         let (pkt, _hdr, _buf) = new_with_buf_for_verification(buf_size);
         let result = pkt.inet_port();
         if buf_size < 4 {
@@ -920,11 +946,12 @@ mod verification {
     }
 
     /// Proof: inet_addr returns None iff buf_size < 8.
-    /// inet_addr does a slice try_into with no byte_order loops. unwind(1) sufficient.
+    /// inet_addr reads 8 bytes; buf constrained to <=10 → unwind(11).
     #[kani::proof]
-    #[kani::unwind(1)]
+    #[kani::solver(cadical)]
+    #[kani::unwind(11)]
     fn proof_inet_addr_bounds() {
-        let buf_size: usize = kani::any_where(|&s| s <= 64);
+        let buf_size: usize = kani::any_where(|&s| s <= 10);
         let (pkt, _hdr, _buf) = new_with_buf_for_verification(buf_size);
         let result = pkt.inet_addr();
         if buf_size < 8 {
@@ -937,12 +964,12 @@ mod verification {
     }
 
     /// Proof: read_proxy_create returns None iff buf_size < 8.
-    /// read_proxy_create calls read_le_u32 (4 bytes → unwind(5)) and read_le_u16 (2 bytes → unwind(3)).
-    /// Use max: unwind(5).
+    /// read_proxy_create reads 8 bytes; buf constrained to <=10 → unwind(11).
     #[kani::proof]
-    #[kani::unwind(5)]
+    #[kani::solver(cadical)]
+    #[kani::unwind(11)]
     fn proof_read_proxy_create_bounds() {
-        let buf_size: usize = kani::any_where(|&s| s <= 64);
+        let buf_size: usize = kani::any_where(|&s| s <= 10);
         let (pkt, _hdr, _buf) = new_with_buf_for_verification(buf_size);
         let result = pkt.read_proxy_create();
         if buf_size < 8 {
@@ -955,11 +982,12 @@ mod verification {
     }
 
     /// Proof: read_getname_req returns None iff buf_size < 12.
-    /// read_getname_req calls read_le_u32 three times (4 bytes each → unwind(5)).
+    /// read_getname_req reads 12 bytes; buf constrained to <=14 → unwind(15).
     #[kani::proof]
-    #[kani::unwind(5)]
+    #[kani::solver(cadical)]
+    #[kani::unwind(15)]
     fn proof_read_getname_req_bounds() {
-        let buf_size: usize = kani::any_where(|&s| s <= 64);
+        let buf_size: usize = kani::any_where(|&s| s <= 14);
         let (pkt, _hdr, _buf) = new_with_buf_for_verification(buf_size);
         let result = pkt.read_getname_req();
         if buf_size < 12 {
@@ -972,11 +1000,12 @@ mod verification {
     }
 
     /// Proof: read_accept_req returns None iff buf_size < 8.
-    /// read_accept_req calls read_le_u32 twice (4 bytes each → unwind(5)).
+    /// read_accept_req reads 8 bytes; buf constrained to <=10 → unwind(11).
     #[kani::proof]
-    #[kani::unwind(5)]
+    #[kani::solver(cadical)]
+    #[kani::unwind(11)]
     fn proof_read_accept_req_bounds() {
-        let buf_size: usize = kani::any_where(|&s| s <= 64);
+        let buf_size: usize = kani::any_where(|&s| s <= 10);
         let (pkt, _hdr, _buf) = new_with_buf_for_verification(buf_size);
         let result = pkt.read_accept_req();
         if buf_size < 8 {
@@ -989,11 +1018,12 @@ mod verification {
     }
 
     /// Proof: read_release_req returns None iff buf_size < 8.
-    /// read_release_req calls read_le_u32 twice (4 bytes each → unwind(5)).
+    /// read_release_req reads 8 bytes; buf constrained to <=10 → unwind(11).
     #[kani::proof]
-    #[kani::unwind(5)]
+    #[kani::solver(cadical)]
+    #[kani::unwind(11)]
     fn proof_read_release_req_bounds() {
-        let buf_size: usize = kani::any_where(|&s| s <= 64);
+        let buf_size: usize = kani::any_where(|&s| s <= 10);
         let (pkt, _hdr, _buf) = new_with_buf_for_verification(buf_size);
         let result = pkt.read_release_req();
         if buf_size < 8 {

@@ -63,6 +63,42 @@ pub fn set_lint(vcpu: &VcpuFd) -> Result<()> {
     vcpu.set_lapic(&klapic).map_err(Error::SetLapic)
 }
 
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// Proof: set_apic_delivery_mode correctly writes mode into bits [10:8] and
+    /// preserves all other bits.
+    ///
+    /// The APIC LVT delivery mode field occupies bits [10:8] (mask 0x700).
+    /// Verifies:
+    ///   - Bits outside [10:8] are unchanged: (result & !0x700) == (reg & !0x700)
+    ///   - Bits [10:8] equal mode:             (result >> 8) & 0x7 == mode
+    ///
+    /// mode is constrained to [0, 7] (3-bit field); reg is unconstrained.
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    fn proof_apic_delivery_mode() {
+        let reg: u32 = kani::any();
+        let mode: u32 = kani::any_where(|&m| m <= 0x7);
+
+        let result = set_apic_delivery_mode(reg, mode);
+
+        kani::assert(
+            (result & !0x700) == (reg & !0x700),
+            "bits outside [10:8] must be preserved",
+        );
+        kani::assert((result >> 8) & 0x7 == mode, "bits [10:8] must equal mode");
+
+        kani::cover!(mode == 0, "mode=0 covered");
+        kani::cover!(mode == 7, "mode=7 covered");
+        kani::cover!(
+            reg & 0x700 != 0,
+            "reg with pre-set delivery mode bits covered"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     extern crate utils;

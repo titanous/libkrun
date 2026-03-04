@@ -1116,7 +1116,10 @@ mod verification {
         };
 
         let result = validate_magic_and_version(&header);
-        kani::assert(result.is_ok(), "correct magic and version must produce Ok(())");
+        kani::assert(
+            result.is_ok(),
+            "correct magic and version must produce Ok(())",
+        );
         kani::cover!(true, "valid header accepted path reachable");
     }
 
@@ -1151,13 +1154,19 @@ mod verification {
         let header: SnapshotHeader = kani::any();
         let result = validate_magic_and_version(&header);
         kani::cover!(matches!(result, Ok(())), "valid header path reachable");
-        kani::cover!(matches!(result, Err(SnapshotError::InvalidMagic)), "invalid magic path reachable");
-        kani::cover!(matches!(result, Err(SnapshotError::InvalidVersion(_))), "invalid version path reachable");
+        kani::cover!(
+            matches!(result, Err(SnapshotError::InvalidMagic)),
+            "invalid magic path reachable"
+        );
+        kani::cover!(
+            matches!(result, Err(SnapshotError::InvalidVersion(_))),
+            "invalid version path reachable"
+        );
     }
 
     #[kani::proof_for_contract(validate_magic_and_version)]
     fn proof_validate_magic_version_contract() {
         let header: SnapshotHeader = kani::any();
-        validate_magic_and_version(&header);
+        let _ = validate_magic_and_version(&header);
     }
 }

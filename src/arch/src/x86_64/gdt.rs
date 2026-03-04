@@ -222,4 +222,82 @@ mod verification {
         );
         kani::cover!(true, "selector encoding verified");
     }
+
+    /// Proof: gdt_entry/kvm_segment_from_gdt round-trip preserves single-bit flag fields.
+    ///
+    /// Verifies that g, db, l, avl, present, and s are each correctly extracted from
+    /// the GDT entry flags field. Each is a single bit at a specific position in the
+    /// 16-bit flags argument:
+    ///   g       = flags[15]
+    ///   db      = flags[14]
+    ///   l       = flags[13]
+    ///   avl     = flags[12]
+    ///   present = flags[7]
+    ///   s       = flags[4]
+    ///
+    /// Also verifies that unusable is the complement of present.
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    fn proof_gdt_single_bit_flags_roundtrip() {
+        let flags: u16 = kani::any();
+        let base: u32 = kani::any();
+        let limit: u32 = kani::any_where(|&l| l <= 0xFFFFF);
+
+        let entry = gdt_entry(flags, base, limit);
+        let seg = kvm_segment_from_gdt(entry, 0);
+
+        let expected_g = ((flags >> 15) & 1) as u8;
+        let expected_db = ((flags >> 14) & 1) as u8;
+        let expected_l = ((flags >> 13) & 1) as u8;
+        let expected_avl = ((flags >> 12) & 1) as u8;
+        let expected_present = ((flags >> 7) & 1) as u8;
+        let expected_s = ((flags >> 4) & 1) as u8;
+        let expected_unusable = if expected_present != 0 { 0u8 } else { 1u8 };
+
+        kani::assert(seg.g == expected_g, "g must match flags[15]");
+        kani::assert(seg.db == expected_db, "db must match flags[14]");
+        kani::assert(seg.l == expected_l, "l must match flags[13]");
+        kani::assert(seg.avl == expected_avl, "avl must match flags[12]");
+        kani::assert(
+            seg.present == expected_present,
+            "present must match flags[7]",
+        );
+        kani::assert(seg.s == expected_s, "s must match flags[4]");
+        kani::assert(
+            seg.unusable == expected_unusable,
+            "unusable must be complement of present",
+        );
+
+        kani::cover!(expected_present == 1, "present segment covered");
+        kani::cover!(
+            expected_present == 0,
+            "not-present (unusable) segment covered"
+        );
+    }
+
+    /// Proof: gdt_entry/kvm_segment_from_gdt round-trip preserves multi-bit flag fields.
+    ///
+    /// Verifies that dpl and type_ are correctly extracted from the GDT entry flags field:
+    ///   dpl   = flags[6:5] (2 bits)
+    ///   type_ = flags[3:0] (4 bits)
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    fn proof_gdt_multi_bit_flags_roundtrip() {
+        let flags: u16 = kani::any();
+        let base: u32 = kani::any();
+        let limit: u32 = kani::any_where(|&l| l <= 0xFFFFF);
+
+        let entry = gdt_entry(flags, base, limit);
+        let seg = kvm_segment_from_gdt(entry, 0);
+
+        let expected_dpl = ((flags >> 5) & 0x3) as u8;
+        let expected_type = (flags & 0xF) as u8;
+
+        kani::assert(seg.dpl == expected_dpl, "dpl must match flags[6:5]");
+        kani::assert(seg.type_ == expected_type, "type_ must match flags[3:0]");
+
+        kani::cover!(expected_dpl == 0, "dpl=0 covered");
+        kani::cover!(expected_dpl == 3, "dpl=3 covered");
+        kani::cover!(expected_type == 0xF, "type_=0xF covered");
+    }
 }

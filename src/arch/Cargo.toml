@@ -31,4 +31,4 @@ proptest = "1.4"
 
 [lints.rust]
 # `loom` is set via RUSTFLAGS="--cfg loom" for concurrency testing; not a Cargo feature.
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(kani)'] }

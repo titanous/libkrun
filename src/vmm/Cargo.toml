@@ -69,7 +69,7 @@ hvf = { path = "../hvf", optional = true }
 loom = { version = "0.7", features = ["checkpoint"] }
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(kani)'] }
 
 [dev-dependencies]
 devices = { path = "../devices", features = ["test_utils"] }

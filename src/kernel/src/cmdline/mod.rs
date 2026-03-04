@@ -290,7 +290,10 @@ mod verification {
         let c = byte as char;
         let result = valid_char(c);
         let expected = byte >= 0x20 && byte <= 0x7E;
-        kani::assert(result == expected, "valid_char must accept exactly printable ASCII");
+        kani::assert(
+            result == expected,
+            "valid_char must accept exactly printable ASCII",
+        );
         kani::cover!(result, "printable ASCII accepted path reachable");
         kani::cover!(!result, "non-printable ASCII rejected path reachable");
     }

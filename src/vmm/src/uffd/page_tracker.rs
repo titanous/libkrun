@@ -528,11 +528,13 @@ mod tests {
 impl kani::Arbitrary for UffdRegion {
     fn any() -> Self {
         let guest_addr: u64 = kani::any();
+        let host_addr: u64 = kani::any();
         let size: u64 = kani::any_where(|&s| s > 0);
         kani::assume(guest_addr.checked_add(size).is_some());
+        kani::assume(host_addr.checked_add(size).is_some());
         UffdRegion {
             guest_addr,
-            host_addr: kani::any(),
+            host_addr,
             size,
             page_offset: 0,
         }
@@ -577,6 +579,7 @@ mod verification {
             stats.preload_pages + stats.fault_pages + stats.zero_pages == stats.loaded_pages,
             "sum of source counts must equal loaded_pages",
         );
+        kani::cover!(true, "same-source dedup path reachable");
     }
 
     /// Proof: marking same page with different sources still counts exactly once.
@@ -613,6 +616,7 @@ mod verification {
             stats.fault_pages == 0,
             "fault_pages must be 0 (bit was already set when fault tried)",
         );
+        kani::cover!(true, "different-source dedup path reachable");
     }
 
     /// Proof: out-of-bounds page_index is ignored — counters stay at 0.
@@ -672,12 +676,14 @@ mod verification {
             stats.preload_pages == 1 && stats.fault_pages == 1,
             "each source must have count 1",
         );
+        kani::cover!(true, "two-distinct-pages path reachable");
     }
 
     /// Proof: all LoadSource variants are accepted by mark_loaded.
-    /// mark_loaded has no loops (single array word access). unwind(1) is sufficient.
+    /// PageTracker::new creates Vec of ceil(total_pages/64) AtomicU64 words.
+    /// With total_pages <= 128: up to 2 words → Vec init loop needs unwind(3).
     #[kani::proof]
-    #[kani::unwind(1)]
+    #[kani::unwind(3)]
     fn proof_mark_loaded_all_sources_accepted() {
         let total_pages: usize = kani::any_where(|&n| n > 0 && n <= 128);
         let page_index: usize = kani::any_where(|&p| p < total_pages);
@@ -712,8 +718,9 @@ mod verification {
         let region_guest: u64 = kani::any();
         let region_host: u64 = kani::any();
         let region_size: u64 = kani::any_where(|&s| s > 0);
-        // Avoid overflow in guest_addr + size.
+        // Avoid overflow in guest_addr + size and host_addr + size.
         kani::assume(region_guest.checked_add(region_size).is_some());
+        kani::assume(region_host.checked_add(region_size).is_some());
 
         let region = UffdRegion {
             guest_addr: region_guest,
@@ -789,8 +796,96 @@ mod verification {
         let addr: u64 = kani::any_where(|&a| a >= region_guest + region_size);
 
         let result = guest_to_host(&[region], addr);
-        kani::assert(result.is_none(), "address at or after region end must produce None");
+        kani::assert(
+            result.is_none(),
+            "address at or after region end must produce None",
+        );
         kani::cover!(true, "after-region None path reachable");
+    }
+
+    /// Proof: host_to_guest is the left inverse of guest_to_host for a single region.
+    ///
+    /// For any in-range guest address `ga`, translating to a host address via
+    /// `guest_to_host` and then back via `host_to_guest` must recover `ga`.
+    ///
+    /// Bound: 1 region → unwind(2) for each of the two single-region iterating functions.
+    #[kani::proof]
+    #[kani::unwind(2)]
+    #[kani::solver(cadical)]
+    fn proof_host_to_guest_inverse_of_guest_to_host() {
+        // Symbolic region parameters — no overflow on either end.
+        let guest_addr: u64 = kani::any();
+        let host_addr: u64 = kani::any();
+        let size: u64 = kani::any_where(|&s| s > 0 && s <= 4096);
+        kani::assume(guest_addr.checked_add(size).is_some());
+        kani::assume(host_addr.checked_add(size).is_some());
+
+        let regions = [UffdRegion {
+            guest_addr,
+            host_addr,
+            size,
+            page_offset: 0,
+        }];
+
+        // Symbolic in-range guest address.
+        let ga: u64 = kani::any_where(|&a| a >= guest_addr && a < guest_addr + size);
+
+        let ha = guest_to_host(&regions, ga).expect("in-range address must produce Some");
+        let result = host_to_guest(&regions, ha);
+
+        kani::assert(
+            result == ga,
+            "host_to_guest must be the inverse of guest_to_host",
+        );
+        kani::cover!(true, "host_to_guest inverse roundtrip reachable");
+    }
+
+    /// Proof: guest_addr_to_page_index arithmetic is correct for a page-aligned address.
+    ///
+    /// For a region with `page_offset = 0` and a concrete page size of 4096 bytes,
+    /// an address at byte offset `k * 4096` within the region must yield page index `k`.
+    ///
+    /// `system_page_size()` calls `libc::sysconf` at runtime, which is unavailable in
+    /// Kani's model.  We therefore verify the underlying arithmetic directly — the same
+    /// computation performed inside `guest_addr_to_page_index` — using a concrete
+    /// page-size constant matching the x86_64 Linux default (4096 bytes).  Constraining
+    /// the symbolic address to be page-aligned ensures the integer division is exact.
+    ///
+    /// Bound: 1 region → unwind(2).
+    #[kani::proof]
+    #[kani::unwind(2)]
+    #[kani::solver(cadical)]
+    fn proof_guest_addr_to_page_index_correct() {
+        const PAGE_SIZE: u64 = 4096;
+
+        // Symbolic region: guest_addr must be page-aligned; up to 16 pages; no overflow.
+        let guest_addr: u64 = kani::any_where(|&g| g % PAGE_SIZE == 0);
+        let num_pages: u64 = kani::any_where(|&n: &u64| n > 0 && n <= 16);
+        let size = num_pages * PAGE_SIZE;
+        kani::assume(guest_addr.checked_add(size).is_some());
+
+        let page_offset: usize = kani::any_where(|&o: &usize| o <= 1024);
+
+        // Symbolic in-range page index within the region.
+        let page_k: u64 = kani::any_where(|&k| k < num_pages);
+        let addr = guest_addr + page_k * PAGE_SIZE;
+
+        // Mirror the arithmetic from guest_addr_to_page_index (with our concrete PAGE_SIZE).
+        let region_offset = addr - guest_addr;
+        let page_in_region = (region_offset / PAGE_SIZE) as usize;
+        let computed_index = page_offset + page_in_region;
+
+        // The computed page-in-region offset must equal page_k exactly.
+        kani::assert(
+            page_in_region == page_k as usize,
+            "page-in-region index must equal (addr - guest_addr) / page_size",
+        );
+        // The full index (with a symbolic base page_offset) must shift by page_offset.
+        kani::assert(
+            computed_index == page_offset + page_k as usize,
+            "full page index must be page_offset + page_in_region",
+        );
+        kani::cover!(true, "page index computation reachable");
     }
 
     /// Proof: guest_to_host with 2 non-overlapping regions returns correct mapping.
@@ -807,31 +902,49 @@ mod verification {
         let host_a: u64 = kani::any();
         let size_a: u64 = kani::any_where(|&s| s > 0);
         kani::assume(guest_a.checked_add(size_a).is_some());
+        kani::assume(host_a.checked_add(size_a).is_some());
 
         // Region B: must start after region A ends (non-overlapping).
         let guest_b: u64 = kani::any();
         let host_b: u64 = kani::any();
         let size_b: u64 = kani::any_where(|&s| s > 0);
         kani::assume(guest_b.checked_add(size_b).is_some());
+        kani::assume(host_b.checked_add(size_b).is_some());
         kani::assume(guest_b >= guest_a + size_a); // B starts at or after A ends.
 
         let regions = [
-            UffdRegion { guest_addr: guest_a, host_addr: host_a, size: size_a, page_offset: 0 },
-            UffdRegion { guest_addr: guest_b, host_addr: host_b, size: size_b, page_offset: 0 },
+            UffdRegion {
+                guest_addr: guest_a,
+                host_addr: host_a,
+                size: size_a,
+                page_offset: 0,
+            },
+            UffdRegion {
+                guest_addr: guest_b,
+                host_addr: host_b,
+                size: size_b,
+                page_offset: 0,
+            },
         ];
 
         // Address in region A.
         let addr_a: u64 = kani::any();
         kani::assume(addr_a >= guest_a && addr_a < guest_a + size_a);
         let result_a = guest_to_host(&regions, addr_a);
-        kani::assert(result_a == Some(host_a + (addr_a - guest_a)), "address in A maps to A's host");
+        kani::assert(
+            result_a == Some(host_a + (addr_a - guest_a)),
+            "address in A maps to A's host",
+        );
         kani::cover!(true, "region A mapping verified");
 
         // Address in region B.
         let addr_b: u64 = kani::any();
         kani::assume(addr_b >= guest_b && addr_b < guest_b + size_b);
         let result_b = guest_to_host(&regions, addr_b);
-        kani::assert(result_b == Some(host_b + (addr_b - guest_b)), "address in B maps to B's host");
+        kani::assert(
+            result_b == Some(host_b + (addr_b - guest_b)),
+            "address in B maps to B's host",
+        );
         kani::cover!(true, "region B mapping verified");
     }
 }

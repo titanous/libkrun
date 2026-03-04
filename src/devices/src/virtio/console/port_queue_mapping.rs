@@ -38,6 +38,117 @@ pub(crate) fn num_queues(num_ports: usize) -> usize {
     2 + 2 * num_ports
 }
 
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// Prove the port/queue mapping is a bijection: for any valid port_id and
+    /// direction, decoding the encoded queue index returns the original (dir, id).
+    ///
+    /// Valid port IDs: 0 is the control port (always valid); ports >= 1 occupy
+    /// queue slots starting at index 4, so the index must not land in 2 or 3
+    /// (the control queues). We constrain port_id to a small concrete bound so
+    /// Kani's model checker remains tractable.
+    #[kani::proof]
+    fn proof_port_queue_roundtrip() {
+        // Symbolic port_id constrained to [0, 14] (keeps queue indices in u8 range)
+        let port_id: usize = kani::any_where(|&id: &usize| id <= 14);
+        let is_rx: bool = kani::any();
+
+        let dir = if is_rx {
+            QueueDirection::Rx
+        } else {
+            QueueDirection::Tx
+        };
+
+        let q = port_id_to_queue_idx(dir, port_id);
+        let (decoded_dir, decoded_port) = queue_idx_to_port_id(q);
+
+        let expected_dir = if is_rx {
+            QueueDirection::Rx
+        } else {
+            QueueDirection::Tx
+        };
+
+        kani::assert(
+            decoded_port == port_id,
+            "port_id must survive queue index encode/decode roundtrip",
+        );
+        kani::assert(
+            decoded_dir == expected_dir,
+            "direction must survive queue index encode/decode roundtrip",
+        );
+        kani::cover!(true, "roundtrip proof path reachable");
+    }
+
+    /// Prove that for any valid port_id, the resulting queue index is strictly
+    /// less than num_queues(max_ports) where max_ports > port_id.
+    #[kani::proof]
+    fn proof_queue_idx_in_bounds() {
+        let port_id: usize = kani::any_where(|&id: &usize| id <= 14);
+        // max_ports is any value strictly greater than port_id
+        let max_ports: usize = kani::any_where(|&m: &usize| m > port_id && m <= 15);
+        let is_rx: bool = kani::any();
+
+        let dir = if is_rx {
+            QueueDirection::Rx
+        } else {
+            QueueDirection::Tx
+        };
+
+        let q = port_id_to_queue_idx(dir, port_id);
+        let bound = num_queues(max_ports);
+
+        kani::assert(
+            q < bound,
+            "port_id_to_queue_idx must return an index within num_queues(max_ports)",
+        );
+        kani::cover!(true, "in-bounds proof path reachable");
+    }
+
+    /// Prove that calling queue_idx_to_port_id with a control-queue index (2 or 3)
+    /// always panics, as specified by the function contract.
+    ///
+    /// Using `#[kani::should_panic]`: Kani verifies that every execution path
+    /// through the function with these inputs reaches a panic.
+    #[kani::proof]
+    #[kani::should_panic]
+    fn proof_control_queue_panics() {
+        let idx: usize = kani::any_where(|&i| i == 2 || i == 3);
+        let _ = queue_idx_to_port_id(idx);
+    }
+
+    /// Prove that queue indices 2 and 3 (the control queues) are never returned
+    /// by port_id_to_queue_idx for any port_id.
+    ///
+    /// Index 0 → port 0 Rx, index 1 → port 0 Tx, and from index 4 onward every
+    /// port gets a consecutive (even Rx, odd Tx) pair.  Indices 2 and 3 are
+    /// permanently reserved for the control receive/transmit queues.
+    #[kani::proof]
+    fn proof_control_queues_excluded() {
+        let port_id: usize = kani::any_where(|&id: &usize| id <= 14);
+        let is_rx: bool = kani::any();
+
+        let dir = if is_rx {
+            QueueDirection::Rx
+        } else {
+            QueueDirection::Tx
+        };
+
+        let q = port_id_to_queue_idx(dir, port_id);
+
+        kani::assert(
+            q != 2,
+            "queue index 2 (control Rx) must never be returned for a data port",
+        );
+        kani::assert(
+            q != 3,
+            "queue index 3 (control Tx) must never be returned for a data port",
+        );
+        kani::cover!(true, "control-exclusion proof path reachable");
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;

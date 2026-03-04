@@ -378,9 +378,11 @@ mod verification {
     /// must complete without panic or out-of-bounds array access.
     ///
     /// Bound: 256 pages * PAGE_SIZE (16384) = 4,194,304 bytes maximum bitmap size.
-    /// mark_dirty has no loops (early return on out-of-bounds, single array access).
+    /// DirtyBitmap::new creates Vec of ceil(num_pages/64) AtomicU64 words.
+    /// With num_pages <= 256: up to 4 words → Vec init loop needs unwind(5).
     #[kani::proof]
-    #[kani::unwind(1)]
+    #[kani::solver(cadical)]
+    #[kani::unwind(5)]
     fn proof_mark_dirty_no_panic() {
         // Symbolic address: any possible u64 value.
         let guest_addr: u64 = kani::any();
@@ -396,60 +398,94 @@ mod verification {
 
         // This must not panic regardless of guest_addr value.
         bitmap.mark_dirty(guest_addr);
+        kani::cover!(true, "mark_dirty no-panic path reachable");
     }
 
     /// Proof: mark_dirty on an in-bounds address is reflected by drain_dirty_pages.
     ///
-    /// If guest_addr is within [0, size), then after mark_dirty, drain_dirty_pages
-    /// must return a non-empty vec containing the marked page.
+    /// If guest_addr is within [base_addr, base_addr + size), then after mark_dirty,
+    /// drain_dirty_pages must return a non-empty vec containing the marked page.
     ///
     /// Bound: 4 pages (keeps state space small; the bitmap logic is identical for N pages).
     /// drain_dirty_pages outer loop: 1 word (ceil(4/64)=1) → unwind(2).
     /// Inner bit-scan loop: 64 iterations → unwind(65).
     /// Use max: unwind(65) covers both.
     #[kani::proof]
-    #[kani::unwind(65)]
+    #[kani::solver(cadical)]
+    #[kani::unwind(66)]
     fn proof_mark_dirty_in_bounds_recorded() {
-        // Use a fixed 4-page bitmap for tractability.
-        // PAGE_SIZE = 16384; 4 pages = 65536 bytes.
-        let bitmap = DirtyBitmap::new(0, 4 * 16384);
+        // Symbolic base_addr: page-aligned and no overflow with 4-page region.
+        let num_pages: u64 = 4;
+        let base_addr: u64 = kani::any_where(|&b: &u64| {
+            b % 16384 == 0 && b.checked_add(num_pages * 16384).is_some()
+        });
+        let bitmap = DirtyBitmap::new(base_addr, num_pages * 16384);
 
-        // Symbolic in-bounds address: within [0, 4 * PAGE_SIZE).
-        let page_idx: u64 = kani::any_where(|&i| i < 4);
-        let guest_addr = page_idx * 16384;
+        // Symbolic in-bounds address: within [base_addr, base_addr + 4 * PAGE_SIZE).
+        let page_idx: u64 = kani::any_where(|&i: &u64| i < num_pages);
+        let guest_addr = base_addr + page_idx * 16384;
 
         bitmap.mark_dirty(guest_addr);
 
         let dirty = bitmap.drain_dirty_pages();
         kani::assert(!dirty.is_empty(), "in-bounds mark_dirty must be recorded");
-        kani::assert(dirty.contains(&guest_addr), "drained pages must contain marked address");
+        // Check the marked page address is in the drained set.
+        // Avoid Vec::contains which creates an unbounded slice iteration loop;
+        // instead check the specific page index directly (4 pages → at most 4 entries).
+        let page_addr = base_addr + (page_idx * 16384);
+        let mut found = false;
+        if dirty.len() > 0 && dirty[0] == page_addr {
+            found = true;
+        }
+        if dirty.len() > 1 && dirty[1] == page_addr {
+            found = true;
+        }
+        if dirty.len() > 2 && dirty[2] == page_addr {
+            found = true;
+        }
+        if dirty.len() > 3 && dirty[3] == page_addr {
+            found = true;
+        }
+        kani::assert(found, "drained pages must contain marked address");
         kani::cover!(true, "in-bounds mark_dirty recorded path reachable");
     }
 
     /// Proof: mark_dirty on an out-of-bounds address leaves the bitmap empty.
     ///
-    /// If guest_addr is outside [0, size), then drain_dirty_pages must return empty.
+    /// If guest_addr is outside [base_addr, base_addr + size), then drain_dirty_pages
+    /// must return empty.
     ///
     /// Bound: 4 pages. drain_dirty_pages outer loop: 1 word → unwind(2).
     /// Inner bit-scan: 64 iterations → unwind(65).
     #[kani::proof]
+    #[kani::solver(cadical)]
     #[kani::unwind(65)]
     fn proof_mark_dirty_out_of_bounds_no_effect() {
-        let bitmap = DirtyBitmap::new(0, 4 * 16384); // 4 pages
+        // Symbolic base_addr: page-aligned and no overflow with 4-page region.
+        let num_pages: u64 = 4;
+        let base_addr: u64 = kani::any_where(|&b: &u64| {
+            b % 16384 == 0 && b.checked_add(num_pages * 16384).is_some()
+        });
+        let bitmap = DirtyBitmap::new(base_addr, num_pages * 16384);
 
-        // Symbolic out-of-bounds address: at or beyond 4 * PAGE_SIZE.
-        let guest_addr: u64 = kani::any_where(|&a| a >= 4 * 16384);
+        // Symbolic out-of-bounds address: before base_addr or at/beyond region end.
+        let region_end = base_addr + num_pages * 16384;
+        let guest_addr: u64 = kani::any_where(|&a| a < base_addr || a >= region_end);
 
         bitmap.mark_dirty(guest_addr);
 
         let dirty = bitmap.drain_dirty_pages();
-        kani::assert(dirty.is_empty(), "out-of-bounds mark_dirty must not record anything");
+        kani::assert(
+            dirty.is_empty(),
+            "out-of-bounds mark_dirty must not record anything",
+        );
         kani::cover!(true, "out-of-bounds silent path reachable");
     }
 
     /// Proof: both in-bounds and out-of-bounds paths are reachable for mark_dirty.
     /// drain_dirty_pages: 1 word outer loop → unwind(2); 64-bit inner loop → unwind(65).
     #[kani::proof]
+    #[kani::solver(cadical)]
     #[kani::unwind(65)]
     fn proof_mark_dirty_both_paths_reachable() {
         let bitmap = DirtyBitmap::new(0, 4 * 16384);

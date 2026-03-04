@@ -85,3 +85,103 @@ pub const VMGENID_GUID_OFFSET: u64 = 40;
 /// Uses IRQ 15 (secondary ATA, unused in this VM) to avoid conflict with
 /// virtio devices (IRQ_BASE..IRQ_MAX = 5..14).
 pub const VMGENID_IRQ: u32 = 15;
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// Verify that key address regions in the x86_64 guest physical memory layout
+    /// do not overlap each other.
+    ///
+    /// All checks are pure constant assertions; no symbolic inputs are required.
+    /// The proof acts as a compile-time-checked specification: any future edit
+    /// that accidentally creates an overlap will be caught by `just kani`.
+    ///
+    /// Regions verified (start inclusive, end exclusive unless noted):
+    ///   VMGENID_GUID_PAGE .. +0x1000   (4 KB GUID page, 0xC0000..0xC1000)
+    ///   SETUP_DATA_ADDR   .. +0x20     (32-byte setup_data node, 0xE0000..0xE0020)
+    ///   EBDA_START        .. +0x400    (mptable lives here, ~0x9FC00..0xA0000)
+    ///   MMIO_MEM_START    .. 4 GiB     (32-bit MMIO gap, 0xD000_0000..0x1_0000_0000)
+    ///   VMGENID_IRQ                    (must not lie in IRQ_BASE..=IRQ_MAX)
+    #[kani::proof]
+    fn proof_layout_regions_no_overlap() {
+        // ---- region extents ------------------------------------------------
+        const VMGENID_GUID_PAGE_END: u64 = VMGENID_GUID_PAGE + 0x1000;
+        const SETUP_DATA_END: u64 = SETUP_DATA_ADDR + 0x20;
+        // mptable lives in the EBDA; reserve a conservative 1 KB for it
+        const MPTABLE_START: u64 = EBDA_START;
+        const MPTABLE_END: u64 = EBDA_START + 0x400;
+        const HIMEM_END: u64 = FIRST_ADDR_PAST_32BITS;
+
+        // ---- VMGENID GUID page vs SETUP_DATA_ADDR --------------------------
+        // They must not overlap: one must end before the other starts.
+        kani::assert(
+            VMGENID_GUID_PAGE_END <= SETUP_DATA_ADDR || SETUP_DATA_END <= VMGENID_GUID_PAGE,
+            "VMGENID_GUID_PAGE and SETUP_DATA_ADDR regions must not overlap",
+        );
+
+        // ---- mptable (EBDA) vs VMGENID GUID page ---------------------------
+        kani::assert(
+            MPTABLE_END <= VMGENID_GUID_PAGE || VMGENID_GUID_PAGE_END <= MPTABLE_START,
+            "mptable (EBDA) and VMGENID_GUID_PAGE regions must not overlap",
+        );
+
+        // ---- mptable (EBDA) vs SETUP_DATA_ADDR -----------------------------
+        kani::assert(
+            MPTABLE_END <= SETUP_DATA_ADDR || SETUP_DATA_END <= MPTABLE_START,
+            "mptable (EBDA) and SETUP_DATA_ADDR regions must not overlap",
+        );
+
+        // ---- VMGENID GUID page is below high memory (not in MMIO gap) ------
+        // MMIO_MEM_START = 0xD000_0000; GUID page at 0xC0000 is well below it.
+        kani::assert(
+            VMGENID_GUID_PAGE_END <= MMIO_MEM_START,
+            "VMGENID_GUID_PAGE must not overlap the 32-bit MMIO gap",
+        );
+
+        // ---- SETUP_DATA_ADDR is below high memory ---------------------------
+        kani::assert(
+            SETUP_DATA_END <= MMIO_MEM_START,
+            "SETUP_DATA_ADDR must not overlap the 32-bit MMIO gap",
+        );
+
+        // ---- HIMEM_START is below MMIO gap ---------------------------------
+        kani::assert(
+            HIMEM_START < MMIO_MEM_START,
+            "HIMEM_START must be below MMIO_MEM_START",
+        );
+
+        // ---- MMIO gap fits below 4 GiB -------------------------------------
+        kani::assert(
+            MMIO_MEM_START < HIMEM_END,
+            "MMIO_MEM_START must be less than 4 GiB (FIRST_ADDR_PAST_32BITS)",
+        );
+
+        // ---- IRQ range sanity ----------------------------------------------
+        kani::assert(
+            IRQ_BASE < IRQ_MAX,
+            "IRQ_BASE must be strictly less than IRQ_MAX",
+        );
+
+        // ---- VMGENID_IRQ is outside the virtio IRQ range -------------------
+        // VMGENID_IRQ must not compete with virtio device IRQs.
+        kani::assert(
+            VMGENID_IRQ < IRQ_BASE || VMGENID_IRQ > IRQ_MAX,
+            "VMGENID_IRQ must not fall within IRQ_BASE..=IRQ_MAX (virtio device range)",
+        );
+
+        // ---- CMDLINE fits below HIMEM_START --------------------------------
+        kani::assert(
+            CMDLINE_START + CMDLINE_MAX_SIZE as u64 <= HIMEM_START,
+            "kernel cmdline region must not overlap high memory",
+        );
+
+        // ---- ZERO_PAGE_START is below CMDLINE_START ------------------------
+        kani::assert(
+            ZERO_PAGE_START < CMDLINE_START,
+            "zero page must be below the cmdline start address",
+        );
+
+        kani::cover!(true, "layout non-overlap proof path reachable");
+    }
+}

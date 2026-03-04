@@ -175,6 +175,122 @@ impl BitHelper for u32 {
     }
 }
 
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// Proof: write_bit followed by read_bit is the identity for any bit position.
+    ///
+    /// For all u32 values and any bit position in [0, 31], writing a boolean value
+    /// and reading it back must return the same boolean.
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    fn proof_write_read_bit_roundtrip() {
+        let mut val: u32 = kani::any();
+        let pos: u32 = kani::any_where(|&p| p <= 31);
+        let b: bool = kani::any();
+
+        val.write_bit(pos, b);
+        let result = val.read_bit(pos);
+
+        kani::assert(
+            result == b,
+            "read_bit must return the value written by write_bit",
+        );
+        kani::cover!(b, "bit written as true covered");
+        kani::cover!(!b, "bit written as false covered");
+    }
+
+    /// Proof: write_bits_in_range followed by read_bits_in_range is the identity.
+    ///
+    /// For all u32 values, valid BitRange(msb, lsb) where msb >= lsb and msb <= 31,
+    /// and any value x that fits within the range, reading back after writing must
+    /// return x.
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    fn proof_write_read_bits_in_range_roundtrip() {
+        let mut val: u32 = kani::any();
+        let msb: u32 = kani::any_where(|&m| m <= 31);
+        let lsb: u32 = kani::any_where(|&l| l <= msb);
+        let range = BitRange {
+            msb_index: msb,
+            lsb_index: lsb,
+        };
+
+        // Compute the mask to determine the maximum value that fits in the range.
+        let mask = range.get_mask();
+        let max_val = mask >> lsb;
+
+        // Constrain x to values that fit within the range (matching write_bits_in_range assert).
+        let x: u32 = kani::any_where(|&v| v <= max_val);
+
+        val.write_bits_in_range(&range, x);
+        let result = val.read_bits_in_range(&range);
+
+        kani::assert(
+            result == x,
+            "read_bits_in_range must return the value written by write_bits_in_range",
+        );
+        kani::cover!(x == 0, "zero value written covered");
+        kani::cover!(x == max_val, "max value written covered");
+    }
+
+    /// Proof: write_bits_in_range does not alter bits outside the target range.
+    ///
+    /// For all u32 values, valid BitRange, and any value x that fits, bits outside
+    /// the range must remain unchanged after the write.
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    fn proof_write_bits_no_side_effect() {
+        let mut val: u32 = kani::any();
+        let original = val;
+        let msb: u32 = kani::any_where(|&m| m <= 31);
+        let lsb: u32 = kani::any_where(|&l| l <= msb);
+        let range = BitRange {
+            msb_index: msb,
+            lsb_index: lsb,
+        };
+
+        let mask = range.get_mask();
+        let max_val = mask >> lsb;
+        let x: u32 = kani::any_where(|&v| v <= max_val);
+
+        val.write_bits_in_range(&range, x);
+
+        kani::assert(
+            (val & !mask) == (original & !mask),
+            "bits outside the BitRange must not be altered by write_bits_in_range",
+        );
+        kani::cover!(mask != u32::MAX, "partial range covered");
+        kani::cover!(mask == u32::MAX, "full-width range covered");
+    }
+
+    /// Proof: get_mask sets exactly (msb - lsb + 1) bits.
+    ///
+    /// For all valid BitRange(msb, lsb), the popcount of get_mask() must equal
+    /// the number of bits in the range.
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    fn proof_get_mask_popcount() {
+        let msb: u32 = kani::any_where(|&m| m <= 31);
+        let lsb: u32 = kani::any_where(|&l| l <= msb);
+        let range = BitRange {
+            msb_index: msb,
+            lsb_index: lsb,
+        };
+
+        let mask = range.get_mask();
+        let expected_bits = msb - lsb + 1;
+
+        kani::assert(
+            mask.count_ones() == expected_bits,
+            "get_mask must set exactly msb - lsb + 1 bits",
+        );
+        kani::cover!(expected_bits == 1, "single-bit range covered");
+        kani::cover!(expected_bits == 32, "full 32-bit range covered");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::bit_helper::*;
