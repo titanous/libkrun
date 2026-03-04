@@ -164,16 +164,17 @@ mod host {
 
             // Print kernel messages with their timestamps, filtered for timing-relevant entries.
             // Format: "priority,seq,ts_usec,flags[,extra];message"
+            // Timing-relevant patterns: virtio probe, net families, root mount, init.
             const KMSG_PATTERNS: &[&str] = &[
-                "Linux version",
-                "Hypervisor detected",
                 "virtio",
                 "NET: Registered",
-                "random: crng",
-                "Freeing unused kernel",
-                "Freeing init memory",
-                "clocksource",
-                "initcall",
+                "VFS:",
+                "Freeing unused",
+                "Run /init",
+                "sched_clock",
+                "taskstats",
+                "printk:",
+                "Btrfs",
             ];
             let mut printed_kmsg = 0usize;
             for line in kmsg_text.lines() {

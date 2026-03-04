@@ -424,12 +424,6 @@ static int mount_filesystems()
         return -1;
     }
 
-    if (mount("cgroup2", "/sys/fs/cgroup", "cgroup2",
-              MS_NODEV | MS_NOEXEC | MS_NOSUID | MS_RELATIME, NULL) < 0) {
-        perror("mount(/sys/fs/cgroup)");
-        return -1;
-    }
-
     for (i = 0; i < 2; ++i) {
         if (mkdir(DIRS_LEVEL2[i], 0755) < 0 && errno != EEXIST) {
             printf("Error creating directory (%s)\n", DIRS_LEVEL2[i]);
