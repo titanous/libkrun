@@ -1344,6 +1344,7 @@ mod tests {
 
     /// Event types for tracking operation order
     #[derive(Debug, Clone, PartialEq, Eq)]
+    #[allow(dead_code)] // GetId: reserved for future test assertions on VIRTIO_BLK_T_GET_ID
     enum OpEvent {
         WriteStart { offset: u64, len: usize },
         WriteEnd { offset: u64, len: usize },
@@ -1399,10 +1400,6 @@ mod tests {
 
         fn set_write_delay(&self, ms: u64) {
             self.write_delay_ms.store(ms, Ordering::SeqCst);
-        }
-
-        fn set_flush_delay(&self, ms: u64) {
-            self.flush_delay_ms.store(ms, Ordering::SeqCst);
         }
 
         fn events(&self) -> Vec<OpEvent> {

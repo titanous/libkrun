@@ -30,6 +30,8 @@ const QUEUE_SIZE: u16 = 256;
 pub struct VhostUserVsock {
     vhost_user: VhostUserDevice,
     guest_cid: u64,
+    // Only read in snapshot restore paths (feature-gated by snapshot); set unconditionally in new().
+    #[allow(dead_code)]
     socket_path: Option<String>,
     queue_configs: Vec<QueueConfig>,
     /// Queue state buffer for snapshot support

@@ -586,6 +586,8 @@ impl VhostUserDevice {
 
     /// Mark device as inactive. Used during snapshot restore to force
     /// re-activation via complete_restore() → activate() → activate_restore().
+    // Called from VhostUserFs and VhostUserVsock restore paths (feature-gated by snapshot).
+    #[allow(dead_code)]
     pub(super) fn mark_inactive(&mut self) {
         self.device_state = DeviceState::Inactive;
     }
@@ -593,6 +595,8 @@ impl VhostUserDevice {
     /// Mark device as activated with given memory and interrupt.
     /// Used by subclasses (like VhostUserFs) that perform custom activation logic
     /// and need to update the device state afterward.
+    // Called from VhostUserFs activate/restore paths (feature-gated by snapshot).
+    #[allow(dead_code)]
     pub(super) fn mark_activated(&mut self, mem: GuestMemoryMmap, interrupt: InterruptTransport) {
         self.device_state = DeviceState::Activated(mem, interrupt);
     }
@@ -600,6 +604,8 @@ impl VhostUserDevice {
     /// Replace the Frontend connection for snapshot restore.
     /// Protocol features use saved set intersected with daemon capabilities;
     /// base virtio features are re-negotiated fresh from the new daemon.
+    // Called from VhostUserFs and VhostUserVsock restore paths (feature-gated by snapshot).
+    #[allow(dead_code)]
     pub(super) fn reconnect_for_restore(
         &mut self,
         stream: UnixStream,

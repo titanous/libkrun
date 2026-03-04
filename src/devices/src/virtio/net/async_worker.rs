@@ -704,8 +704,10 @@ mod tests {
         fn create(self: Box<Self>) -> SendBoxFuture<'static, std::io::Result<NetBackendHandle>> {
             Box::pin(async move {
                 let (to_guest_tx, to_guest_rx) = tokio::sync::mpsc::channel(16);
-                // Keep tx alive so the channel doesn't close
-                std::mem::forget(to_guest_tx);
+                // Drop tx immediately: DummyNetBackend never sends guest-bound packets.
+                // The select! arm `Some(p) = to_guest_rx.recv()` is disabled when the
+                // channel is closed, so the worker loop continues via other branches.
+                drop(to_guest_tx);
                 Ok(NetBackendHandle {
                     backend: Box::new(DummyNetBackend),
                     to_guest_rx,
@@ -1643,7 +1645,7 @@ mod tests {
             shared_backend_state,
         );
 
-        let _handle = worker.run();
+        let handle = worker.run();
 
         // Give the worker time to start and create backend
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -1707,5 +1709,6 @@ mod tests {
         resume_fd_clone.write(1).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(50));
         stop_fd_clone.write(1).unwrap();
+        handle.join().expect("worker thread panicked");
     }
 }

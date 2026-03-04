@@ -11,6 +11,9 @@ const INDEX_OFFSET: u64 = 0x0;
 const DATA_OFFSET: u64 = 0x1;
 const DATA_LEN: usize = 128;
 
+// Fields are only read by serde's generated code (behind the snapshot feature).
+// Without --features snapshot, serde derives are absent and fields appear unread.
+#[allow(dead_code)]
 #[cfg_attr(feature = "snapshot", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone)]
 struct CmosState {

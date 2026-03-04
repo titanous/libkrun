@@ -8,7 +8,7 @@ use libfuzzer_sys::fuzz_target;
 use devices::virtio::descriptor_utils::{Reader, Writer};
 use devices::virtio::fs::filesystem::FileSystem;
 use devices::Server;
-use devices::virtio::queue::DescriptorChain;
+use devices::virtio::DescriptorChain;
 use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
 
 /// A minimal FileSystem implementation that returns ENOSYS for all operations.

@@ -14,6 +14,134 @@
         pkgs = import nixpkgs { inherit system overlays; };
         toolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
 
+        # Nightly toolchain for miri, asan, and cargo-fuzz.
+        # Extensions: miri (interpreter), rust-src (needed by miri/asan), llvm-tools-preview (sanitizer runtime).
+        nightlyToolchain = pkgs.rust-bin.nightly.latest.default.override {
+          extensions = [ "miri" "rust-src" "llvm-tools-preview" ];
+        };
+
+        # Kani requires an exact nightly to match the kani-compiler binary in its release bundle.
+        # kani 0.67.0 was built against nightly-2025-11-21 (rustc 1.93.0-nightly 53732d5e0).
+        # This toolchain provides librustc_driver-b64ee523d8950218.so for kani-compiler's RUNPATH.
+        kaniNightlyToolchain = pkgs.rust-bin.nightly."2025-11-21".default.override {
+          extensions = [ "rust-src" ];
+        };
+
+        # Kani release bundle: pre-built kani-driver, kani-compiler, cbmc, goto-cc, kissat.
+        # autoPatchelfHook rewrites the ELF interpreter and rpath for the Nix glibc.
+        # kaniNightlyToolchain in buildInputs provides librustc_driver for kani-compiler
+        # (RUNPATH originally points to $ORIGIN/../toolchain/lib and /home/runner/.rustup/...).
+        # stdenv.cc.cc.lib provides libstdc++.so.6 required by cbmc and goto-* (C++ binaries).
+        kaniBundle = pkgs.stdenv.mkDerivation {
+          name = "kani-0.67.0";
+          src = pkgs.fetchurl {
+            url = "https://github.com/model-checking/kani/releases/download/kani-0.67.0/kani-0.67.0-x86_64-unknown-linux-gnu.tar.gz";
+            hash = "sha256-O196/TtRYD7nINt7wbxP5GtaT1022q2ZOcS0xli1GsA=";
+          };
+          nativeBuildInputs = [ pkgs.autoPatchelfHook ];
+          buildInputs = [
+            pkgs.stdenv.cc.cc.lib  # libstdc++.so.6 for cbmc / goto-* (C++)
+            kaniNightlyToolchain   # librustc_driver-b64ee523d8950218.so for kani-compiler
+          ];
+          dontBuild = true;
+          # unpackPhase leaves us inside kani-0.67.0/ (the tarball's top-level dir).
+          # Copy to $out/kani-0.67.0/ so KANI_HOME=$out satisfies kani_dir() = $KANI_HOME/kani-0.67.0.
+          # kani-driver finds cargo at toolchain/bin/cargo; symlink kaniNightlyToolchain there.
+          installPhase = ''
+            mkdir -p $out/kani-0.67.0
+            cp -r . $out/kani-0.67.0/
+            ln -s ${kaniNightlyToolchain} $out/kani-0.67.0/toolchain
+          '';
+        };
+
+        # cargo-kani proxy: bridges `cargo kani` to kani-driver in kaniBundle.
+        # Replaces `cargo install --locked kani-verifier` + `cargo kani setup` without internet.
+        # Cargo invokes as: cargo-kani kani [proof-args...]; "kani" is kani-driver's <INPUT>
+        # subcommand and must NOT be stripped — pass all args through verbatim.
+        kaniWrapper = pkgs.writeShellScriptBin "cargo-kani" ''
+          KANI_DIR="${kaniBundle}/kani-0.67.0"
+
+          # kani-compiler must match the nightly it was built against.
+          # cargoWrapper intercepts RUSTUP_TOOLCHAIN=nightly-* → kaniNightlyToolchain.
+          export RUSTUP_TOOLCHAIN="nightly-2025-11-21-x86_64-unknown-linux-gnu"
+
+          # cbmc, goto-cc, kani-compiler are co-located with kani-driver.
+          export PATH="$KANI_DIR/bin:$PATH"
+
+          # KANI_HOME lets kani-driver locate its siblings and lets any re-entrant
+          # cargo-kani invocations skip the setup check (appears_setup → dir exists).
+          export KANI_HOME="${kaniBundle}"
+
+          # kani-driver uses cargo_metadata which finds cargo via $CARGO, not PATH.
+          # Point it at our cargoWrapper so RUSTUP_TOOLCHAIN dispatch works.
+          export CARGO="${cargoWrapper}/bin/cargo"
+
+          exec "$KANI_DIR/bin/kani-driver" "$@"
+        '';
+
+        # clang++ wrapper that fixes the glibc #include_next issue for C++ builds.
+        #
+        # Problem: glibc.dev setup hook adds glibc as `-isystem` before gcc's C++
+        # headers in both NIX_CFLAGS_COMPILE and NIX_CFLAGS_COMPILE_FOR_TARGET.
+        # The NixOS clang wrapper's libc-cflags correctly adds glibc as `-idirafter`
+        # (which would appear after gcc C++ headers and make `#include_next <stdlib.h>`
+        # work), but the gcc deduplication logic removes the -idirafter entry when the
+        # same path is already listed as -isystem — leaving glibc before gcc C++ headers,
+        # where #include_next from <cstdlib> cannot reach it.
+        # When --target=x86_64-unknown-linux-gnu is set (e.g. fuzz/cc crate), the clang
+        # wrapper reads NIX_CFLAGS_COMPILE_FOR_TARGET in addition to NIX_CFLAGS_COMPILE.
+        #
+        # Fix: strip glibc -isystem entries from both vars before calling the real
+        # clang wrapper, so its -idirafter is not deduplicated away.
+        cxxWrapper = pkgs.writeShellScriptBin "clang++" ''
+          NIX_CFLAGS_COMPILE=$(
+            echo "''${NIX_CFLAGS_COMPILE:-}" \
+              | sed 's/ -isystem [^ ]*glibc[^ ]*-dev\/include//g'
+          )
+          export NIX_CFLAGS_COMPILE
+          NIX_CFLAGS_COMPILE_FOR_TARGET=$(
+            echo "''${NIX_CFLAGS_COMPILE_FOR_TARGET:-}" \
+              | sed 's/ -isystem [^ ]*glibc[^ ]*-dev\/include//g'
+          )
+          export NIX_CFLAGS_COMPILE_FOR_TARGET
+          exec "${pkgs.llvmPackages.clang}/bin/clang++" "$@"
+        '';
+
+        # Cargo wrapper that dispatches `cargo +nightly` / `cargo +stable` to the
+        # corresponding Nix-provided toolchain binary without needing rustup.
+        # Cargo finds its sibling rustc via the executable's own directory, so no
+        # RUSTC override is needed.
+        cargoWrapper = pkgs.writeShellScriptBin "cargo" ''
+          case "$1" in
+            +nightly)
+              shift
+              # Prepend nightly bin to PATH so cargo can find cargo-miri, cargo-fuzz, etc.
+              exec env "PATH=${nightlyToolchain}/bin:$PATH" "${nightlyToolchain}/bin/cargo" "$@"
+              ;;
+            +stable)
+              shift
+              exec "${toolchain}/bin/cargo" "$@"
+              ;;
+            *)
+              # Also honour RUSTUP_TOOLCHAIN so that env-var based dispatch (e.g.
+              # integration-asan's run.sh) works without rustup installed.
+              case "''${RUSTUP_TOOLCHAIN:-}" in
+                nightly)
+                  exec env "PATH=${nightlyToolchain}/bin:$PATH" "${nightlyToolchain}/bin/cargo" "$@"
+                  ;;
+                nightly-*)
+                  # kani sets RUSTUP_TOOLCHAIN=nightly-2025-11-21-x86_64-unknown-linux-gnu;
+                  # dispatch to the pinned kani nightly toolchain.
+                  exec env "PATH=${kaniNightlyToolchain}/bin:$PATH" "${kaniNightlyToolchain}/bin/cargo" "$@"
+                  ;;
+                *)
+                  exec "${toolchain}/bin/cargo" "$@"
+                  ;;
+              esac
+              ;;
+          esac
+        '';
+
         # The NixOS pkg-config wrapper sets NIX_PKG_CONFIG_WRAPPER_TARGET_TARGET_*
         # (triggered by glibc.dev in buildInputs) which causes it to replace
         # PKG_CONFIG_PATH with PKG_CONFIG_PATH_x86_64_unknown_linux_gnu (empty).
@@ -51,6 +179,8 @@ CONFIG_VMGENID=y
 CONFIG_SERIAL_8250=y
 CONFIG_SERIAL_8250_CONSOLE=y
 CONFIG_SERIAL_EARLYCON=y
+CONFIG_RANDOM_TRUST_CPU=y
+# CONFIG_CRYPTO_JITTERENTROPY is not set
 KCONFIG_EOF
           '';
         });
@@ -100,6 +230,16 @@ KCONFIG_EOF
 
             # Task runner (replaces Makefile)
             just
+
+            # cargo-fuzz: required for `just fuzz` and `just fuzz-all`
+            cargo-fuzz
+
+            # Cargo wrapper that dispatches +nightly/+stable and RUSTUP_TOOLCHAIN.
+            # PATH position is enforced via shellHook below (setup hooks can reorder).
+            cargoWrapper
+
+            # cargo-kani proxy: bridges `cargo kani` to kani-driver in kaniBundle.
+            kaniWrapper
           ];
 
           # Point Rust's pkg_config crate at the shim so PKG_CONFIG_PATH set by
@@ -110,17 +250,32 @@ KCONFIG_EOF
           LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
           BINDGEN_EXTRA_CLANG_ARGS = "-isystem ${pkgs.glibc.dev}/include -isystem ${pkgs.pipewire.dev}/include";
 
-          # Force gcc as the host linker. The rust-overlay toolchain defaults to
-          # its bundled LLD, which cannot resolve glibc's open64/stat64 compat
-          # aliases on glibc 2.34+ (NixOS). gcc delegates to GNU ld which handles
-          # these correctly.
+          # Force gcc as the host C compiler and linker for x86_64-unknown-linux-gnu.
+          # Without CC_x86_64_unknown_linux_gnu, build scripts (e.g. bzip2-sys) fall
+          # back to CC which is the musl cc, causing compiler-family detection failures
+          # when .cargo/config.toml sets an explicit default target.
+          # The rust-overlay toolchain defaults to its bundled LLD which cannot resolve
+          # glibc's open64/stat64 compat aliases on glibc 2.34+ (NixOS); gcc's ld does.
+          CC_x86_64_unknown_linux_gnu = "${pkgs.gcc}/bin/gcc";
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER = "${pkgs.gcc}/bin/gcc";
+
+          # Force the NixOS-wrapped clang++ for C++ compilation (used by libfuzzer-sys
+          # build.rs). The gcc-wrapper g++ has a broken #include_next search order on
+          # NixOS: glibc is added via -isystem (position 3) before gcc's own C++ headers
+          # (position 12), so #include_next <stdlib.h> in <cstdlib> can't find glibc.
+          # The NixOS clang wrapper uses a different include strategy that works correctly.
+          CXX_x86_64_unknown_linux_gnu = "${cxxWrapper}/bin/clang++";
 
           # Linker for the x86_64-unknown-linux-musl target (guest-agent)
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER =
             "${pkgs.pkgsMusl.stdenv.cc}/bin/cc";
 
           shellHook = ''
+            # The rust-overlay toolchain's setup hook re-adds its bin to PATH after
+            # buildInputs ordering runs, overriding our cargoWrapper. Force the wrapper
+            # first so `cargo +nightly` dispatch works without rustup.
+            export PATH="${cargoWrapper}/bin:$PATH"
+
             # `make test` hardcodes LD_LIBRARY_PATH to test-prefix/lib64 only.
             # Symlink libkrunfw there so the test runner can find it alongside libkrun.
             mkdir -p test-prefix/lib64
@@ -135,6 +290,8 @@ KCONFIG_EOF
 
             # Add libclang to LD_LIBRARY_PATH so clang-sys can load it at build time
             export LD_LIBRARY_PATH="${pkgs.llvmPackages.libclang.lib}/lib:$LD_LIBRARY_PATH"
+
+            # cargo-kani is provided by kaniWrapper in buildInputs (no install needed).
           '';
         };
       }

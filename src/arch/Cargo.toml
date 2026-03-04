@@ -28,3 +28,7 @@ tdx = { version = "0.1.0", optional = true }
 [dev-dependencies]
 utils = { path = "../utils" }
 proptest = "1.4"
+
+[lints.rust]
+# `loom` is set via RUSTFLAGS="--cfg loom" for concurrency testing; not a Cargo feature.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }

@@ -6,6 +6,9 @@ version = "0.0.1"
 publish = false
 edition = "2021"
 
+[package.metadata]
+cargo-fuzz = true
+
 # cargo-fuzz requires nightly and uses a separate workspace.
 # This Cargo.toml is intentionally NOT listed in the root workspace members.
 # Run with: cargo +nightly fuzz run <target>
@@ -19,6 +22,12 @@ vm-memory = { version = "0.18", features = ["backend-mmap"] }
 # Include all features needed by the fuzz targets.
 devices = { path = "../src/devices", features = ["blk", "vhost-user"] }
 vmm = { path = "../src/vmm", features = ["snapshot"] }
+
+# Must mirror root [patch.crates-io] — the fuzz workspace is separate and
+# does not inherit patches from the root workspace.
+[patch.crates-io]
+vhost = { path = "../vendor/vhost" }
+linux-loader = { git = "https://github.com/theoparis/linux-loader", rev = "af90928dcfa1666d47a5269061ef77857eff46d3" }
 
 [[bin]]
 name = "fuzz_snapshot_deser"

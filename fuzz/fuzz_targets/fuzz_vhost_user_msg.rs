@@ -70,7 +70,9 @@ fuzz_target!(|data: &[u8]| {
     let _has_reserved = (header.flags & RESERVED_BITS) != 0;
 
     // Exercise request type validation.
-    let _is_known = KNOWN_REQUEST_TYPES.contains(&header.request);
+    // Copy packed field to local to avoid unaligned reference (E0793).
+    let request = header.request;
+    let _is_known = KNOWN_REQUEST_TYPES.contains(&request);
 
     // Exercise size field interpretation.
     // In production: size must be <= MAX_MSG_SIZE (4096). Check the boundary.

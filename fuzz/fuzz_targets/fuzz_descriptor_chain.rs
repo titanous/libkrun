@@ -5,7 +5,7 @@ use std::io::Read;
 use libfuzzer_sys::fuzz_target;
 
 use devices::virtio::descriptor_utils::{Reader, Writer};
-use devices::virtio::queue::DescriptorChain;
+use devices::virtio::DescriptorChain;
 use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
 
 /// Guest memory layout:

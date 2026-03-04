@@ -113,6 +113,10 @@ impl BalloonStats {
 /// (which already handles queue states and acked_features).
 /// Reclaimed page bitmaps are NOT included — they are transient host state
 /// that starts empty after restore.
+// Fields are only read by serde's generated code (behind the snapshot feature) or
+// written in save_backend_state() and read in restore_backend_state(). The compiler
+// sees them as unread in builds without --features snapshot.
+#[allow(dead_code)]
 #[cfg_attr(feature = "snapshot", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone)]
 struct BalloonState {

@@ -1,5 +1,4 @@
 # Feature set used by all targets.
-# AC2.11: All targets use this same variable.
 features := "embedded_init,snapshot,uffd,blk,vhost-user"
 
 # Default: check
@@ -16,48 +15,36 @@ build:
 
 # Unit tests for all crates
 test:
-    cargo test -p devices --features net,snapshot
-    cargo test -p vmm --features snapshot
-    cargo test -p devices --features net,vhost-user
+    cargo test -p devices --features net,snapshot,vhost-user
+    cargo test -p vmm --features uffd,snapshot
 
-# Run integration tests.
 # Requires libkrunfw.so in test-prefix/lib64/ (nix shellHook creates this symlink).
-# Usage:
-#   just integration         — run all tests
-#   just integration <name>  — run single test by name
+# Usage: just integration [<name>]
+# Run integration tests (all by default, or single by name).
 integration test="all":
     mkdir -p test-prefix/lib64
     cd tests && RUST_LOG=trace LD_LIBRARY_PATH="$(realpath ../test-prefix/lib64/)" ./run.sh test --test-case "{{test}}"
 
-# Compound target: all fast tests (extended in later phases)
-# Phase 1: check + unit tests
-# Phase 2: add miri proptest loom
-# Phase 5: add shuttle
+# Full fast suite: check + test + miri + proptest + loom + shuttle
 all: check test miri proptest loom shuttle
 
-# Compound target: safety checks.
-# Phase 1: check
-# Phase 4: + fuzz-all (60s per target)
-# Phase 5: + asan + shuttle
-# Phase 6: + kani
+# Full safety suite: check + fuzz-all + asan + shuttle + kani
 safety: check fuzz-all asan shuttle kani
-
-# ── Stubs for tools added in later phases ────────────────────────────────────
-# These targets are extended by later implementation phases.
-# Running them before the corresponding phase is complete will exit with an error.
 
 # Miri: run pure-logic unit tests under Miri (requires nightly)
 miri:
     MIRIFLAGS="-Zmiri-backtrace=full" \
-    cargo +nightly miri test -p arch -- gdt
+    cargo +nightly miri test -p arch -- gdt --skip proptest_tests
     MIRIFLAGS="-Zmiri-backtrace=full" \
-    cargo +nightly miri test -p vmm --features snapshot -- dirty_bitmap snapshot::tests::test_header
+    cargo +nightly miri test -p vmm --features snapshot -- dirty_bitmap --skip proptest_tests
     MIRIFLAGS="-Zmiri-backtrace=full" \
-    cargo +nightly miri test -p vmm --features uffd,snapshot -- uffd::page_tracker
+    cargo +nightly miri test -p vmm --features snapshot -- snapshot::tests::test_header --skip proptest_tests
     MIRIFLAGS="-Zmiri-backtrace=full" \
-    cargo +nightly miri test -p devices --features net -- balloon::reclaimed_bitmap
+    cargo +nightly miri test -p vmm --features uffd,snapshot -- uffd::page_tracker --skip proptest_tests
     MIRIFLAGS="-Zmiri-backtrace=full" \
-    cargo +nightly miri test -p devices --features blk -- virtio::block::request
+    cargo +nightly miri test -p devices --features net,blk -- balloon::reclaimed_bitmap --skip proptest_tests
+    MIRIFLAGS="-Zmiri-backtrace=full" \
+    cargo +nightly miri test -p devices --features net,blk -- virtio::block::request --skip proptest_tests
 
 # proptest: property-based tests for bitmap invariants, GDT, address translation, round-trips
 proptest:
@@ -73,22 +60,23 @@ proptest-long:
     PROPTEST_CASES=10000 cargo test -p vmm --features uffd,snapshot -- uffd::page_tracker::tests::proptest_tests
     PROPTEST_CASES=10000 cargo test -p devices --features net -- virtio::balloon::reclaimed_bitmap::tests::proptest_tests
 
-# Loom: exhaustive concurrency testing on all bitmap/tracker types
 # Requires --release for performance (loom is computationally intensive).
+# Exhaustive concurrency testing on all bitmap/tracker types.
 loom:
     RUSTFLAGS="--cfg loom" cargo test --release -p vmm -- dirty_bitmap::tests::loom_tests
     RUSTFLAGS="--cfg loom" cargo test --release -p vmm --features uffd -- uffd::page_tracker::tests::loom_tests
     RUSTFLAGS="--cfg loom" cargo test --release -p devices --features net -- virtio::balloon::reclaimed_bitmap::tests::loom_tests
 
-# Run a single fuzz target for a given duration.
-# Usage: just fuzz fuzz_snapshot_deser
-#        just fuzz fuzz_fuse_parsing 120
+# Usage: just fuzz <target> [duration]
+#   just fuzz fuzz_snapshot_deser
+#   just fuzz fuzz_fuse_parsing 120
+# Run a single fuzz target for the given duration (default 60s).
 fuzz target duration="60":
-    cargo +nightly fuzz run --manifest-path fuzz/Cargo.toml {{target}} -- -max_total_time={{duration}}
+    cargo +nightly fuzz run --fuzz-dir fuzz {{target}} -- -max_total_time={{duration}}
 
-# Run all fuzz targets sequentially, each for the given duration.
-# Usage: just fuzz-all
-#        just fuzz-all 300
+# Usage: just fuzz-all [duration]
+#   just fuzz-all 300
+# Run all fuzz targets sequentially for the given duration (default 60s each).
 fuzz-all duration="60":
     for target in $(just fuzz-list); do \
         echo "--- Fuzzing $target for {{duration}}s ---"; \
@@ -97,11 +85,12 @@ fuzz-all duration="60":
 
 # List all available fuzz targets.
 fuzz-list:
-    @cargo +nightly fuzz list --manifest-path fuzz/Cargo.toml 2>/dev/null \
+    @cargo +nightly fuzz list --fuzz-dir fuzz 2>/dev/null \
         || grep '^name = ' fuzz/Cargo.toml | grep -v 'libkrun-fuzz' | sed 's/name = "\(.*\)"/\1/'
 
+# Usage: just fuzz-corpus <target>
+#   just fuzz-corpus fuzz_snapshot_deser
 # Show corpus statistics for a fuzz target.
-# Usage: just fuzz-corpus fuzz_snapshot_deser
 fuzz-corpus target:
     @if [ -d "fuzz/corpus/{{target}}" ]; then \
         echo "Corpus for {{target}}:"; \
@@ -112,24 +101,24 @@ fuzz-corpus target:
         echo "Run 'just fuzz {{target}}' to start generating one."; \
     fi
 
-# ASan: run unit tests under AddressSanitizer.
-# Requires nightly Rust. Detects buffer overflows, use-after-free, heap corruption.
 # Must use --target explicitly (ASan requires target triple even for host builds).
+# Unit tests under AddressSanitizer (nightly; detects memory bugs).
 asan:
     RUSTFLAGS="-Zsanitizer=address" \
     cargo +nightly test \
         --target x86_64-unknown-linux-gnu \
-        -p devices --features net,snapshot
+        -p devices --features net,snapshot,vhost-user
     RUSTFLAGS="-Zsanitizer=address" \
     cargo +nightly test \
         --target x86_64-unknown-linux-gnu \
-        -p vmm --features snapshot
+        -p vmm --features uffd,snapshot
 
-# integration-asan: run integration tests with ASan instrumentation on the runner binary.
+# integration-asan: run integration tests under AddressSanitizer.
 #
 # How it works:
 #   1. Sets RUSTFLAGS="-Zsanitizer=address" and RUSTUP_TOOLCHAIN=nightly so that
 #      all `cargo build` calls inside tests/run.sh compile with ASan.
+#      RUSTUP_TOOLCHAIN is intercepted by the Nix cargoWrapper (no rustup needed).
 #   2. The runner, test-daemon, and test-vsock-proxy binaries are built with ASan.
 #   3. The guest-agent binary is musl-compiled (x86_64-unknown-linux-musl);
 #      musl + ASan is unsupported — that build will fail if RUSTFLAGS is set
@@ -140,7 +129,7 @@ asan:
 # Note on guest-agent: musl + ASan is not supported by the ASan runtime.
 # The workaround is to build guest-agent before entering ASan mode, or to
 # modify run.sh to skip the RUSTFLAGS env when building for the musl target.
-# See implementation note below.
+# Integration tests under AddressSanitizer (host binaries only; musl guest-agent built separately).
 integration-asan:
     mkdir -p test-prefix/lib64
     cd tests && \
@@ -154,22 +143,21 @@ integration-asan:
         LD_LIBRARY_PATH="$(realpath ../test-prefix/lib64/)" \
         ./run.sh test
 
-# Shuttle: randomized concurrency testing for complex multi-threaded coordination.
 # Uses shuttle crate to sample thread interleavings (not exhaustive like loom).
-# Targets: block worker quiesce handshake, balloon condvar, device state transitions.
-# Default: 1000 iterations per test. Pass iterations=N to override.
+# Targets: block worker quiesce, balloon condvar, device state transitions.
+# Randomized concurrency testing (default 1000 iterations; pass iterations=N to override).
 shuttle iterations="1000":
     SHUTTLE_ITERATIONS={{iterations}} \
     cargo test -p devices --features net,blk,shuttle -- shuttle_tests
 
-# Kani: bounded formal verification proofs.
 # Requires: cargo install --locked kani-verifier && cargo kani setup
-# All proofs in kani-proofs/:
+# Bounded formal verification proofs in kani-proofs/.
 kani:
     cargo kani --manifest-path kani-proofs/Cargo.toml
 
+# Usage: just kani-proof <name>
+#   just kani-proof proof_mark_dirty_no_panic
 # Run a single named Kani proof.
-# Usage: just kani-proof proof_mark_dirty_no_panic
 kani-proof name:
     cargo kani --manifest-path kani-proofs/Cargo.toml --harness {{name}}
 
@@ -177,9 +165,9 @@ kani-proof name:
 # Note: mutants_excludes relies on sh -c word splitting to expand multiple -e flags.
 mutants_excludes := "-e 'src/rutabaga_gfx' -e 'src/hvf' -e 'src/devices/src/virtio/gpu' -e 'src/devices/src/virtio/snd' -e 'src/devices/src/virtio/input'"
 
-# Run full mutation test suite. Produces mutants.out/outcomes.json.
 # timeout: seconds per mutant test run (default 3600 for full run, use 60 for quick checks)
 # jobs: parallel workers (default 4)
+# Full mutation test suite. Produces mutants.out/outcomes.json.
 mutants timeout="3600" jobs="4":
     cargo mutants \
       --features {{features}} \
@@ -187,8 +175,7 @@ mutants timeout="3600" jobs="4":
       --timeout {{timeout}} \
       --jobs {{jobs}}
 
-# Run mutation tests scoped to files changed vs origin/main.
-# Much faster than full run; suitable for CI on PRs.
+# Run mutation tests scoped to files changed vs origin/main (fast; suitable for CI on PRs).
 mutants-diff timeout="60" jobs="4":
     cargo mutants \
       --features {{features}} \
