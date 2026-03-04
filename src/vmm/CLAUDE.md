@@ -1,12 +1,12 @@
 # VMM Crate
 
-Last verified: 2026-03-02
+Last verified: 2026-03-03
 
 ## Purpose
 Core virtual machine manager. Orchestrates VM lifecycle: build, run, snapshot/restore, dirty page tracking.
 
 ## Contracts
-- **Exposes**: `Vmm` struct (VM lifecycle, `get_balloon()`), `build_microvm()`, snapshot/restore functions, `DirtyBitmap`, `VmExit` enum, `SharedVmExit` type, `VhostUserFsConfig` (behind `vhost-user` feature), `Vm::register_memory_region()`, `snapshot_store` module (`SnapshotStore` trait, `SnapshotStoreFactory` trait, `FsSnapshotStore`, `FsSnapshotStoreFactory`) behind `snapshot` feature, `uffd` module (`UffdHandler`, `PageTracker`, `PageTrackerStats`, `LoadSource`) behind `uffd` feature
+- **Exposes**: `Vmm` struct (VM lifecycle, `get_balloon()`), `build_microvm()`, snapshot/restore functions, `DirtyBitmap`, `VmExit` enum, `SharedVmExit` type, `VhostUserFsConfig` (behind `vhost-user` feature), `Vm::register_memory_region()`, `snapshot_store` module (`SnapshotStore` trait, `SnapshotStoreFactory` trait, `FsSnapshotStore`, `FsSnapshotStoreFactory`) behind `snapshot` feature, `uffd` module (`UffdHandler`, `PageTracker`, `PageTrackerStats`, `LoadSource`, `UffdRegion`, `guest_to_host`, `host_to_guest`, `guest_addr_to_page_index`) behind `uffd` feature
 - **Guarantees**:
   - `validate_header_for_vm` checks magic, version, RAM layout, vCPU count, and nested_enabled match
   - Incremental snapshots require `dirty_tracking_enabled` (returns `DirtyTrackingNotEnabled` otherwise)
@@ -107,7 +107,9 @@ Core virtual machine manager. Orchestrates VM lifecycle: build, run, snapshot/re
 - `dirty_bitmap.rs` - Lock-free dirty page tracking for incremental snapshots
 - `builder.rs` - `build_microvm()` VM construction, creates `SharedVmExit` and `vcpu_exit_flag`
 - `snapshot_store.rs` - `SnapshotStore` trait, `SnapshotStoreFactory` trait, `FsSnapshotStore`, `FsSnapshotStoreFactory`; directory-based snapshot I/O with incremental overlay support
-- `uffd.rs` - `UffdHandler` (UFFD demand-paging), `PageTracker` (atomic bitmap), `LoadSource`, `PageTrackerStats`; behind `uffd` feature
+- `uffd/mod.rs` - Re-exports public UFFD types (`UffdHandler`, `PageTracker`, `PageTrackerStats`, `LoadSource`, `UffdRegion`, `guest_to_host`, `host_to_guest`, `guest_addr_to_page_index`)
+- `uffd/handler.rs` - `UffdHandler` (UFFD demand-paging, fault loop, preload); behind `uffd` feature
+- `uffd/page_tracker.rs` - `PageTracker` (atomic bitmap), `LoadSource`, `PageTrackerStats`, `UffdRegion`, address translation functions; behind `uffd` feature
 - `lib.rs` - `Vmm` struct, `stop()`, `resolve_vm_exit()`, snapshot orchestration (store-based), `restore_device_and_vcpu_states`, used ring dirty marking
 - `device_manager/legacy.rs` - `PortIODeviceManager` with snapshot save/restore (x86_64)
 - `device_manager/kvm/mmio.rs` - `MMIODeviceManager`, `get_virtio_used_ring_ranges()`

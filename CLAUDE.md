@@ -10,21 +10,34 @@ Last verified: 2026-03-03
 - Build: justfile + Cargo workspace
 
 ## Commands
-- `just check` - Format check + cargo check (replaces `make`)
-- `just build` - Build release library (replaces `make`)
+- `just check` - Format check + clippy
+- `just build` - Build release library
 - `just test` - Run unit tests for all crates
-- `just integration` - Run all integration tests (embedded_init required; libkrunfw must be in test-prefix/lib64/)
+- `just integration` - Run all integration tests (libkrunfw must be in test-prefix/lib64/)
 - `just integration <name>` - Run a single named integration test
-- `cargo test -p devices --features net` - Run devices crate unit tests (net feature needed for async_worker tests)
-- `cargo test -p devices --features net,snapshot` - Devices tests including snapshot-dependent tests
-- `cargo test -p vmm --features snapshot` - VMM crate unit tests (snapshot feature for snapshot.rs tests)
+- `just all` - Full fast suite: check + test + miri + proptest + loom + shuttle
+- `just safety` - Full safety suite: check + fuzz-all + asan + shuttle + kani
+- `just miri` - Run pure-logic tests under Miri (requires nightly)
+- `just proptest` - Property-based tests for bitmaps, GDT, address translation, round-trips
+- `just loom` - Exhaustive concurrency testing on bitmap/tracker types (requires --release)
+- `just fuzz <target> [duration]` - Run a single cargo-fuzz target (default 60s)
+- `just fuzz-all [duration]` - Run all 5 fuzz targets sequentially
+- `just asan` - Unit tests under AddressSanitizer (requires nightly)
+- `just integration-asan` - Integration tests with ASan instrumentation
+- `just shuttle [iterations]` - Randomized concurrency testing (default 1000 iterations)
+- `just kani` - All Kani bounded model checking proofs
+- `just kani-proof <name>` - Single Kani proof by harness name
+- `just mutants` - Full mutation testing suite
+- `just mutants-diff` - Mutation tests scoped to diff vs origin/main
 
 ## Project Structure
-- `src/libkrun/` - Public Rust API (`Builder`, `Context`, `VmHandle`) — C API removed
+- `src/libkrun/` - Public Rust API (`Builder`, `Context`, `VmHandle`) -- crate type `lib` only (no cdylib)
 - `src/vmm/` - Virtual machine manager: builder, snapshot/restore, dirty tracking
 - `src/devices/` - Virtio and legacy device implementations (net, console, block, balloon, vsock, fs, vhost-user, serial, CMOS, i8042, RTC)
 - `src/arch/`, `src/kernel/` - Architecture and kernel loading support
 - `tests/` - Integration test workspace (host+guest test cases run inside VMs)
+- `fuzz/` - Cargo-fuzz package with 5 harnesses (snapshot deser, FUSE parsing, block request, descriptor chain, vhost-user msg)
+- `kani-proofs/` - Kani bounded model checking package with 22 proofs (bitmaps, GDT, page tracker, snapshot header)
 - `init/` - C init binary compiled for guest (embedded when `embedded_init` feature on)
 - `vendor/vhost/` - Patched vhost 0.15.0 crate (adds DEVICE_STATE protocol methods); used via `[patch.crates-io]`
 - `vendor/vhost-user-backend/` - Patched vhost-user-backend 0.21.0 (vm-memory 0.18 compat); used by test daemons
@@ -40,6 +53,7 @@ Last verified: 2026-03-03
 - `efi` - EFI boot support (implies blk + net)
 - `vhost-user` - Enables vhost-user device support (virtio-fs with DAX, vsock); gated by feature flag
 - `uffd` - Enables userfaultfd demand-paging for snapshot restore (implies `snapshot`; Linux-only; adds `userfaultfd` crate)
+- `shuttle` - Enables shuttle concurrency tests (devices, vmm); dev-dependency only
 
 ## Conventions
 - Platform-specific code gated with `#[cfg(target_os = "...")]`
@@ -49,6 +63,8 @@ Last verified: 2026-03-03
 - Feature flags gate optional dependencies; see `src/devices/Cargo.toml`
 - Integration tests use host/guest split: `#[host]`/`#[guest]` proc macros
 - Virtio-FS uses generic `FileSystem` trait (`Box<dyn FileSystem + Send + Sync>`); `PassthroughFs` is the built-in backend; Linux-only (no macOS virtiofs)
+- Loom shims: atomic types in `dirty_bitmap.rs`, `page_tracker.rs`, `reclaimed_bitmap.rs`, `request.rs` use `#[cfg(loom)] loom::sync::atomic` / `#[cfg(not(loom))] std::sync::atomic` for loom concurrency testing
+- Test infrastructure: proptest (property-based), loom (exhaustive concurrency), shuttle (randomized concurrency), Miri (UB detection), cargo-fuzz (fuzzing), Kani (bounded model checking), cargo-mutants (mutation testing)
 - See domain CLAUDE.md files for crate-specific contracts
 
 ## Debugging Guest Boot (earlycon)

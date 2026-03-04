@@ -1,12 +1,12 @@
 # Virtio-FS Device
 
-Last verified: 2026-03-01
+Last verified: 2026-03-03
 
 ## Purpose
 Virtio-FS (FUSE-over-virtio) device implementation. Exposes a generic `FileSystem` trait for pluggable filesystem backends, with `PassthroughFs` as the built-in host directory backend. Linux-only (macOS virtiofs was removed).
 
 ## Contracts
-- **Exposes**: `Fs` device, `FileSystem` trait, `DaxMapper` trait, `Server`, `PassthroughFs`, `ExportTable`, newtype wrappers (`Inode`, `Handle`), FUSE types (`Context`, `Entry`, `DirEntry`, etc.)
+- **Exposes**: `Fs` device, `FileSystem` trait, `DaxMapper` trait, `Server` (also re-exported from `devices::lib.rs`), `PassthroughFs`, `ExportTable`, newtype wrappers (`Inode`, `Handle`), FUSE types (`Context`, `Entry`, `DirEntry`, etc.)
 - **Guarantees**:
   - `FileSystem` is object-safe (no associated types); uses concrete `Inode(u64)` and `Handle(u64)` newtypes
   - All `FileSystem` methods have default implementations returning `ENOSYS`
@@ -22,7 +22,7 @@ Virtio-FS (FUSE-over-virtio) device implementation. Exposes a generic `FileSyste
 ## Dependencies
 - **Uses**: `vm-memory`, `libc` (mmap for LinuxDaxMapper), `bindings` (FUSE/Linux errno constants)
 - **Used by**: `vmm::builder` (creates `Fs` device from `FsMount`), `libkrun` (re-exports `FileSystem`, `passthrough`, `dax_mapper`)
-- **Boundary**: `filesystem` and `dax_mapper` modules are `pub`; `server`, `worker`, `device` are crate-internal
+- **Boundary**: `filesystem`, `dax_mapper`, `fuse` modules are `pub`; `fuse_dispatch`, `worker`, `device` are crate-internal; `server` is `pub(crate)` but re-exported from `devices::lib.rs`
 
 ## Key Decisions
 - `FileSystem` made object-safe by replacing associated types `Inode`/`Handle` with concrete newtypes -- enables `Box<dyn FileSystem>` throughout
@@ -34,6 +34,7 @@ Virtio-FS (FUSE-over-virtio) device implementation. Exposes a generic `FileSyste
 - `filesystem.rs` - `FileSystem` trait (object-safe), `Inode`/`Handle` newtypes, `ZeroCopyReader`/`ZeroCopyWriter`, `Entry`, `Context`, `ExportTable`
 - `dax_mapper.rs` - `DaxMapper` trait, `LinuxDaxMapper` (mmap-based, bounds-checked)
 - `device.rs` - `Fs` struct (VirtioDevice impl), takes `Box<dyn FileSystem + Send + Sync>`
-- `server.rs` - `Server` (FUSE message dispatch), creates `LinuxDaxMapper` for DAX operations
+- `server.rs` - `Server` (FUSE message dispatch entry point), creates `LinuxDaxMapper` for DAX operations
+- `fuse_dispatch.rs` - FUSE opcode dispatch logic extracted from server.rs; maps FUSE opcodes to FileSystem trait methods
 - `worker.rs` - `FsWorker` (queue processing thread)
 - `linux/passthrough.rs` - `PassthroughFs` (host directory passthrough via O_PATH fds)

@@ -1,12 +1,12 @@
 # Virtio Balloon Device
 
-Last verified: 2026-03-02
+Last verified: 2026-03-03
 
 ## Purpose
 Virtio memory balloon device. Allows host to reclaim guest memory (inflate) and return it (deflate). Supports stats reporting, free page hinting, and snapshot integration.
 
 ## Contracts
-- **Exposes**: `Balloon` struct, `BalloonStats` struct, `TYPE_BALLOON` constant, `BalloonError` enum
+- **Exposes**: `Balloon` struct, `BalloonStats` struct, `TYPE_BALLOON` constant, `BalloonError` enum, `ReclaimedBitmap` (pub re-export from mod.rs)
 - **Guarantees**:
   - 5 queues: inflate (0), deflate (1), stats (2), free page hint (3), free page reporting (4)
   - Inflate processes PFN list, calls `MADV_DONTNEED` per page; invalid PFNs silently skipped; duplicate PFNs idempotent
