@@ -174,6 +174,7 @@
 
             cp ${./libkrunfw-patches/0022-vmgenid-setup-data.patch} patches/0022-vmgenid-setup-data.patch
             cp ${./libkrunfw-patches/0023-no-jitterentropy.patch} patches/0023-no-jitterentropy.patch
+            cp ${./libkrunfw-patches/0024-virtio-mmio-async-probe.patch} patches/0024-virtio-mmio-async-probe.patch
 
             cat >> config-libkrunfw_x86_64 <<'KCONFIG_EOF'
 CONFIG_VMGENID=y

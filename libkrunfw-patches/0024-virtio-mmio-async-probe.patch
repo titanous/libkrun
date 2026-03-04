@@ -1,0 +1,20 @@
+--- a/drivers/virtio/virtio_mmio.c
++++ b/drivers/virtio/virtio_mmio.c
+@@ -849,6 +849,7 @@
+ 	.driver		= {
+ 		.name	= "virtio-mmio",
+ 		.of_match_table	= virtio_mmio_match,
++		.probe_type	= PROBE_PREFER_ASYNCHRONOUS,
+ 		.acpi_match_table = ACPI_PTR(virtio_mmio_acpi_match),
+ #ifdef CONFIG_PM_SLEEP
+ 		.pm	= &virtio_mmio_pm_ops,
+--- a/init/main.c
++++ b/init/main.c
+@@ -1595,6 +1595,7 @@
+
+ 	wait_for_initramfs();
+ 	console_on_rootfs();
++	async_synchronize_full(); /* wait for PROBE_PREFER_ASYNCHRONOUS drivers (e.g. virtio-mmio) before root mount */
+
+ 	/*
+ 	 * check if there is an early userspace init.  If yes, let it do all
