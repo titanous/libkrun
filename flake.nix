@@ -175,6 +175,7 @@
             cp ${./libkrunfw-patches/0022-vmgenid-setup-data.patch} patches/0022-vmgenid-setup-data.patch
             cp ${./libkrunfw-patches/0023-no-jitterentropy.patch} patches/0023-no-jitterentropy.patch
             cp ${./libkrunfw-patches/0024-virtio-mmio-async-probe.patch} patches/0024-virtio-mmio-async-probe.patch
+
             cat >> config-libkrunfw_x86_64 <<'KCONFIG_EOF'
 CONFIG_VMGENID=y
 # Remove jitterentropy (~14ms savings): 0023-no-jitterentropy.patch removes the unconditional
@@ -182,6 +183,7 @@ CONFIG_VMGENID=y
 # the base config's explicit CONFIG_CRYPTO_JITTERENTROPY=y can be overridden here.
 # CONFIG_RANDOM_TRUST_CPU=y ensures DRBG has CPU entropy (RDRAND) without needing jent.
 CONFIG_CRYPTO_JITTERENTROPY=n
+CONFIG_RANDOM_TRUST_CPU=y
 # Serial 8250 disabled in production (~12ms savings for serial8250_init).
 # For earlycon debugging: flip these to =y and add earlycon=uart8250,io,0x3f8,115200 to cmdline
 CONFIG_SERIAL_8250=n
