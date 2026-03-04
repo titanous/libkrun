@@ -223,54 +223,17 @@ fn try_mount_device(
     -1
 }
 
-// ── Stdio redirect (sysfs scan — replaced by env vars in Phase 3) ──
+// ── Stdio redirect (env vars — Phase 3) ────────────────────────────
 
 fn setup_redirects() {
-    // Phase 1: keep the existing sysfs-based redirect approach from init.c
-    // Phase 3 will replace this with env-var-based redirect (KRUN_STDIN_DEV, etc.)
-    let dir_path = CString::new("/sys/class/virtio-ports").unwrap();
-    unsafe {
-        let dir = libc::opendir(dir_path.as_ptr());
-        if dir.is_null() {
-            eprintln!("Unable to open ports directory");
-            return;
-        }
-
-        loop {
-            let entry = libc::readdir(dir);
-            if entry.is_null() {
-                break;
-            }
-            let name = CStr::from_ptr((*entry).d_name.as_ptr());
-            let name_str = name.to_string_lossy();
-
-            // Read the port name file
-            let name_path = format!("/sys/class/virtio-ports/{}/name", name_str);
-            let c_path = CString::new(name_path).unwrap();
-            let mode = CString::new("r").unwrap();
-            let f = libc::fopen(c_path.as_ptr(), mode.as_ptr());
-            if f.is_null() {
-                continue;
-            }
-            let mut buf = [0u8; 256];
-            let ret = libc::fgets(buf.as_mut_ptr().cast(), buf.len() as i32, f);
-            libc::fclose(f);
-            if ret.is_null() {
-                continue;
-            }
-            let port_name = CStr::from_ptr(buf.as_ptr().cast()).to_string_lossy();
-
-            let dev_path = format!("/dev/{}", name_str);
-            if port_name.trim_end() == "krun-stdin" {
-                reopen_fd(libc::STDIN_FILENO, &dev_path, libc::O_RDONLY);
-            } else if port_name.trim_end() == "krun-stdout" {
-                reopen_fd(libc::STDOUT_FILENO, &dev_path, libc::O_WRONLY);
-            } else if port_name.trim_end() == "krun-stderr" {
-                reopen_fd(libc::STDERR_FILENO, &dev_path, libc::O_WRONLY);
-            }
-        }
-
-        libc::closedir(dir);
+    if let Ok(path) = env::var("KRUN_STDIN_DEV") {
+        reopen_fd(libc::STDIN_FILENO, &path, libc::O_RDONLY);
+    }
+    if let Ok(path) = env::var("KRUN_STDOUT_DEV") {
+        reopen_fd(libc::STDOUT_FILENO, &path, libc::O_WRONLY);
+    }
+    if let Ok(path) = env::var("KRUN_STDERR_DEV") {
+        reopen_fd(libc::STDERR_FILENO, &path, libc::O_WRONLY);
     }
 }
 
