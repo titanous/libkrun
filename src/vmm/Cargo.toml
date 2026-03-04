@@ -69,6 +69,8 @@ hvf = { path = "../hvf", optional = true }
 loom = { version = "0.7", features = ["checkpoint"] }
 
 [lints.rust]
+# `loom` is set via RUSTFLAGS="--cfg loom" for concurrency testing; not a Cargo feature.
+# `kani` is used for bounded model checking proofs; not a Cargo feature.
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(kani)'] }
 
 [dev-dependencies]

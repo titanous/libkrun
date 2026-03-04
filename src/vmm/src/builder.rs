@@ -1433,6 +1433,29 @@ pub fn build_microvm(
         console_id += 1;
     }
 
+    // Inject KRUN_*_DEV env vars for named console ports so the guest init
+    // can open them directly without scanning sysfs.
+    for port in &device_info.console_ports {
+        match port.name.as_deref() {
+            Some("krun-stdin") => {
+                vmm.kernel_cmdline
+                    .insert_str(format!("KRUN_STDIN_DEV={}", port.device_path))
+                    .unwrap();
+            }
+            Some("krun-stdout") => {
+                vmm.kernel_cmdline
+                    .insert_str(format!("KRUN_STDOUT_DEV={}", port.device_path))
+                    .unwrap();
+            }
+            Some("krun-stderr") => {
+                vmm.kernel_cmdline
+                    .insert_str(format!("KRUN_STDERR_DEV={}", port.device_path))
+                    .unwrap();
+            }
+            _ => {}
+        }
+    }
+
     timer.checkpoint("attach_balloon + rng + vmgenid + console");
 
     #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]

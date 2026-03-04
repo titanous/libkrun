@@ -4,6 +4,10 @@ version = "0.1.0"
 authors = ["Amazon Firecracker team <firecracker-devel@amazon.com>"]
 edition = "2021"
 
+[lints.rust]
+# `kani` is used for bounded model checking proofs; not a Cargo feature.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
 [dependencies]
 bitflags = "1.2.0"
 libc = ">=0.2.85"
