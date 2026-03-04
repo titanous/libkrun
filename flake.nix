@@ -188,7 +188,7 @@ CONFIG_CRYPTO_JITTERENTROPY=n
 CONFIG_SERIAL_8250=n
 CONFIG_SERIAL_8250_CONSOLE=n
 CONFIG_SERIAL_EARLYCON=n
-# Unused filesystems (rootfs is virtiofs/erofs; ext4 kept for app use)
+# Unused filesystems (rootfs is virtiofs; ext4 kept for app/block use)
 CONFIG_BTRFS_FS=n
 CONFIG_XFS_FS=n
 CONFIG_FAT_FS=n
@@ -198,7 +198,7 @@ CONFIG_TUN=n
 # DM-Crypt and DM-Integrity not used in microVM
 CONFIG_DM_CRYPT=n
 CONFIG_DM_INTEGRITY=n
-# SELinux and audit not needed in microVM
+# SELinux and audit not needed in microVM (~5ms savings from AUDIT alone)
 CONFIG_SECURITY_SELINUX=n
 CONFIG_AUDIT=n
 KCONFIG_EOF
