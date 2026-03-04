@@ -11,6 +11,7 @@ default: check
 
 # Format check + clippy
 check:
+    cd init && cargo fmt --check && cargo clippy --release -- -D warnings
     cargo fmt --check
     cargo clippy -p libkrun --features {{features}} -- -D warnings
 

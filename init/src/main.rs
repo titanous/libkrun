@@ -139,8 +139,13 @@ fn pivot_to_block_root(device: &str) {
             libc::close(fd);
         }
 
-        if libc::mount(c_dot.as_ptr(), c_root.as_ptr(), ptr::null(), libc::MS_MOVE, ptr::null())
-            < 0
+        if libc::mount(
+            c_dot.as_ptr(),
+            c_root.as_ptr(),
+            ptr::null(),
+            libc::MS_MOVE,
+            ptr::null(),
+        ) < 0
         {
             eprintln!("remount root failed");
             libc::exit(-1);
@@ -156,7 +161,12 @@ fn pivot_to_block_root(device: &str) {
 }
 
 /// Try to mount a block device. If fstype is None, iterate /proc/filesystems.
-fn try_mount_device(source: &str, target: &str, fstype: Option<&str>, options: Option<&str>) -> i32 {
+fn try_mount_device(
+    source: &str,
+    target: &str,
+    fstype: Option<&str>,
+    options: Option<&str>,
+) -> i32 {
     let c_source = CString::new(source).unwrap();
     let c_target = CString::new(target).unwrap();
     let c_options = options.map(|o| CString::new(o).unwrap());
@@ -165,7 +175,13 @@ fn try_mount_device(source: &str, target: &str, fstype: Option<&str>, options: O
     if let Some(fs) = fstype {
         let c_fs = CString::new(fs).unwrap();
         unsafe {
-            return libc::mount(c_source.as_ptr(), c_target.as_ptr(), c_fs.as_ptr(), 0, opts_ptr.cast());
+            return libc::mount(
+                c_source.as_ptr(),
+                c_target.as_ptr(),
+                c_fs.as_ptr(),
+                0,
+                opts_ptr.cast(),
+            );
         }
     }
 
@@ -178,7 +194,8 @@ fn try_mount_device(source: &str, target: &str, fstype: Option<&str>, options: O
             return -1;
         }
         let mut buf = [0u8; 129];
-        while libc::fgets(buf.as_mut_ptr().cast(), buf.len() as i32, f) != ptr::null_mut() {
+        while !libc::fgets(buf.as_mut_ptr().cast(), buf.len() as i32, f).is_null() {
+            // Safety: fgets guarantees null-termination within n bytes and the buffer is zero-initialized
             let line = CStr::from_ptr(buf.as_ptr().cast());
             let line_str = line.to_string_lossy();
             if line_str.starts_with("nodev") {
@@ -189,7 +206,14 @@ fn try_mount_device(source: &str, target: &str, fstype: Option<&str>, options: O
                 continue;
             }
             let c_fs = CString::new(fs_name).unwrap();
-            if libc::mount(c_source.as_ptr(), c_target.as_ptr(), c_fs.as_ptr(), 0, opts_ptr.cast()) == 0 {
+            if libc::mount(
+                c_source.as_ptr(),
+                c_target.as_ptr(),
+                c_fs.as_ptr(),
+                0,
+                opts_ptr.cast(),
+            ) == 0
+            {
                 libc::fclose(f);
                 return 0;
             }
@@ -255,7 +279,11 @@ fn reopen_fd(fd: i32, path: &str, flags: i32) {
     unsafe {
         let newfd = libc::open(c_path.as_ptr(), flags);
         if newfd < 0 {
-            eprintln!("Failed to open '{}': errno {}", path, *libc::__errno_location());
+            eprintln!(
+                "Failed to open '{}': errno {}",
+                path,
+                *libc::__errno_location()
+            );
             return;
         }
         if libc::dup2(newfd, fd) < 0 {
@@ -301,7 +329,7 @@ fn set_exit_code(code: i32) {
             eprintln!("Couldn't open root filesystem to report exit code");
             return;
         }
-        let ret = libc::ioctl(fd, KRUN_EXIT_CODE_IOCTL as i32, code);
+        let ret = libc::ioctl(fd, KRUN_EXIT_CODE_IOCTL, code);
         if ret < 0 {
             eprintln!("Error using the ioctl to set the exit code");
         }
@@ -343,9 +371,7 @@ fn set_rlimits(rlimits_str: &str) {
 }
 
 fn parse_u64(s: &str) -> (u64, &str) {
-    let end = s
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(s.len());
+    let end = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
     let val = s[..end].parse::<u64>().unwrap_or(u64::MAX);
     (val, &s[end..])
 }
@@ -521,7 +547,7 @@ fn main() {
     unsafe {
         loop {
             let pid = libc::waitpid(-1, &mut status, 0);
-            if pid == child {
+            if pid == child || pid < 0 {
                 break;
             }
         }
