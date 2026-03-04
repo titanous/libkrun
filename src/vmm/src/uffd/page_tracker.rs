@@ -435,9 +435,9 @@ mod tests {
             #[test]
             fn prop_mark_loaded_deduplication(
                 total_pages in 1usize..256,
-                page_index in 0usize..256,
+                pct in 0usize..100,
             ) {
-                prop_assume!(page_index < total_pages);
+                let page_index = pct % total_pages;
                 let tracker = PageTracker::new(total_pages);
                 tracker.mark_loaded(page_index, LoadSource::Preload);
                 tracker.mark_loaded(page_index, LoadSource::Preload);
