@@ -842,12 +842,34 @@ impl BuiltVm {
     }
 }
 
+struct BootTimer {
+    start: std::time::Instant,
+    last: std::time::Instant,
+}
+impl BootTimer {
+    fn new() -> Self {
+        let now = std::time::Instant::now();
+        Self { start: now, last: now }
+    }
+    fn checkpoint(&mut self, name: &str) {
+        let now = std::time::Instant::now();
+        info!(
+            "[boot_timing] {:45} +{:>7.3}ms  total={:.3}ms",
+            name,
+            self.last.elapsed().as_secs_f64() * 1000.0,
+            self.start.elapsed().as_secs_f64() * 1000.0,
+        );
+        self.last = now;
+    }
+}
+
 pub fn build_microvm(
     vm_resources: &mut super::resources::VmResources,
     event_manager: &mut EventManager,
     _shutdown_efd: Option<EventFd>,
     _sender: Sender<WorkerMessage>,
 ) -> std::result::Result<BuiltVm, StartMicrovmError> {
+    let mut timer = BootTimer::new();
     let mut device_info = VmDeviceInfo::default();
 
     // Populate device_info with configured vCPU count and RAM size
@@ -868,6 +890,7 @@ pub fn build_microvm(
         vm_resources,
         &payload,
     )?;
+    timer.checkpoint("create_guest_memory");
 
     let vcpu_config = vm_resources.vcpu_config();
 
@@ -906,6 +929,7 @@ pub fn build_microvm(
     #[cfg(not(feature = "tee"))]
     #[allow(unused_mut)]
     let mut vm = setup_vm(&guest_memory, vm_resources.nested_enabled)?;
+    timer.checkpoint("setup_vm");
 
     #[cfg(feature = "tee")]
     let (_kvm, vm) = {
@@ -1032,6 +1056,12 @@ pub fn build_microvm(
             None,
             // Uncomment this to get EFI output when debugging EDK2.
             //Some(Box::new(io::stdout())),
+        )?);
+    } else {
+        serial_devices.push(setup_serial_device(
+            event_manager,
+            None,
+            Some(Box::new(io::stderr())),
         )?);
     }
 
@@ -1298,6 +1328,8 @@ pub fn build_microvm(
         setup_terminal_raw_mode(&mut vmm, Some(serial_tty), false);
     }
 
+    timer.checkpoint("create_vcpus + legacy_devices");
+
     #[cfg(not(feature = "tee"))]
     let balloon_device = attach_balloon_device(&mut vmm, event_manager, intc.clone())?;
     #[cfg(not(feature = "tee"))]
@@ -1398,6 +1430,8 @@ pub fn build_microvm(
         console_id += 1;
     }
 
+    timer.checkpoint("attach_balloon + rng + vmgenid + console");
+
     #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
     let export_table: Option<ExportTable> = if cfg!(feature = "gpu") {
         Some(Default::default())
@@ -1489,6 +1523,8 @@ pub fn build_microvm(
         }
     };
 
+    timer.checkpoint("attach_fs + blk + vsock + net + snd");
+
     // Write the kernel command line to guest memory. This is x86_64 specific, since on
     // aarch64 the command line will be specified through the FDT.
     #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
@@ -1501,6 +1537,7 @@ pub fn build_microvm(
         &vm_resources.smbios_oem_strings,
     )
     .map_err(StartMicrovmError::Internal)?;
+    timer.checkpoint("configure_system");
 
     #[cfg(feature = "tee")]
     {

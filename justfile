@@ -25,6 +25,67 @@ integration test="all":
     mkdir -p test-prefix/lib64
     cd tests && RUST_LOG=trace LD_LIBRARY_PATH="$(realpath ../test-prefix/lib64/)" ./run.sh test --test-case "{{test}}"
 
+# Benchmark boot-timing-e2e with release builds; prints min/max/mean/stddev/median.
+# Runs one warmup iteration then N timed samples.
+# Usage: just bench-boot [n]
+bench-boot n="20":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p test-prefix/lib64
+    export LD_LIBRARY_PATH="$(realpath test-prefix/lib64/)"
+    cd tests
+    GUEST_TARGET_ARCH="$(uname -m)-unknown-linux-musl"
+    HOST_TARGET_ARCH="$(uname -m)-unknown-linux-gnu"
+    cargo build --release --target="$GUEST_TARGET_ARCH" -p guest-agent
+    cargo build --release -p runner
+    cargo build -p test-daemon
+    cargo build -p test-vsock-proxy
+    export KRUN_TEST_GUEST_AGENT_PATH="target/$GUEST_TARGET_ARCH/release/guest-agent"
+    export KRUN_TEST_DAEMON_PATH="target/debug/test-daemon"
+    export KRUN_TEST_VSOCK_PROXY_PATH="target/debug/test-vsock-proxy"
+    RUNNER="target/$HOST_TARGET_ARCH/release/runner"
+
+    run_once() {
+        unshare --user --map-root-user --net -- /bin/sh -c \
+            "ifconfig lo 127.0.0.1 && exec $RUNNER test --test-case boot-timing-e2e" \
+            2>&1 | sed -n 's/.*boot_timing_e2e: \([0-9][0-9]*\)ms.*/\1/p'
+    }
+
+    printf 'Warming up...\n'
+    warmup=$(run_once)
+    printf '  warmup: %sms\n' "$warmup"
+
+    printf 'Collecting %d samples...\n' "{{n}}"
+    declare -a samples
+    for i in $(seq 1 {{n}}); do
+        ms=$(run_once)
+        if [ -z "$ms" ]; then
+            printf '  run %2d: FAILED (no timing output)\n' "$i"
+            exit 1
+        fi
+        samples+=("$ms")
+        printf '  run %2d: %sms\n' "$i" "$ms"
+    done
+
+    printf '\nResults (%d samples):\n' {{n}}
+    sorted=($(printf '%s\n' "${samples[@]}" | sort -n))
+    n={{n}}
+    if (( n % 2 == 1 )); then
+        median=${sorted[$((n / 2))]}
+    else
+        median=$(( (${sorted[$((n / 2 - 1))]} + ${sorted[$((n / 2))]}) / 2 ))
+    fi
+    printf '%s\n' "${samples[@]}" | gawk -v med="$median" '
+        { a[NR]=$1; sum+=$1; if(NR==1||$1<min)min=$1; if(NR==1||$1>max)max=$1 }
+        END {
+            n=NR; mean=sum/n
+            for(i=1;i<=n;i++) v+=(a[i]-mean)^2
+            sd=sqrt(v/n)
+            printf "  n=%d  min=%dms  median=%dms  mean=%.1fms  max=%dms  stddev=%.1fms\n",
+                   n, min, med, mean, max, sd
+        }
+    '
+
 # Full fast suite: check + test + miri + proptest + loom + shuttle
 all: check test miri proptest loom shuttle
 

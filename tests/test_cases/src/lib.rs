@@ -134,6 +134,9 @@ use test_balloon_snapshot_race::TestBalloonSnapshotRace;
 mod test_uffd_balloon_parallel;
 use test_uffd_balloon_parallel::TestUffdBalloonParallel;
 
+mod test_boot_timing_e2e;
+use test_boot_timing_e2e::TestBootTimingE2e;
+
 pub fn test_cases() -> Vec<TestCase> {
     // Register your test here:
     vec![
@@ -237,6 +240,7 @@ pub fn test_cases() -> Vec<TestCase> {
         TestCase::new("virtiofs-dax-snapshot", Box::new(TestVirtiofsDaxSnapshot)),
         TestCase::new("balloon-snapshot-race", Box::new(TestBalloonSnapshotRace)),
         TestCase::new("uffd-balloon-parallel", Box::new(TestUffdBalloonParallel)),
+        TestCase::new("boot-timing-e2e", Box::new(TestBootTimingE2e)),
     ]
 }
 

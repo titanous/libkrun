@@ -1,4 +1,5 @@
 use crossbeam_channel::unbounded;
+use log::info;
 #[cfg(feature = "gpu")]
 use devices::virtio::gpu::display::DisplayInfo;
 #[cfg(feature = "blk")]
@@ -1121,12 +1122,18 @@ impl Builder {
             .and_then(|efd| efd.try_clone().ok())
             .map(Arc::new);
 
+        let t_build_start = std::time::Instant::now();
+        info!("[boot_timing] build_microvm: start");
         let built_vm = vmm::builder::build_microvm(
             &mut ctx_cfg.vmr,
             &mut event_manager,
             ctx_cfg.shutdown_efd,
             sender,
         )?;
+        info!(
+            "[boot_timing] build_microvm: done (vcpus ready) total={:.3}ms",
+            t_build_start.elapsed().as_secs_f64() * 1000.0,
+        );
 
         #[cfg(target_os = "macos")]
         if ctx_cfg.gpu_virgl_flags.is_some() {
@@ -1249,14 +1256,27 @@ impl Context {
 
     /// Start the VM and run the event loop. This blocks until the VM exits.
     pub fn run(mut self) -> Result<vmm::vm_exit::VmExit, StartError> {
+        let t_run_start = std::time::Instant::now();
         // Start the vCPUs
         self.built_vm.run()?;
+        info!(
+            "[boot_timing] start_vcpus (kernel executing)         total={:.3}ms",
+            t_run_start.elapsed().as_secs_f64() * 1000.0,
+        );
 
+        let mut first_event_logged = false;
         // Run the event loop
         loop {
-            self.event_manager
+            let n = self.event_manager
                 .run()
                 .map_err(StartError::EventManagerRun)?;
+            if n > 0 && !first_event_logged {
+                info!(
+                    "[boot_timing] first guest device I/O              total={:.3}ms",
+                    t_run_start.elapsed().as_secs_f64() * 1000.0,
+                );
+                first_event_logged = true;
+            }
 
             // Check if the VM has exited
             if let Some(vm_exit) = self.vm_exit.lock().expect("Poisoned vm_exit lock").take() {

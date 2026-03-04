@@ -238,6 +238,7 @@ struct Cli {
 }
 
 fn main() -> anyhow::Result<()> {
+    let _ = env_logger::try_init();
     let cli = Cli::parse();
     let command = cli.command.unwrap_or_default();
 
