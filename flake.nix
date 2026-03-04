@@ -188,6 +188,19 @@ CONFIG_CRYPTO_JITTERENTROPY=n
 CONFIG_SERIAL_8250=n
 CONFIG_SERIAL_8250_CONSOLE=n
 CONFIG_SERIAL_EARLYCON=n
+# Unused filesystems (rootfs is virtiofs/erofs; ext4 kept for app use)
+CONFIG_BTRFS_FS=n
+CONFIG_XFS_FS=n
+CONFIG_FAT_FS=n
+CONFIG_VFAT_FS=n
+# TUN not needed in guest (virtio_net used; TUN is for VPN/tap tools)
+CONFIG_TUN=n
+# DM-Crypt and DM-Integrity not used in microVM
+CONFIG_DM_CRYPT=n
+CONFIG_DM_INTEGRITY=n
+# SELinux and audit not needed in microVM
+CONFIG_SECURITY_SELINUX=n
+CONFIG_AUDIT=n
 KCONFIG_EOF
           '';
         });
