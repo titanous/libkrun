@@ -99,7 +99,15 @@ impl From<io::Error> for SnapshotError {
     }
 }
 
-#[doc(hidden)]
+#[cfg_attr(kani, kani::ensures(|result| {
+    if header.magic != SNAPSHOT_MAGIC {
+        result.is_err()
+    } else if header.version != SNAPSHOT_VERSION {
+        result.is_err()
+    } else {
+        result.is_ok()
+    }
+}))]
 pub fn validate_magic_and_version(header: &SnapshotHeader) -> Result<(), SnapshotError> {
     if header.magic != SNAPSHOT_MAGIC {
         return Err(SnapshotError::InvalidMagic);
@@ -1025,5 +1033,131 @@ mod tests {
                 prop_assert!(result.is_err());
             }
         }
+    }
+}
+
+#[cfg(kani)]
+impl kani::Arbitrary for SnapshotHeader {
+    fn any() -> Self {
+        SnapshotHeader {
+            magic: kani::any(),
+            version: kani::any(),
+            vcpu_count: kani::any(),
+            ram_regions: vec![], // Keep bounded - Kani can't handle arbitrary-length vecs well
+            nested_enabled: kani::any(),
+        }
+    }
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// Proof: wrong magic always produces InvalidMagic error.
+    ///
+    /// For any header where magic != SNAPSHOT_MAGIC, validate_magic_and_version
+    /// must return Err(SnapshotError::InvalidMagic).
+    #[kani::proof]
+    fn proof_invalid_magic_rejected() {
+        let magic: u32 = kani::any_where(|&m| m != SNAPSHOT_MAGIC);
+
+        let header = SnapshotHeader {
+            magic,
+            version: SNAPSHOT_VERSION, // correct version (magic is the error)
+            vcpu_count: 1,
+            ram_regions: vec![],
+            nested_enabled: false,
+        };
+
+        let result = validate_magic_and_version(&header);
+        kani::assert(
+            matches!(result, Err(SnapshotError::InvalidMagic)),
+            "wrong magic must produce InvalidMagic error",
+        );
+        kani::cover!(true, "error path is reachable");
+    }
+
+    /// Proof: correct magic but wrong version produces InvalidVersion error.
+    ///
+    /// For any header where magic == SNAPSHOT_MAGIC and version != SNAPSHOT_VERSION,
+    /// validate_magic_and_version must return Err(SnapshotError::InvalidVersion(v)).
+    #[kani::proof]
+    fn proof_invalid_version_rejected() {
+        let version: u32 = kani::any_where(|&v| v != SNAPSHOT_VERSION);
+
+        let header = SnapshotHeader {
+            magic: SNAPSHOT_MAGIC,
+            version,
+            vcpu_count: 1,
+            ram_regions: vec![],
+            nested_enabled: false,
+        };
+
+        let result = validate_magic_and_version(&header);
+        kani::assert(
+            matches!(result, Err(SnapshotError::InvalidVersion(_))),
+            "wrong version (with correct magic) must produce InvalidVersion error",
+        );
+        kani::cover!(true, "invalid version error path is reachable");
+    }
+
+    /// Proof: correct magic AND correct version produces Ok(()).
+    ///
+    /// This is the only valid input combination. All other combinations must fail
+    /// (proven by the proofs above).
+    #[kani::proof]
+    fn proof_valid_header_accepted() {
+        let header = SnapshotHeader {
+            magic: SNAPSHOT_MAGIC,
+            version: SNAPSHOT_VERSION,
+            vcpu_count: kani::any(),
+            ram_regions: vec![],
+            nested_enabled: kani::any(),
+        };
+
+        let result = validate_magic_and_version(&header);
+        kani::assert(result.is_ok(), "correct magic and version must produce Ok(())");
+        kani::cover!(true, "valid header accepted path reachable");
+    }
+
+    /// Proof: exhaustive check — magic XOR version wrong always fails.
+    ///
+    /// Explores all combinations where at least one of (magic, version) is wrong.
+    /// Together with proof_valid_header_accepted, this covers the full input space.
+    #[kani::proof]
+    fn proof_any_wrong_field_fails() {
+        let magic: u32 = kani::any();
+        let version: u32 = kani::any();
+
+        // At least one of the two fields is wrong.
+        kani::assume(magic != SNAPSHOT_MAGIC || version != SNAPSHOT_VERSION);
+
+        let header = SnapshotHeader {
+            magic,
+            version,
+            vcpu_count: 1,
+            ram_regions: vec![],
+            nested_enabled: false,
+        };
+
+        let result = validate_magic_and_version(&header);
+        kani::assert(result.is_err(), "any wrong field must produce an error");
+        kani::cover!(true, "any-wrong-field error path reachable");
+    }
+
+    /// Proof: all three validation outcomes are reachable.
+    #[kani::proof]
+    fn proof_validate_magic_version_all_paths_reachable() {
+        let header: SnapshotHeader = kani::any();
+        let result = validate_magic_and_version(&header);
+        kani::cover!(matches!(result, Ok(())), "valid header path reachable");
+        kani::cover!(matches!(result, Err(SnapshotError::InvalidMagic)), "invalid magic path reachable");
+        kani::cover!(matches!(result, Err(SnapshotError::InvalidVersion(_))), "invalid version path reachable");
+    }
+
+    #[kani::proof_for_contract(validate_magic_and_version)]
+    fn proof_validate_magic_version_contract() {
+        let header: SnapshotHeader = kani::any();
+        validate_magic_and_version(&header);
     }
 }

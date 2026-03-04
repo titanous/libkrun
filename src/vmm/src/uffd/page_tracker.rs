@@ -523,3 +523,315 @@ mod tests {
         }
     }
 }
+
+#[cfg(kani)]
+impl kani::Arbitrary for UffdRegion {
+    fn any() -> Self {
+        let guest_addr: u64 = kani::any();
+        let size: u64 = kani::any_where(|&s| s > 0);
+        kani::assume(guest_addr.checked_add(size).is_some());
+        UffdRegion {
+            guest_addr,
+            host_addr: kani::any(),
+            size,
+            page_offset: 0,
+        }
+    }
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    // ── PageTracker proofs ────────────────────────────────────────────────────
+
+    /// Proof: marking same page twice with same source increments counter exactly once.
+    ///
+    /// Bound: total_pages <= 128. stats() iterates ceil(128/64)=2 words → unwind(3).
+    #[kani::proof]
+    #[kani::unwind(3)]
+    fn proof_mark_loaded_same_source_dedup() {
+        let total_pages: usize = kani::any_where(|&n| n > 0 && n <= 128);
+        let tracker = PageTracker::new(total_pages);
+
+        let page_index: usize = kani::any_where(|&p| p < total_pages);
+
+        // Mark the same page twice with the same source.
+        tracker.mark_loaded(page_index, LoadSource::Preload);
+        tracker.mark_loaded(page_index, LoadSource::Preload);
+
+        let stats = tracker.stats();
+
+        // loaded_pages counts set bits in the bitmap — must be exactly 1.
+        kani::assert(
+            stats.loaded_pages == 1,
+            "loaded_pages must be 1 after marking same page twice",
+        );
+        // preload_count must also be 1 (not 2).
+        kani::assert(
+            stats.preload_pages == 1,
+            "preload_pages must be 1 — counter must not double-increment",
+        );
+        // Total source counts must equal loaded_pages.
+        kani::assert(
+            stats.preload_pages + stats.fault_pages + stats.zero_pages == stats.loaded_pages,
+            "sum of source counts must equal loaded_pages",
+        );
+    }
+
+    /// Proof: marking same page with different sources still counts exactly once.
+    ///
+    /// Preload marks the page first, then Fault tries to mark the same page.
+    /// Only the Preload counter should increment. loaded_pages must be 1.
+    ///
+    /// Bound: total_pages <= 128. stats() iterates ceil(128/64)=2 words → unwind(3).
+    #[kani::proof]
+    #[kani::unwind(3)]
+    fn proof_mark_loaded_different_source_dedup() {
+        let total_pages: usize = kani::any_where(|&n| n > 0 && n <= 128);
+        let tracker = PageTracker::new(total_pages);
+
+        let page_index: usize = kani::any_where(|&p| p < total_pages);
+
+        // Preload marks it first.
+        tracker.mark_loaded(page_index, LoadSource::Preload);
+        // Fault handler tries to mark the same page (simulating EEXIST race in sequential order).
+        tracker.mark_loaded(page_index, LoadSource::Fault);
+
+        let stats = tracker.stats();
+
+        kani::assert(
+            stats.loaded_pages == 1,
+            "loaded_pages must be 1 regardless of source order",
+        );
+        // Preload was first — preload_count incremented, fault_count did not.
+        kani::assert(
+            stats.preload_pages == 1,
+            "preload_pages must be 1 (preload was first)",
+        );
+        kani::assert(
+            stats.fault_pages == 0,
+            "fault_pages must be 0 (bit was already set when fault tried)",
+        );
+    }
+
+    /// Proof: out-of-bounds page_index is ignored — counters stay at 0.
+    ///
+    /// Bound: total_pages <= 128. stats() iterates ceil(128/64)=2 words → unwind(3).
+    #[kani::proof]
+    #[kani::unwind(3)]
+    fn proof_mark_loaded_out_of_bounds_ignored() {
+        let total_pages: usize = kani::any_where(|&n| n > 0 && n <= 128);
+        let tracker = PageTracker::new(total_pages);
+
+        // page_index at or beyond total_pages.
+        let page_index: usize = kani::any_where(|&p: &usize| p >= total_pages);
+
+        // This must not panic.
+        tracker.mark_loaded(page_index, LoadSource::Preload);
+
+        let stats = tracker.stats();
+        kani::assert(
+            stats.loaded_pages == 0,
+            "out-of-bounds mark_loaded must not increment loaded_pages",
+        );
+        kani::assert(
+            stats.preload_pages == 0,
+            "out-of-bounds mark_loaded must not increment preload_pages",
+        );
+        kani::cover!(true, "out-of-bounds ignored path reachable");
+    }
+
+    /// Proof: marking two distinct pages gives loaded_pages == 2.
+    ///
+    /// Regression guard: ensures deduplication only applies to the same index.
+    ///
+    /// Bound: total_pages <= 128, at least 2 pages.
+    /// stats() iterates ceil(128/64)=2 words → unwind(3).
+    #[kani::proof]
+    #[kani::unwind(3)]
+    fn proof_mark_two_distinct_pages() {
+        let total_pages: usize = kani::any_where(|&n| n >= 2 && n <= 128);
+        let tracker = PageTracker::new(total_pages);
+
+        let page_a: usize = kani::any();
+        let page_b: usize = kani::any();
+        kani::assume(page_a < total_pages);
+        kani::assume(page_b < total_pages);
+        kani::assume(page_a != page_b);
+
+        tracker.mark_loaded(page_a, LoadSource::Preload);
+        tracker.mark_loaded(page_b, LoadSource::Fault);
+
+        let stats = tracker.stats();
+        kani::assert(
+            stats.loaded_pages == 2,
+            "two distinct pages must give loaded_pages == 2",
+        );
+        kani::assert(
+            stats.preload_pages == 1 && stats.fault_pages == 1,
+            "each source must have count 1",
+        );
+    }
+
+    /// Proof: all LoadSource variants are accepted by mark_loaded.
+    /// mark_loaded has no loops (single array word access). unwind(1) is sufficient.
+    #[kani::proof]
+    #[kani::unwind(1)]
+    fn proof_mark_loaded_all_sources_accepted() {
+        let total_pages: usize = kani::any_where(|&n| n > 0 && n <= 128);
+        let page_index: usize = kani::any_where(|&p| p < total_pages);
+
+        let tracker = PageTracker::new(total_pages);
+        tracker.mark_loaded(page_index, LoadSource::Preload);
+        kani::cover!(true, "Preload source accepted");
+
+        let tracker2 = PageTracker::new(total_pages);
+        tracker2.mark_loaded(page_index, LoadSource::Fault);
+        kani::cover!(true, "Fault source accepted");
+
+        let tracker3 = PageTracker::new(total_pages);
+        tracker3.mark_loaded(page_index, LoadSource::Zero);
+        kani::cover!(true, "Zero source accepted");
+    }
+
+    // ── Address translation proofs ────────────────────────────────────────────
+
+    /// Proof: guest_to_host returns Some with correct offset for in-range addresses.
+    ///
+    /// For a single region, any address in [guest_addr, guest_addr + size) must map
+    /// to Some(host_addr + (addr - guest_addr)).
+    ///
+    /// Bound: 1 region (the correctness of the loop is the same for N regions).
+    /// guest_to_host iterates 1 region → unwind(2).
+    #[kani::proof]
+    #[kani::unwind(2)]
+    #[kani::solver(cadical)]
+    fn proof_guest_to_host_in_range_correct() {
+        // Symbolic region parameters.
+        let region_guest: u64 = kani::any();
+        let region_host: u64 = kani::any();
+        let region_size: u64 = kani::any_where(|&s| s > 0);
+        // Avoid overflow in guest_addr + size.
+        kani::assume(region_guest.checked_add(region_size).is_some());
+
+        let region = UffdRegion {
+            guest_addr: region_guest,
+            host_addr: region_host,
+            size: region_size,
+            page_offset: 0,
+        };
+
+        // Symbolic in-range address.
+        let addr: u64 = kani::any();
+        kani::assume(addr >= region_guest);
+        kani::assume(addr < region_guest + region_size);
+
+        let result = guest_to_host(&[region.clone()], addr);
+
+        kani::assert(result.is_some(), "in-range address must produce Some");
+        let expected_host = region_host + (addr - region_guest);
+        kani::assert(
+            result == Some(expected_host),
+            "host address must be region.host_addr + offset",
+        );
+        kani::cover!(true, "in-range Some path reachable");
+    }
+
+    /// Proof: guest_to_host returns None for addresses before any region.
+    ///
+    /// Bound: 1 region. guest_to_host iterates 1 region → unwind(2).
+    #[kani::proof]
+    #[kani::unwind(2)]
+    #[kani::solver(cadical)]
+    fn proof_guest_to_host_before_region_is_none() {
+        let region_guest: u64 = kani::any_where(|&g| g > 0);
+        let region_host: u64 = kani::any();
+        let region_size: u64 = kani::any_where(|&s| s > 0);
+        kani::assume(region_guest.checked_add(region_size).is_some());
+
+        let region = UffdRegion {
+            guest_addr: region_guest,
+            host_addr: region_host,
+            size: region_size,
+            page_offset: 0,
+        };
+
+        // Symbolic address strictly before the region.
+        let addr: u64 = kani::any_where(|&a| a < region_guest);
+
+        let result = guest_to_host(&[region], addr);
+        kani::assert(result.is_none(), "address before region must produce None");
+        kani::cover!(true, "before-region None path reachable");
+    }
+
+    /// Proof: guest_to_host returns None for addresses at or after region end.
+    ///
+    /// Bound: 1 region. guest_to_host iterates 1 region → unwind(2).
+    #[kani::proof]
+    #[kani::unwind(2)]
+    #[kani::solver(cadical)]
+    fn proof_guest_to_host_after_region_is_none() {
+        let region_guest: u64 = kani::any();
+        let region_host: u64 = kani::any();
+        let region_size: u64 = kani::any_where(|&s| s > 0);
+        // Ensure region_guest + region_size does not overflow.
+        kani::assume(region_guest.checked_add(region_size).is_some());
+
+        let region = UffdRegion {
+            guest_addr: region_guest,
+            host_addr: region_host,
+            size: region_size,
+            page_offset: 0,
+        };
+
+        // Address at or after the region end.
+        let addr: u64 = kani::any_where(|&a| a >= region_guest + region_size);
+
+        let result = guest_to_host(&[region], addr);
+        kani::assert(result.is_none(), "address at or after region end must produce None");
+        kani::cover!(true, "after-region None path reachable");
+    }
+
+    /// Proof: guest_to_host with 2 non-overlapping regions returns correct mapping.
+    ///
+    /// When two regions exist, an address in region 1 maps to region 1's host space,
+    /// and an address in region 2 maps to region 2's host space.
+    /// Bound: 2 regions. guest_to_host iterates 2 regions → unwind(3).
+    #[kani::proof]
+    #[kani::unwind(3)]
+    #[kani::solver(cadical)]
+    fn proof_guest_to_host_two_regions() {
+        // Region A.
+        let guest_a: u64 = kani::any();
+        let host_a: u64 = kani::any();
+        let size_a: u64 = kani::any_where(|&s| s > 0);
+        kani::assume(guest_a.checked_add(size_a).is_some());
+
+        // Region B: must start after region A ends (non-overlapping).
+        let guest_b: u64 = kani::any();
+        let host_b: u64 = kani::any();
+        let size_b: u64 = kani::any_where(|&s| s > 0);
+        kani::assume(guest_b.checked_add(size_b).is_some());
+        kani::assume(guest_b >= guest_a + size_a); // B starts at or after A ends.
+
+        let regions = [
+            UffdRegion { guest_addr: guest_a, host_addr: host_a, size: size_a, page_offset: 0 },
+            UffdRegion { guest_addr: guest_b, host_addr: host_b, size: size_b, page_offset: 0 },
+        ];
+
+        // Address in region A.
+        let addr_a: u64 = kani::any();
+        kani::assume(addr_a >= guest_a && addr_a < guest_a + size_a);
+        let result_a = guest_to_host(&regions, addr_a);
+        kani::assert(result_a == Some(host_a + (addr_a - guest_a)), "address in A maps to A's host");
+        kani::cover!(true, "region A mapping verified");
+
+        // Address in region B.
+        let addr_b: u64 = kani::any();
+        kani::assume(addr_b >= guest_b && addr_b < guest_b + size_b);
+        let result_b = guest_to_host(&regions, addr_b);
+        kani::assert(result_b == Some(host_b + (addr_b - guest_b)), "address in B maps to B's host");
+        kani::cover!(true, "region B mapping verified");
+    }
+}

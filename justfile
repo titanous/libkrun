@@ -151,15 +151,24 @@ shuttle iterations="1000":
     cargo test -p devices --features net,blk,shuttle -- shuttle_tests
 
 # Requires: cargo install --locked kani-verifier && cargo kani setup
-# Bounded formal verification proofs in kani-proofs/.
+# Bounded formal verification proofs (inline #[cfg(kani)] modules in source files).
 kani:
-    cargo kani --manifest-path kani-proofs/Cargo.toml
+    cargo kani -p vmm --features snapshot,uffd
+    cargo kani -p devices --features net
+    cargo kani -p arch
+    cargo kani -p utils
+    cargo kani -p kernel
 
 # Usage: just kani-proof <name>
 #   just kani-proof proof_mark_dirty_no_panic
-# Run a single named Kani proof.
+# Run a single named Kani proof across all packages.
 kani-proof name:
-    cargo kani --manifest-path kani-proofs/Cargo.toml --harness {{name}}
+    cargo kani -p vmm --features snapshot,uffd --harness {{name}} 2>/dev/null || \
+    cargo kani -p devices --features net --harness {{name}} 2>/dev/null || \
+    cargo kani -p arch --harness {{name}} 2>/dev/null || \
+    cargo kani -p utils --harness {{name}} 2>/dev/null || \
+    cargo kani -p kernel --harness {{name}} 2>/dev/null || \
+    echo "No harness named '{{name}}' found in any package"
 
 # Excluded subsystems (no tests exist for these)
 # Note: mutants_excludes relies on sh -c word splitting to expand multiple -e flags.

@@ -546,7 +546,7 @@ impl VsockPacket {
     }
 
     pub fn read_proxy_create(&self) -> Option<TsiProxyCreate> {
-        if self.buf_size >= 6 {
+        if self.buf_size >= 8 {
             let peer_port: u32 = byte_order::read_le_u32(&self.buf().unwrap()[0..]);
             let family: u16 = byte_order::read_le_u16(&self.buf().unwrap()[4..]);
             let _type: u16 = byte_order::read_le_u16(&self.buf().unwrap()[6..]);
@@ -703,6 +703,305 @@ impl VsockPacket {
             if let Some(buf) = self.buf_mut() {
                 byte_order::write_le_u64(&mut buf[0..], time);
             }
+        }
+    }
+
+    #[cfg(kani)]
+    fn new_for_verification() -> (Self, Vec<u8>) {
+        let mut hdr_buf = vec![0u8; VSOCK_PKT_HDR_SIZE];
+        let pkt = VsockPacket {
+            hdr: hdr_buf.as_mut_ptr(),
+            buf: None,
+            buf_size: 0,
+        };
+        (pkt, hdr_buf)
+    }
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    // Proofs verify invariants from the VIRTIO specification v1.2:
+    // - Virtio Socket Device (Sec 5.10): packet header format, field encoding
+    // - Virtio Transport (Sec 4.2.3): descriptor chain processing
+    // See: https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.html
+
+    // Header field layout per virtio_vsock_hdr (Virtio spec 5.10.6.1)
+
+    // u64 fields: byte_order write/read loop iterates 8 bytes → unwind(9)
+    #[kani::proof]
+    #[kani::unwind(9)]
+    fn proof_vsock_hdr_src_cid_roundtrip() {
+        let (mut pkt, _hdr_buf) = VsockPacket::new_for_verification();
+        let val: u64 = kani::any();
+        pkt.set_src_cid(val);
+        assert_eq!(pkt.src_cid(), val);
+    }
+
+    // u64 fields: byte_order write/read loop iterates 8 bytes → unwind(9)
+    #[kani::proof]
+    #[kani::unwind(9)]
+    fn proof_vsock_hdr_dst_cid_roundtrip() {
+        let (mut pkt, _hdr_buf) = VsockPacket::new_for_verification();
+        let val: u64 = kani::any();
+        pkt.set_dst_cid(val);
+        assert_eq!(pkt.dst_cid(), val);
+    }
+
+    // u32 fields: byte_order write/read loop iterates 4 bytes → unwind(5)
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn proof_vsock_hdr_src_port_roundtrip() {
+        let (mut pkt, _hdr_buf) = VsockPacket::new_for_verification();
+        let val: u32 = kani::any();
+        pkt.set_src_port(val);
+        assert_eq!(pkt.src_port(), val);
+    }
+
+    // u32 fields: byte_order write/read loop iterates 4 bytes → unwind(5)
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn proof_vsock_hdr_dst_port_roundtrip() {
+        let (mut pkt, _hdr_buf) = VsockPacket::new_for_verification();
+        let val: u32 = kani::any();
+        pkt.set_dst_port(val);
+        assert_eq!(pkt.dst_port(), val);
+    }
+
+    // u32 fields: byte_order write/read loop iterates 4 bytes → unwind(5)
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn proof_vsock_hdr_len_roundtrip() {
+        let (mut pkt, _hdr_buf) = VsockPacket::new_for_verification();
+        let val: u32 = kani::any();
+        pkt.set_len(val);
+        assert_eq!(pkt.len(), val);
+    }
+
+    // u16 fields: byte_order write/read loop iterates 2 bytes → unwind(3)
+    #[kani::proof]
+    #[kani::unwind(3)]
+    fn proof_vsock_hdr_type_roundtrip() {
+        let (mut pkt, _hdr_buf) = VsockPacket::new_for_verification();
+        let val: u16 = kani::any();
+        pkt.set_type(val);
+        assert_eq!(pkt.type_(), val);
+    }
+
+    // u16 fields: byte_order write/read loop iterates 2 bytes → unwind(3)
+    #[kani::proof]
+    #[kani::unwind(3)]
+    fn proof_vsock_hdr_op_roundtrip() {
+        let (mut pkt, _hdr_buf) = VsockPacket::new_for_verification();
+        let val: u16 = kani::any();
+        pkt.set_op(val);
+        assert_eq!(pkt.op(), val);
+    }
+
+    // u32 fields: byte_order write/read loop iterates 4 bytes → unwind(5)
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn proof_vsock_hdr_flags_roundtrip() {
+        let (mut pkt, _hdr_buf) = VsockPacket::new_for_verification();
+        let val: u32 = kani::any();
+        pkt.set_flags(val);
+        assert_eq!(pkt.flags(), val);
+    }
+
+    // u32 fields: byte_order write/read loop iterates 4 bytes → unwind(5)
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn proof_vsock_hdr_buf_alloc_roundtrip() {
+        let (mut pkt, _hdr_buf) = VsockPacket::new_for_verification();
+        let val: u32 = kani::any();
+        pkt.set_buf_alloc(val);
+        assert_eq!(pkt.buf_alloc(), val);
+    }
+
+    // u32 fields: byte_order write/read loop iterates 4 bytes → unwind(5)
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn proof_vsock_hdr_fwd_cnt_roundtrip() {
+        let (mut pkt, _hdr_buf) = VsockPacket::new_for_verification();
+        let val: u32 = kani::any();
+        pkt.set_fwd_cnt(val);
+        assert_eq!(pkt.fwd_cnt(), val);
+    }
+
+    // Multi-field isolation: largest field is u64 (8 bytes) → unwind(9)
+    #[kani::proof]
+    #[kani::unwind(9)]
+    fn proof_vsock_hdr_field_isolation() {
+        let (mut pkt, _hdr_buf) = VsockPacket::new_for_verification();
+        let cid: u64 = kani::any();
+        let port: u32 = kani::any();
+        let len: u32 = kani::any();
+        let op: u16 = kani::any();
+
+        pkt.set_src_cid(cid);
+        pkt.set_dst_port(port);
+        pkt.set_len(len);
+        pkt.set_op(op);
+
+        // Each field is independent
+        assert_eq!(pkt.src_cid(), cid);
+        assert_eq!(pkt.dst_port(), port);
+        assert_eq!(pkt.len(), len);
+        assert_eq!(pkt.op(), op);
+    }
+
+    // set_flag calls set_flags (read u32 + write u32): byte_order loops 4 bytes each → unwind(5)
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn proof_vsock_hdr_set_flag_or() {
+        let (mut pkt, _hdr_buf) = VsockPacket::new_for_verification();
+        let initial: u32 = kani::any();
+        let flag: u32 = kani::any();
+        pkt.set_flags(initial);
+        pkt.set_flag(flag);
+        assert_eq!(pkt.flags(), initial | flag);
+    }
+
+    // TSI protocol extensions (libkrun-specific, not in Virtio spec)
+
+    // Helper: create a VsockPacket with a symbolic data buffer of `buf_size` bytes.
+    // Returns the packet plus the backing allocations (must be kept alive).
+    fn new_with_buf_for_verification(buf_size: usize) -> (VsockPacket, Vec<u8>, Vec<u8>) {
+        let mut hdr_buf = vec![0u8; VSOCK_PKT_HDR_SIZE];
+        let mut data_buf: Vec<u8> = vec![0u8; buf_size];
+        for byte in data_buf.iter_mut() {
+            *byte = kani::any();
+        }
+        let pkt = VsockPacket {
+            hdr: hdr_buf.as_mut_ptr(),
+            buf: if buf_size > 0 {
+                Some(data_buf.as_mut_ptr())
+            } else {
+                None
+            },
+            buf_size,
+        };
+        (pkt, hdr_buf, data_buf)
+    }
+
+    /// Proof: sa_family returns None iff buf_size < 2.
+    /// sa_family calls read_le_u16 (2 bytes → unwind(3)).
+    #[kani::proof]
+    #[kani::unwind(3)]
+    fn proof_sa_family_bounds() {
+        let buf_size: usize = kani::any_where(|&s| s <= 64);
+        let (pkt, _hdr, _buf) = new_with_buf_for_verification(buf_size);
+        let result = pkt.sa_family();
+        if buf_size < 2 {
+            assert!(result.is_none());
+            kani::cover!(true, "None path reachable");
+        } else {
+            assert!(result.is_some());
+            kani::cover!(true, "Some path reachable");
+        }
+    }
+
+    /// Proof: inet_port returns None iff buf_size < 4.
+    /// inet_port calls read_be_u16 (2 bytes → unwind(3)).
+    #[kani::proof]
+    #[kani::unwind(3)]
+    fn proof_inet_port_bounds() {
+        let buf_size: usize = kani::any_where(|&s| s <= 64);
+        let (pkt, _hdr, _buf) = new_with_buf_for_verification(buf_size);
+        let result = pkt.inet_port();
+        if buf_size < 4 {
+            assert!(result.is_none());
+            kani::cover!(true, "inet_port None path reachable");
+        } else {
+            assert!(result.is_some());
+            kani::cover!(true, "inet_port Some path reachable");
+        }
+    }
+
+    /// Proof: inet_addr returns None iff buf_size < 8.
+    /// inet_addr does a slice try_into with no byte_order loops. unwind(1) sufficient.
+    #[kani::proof]
+    #[kani::unwind(1)]
+    fn proof_inet_addr_bounds() {
+        let buf_size: usize = kani::any_where(|&s| s <= 64);
+        let (pkt, _hdr, _buf) = new_with_buf_for_verification(buf_size);
+        let result = pkt.inet_addr();
+        if buf_size < 8 {
+            assert!(result.is_none());
+            kani::cover!(true, "inet_addr None path reachable");
+        } else {
+            assert!(result.is_some());
+            kani::cover!(true, "inet_addr Some path reachable");
+        }
+    }
+
+    /// Proof: read_proxy_create returns None iff buf_size < 8.
+    /// read_proxy_create calls read_le_u32 (4 bytes → unwind(5)) and read_le_u16 (2 bytes → unwind(3)).
+    /// Use max: unwind(5).
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn proof_read_proxy_create_bounds() {
+        let buf_size: usize = kani::any_where(|&s| s <= 64);
+        let (pkt, _hdr, _buf) = new_with_buf_for_verification(buf_size);
+        let result = pkt.read_proxy_create();
+        if buf_size < 8 {
+            assert!(result.is_none());
+            kani::cover!(true, "read_proxy_create None path reachable");
+        } else {
+            assert!(result.is_some());
+            kani::cover!(true, "read_proxy_create Some path reachable");
+        }
+    }
+
+    /// Proof: read_getname_req returns None iff buf_size < 12.
+    /// read_getname_req calls read_le_u32 three times (4 bytes each → unwind(5)).
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn proof_read_getname_req_bounds() {
+        let buf_size: usize = kani::any_where(|&s| s <= 64);
+        let (pkt, _hdr, _buf) = new_with_buf_for_verification(buf_size);
+        let result = pkt.read_getname_req();
+        if buf_size < 12 {
+            assert!(result.is_none());
+            kani::cover!(true, "read_getname_req None path reachable");
+        } else {
+            assert!(result.is_some());
+            kani::cover!(true, "read_getname_req Some path reachable");
+        }
+    }
+
+    /// Proof: read_accept_req returns None iff buf_size < 8.
+    /// read_accept_req calls read_le_u32 twice (4 bytes each → unwind(5)).
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn proof_read_accept_req_bounds() {
+        let buf_size: usize = kani::any_where(|&s| s <= 64);
+        let (pkt, _hdr, _buf) = new_with_buf_for_verification(buf_size);
+        let result = pkt.read_accept_req();
+        if buf_size < 8 {
+            assert!(result.is_none());
+            kani::cover!(true, "read_accept_req None path reachable");
+        } else {
+            assert!(result.is_some());
+            kani::cover!(true, "read_accept_req Some path reachable");
+        }
+    }
+
+    /// Proof: read_release_req returns None iff buf_size < 8.
+    /// read_release_req calls read_le_u32 twice (4 bytes each → unwind(5)).
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn proof_read_release_req_bounds() {
+        let buf_size: usize = kani::any_where(|&s| s <= 64);
+        let (pkt, _hdr, _buf) = new_with_buf_for_verification(buf_size);
+        let result = pkt.read_release_req();
+        if buf_size < 8 {
+            assert!(result.is_none());
+            kani::cover!(true, "read_release_req None path reachable");
+        } else {
+            assert!(result.is_some());
+            kani::cover!(true, "read_release_req Some path reachable");
         }
     }
 }

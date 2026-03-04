@@ -416,3 +416,110 @@ mod tests {
         }
     }
 }
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// Proof: mark(pfn) followed by is_set(pfn) returns true.
+    ///
+    /// Bound: 256 pages; pfn is any valid index in [0, 255].
+    /// mark and is_set have no loops (single array word access). unwind(1) sufficient.
+    #[kani::proof]
+    #[kani::unwind(1)]
+    fn proof_mark_then_is_set() {
+        // Symbolic number of pages: [1, 256]
+        let num_pages: usize = kani::any_where(|&n| n > 0 && n <= 256);
+        let bitmap = ReclaimedBitmap::new(num_pages);
+
+        // Symbolic PFN: valid index.
+        let pfn: u32 = kani::any_where(|&p| (p as usize) < num_pages);
+
+        bitmap.mark(pfn);
+
+        kani::assert(bitmap.is_set(pfn), "mark(pfn) must make is_set(pfn) return true");
+        kani::cover!(bitmap.is_set(pfn), "in-bounds pfn is set after mark");
+    }
+
+    /// Proof: mark(pfn) then clear(pfn) makes is_set(pfn) return false.
+    ///
+    /// Bound: 256 pages. mark/clear/is_set have no loops. unwind(1) sufficient.
+    #[kani::proof]
+    #[kani::unwind(1)]
+    fn proof_clear_then_not_is_set() {
+        let num_pages: usize = kani::any_where(|&n| n > 0 && n <= 256);
+        let bitmap = ReclaimedBitmap::new(num_pages);
+
+        let pfn: u32 = kani::any_where(|&p| (p as usize) < num_pages);
+
+        bitmap.mark(pfn);
+        bitmap.clear(pfn);
+
+        kani::assert(!bitmap.is_set(pfn), "clear(pfn) must make is_set(pfn) return false");
+        kani::cover!(true, "mark-then-clear path reachable");
+    }
+
+    /// Proof: count() equals the number of set bits (popcount invariant).
+    ///
+    /// After marking exactly one page, count() must return 1.
+    /// After clearing it, count() must return 0.
+    ///
+    /// Bound: 256 pages. count() iterates ceil(256/64)=4 words → unwind(5).
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn proof_count_equals_popcount() {
+        let num_pages: usize = kani::any_where(|&n| n > 0 && n <= 256);
+        let bitmap = ReclaimedBitmap::new(num_pages);
+
+        // Initially empty: count must be 0.
+        kani::assert(bitmap.count() == 0, "fresh bitmap must have count 0");
+
+        let pfn: u32 = kani::any_where(|&p| (p as usize) < num_pages);
+
+        // After marking one page: count must be 1.
+        bitmap.mark(pfn);
+        kani::assert(bitmap.count() == 1, "count must be 1 after marking one page");
+        kani::cover!(bitmap.count() == 1, "count-is-1 path reachable");
+
+        // After clearing: count must be 0 again.
+        bitmap.clear(pfn);
+        kani::assert(bitmap.count() == 0, "count must be 0 after clearing the only marked page");
+        kani::cover!(bitmap.count() == 0, "count-is-0-after-clear path reachable");
+    }
+
+    /// Proof: out-of-bounds pfn is silently ignored by mark and clear.
+    ///
+    /// A PFN equal to num_pages is out of bounds. mark and clear must not panic.
+    /// count() iterates ceil(255/64)=4 words → unwind(5).
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn proof_out_of_bounds_pfn_ignored() {
+        let num_pages: usize = kani::any_where(|&n| n > 0 && n <= 255); // leave room for pfn = num_pages
+        let bitmap = ReclaimedBitmap::new(num_pages);
+
+        // PFN exactly at the boundary (out of bounds).
+        let pfn = num_pages as u32;
+
+        // These must not panic.
+        bitmap.mark(pfn);
+        bitmap.clear(pfn);
+
+        // Bitmap must remain empty.
+        kani::assert(bitmap.count() == 0, "out-of-bounds pfn must not affect count");
+        kani::assert(!bitmap.is_set(pfn), "out-of-bounds pfn must not appear as set");
+        kani::cover!(true, "out-of-bounds pfn ignored path reachable");
+    }
+
+    /// Proof: mark/is_set/clear path coverage.
+    /// mark and is_set have no loops. unwind(1) sufficient.
+    #[kani::proof]
+    #[kani::unwind(1)]
+    fn proof_reclaimed_bitmap_path_coverage() {
+        let num_pages: usize = kani::any_where(|&n| n > 0 && n <= 256);
+        let bitmap = ReclaimedBitmap::new(num_pages);
+        let pfn: u32 = kani::any();
+        bitmap.mark(pfn);
+        kani::cover!(bitmap.is_set(pfn), "in-bounds pfn is set after mark");
+        kani::cover!(!bitmap.is_set(pfn), "out-of-bounds pfn remains unset");
+    }
+}

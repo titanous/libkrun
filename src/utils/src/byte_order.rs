@@ -107,3 +107,74 @@ mod tests {
     byte_order_test_read_write!(test_be_u16, write_be_u16, read_be_u16, true, u16);
     byte_order_test_read_write!(test_be_u32, write_be_u32, read_be_u32, true, u32);
 }
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    #[kani::proof]
+    #[kani::unwind(3)]
+    fn proof_le_u16_roundtrip() {
+        let val: u16 = kani::any();
+        let mut buf = [0u8; 2];
+        write_le_u16(&mut buf, val);
+        let result = read_le_u16(&buf);
+        kani::assert(result == val, "le_u16 write-read must be identity");
+        kani::cover!(true, "le_u16 roundtrip path reachable");
+    }
+
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn proof_le_u32_roundtrip() {
+        let val: u32 = kani::any();
+        let mut buf = [0u8; 4];
+        write_le_u32(&mut buf, val);
+        let result = read_le_u32(&buf);
+        kani::assert(result == val, "le_u32 write-read must be identity");
+        kani::cover!(true, "le_u32 roundtrip path reachable");
+    }
+
+    #[kani::proof]
+    #[kani::unwind(9)]
+    fn proof_le_u64_roundtrip() {
+        let val: u64 = kani::any();
+        let mut buf = [0u8; 8];
+        write_le_u64(&mut buf, val);
+        let result = read_le_u64(&buf);
+        kani::assert(result == val, "le_u64 write-read must be identity");
+        kani::cover!(true, "le_u64 roundtrip path reachable");
+    }
+
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn proof_le_i32_roundtrip() {
+        let val: i32 = kani::any();
+        let mut buf = [0i8; 4];
+        write_le_i32(&mut buf, val);
+        let result = read_le_i32(&buf);
+        kani::assert(result == val, "le_i32 write-read must be identity");
+        kani::cover!(true, "le_i32 roundtrip path reachable");
+    }
+
+    #[kani::proof]
+    #[kani::unwind(3)]
+    fn proof_be_u16_roundtrip() {
+        let val: u16 = kani::any();
+        let mut buf = [0u8; 2];
+        write_be_u16(&mut buf, val);
+        let result = read_be_u16(&buf);
+        kani::assert(result == val, "be_u16 write-read must be identity");
+        kani::cover!(true, "be_u16 roundtrip path reachable");
+    }
+
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn proof_be_u32_roundtrip() {
+        let val: u32 = kani::any();
+        let mut buf = [0u8; 4];
+        write_be_u32(&mut buf, val);
+        let result = read_be_u32(&buf);
+        kani::assert(result == val, "be_u32 write-read must be identity");
+        kani::cover!(true, "be_u32 roundtrip path reachable");
+    }
+}

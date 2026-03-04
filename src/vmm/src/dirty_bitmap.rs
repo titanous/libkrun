@@ -366,3 +366,97 @@ mod tests {
         }
     }
 }
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// Proof: mark_dirty never panics for any address with bitmap up to 256 pages.
+    ///
+    /// Kani exhaustively explores all combinations of (guest_addr, size) where
+    /// size is at most 256 pages worth of bytes. For every combination, mark_dirty
+    /// must complete without panic or out-of-bounds array access.
+    ///
+    /// Bound: 256 pages * PAGE_SIZE (16384) = 4,194,304 bytes maximum bitmap size.
+    /// mark_dirty has no loops (early return on out-of-bounds, single array access).
+    #[kani::proof]
+    #[kani::unwind(1)]
+    fn proof_mark_dirty_no_panic() {
+        // Symbolic address: any possible u64 value.
+        let guest_addr: u64 = kani::any();
+
+        // Symbolic size: constrain to keep verification tractable using any_where.
+        // DirtyBitmap::new uses PAGE_SIZE = 16384 internally.
+        // 256 pages = 4,194,304 bytes.
+        let num_pages: u64 = kani::any_where(|&n| n > 0 && n <= 256);
+        let size = num_pages * 16384; // PAGE_SIZE = 16384
+
+        // Base address: use 0 for simplicity; the address arithmetic is relative.
+        let bitmap = DirtyBitmap::new(0, size);
+
+        // This must not panic regardless of guest_addr value.
+        bitmap.mark_dirty(guest_addr);
+    }
+
+    /// Proof: mark_dirty on an in-bounds address is reflected by drain_dirty_pages.
+    ///
+    /// If guest_addr is within [0, size), then after mark_dirty, drain_dirty_pages
+    /// must return a non-empty vec containing the marked page.
+    ///
+    /// Bound: 4 pages (keeps state space small; the bitmap logic is identical for N pages).
+    /// drain_dirty_pages outer loop: 1 word (ceil(4/64)=1) → unwind(2).
+    /// Inner bit-scan loop: 64 iterations → unwind(65).
+    /// Use max: unwind(65) covers both.
+    #[kani::proof]
+    #[kani::unwind(65)]
+    fn proof_mark_dirty_in_bounds_recorded() {
+        // Use a fixed 4-page bitmap for tractability.
+        // PAGE_SIZE = 16384; 4 pages = 65536 bytes.
+        let bitmap = DirtyBitmap::new(0, 4 * 16384);
+
+        // Symbolic in-bounds address: within [0, 4 * PAGE_SIZE).
+        let page_idx: u64 = kani::any_where(|&i| i < 4);
+        let guest_addr = page_idx * 16384;
+
+        bitmap.mark_dirty(guest_addr);
+
+        let dirty = bitmap.drain_dirty_pages();
+        kani::assert(!dirty.is_empty(), "in-bounds mark_dirty must be recorded");
+        kani::assert(dirty.contains(&guest_addr), "drained pages must contain marked address");
+        kani::cover!(true, "in-bounds mark_dirty recorded path reachable");
+    }
+
+    /// Proof: mark_dirty on an out-of-bounds address leaves the bitmap empty.
+    ///
+    /// If guest_addr is outside [0, size), then drain_dirty_pages must return empty.
+    ///
+    /// Bound: 4 pages. drain_dirty_pages outer loop: 1 word → unwind(2).
+    /// Inner bit-scan: 64 iterations → unwind(65).
+    #[kani::proof]
+    #[kani::unwind(65)]
+    fn proof_mark_dirty_out_of_bounds_no_effect() {
+        let bitmap = DirtyBitmap::new(0, 4 * 16384); // 4 pages
+
+        // Symbolic out-of-bounds address: at or beyond 4 * PAGE_SIZE.
+        let guest_addr: u64 = kani::any_where(|&a| a >= 4 * 16384);
+
+        bitmap.mark_dirty(guest_addr);
+
+        let dirty = bitmap.drain_dirty_pages();
+        kani::assert(dirty.is_empty(), "out-of-bounds mark_dirty must not record anything");
+        kani::cover!(true, "out-of-bounds silent path reachable");
+    }
+
+    /// Proof: both in-bounds and out-of-bounds paths are reachable for mark_dirty.
+    /// drain_dirty_pages: 1 word outer loop → unwind(2); 64-bit inner loop → unwind(65).
+    #[kani::proof]
+    #[kani::unwind(65)]
+    fn proof_mark_dirty_both_paths_reachable() {
+        let bitmap = DirtyBitmap::new(0, 4 * 16384);
+        let guest_addr: u64 = kani::any();
+        bitmap.mark_dirty(guest_addr);
+        let dirty = bitmap.drain_dirty_pages();
+        kani::cover!(!dirty.is_empty(), "in-bounds mark is recorded");
+        kani::cover!(dirty.is_empty(), "out-of-bounds mark is silent");
+    }
+}

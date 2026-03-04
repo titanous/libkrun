@@ -37,7 +37,7 @@ Last verified: 2026-03-03
 - `src/arch/`, `src/kernel/` - Architecture and kernel loading support
 - `tests/` - Integration test workspace (host+guest test cases run inside VMs)
 - `fuzz/` - Cargo-fuzz package with 5 harnesses (snapshot deser, FUSE parsing, block request, descriptor chain, vhost-user msg)
-- `kani-proofs/` - Kani bounded model checking package with 22 proofs (bitmaps, GDT, page tracker, snapshot header)
+- Kani bounded model checking: 22 proofs live inline as `#[cfg(kani)] mod verification` in their respective source files (dirty_bitmap.rs, gdt.rs, snapshot.rs, page_tracker.rs, reclaimed_bitmap.rs)
 - `init/` - C init binary compiled for guest (embedded when `embedded_init` feature on)
 - `vendor/vhost/` - Patched vhost 0.15.0 crate (adds DEVICE_STATE protocol methods); used via `[patch.crates-io]`
 - `vendor/vhost-user-backend/` - Patched vhost-user-backend 0.21.0 (vm-memory 0.18 compat); used by test daemons
