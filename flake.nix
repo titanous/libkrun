@@ -173,14 +173,20 @@
               --replace 'KERNEL_VERSION = linux-6.12.68' 'KERNEL_VERSION = linux-6.12.74'
 
             cp ${./libkrunfw-patches/0022-vmgenid-setup-data.patch} patches/0022-vmgenid-setup-data.patch
+            cp ${./libkrunfw-patches/0023-no-jitterentropy.patch} patches/0023-no-jitterentropy.patch
 
             cat >> config-libkrunfw_x86_64 <<'KCONFIG_EOF'
 CONFIG_VMGENID=y
-CONFIG_SERIAL_8250=y
-CONFIG_SERIAL_8250_CONSOLE=y
-CONFIG_SERIAL_EARLYCON=y
-CONFIG_RANDOM_TRUST_CPU=y
-# CONFIG_CRYPTO_JITTERENTROPY is not set
+# Remove jitterentropy (~14ms savings): 0023-no-jitterentropy.patch removes the unconditional
+# `select CRYPTO_JITTERENTROPY` from CRYPTO_DRBG in crypto/Kconfig; without the select,
+# the base config's explicit CONFIG_CRYPTO_JITTERENTROPY=y can be overridden here.
+# CONFIG_RANDOM_TRUST_CPU=y ensures DRBG has CPU entropy (RDRAND) without needing jent.
+CONFIG_CRYPTO_JITTERENTROPY=n
+# Serial 8250 disabled in production (~12ms savings for serial8250_init).
+# For earlycon debugging: flip these to =y and add earlycon=uart8250,io,0x3f8,115200 to cmdline
+CONFIG_SERIAL_8250=n
+CONFIG_SERIAL_8250_CONSOLE=n
+CONFIG_SERIAL_EARLYCON=n
 KCONFIG_EOF
           '';
         });
