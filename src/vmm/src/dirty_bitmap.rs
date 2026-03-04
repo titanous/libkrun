@@ -30,8 +30,8 @@ pub struct DirtyBitmap {
 impl DirtyBitmap {
     /// Create a new dirty bitmap covering the given address range.
     pub fn new(base_addr: u64, size: u64) -> Self {
-        let num_pages = ((size + PAGE_SIZE - 1) / PAGE_SIZE) as usize;
-        let num_words = (num_pages + 63) / 64;
+        let num_pages = size.div_ceil(PAGE_SIZE) as usize;
+        let num_words = num_pages.div_ceil(64);
         let bitmap: Vec<AtomicU64> = (0..num_words).map(|_| AtomicU64::new(0)).collect();
 
         DirtyBitmap {
