@@ -1,6 +1,11 @@
 # Feature set used by all targets.
 features := "embedded_init,snapshot,uffd,blk,vhost-user"
 
+# Build the guest init binary (static musl)
+build-init:
+    cd init && cargo build --release
+    cp init/target/x86_64-unknown-linux-musl/release/krun-init init/init
+
 # Default: check
 default: check
 
@@ -10,7 +15,7 @@ check:
     cargo clippy -p libkrun --features {{features}} -- -D warnings
 
 # Build the release library
-build:
+build: build-init
     cargo build --release -p libkrun --features {{features}}
 
 # Unit tests for all crates
