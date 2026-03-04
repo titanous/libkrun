@@ -117,14 +117,6 @@ pub fn validate_header_for_vm(
 ) -> Result<(), SnapshotError> {
     validate_magic_and_version(header)?;
 
-    let expected_layout = ram_layout(guest_memory);
-    if header.ram_regions != expected_layout {
-        return Err(SnapshotError::MemoryLayoutMismatch {
-            expected: expected_layout,
-            got: header.ram_regions.clone(),
-        });
-    }
-
     if header.vcpu_count as usize != expected_vcpu_count {
         return Err(SnapshotError::VcpuCountMismatch {
             expected: expected_vcpu_count,
@@ -134,6 +126,14 @@ pub fn validate_header_for_vm(
 
     if header.nested_enabled != expected_nested_enabled {
         return Err(SnapshotError::NestedEnabledMismatch);
+    }
+
+    let expected_layout = ram_layout(guest_memory);
+    if header.ram_regions != expected_layout {
+        return Err(SnapshotError::MemoryLayoutMismatch {
+            expected: expected_layout,
+            got: header.ram_regions.clone(),
+        });
     }
 
     Ok(())

@@ -5,8 +5,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the THIRD-PARTY file.
 
-#[cfg(not(feature = "tee"))]
-mod setup_data;
 mod gdt;
 /// Contains logic for setting up Advanced Programmable Interrupt Controller (local version).
 pub mod interrupts;
@@ -18,6 +16,8 @@ mod mptable;
 pub mod msr;
 /// Logic for configuring x86_64 registers.
 pub mod regs;
+#[cfg(not(feature = "tee"))]
+mod setup_data;
 
 use crate::x86_64::layout::{EBDA_START, FIRST_ADDR_PAST_32BITS, MMIO_MEM_START};
 #[cfg(feature = "tee")]
@@ -273,8 +273,8 @@ pub fn configure_system(
     mptable::setup_mptable(guest_mem, num_cpus).map_err(Error::MpTableSetup)?;
 
     #[cfg(not(feature = "tee"))]
-    let setup_data_addr = setup_data::write_vmgenid_setup_data(guest_mem)
-        .map_err(Error::SetupData)?;
+    let setup_data_addr =
+        setup_data::write_vmgenid_setup_data(guest_mem).map_err(Error::SetupData)?;
 
     let mut params: BootParamsWrapper = BootParamsWrapper(boot_params::default());
 

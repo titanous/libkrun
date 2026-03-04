@@ -40,7 +40,10 @@ pub fn write_vmgenid_setup_data(guest_mem: &GuestMemoryMmap) -> Result<u64, Erro
         .map_err(|_| Error::WriteSetupData)?;
     // type: SETUP_VMGENID
     guest_mem
-        .write_slice(&SETUP_VMGENID.to_le_bytes(), GuestAddress(SETUP_DATA_ADDR + 8))
+        .write_slice(
+            &SETUP_VMGENID.to_le_bytes(),
+            GuestAddress(SETUP_DATA_ADDR + 8),
+        )
         .map_err(|_| Error::WriteSetupData)?;
     // len: payload size
     guest_mem
@@ -55,7 +58,10 @@ pub fn write_vmgenid_setup_data(guest_mem: &GuestMemoryMmap) -> Result<u64, Erro
         .map_err(|_| Error::WriteSetupData)?;
     // irq
     guest_mem
-        .write_slice(&VMGENID_IRQ.to_le_bytes(), GuestAddress(SETUP_DATA_ADDR + 24))
+        .write_slice(
+            &VMGENID_IRQ.to_le_bytes(),
+            GuestAddress(SETUP_DATA_ADDR + 24),
+        )
         .map_err(|_| Error::WriteSetupData)?;
     // pad
     guest_mem
@@ -70,7 +76,9 @@ mod tests {
     use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
 
     use super::*;
-    use crate::x86_64::layout::{SETUP_DATA_ADDR, VMGENID_GUID_OFFSET, VMGENID_GUID_PAGE, VMGENID_IRQ};
+    use crate::x86_64::layout::{
+        SETUP_DATA_ADDR, VMGENID_GUID_OFFSET, VMGENID_GUID_PAGE, VMGENID_IRQ,
+    };
 
     fn read_u32(mem: &GuestMemoryMmap, offset: u64) -> u32 {
         let mut buf = [0u8; 4];

@@ -14,18 +14,13 @@ mod host {
 
     /// Write a minimal snapshot directory for error-path testing.
     /// Produces a valid bincode-encoded VmSnapshot at `dir/vmstate` with the
-    /// given header fields, and an empty `dir/memory` file (error happens before
-    /// memory is read for AC6.3/6.4/6.5).
+    /// given header fields, and an empty `dir/memory` file.
+    ///
+    /// RAM regions are intentionally left empty — validation checks magic,
+    /// version, vCPU count, and nested_enabled before RAM layout, so these
+    /// error-path tests never reach the RAM layout check.
     fn write_vmstate(dir: &Path, magic: u32, version: u32, vcpu_count: u32, nested: bool) {
-        // Actual RAM layout from vm_config(1, 128): three regions
-        // (verified from actual error messages when layout mismatch fires)
-        // Note: kernel size varies with config (ACPI/PCI/VMGENID add ~256KB)
-        let ram_regions = vec![
-            (0u64, 16777216u64),         // Region 1: base=0, size=16MiB
-            (16777216u64, 21430272u64),  // Region 2: base=16MiB, size=~20.4MiB
-            (38207488u64, 134217728u64), // Region 3: base=~36.4MiB, size=128MiB
-        ];
-        write_vmstate_with_regions(dir, magic, version, vcpu_count, nested, ram_regions);
+        write_vmstate_with_regions(dir, magic, version, vcpu_count, nested, vec![]);
     }
 
     /// Helper to encode snapshot with explicit RAM regions (for testing purposes).

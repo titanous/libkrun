@@ -1,6 +1,6 @@
 # Integration Tests
 
-Last verified: 2026-03-01
+Last verified: 2026-03-03
 
 ## Purpose
 Host/guest integration test workspace. Tests run inside real microVMs to verify end-to-end behavior.
