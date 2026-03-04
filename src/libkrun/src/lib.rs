@@ -737,7 +737,7 @@ impl Builder {
     #[cfg(not(feature = "tee"))]
     pub fn set_root(&mut self, root_path: &str) -> &mut Self {
         // 64 MB DAX window (reduced from 512 MB; smaller KVM region setup overhead).
-        self.add_virtiofs_path("/dev/root", root_path, Some(1 << 26), false);
+        self.add_virtiofs_path("krun_root", root_path, Some(1 << 26), false);
         self
     }
 
