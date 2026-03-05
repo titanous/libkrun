@@ -1512,9 +1512,10 @@ mod verification {
     /// pure-logic conditions (ready, size validity, and three alignment constraints)
     /// and that these conditions match the expected logic.
     ///
-    /// Regression guard: if the conditions inside is_valid_params() or is_valid()
-    /// are changed or the call to is_valid_params() is removed from is_valid(),
-    /// this proof will fail.
+    /// Regression guard: if the conditions inside is_valid_params() are changed,
+    /// this proof will fail. The delegation from is_valid() to is_valid_params()
+    /// is guarded by unit tests (test_queue_validation,
+    /// test_is_valid_params_matches_is_valid_conditions).
     #[kani::proof]
     #[kani::solver(cadical)]
     fn proof_is_valid_params_matches_is_valid_conditions() {
