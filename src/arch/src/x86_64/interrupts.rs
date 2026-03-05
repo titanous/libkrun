@@ -97,6 +97,140 @@ mod verification {
             "reg with pre-set delivery mode bits covered"
         );
     }
+
+    // ── LAPIC register read/write proofs ──────────────────────────────────────
+
+    /// Proof: set_klapic_reg / get_klapic_reg round-trip at APIC_LVT0 (0x350).
+    ///
+    /// set_klapic_reg writes a u32 (as little-endian i32) at bytes [offset, offset+4).
+    /// get_klapic_reg reads back the same bytes and must return the original value.
+    /// Uses the concrete offset APIC_LVT0 = 0x350 (known valid register) so Kani
+    /// can handle the fixed-size [i8; 1024] array without symbolic index overhead.
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    fn proof_klapic_reg_lvt0_set_get_roundtrip() {
+        let value: u32 = kani::any();
+
+        let mut klapic = kvm_bindings::kvm_lapic_state::default();
+        set_klapic_reg(&mut klapic, APIC_LVT0, value);
+        let recovered = get_klapic_reg(&klapic, APIC_LVT0);
+
+        kani::assert(
+            recovered == value,
+            "get_klapic_reg must return the value written by set_klapic_reg at APIC_LVT0",
+        );
+        kani::cover!(value == 0, "zero value roundtrip covered");
+        kani::cover!(value == u32::MAX, "max value roundtrip covered");
+    }
+
+    /// Proof: set_klapic_reg / get_klapic_reg round-trip at APIC_LVT1 (0x360).
+    ///
+    /// Verifies the same round-trip property at the APIC_LVT1 register offset.
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    fn proof_klapic_reg_lvt1_set_get_roundtrip() {
+        let value: u32 = kani::any();
+
+        let mut klapic = kvm_bindings::kvm_lapic_state::default();
+        set_klapic_reg(&mut klapic, APIC_LVT1, value);
+        let recovered = get_klapic_reg(&klapic, APIC_LVT1);
+
+        kani::assert(
+            recovered == value,
+            "get_klapic_reg must return the value written by set_klapic_reg at APIC_LVT1",
+        );
+        kani::cover!(value == 0, "zero value roundtrip covered");
+        kani::cover!(value == u32::MAX, "max value roundtrip covered");
+    }
+
+    /// Proof: set_klapic_reg does not modify bytes outside the 4-byte write window.
+    ///
+    /// Writing at offset O must leave bytes outside [O, O+4) unchanged.
+    /// Verifies there is no byte spill from the little-endian i32 write.
+    ///
+    /// Strategy: write at a concrete offset (APIC_LVT0 = 0x350 = 848), then check
+    /// that adjacent bytes at offset 0 are unchanged.
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    fn proof_klapic_reg_write_does_not_spill() {
+        const WRITE_OFFSET: usize = APIC_LVT0; // 0x350
+
+        let value: u32 = kani::any();
+
+        let mut klapic = kvm_bindings::kvm_lapic_state::default();
+        // Record the initial value at a different offset (offset 0 = APIC ID register).
+        let before = get_klapic_reg(&klapic, 0);
+
+        set_klapic_reg(&mut klapic, WRITE_OFFSET, value);
+
+        // Offset 0 must be unchanged (it does not overlap with offset 0x350).
+        let after = get_klapic_reg(&klapic, 0);
+        kani::assert(
+            before == after,
+            "write at APIC_LVT0 must not affect bytes at offset 0",
+        );
+        kani::cover!(value != 0, "non-zero write no-spill path covered");
+    }
+
+    /// Proof: APIC mode constants fit in the 3-bit delivery mode field.
+    ///
+    /// APIC_MODE_NMI (4) and APIC_MODE_EXTINT (7) must be in [0, 7].
+    /// set_apic_delivery_mode only uses bits [2:0] of mode via the 0x700 mask.
+    #[kani::proof]
+    fn proof_apic_mode_constants_valid() {
+        kani::assert(
+            APIC_MODE_NMI <= 0x7,
+            "APIC_MODE_NMI must fit in the 3-bit delivery mode field",
+        );
+        kani::assert(
+            APIC_MODE_EXTINT <= 0x7,
+            "APIC_MODE_EXTINT must fit in the 3-bit delivery mode field",
+        );
+        // Verify they are distinct (no aliasing between NMI and EXTINT modes).
+        kani::assert(
+            APIC_MODE_NMI != APIC_MODE_EXTINT,
+            "NMI and EXTINT delivery modes must be distinct",
+        );
+        kani::cover!(true, "APIC mode constants valid proof reachable");
+    }
+
+    /// Proof: set_lint correctly configures LVT0 (EXTINT) and LVT1 (NMI) delivery modes.
+    ///
+    /// Verifies the combined effect of set_apic_delivery_mode applied to both LVT entries:
+    /// - LVT0 gets APIC_MODE_EXTINT in bits [10:8]
+    /// - LVT1 gets APIC_MODE_NMI in bits [10:8]
+    /// - All other bits in each LVT entry are preserved from the initial state.
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    fn proof_set_lint_modes_correct() {
+        let initial_lvt0: u32 = kani::any();
+        let initial_lvt1: u32 = kani::any();
+
+        let result_lvt0 = set_apic_delivery_mode(initial_lvt0, APIC_MODE_EXTINT);
+        let result_lvt1 = set_apic_delivery_mode(initial_lvt1, APIC_MODE_NMI);
+
+        // LVT0 delivery mode field must be EXTINT.
+        kani::assert(
+            (result_lvt0 >> 8) & 0x7 == APIC_MODE_EXTINT,
+            "LVT0 delivery mode must be APIC_MODE_EXTINT",
+        );
+        // LVT1 delivery mode field must be NMI.
+        kani::assert(
+            (result_lvt1 >> 8) & 0x7 == APIC_MODE_NMI,
+            "LVT1 delivery mode must be APIC_MODE_NMI",
+        );
+        // Non-delivery-mode bits must be preserved.
+        kani::assert(
+            (result_lvt0 & !0x700) == (initial_lvt0 & !0x700),
+            "LVT0 non-mode bits must be preserved",
+        );
+        kani::assert(
+            (result_lvt1 & !0x700) == (initial_lvt1 & !0x700),
+            "LVT1 non-mode bits must be preserved",
+        );
+
+        kani::cover!(true, "set_lint modes correct proof reachable");
+    }
 }
 
 #[cfg(test)]

@@ -271,6 +271,19 @@ impl Rtc {
         defs::RTC_DEV_ID
     }
 
+    /// Validate a clock_id from the guest and return the appropriate status code.
+    ///
+    /// Returns `VIRTIO_RTC_S_OK` for clock_id 0 (UTC) and `VIRTIO_RTC_S_EINVAL`
+    /// for any other value.  Called directly by `process_req` for both
+    /// `VIRTIO_RTC_REQ_CLOCK_CAP` and `VIRTIO_RTC_REQ_READ` dispatches.
+    fn validate_clock_id(clock_id: u16) -> u8 {
+        if clock_id == 0 {
+            uapi::VIRTIO_RTC_S_OK
+        } else {
+            uapi::VIRTIO_RTC_S_EINVAL
+        }
+    }
+
     /// Get current UTC time in nanoseconds since UNIX epoch
     fn get_utc_ns() -> u64 {
         SystemTime::now()
@@ -362,12 +375,13 @@ impl Rtc {
                         .unwrap_or_default();
 
                     let clock_id = req_body.clock_id.to_native();
+                    let status = Self::validate_clock_id(clock_id);
 
-                    let resp = if clock_id == 0 {
+                    let resp = if status == uapi::VIRTIO_RTC_S_OK {
                         // Clock 0 = UTC
                         RespClockCap {
                             head: RespHead {
-                                status: uapi::VIRTIO_RTC_S_OK,
+                                status,
                                 _reserved: [0; 7],
                             },
                             clock_type: Le16::from(uapi::VIRTIO_RTC_CLOCK_UTC),
@@ -377,7 +391,7 @@ impl Rtc {
                     } else {
                         RespClockCap {
                             head: RespHead {
-                                status: uapi::VIRTIO_RTC_S_EINVAL,
+                                status,
                                 _reserved: [0; 7],
                             },
                             clock_type: Le16::from(0),
@@ -404,12 +418,13 @@ impl Rtc {
                         .unwrap_or_default();
 
                     let clock_id = req_body.clock_id.to_native();
+                    let status = Self::validate_clock_id(clock_id);
 
-                    let resp = if clock_id == 0 {
+                    let resp = if status == uapi::VIRTIO_RTC_S_OK {
                         // Clock 0 = UTC
                         RespRead {
                             head: RespHead {
-                                status: uapi::VIRTIO_RTC_S_OK,
+                                status,
                                 _reserved: [0; 7],
                             },
                             clock_ns: Le64::from(Self::get_utc_ns()),
@@ -417,7 +432,7 @@ impl Rtc {
                     } else {
                         RespRead {
                             head: RespHead {
-                                status: uapi::VIRTIO_RTC_S_EINVAL,
+                                status,
                                 _reserved: [0; 7],
                             },
                             clock_ns: Le64::from(0),
@@ -875,5 +890,186 @@ mod tests {
             freq >= min_freq && freq <= max_freq,
             "Counter frequency {freq} Hz should be between {min_freq} and {max_freq}"
         );
+    }
+}
+
+/// Mock for `SystemTime::now()` used in Kani proofs.
+///
+/// Returns a fixed time (UNIX_EPOCH + 1_700_000_000 seconds, an arbitrary
+/// post-2020 timestamp) so that `get_utc_ns()` is deterministic.
+#[cfg(kani)]
+fn mock_system_time_now() -> std::time::SystemTime {
+    std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000)
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    // ── Structure size proofs ─────────────────────────────────────────────────
+    //
+    // Virtio-RTC spec (§5.16) mandates specific struct layouts.  We verify each
+    // size at the type level via `std::mem::size_of`, which is a compile-time
+    // constant that Kani resolves immediately.
+
+    /// Proof: ReqHead is exactly 8 bytes (virtio-rtc spec §5.16.6.1).
+    #[kani::proof]
+    fn proof_req_head_size() {
+        kani::assert(
+            std::mem::size_of::<ReqHead>() == 8,
+            "ReqHead must be 8 bytes per virtio-rtc spec",
+        );
+        kani::cover!(true, "ReqHead size proof reachable");
+    }
+
+    /// Proof: RespHead is exactly 8 bytes.
+    #[kani::proof]
+    fn proof_resp_head_size() {
+        kani::assert(
+            std::mem::size_of::<RespHead>() == 8,
+            "RespHead must be 8 bytes per virtio-rtc spec",
+        );
+        kani::cover!(true, "RespHead size proof reachable");
+    }
+
+    /// Proof: RespCfg is exactly 16 bytes (header + num_clocks + padding).
+    #[kani::proof]
+    fn proof_resp_cfg_size() {
+        kani::assert(
+            std::mem::size_of::<RespCfg>() == 16,
+            "RespCfg must be 16 bytes per virtio-rtc spec",
+        );
+        kani::cover!(true, "RespCfg size proof reachable");
+    }
+
+    /// Proof: RespRead is exactly 16 bytes (header + clock_ns Le64).
+    #[kani::proof]
+    fn proof_resp_read_size() {
+        kani::assert(
+            std::mem::size_of::<RespRead>() == 16,
+            "RespRead must be 16 bytes per virtio-rtc spec",
+        );
+        kani::cover!(true, "RespRead size proof reachable");
+    }
+
+    /// Proof: RespReadCross is exactly 24 bytes (header + clock_ns + counter_value).
+    #[kani::proof]
+    fn proof_resp_read_cross_size() {
+        kani::assert(
+            std::mem::size_of::<RespReadCross>() == 24,
+            "RespReadCross must be 24 bytes per virtio-rtc spec",
+        );
+        kani::cover!(true, "RespReadCross size proof reachable");
+    }
+
+    // ── Protocol dispatch proofs ──────────────────────────────────────────────
+
+    /// Proof: clock_id 0 always selects VIRTIO_RTC_S_OK.
+    ///
+    /// The virtio-rtc spec mandates that clock 0 (UTC) must always be supported.
+    /// This calls the production `Rtc::validate_clock_id` directly.
+    #[kani::proof]
+    fn proof_clock_cap_clock0_is_ok() {
+        let status = Rtc::validate_clock_id(0);
+        kani::assert(
+            status == uapi::VIRTIO_RTC_S_OK,
+            "clock 0 must return VIRTIO_RTC_S_OK",
+        );
+        kani::cover!(true, "clock 0 OK path reachable");
+    }
+
+    /// Proof: any clock_id other than 0 always returns VIRTIO_RTC_S_EINVAL.
+    #[kani::proof]
+    fn proof_clock_cap_nonzero_clock_is_einval() {
+        let clock_id: u16 = kani::any_where(|&id| id != 0);
+        let status = Rtc::validate_clock_id(clock_id);
+        kani::assert(
+            status == uapi::VIRTIO_RTC_S_EINVAL,
+            "non-zero clock_id must return VIRTIO_RTC_S_EINVAL",
+        );
+        kani::cover!(true, "nonzero clock EINVAL path reachable");
+    }
+
+    /// Proof: validate_clock_id returns only VIRTIO_RTC_S_OK or VIRTIO_RTC_S_EINVAL.
+    ///
+    /// For any clock_id, the status is either VIRTIO_RTC_S_OK (0) or
+    /// VIRTIO_RTC_S_EINVAL (4).  No other status code is produced.  Both
+    /// CLOCK_CAP and READ dispatches in `process_req` rely on this invariant.
+    #[kani::proof]
+    fn proof_clock_cap_status_is_ok_or_einval() {
+        let clock_id: u16 = kani::any();
+        let status = Rtc::validate_clock_id(clock_id);
+        kani::assert(
+            status == uapi::VIRTIO_RTC_S_OK || status == uapi::VIRTIO_RTC_S_EINVAL,
+            "validate_clock_id status must be OK or EINVAL",
+        );
+        kani::cover!(status == uapi::VIRTIO_RTC_S_OK, "OK branch reachable");
+        kani::cover!(
+            status == uapi::VIRTIO_RTC_S_EINVAL,
+            "EINVAL branch reachable"
+        );
+    }
+
+    /// Proof: validate_clock_id is deterministic — two calls with the same
+    /// clock_id always produce the same status.
+    ///
+    /// Both CLOCK_CAP and READ in `process_req` use this single function, so
+    /// they are guaranteed to agree for every possible clock_id.
+    #[kani::proof]
+    fn proof_clock_cap_and_read_status_agree() {
+        let clock_id: u16 = kani::any();
+        let cap_status = Rtc::validate_clock_id(clock_id);
+        let rd_status = Rtc::validate_clock_id(clock_id);
+        kani::assert(
+            cap_status == rd_status,
+            "CLOCK_CAP and READ status must agree for all clock_id values",
+        );
+        kani::cover!(true, "status agreement proof reachable");
+    }
+
+    // ── get_utc_ns with SystemTime stub ───────────────────────────────────────
+
+    /// Proof: get_utc_ns returns a value that fits in u64.
+    ///
+    /// `SystemTime::now().duration_since(UNIX_EPOCH)` can only fail if the
+    /// system clock is set before the UNIX epoch (1970).  In practice this
+    /// cannot happen in a VM, but we stub the call to a fixed post-epoch
+    /// timestamp so that Kani can reason about the arithmetic.
+    ///
+    /// The stub replaces `SystemTime::now` with `mock_system_time_now`, which
+    /// returns `UNIX_EPOCH + 1_700_000_000s`.  The proof then checks that the
+    /// resulting nanosecond value is non-zero and fits in u64.
+    #[kani::proof]
+    #[kani::stub(std::time::SystemTime::now, mock_system_time_now)]
+    fn proof_get_utc_ns_no_panic() {
+        let ns = Rtc::get_utc_ns();
+        // With our fixed stub, duration_since(UNIX_EPOCH) succeeds and the
+        // value is 1_700_000_000 * 1e9 = 1.7e18, which fits in a u64.
+        kani::assert(ns > 0, "get_utc_ns with fixed stub must return non-zero");
+        kani::cover!(true, "get_utc_ns stub path reachable");
+    }
+
+    // ── Constant value proofs ─────────────────────────────────────────────────
+
+    /// Proof: VIRTIO_RTC_S_OK == 0 as required by the virtio spec.
+    ///
+    /// The spec (§5.16.6.2) defines the success status as 0.
+    #[kani::proof]
+    fn proof_virtio_rtc_s_ok_is_zero() {
+        kani::assert(
+            uapi::VIRTIO_RTC_S_OK == 0,
+            "VIRTIO_RTC_S_OK must be 0 per virtio-rtc spec",
+        );
+        kani::cover!(true, "status constant proof reachable");
+    }
+
+    /// Proof: NUM_CLOCKS == 1.
+    ///
+    /// We advertise exactly one clock (UTC).  This proof ensures that the
+    /// constant is not accidentally changed.
+    #[kani::proof]
+    fn proof_num_clocks_is_one() {
+        kani::assert(NUM_CLOCKS == 1, "NUM_CLOCKS must be 1 (UTC clock only)");
+        kani::cover!(true, "NUM_CLOCKS constant proof reachable");
     }
 }

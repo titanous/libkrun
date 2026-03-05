@@ -10,6 +10,19 @@
 use kvm_bindings::kvm_segment;
 
 /// Constructor for a conventional segment GDT (or LDT) entry. Derived from the kernel's segment.h.
+///
+/// # Contracts
+/// The GDT limit field is 20 bits; the result correctly encodes base, limit, and flags.
+/// Only limit values ≤ 0xFFFFF are representable without truncation.
+#[cfg_attr(kani, kani::requires(limit <= 0xFFFFF))]
+#[cfg_attr(kani, kani::ensures(|&result| {
+    // Verify base round-trips: the three base fragments reassemble to the original base.
+    let recovered_base =
+        ((result & 0xFF00_0000_0000_0000) >> 32)
+        | ((result & 0x0000_00FF_0000_0000) >> 16)
+        | ((result & 0x0000_0000_FFFF_0000) >> 16);
+    recovered_base == u64::from(base)
+}))]
 pub fn gdt_entry(flags: u16, base: u32, limit: u32) -> u64 {
     ((u64::from(base) & 0xff00_0000u64) << (56 - 24))
         | ((u64::from(flags) & 0x0000_f0ffu64) << 40)
@@ -66,6 +79,10 @@ fn get_type(entry: u64) -> u8 {
 ///
 /// * `entry` - The gdt entry.
 /// * `table_index` - Index of the entry in the gdt table.
+#[cfg_attr(kani, kani::ensures(|result| {
+    // selector must equal table_index * 8
+    result.selector == u16::from(table_index) * 8
+}))]
 pub fn kvm_segment_from_gdt(entry: u64, table_index: u8) -> kvm_segment {
     kvm_segment {
         base: get_base(entry),
@@ -299,5 +316,36 @@ mod verification {
         kani::cover!(expected_dpl == 0, "dpl=0 covered");
         kani::cover!(expected_dpl == 3, "dpl=3 covered");
         kani::cover!(expected_type == 0xF, "type_=0xF covered");
+    }
+
+    // ── Contract-based proofs ─────────────────────────────────────────────────
+
+    /// Contract proof: `gdt_entry` encodes base correctly (requires limit <= 0xFFFFF).
+    ///
+    /// `#[kani::requires]` gates the precondition; `#[kani::ensures]` checks base encoding.
+    /// No unwind bound needed — gdt_entry is a purely arithmetic expression.
+    #[kani::proof_for_contract(gdt_entry)]
+    #[kani::solver(cadical)]
+    fn proof_contract_gdt_entry_base_encoding() {
+        let flags: u16 = kani::any();
+        let base: u32 = kani::any();
+        let limit: u32 = kani::any_where(|&l| l <= 0xFFFFF);
+        let _ = gdt_entry(flags, base, limit);
+    }
+
+    /// Contract proof: `kvm_segment_from_gdt` selector equals table_index * 8.
+    ///
+    /// Uses `stub_verified(gdt_entry)` so the entry is treated as an arbitrary u64
+    /// satisfying gdt_entry's contract, enabling compositional verification.
+    #[kani::proof_for_contract(kvm_segment_from_gdt)]
+    #[kani::stub_verified(gdt_entry)]
+    #[kani::solver(cadical)]
+    fn proof_contract_kvm_segment_selector() {
+        let flags: u16 = kani::any();
+        let base: u32 = kani::any();
+        let limit: u32 = kani::any_where(|&l| l <= 0xFFFFF);
+        let entry = gdt_entry(flags, base, limit);
+        let table_index: u8 = kani::any();
+        let _ = kvm_segment_from_gdt(entry, table_index);
     }
 }

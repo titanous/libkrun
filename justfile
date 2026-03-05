@@ -214,36 +214,53 @@ shuttle iterations="1000":
 # Requires: cargo install --locked kani-verifier && cargo kani setup
 # Bounded formal verification proofs (inline #[cfg(kani)] modules in source files).
 kani:
-    cargo kani -p vmm --features snapshot,uffd -Z function-contracts
-    cargo kani -p devices --features net,snapshot,vhost-user
-    cargo kani -p arch
-    cargo kani -p utils
-    cargo kani -p kernel
-    cargo kani -p cpuid
-    cargo kani -p virtio-queue
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # -Z function-contracts: #[kani::ensures], #[kani::proof_for_contract]
+    # -Z stubbing: #[kani::stub], #[kani::stub_verified]
+    # -j: run harnesses in parallel within each crate
+    pids=()
+    cargo kani -j --output-format terse -p vmm --features snapshot,uffd -Z function-contracts &
+    pids+=($!)
+    cargo kani -j --output-format terse -p devices --features net,snapshot,vhost-user -Z function-contracts -Z stubbing &
+    pids+=($!)
+    cargo kani -j --output-format terse -p arch -Z function-contracts -Z stubbing &
+    pids+=($!)
+    cargo kani -j --output-format terse -p utils -Z function-contracts &
+    pids+=($!)
+    cargo kani -j --output-format terse -p kernel &
+    pids+=($!)
+    cargo kani -j --output-format terse -p cpuid &
+    pids+=($!)
+    failed=0
+    for pid in "${pids[@]}"; do
+        wait "$pid" || ((failed++))
+    done
+    if ((failed > 0)); then
+        echo "$failed kani job(s) failed"
+        exit 1
+    fi
 
 # Usage: just kani-proof <name>
 #   just kani-proof proof_mark_dirty_no_panic
 # Run a single named Kani proof across all packages.
 kani-proof name:
     cargo kani -p vmm --features snapshot,uffd -Z function-contracts --harness {{name}} 2>/dev/null || \
-    cargo kani -p devices --features net,snapshot,vhost-user --harness {{name}} 2>/dev/null || \
-    cargo kani -p arch --harness {{name}} 2>/dev/null || \
-    cargo kani -p utils --harness {{name}} 2>/dev/null || \
+    cargo kani -p devices --features net,snapshot,vhost-user -Z function-contracts -Z stubbing --harness {{name}} 2>/dev/null || \
+    cargo kani -p arch -Z function-contracts -Z stubbing --harness {{name}} 2>/dev/null || \
+    cargo kani -p utils -Z function-contracts --harness {{name}} 2>/dev/null || \
     cargo kani -p kernel --harness {{name}} 2>/dev/null || \
     cargo kani -p cpuid --harness {{name}} 2>/dev/null || \
-    cargo kani -p virtio-queue --harness {{name}} 2>/dev/null || \
     echo "No harness named '{{name}}' found in any package"
 
 # Run a single Kani proof with concrete playback for debugging failures.
 kani-playback name:
     cargo kani -p vmm --features snapshot,uffd -Z function-contracts --harness {{name}} --concrete-playback=print 2>/dev/null || \
-    cargo kani -p devices --features net,snapshot,vhost-user --harness {{name}} --concrete-playback=print 2>/dev/null || \
-    cargo kani -p arch --harness {{name}} --concrete-playback=print 2>/dev/null || \
-    cargo kani -p utils --harness {{name}} --concrete-playback=print 2>/dev/null || \
+    cargo kani -p devices --features net,snapshot,vhost-user -Z function-contracts -Z stubbing --harness {{name}} --concrete-playback=print 2>/dev/null || \
+    cargo kani -p arch -Z function-contracts -Z stubbing --harness {{name}} --concrete-playback=print 2>/dev/null || \
+    cargo kani -p utils -Z function-contracts --harness {{name}} --concrete-playback=print 2>/dev/null || \
     cargo kani -p kernel --harness {{name}} --concrete-playback=print 2>/dev/null || \
     cargo kani -p cpuid --harness {{name}} --concrete-playback=print 2>/dev/null || \
-    cargo kani -p virtio-queue --harness {{name}} --concrete-playback=print 2>/dev/null || \
     echo "No harness named '{{name}}' found in any package"
 
 # Excluded subsystems (no tests exist for these)

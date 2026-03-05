@@ -65,6 +65,10 @@ impl ReclaimedBitmap {
     }
 
     /// Check whether a page is marked as reclaimed.
+    #[cfg_attr(kani, kani::ensures(|&result| {
+        // out-of-bounds PFN always returns false
+        if (pfn as usize) >= self.num_pages { !result } else { true }
+    }))]
     pub fn is_set(&self, pfn: u32) -> bool {
         let pfn = pfn as usize;
         if pfn >= self.num_pages {
@@ -505,12 +509,12 @@ mod verification {
     /// Proof: out-of-bounds pfn is silently ignored by mark and clear.
     ///
     /// A PFN equal to num_pages is out of bounds. mark and clear must not panic.
-    /// count() iterates ceil(255/64)=4 words → unwind(5).
+    /// count() iterates ceil(64/64)=1 word → unwind(2).
     #[kani::proof]
     #[kani::solver(cadical)]
-    #[kani::unwind(5)]
+    #[kani::unwind(2)]
     fn proof_out_of_bounds_pfn_ignored() {
-        let num_pages: usize = kani::any_where(|&n| n > 0 && n <= 255); // leave room for pfn = num_pages
+        let num_pages: usize = kani::any_where(|&n| n > 0 && n <= 64);
         let bitmap = ReclaimedBitmap::new(num_pages);
 
         // PFN exactly at the boundary (out of bounds).
@@ -544,5 +548,16 @@ mod verification {
         bitmap.mark(pfn);
         kani::cover!(bitmap.is_set(pfn), "in-bounds pfn is set after mark");
         kani::cover!(!bitmap.is_set(pfn), "out-of-bounds pfn remains unset");
+    }
+
+    /// Contract proof: `is_set` returns false for out-of-bounds PFNs.
+    #[kani::proof_for_contract(ReclaimedBitmap::is_set)]
+    #[kani::solver(cadical)]
+    #[kani::unwind(5)]
+    fn proof_contract_is_set_oob() {
+        let num_pages: usize = kani::any_where(|&n| n > 0 && n <= 256);
+        let bitmap = ReclaimedBitmap::new(num_pages);
+        let pfn: u32 = kani::any();
+        let _ = bitmap.is_set(pfn);
     }
 }

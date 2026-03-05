@@ -3,6 +3,7 @@
 
 macro_rules! generate_read_fn {
     ($fn_name: ident, $data_type: ty, $byte_type: ty, $type_size: expr, $endian_type: ident) => {
+        #[cfg_attr(kani, kani::requires(input.len() >= $type_size))]
         pub fn $fn_name(input: &[$byte_type]) -> $data_type {
             assert!($type_size == std::mem::size_of::<$data_type>());
             let mut array = [0u8; $type_size];
@@ -16,6 +17,7 @@ macro_rules! generate_read_fn {
 
 macro_rules! generate_write_fn {
     ($fn_name: ident, $data_type: ty, $byte_type: ty, $endian_type: ident) => {
+        #[cfg_attr(kani, kani::requires(buf.len() >= std::mem::size_of::<$data_type>()))]
         pub fn $fn_name(buf: &mut [$byte_type], n: $data_type) {
             for (byte, read) in buf
                 .iter_mut()
@@ -182,5 +184,124 @@ mod verification {
         let result = read_be_u32(&buf);
         kani::assert(result == val, "be_u32 write-read must be identity");
         kani::cover!(true, "be_u32 roundtrip path reachable");
+    }
+
+    // ── Contract-based proofs ─────────────────────────────────────────────────
+    // Each proof_for_contract harness verifies that callers satisfy the
+    // `#[kani::requires]` precondition (sufficient buffer size) and that the
+    // function body is correct under that assumption.
+
+    /// Contract proof: `write_le_u16` satisfies requires (buf.len() >= 2).
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    #[kani::unwind(3)]
+    fn proof_contract_write_le_u16() {
+        let val: u16 = kani::any();
+        let mut buf = [0u8; 2];
+        write_le_u16(&mut buf, val);
+    }
+
+    /// Contract proof: `read_le_u16` requires input.len() >= 2.
+    #[kani::proof_for_contract(read_le_u16)]
+    #[kani::solver(cadical)]
+    #[kani::unwind(3)]
+    fn proof_contract_read_le_u16() {
+        let buf = [kani::any::<u8>(), kani::any::<u8>()];
+        let _ = read_le_u16(&buf);
+    }
+
+    /// Contract proof: `write_le_u32` satisfies requires (buf.len() >= 4).
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    #[kani::unwind(5)]
+    fn proof_contract_write_le_u32() {
+        let val: u32 = kani::any();
+        let mut buf = [0u8; 4];
+        write_le_u32(&mut buf, val);
+    }
+
+    /// Contract proof: `read_le_u32` requires input.len() >= 4.
+    #[kani::proof_for_contract(read_le_u32)]
+    #[kani::solver(cadical)]
+    #[kani::unwind(5)]
+    fn proof_contract_read_le_u32() {
+        let buf = [kani::any::<u8>(); 4];
+        let _ = read_le_u32(&buf);
+    }
+
+    /// Contract proof: `write_le_u64` satisfies requires (buf.len() >= 8).
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    #[kani::unwind(9)]
+    fn proof_contract_write_le_u64() {
+        let val: u64 = kani::any();
+        let mut buf = [0u8; 8];
+        write_le_u64(&mut buf, val);
+    }
+
+    /// Contract proof: `read_le_u64` requires input.len() >= 8.
+    #[kani::proof_for_contract(read_le_u64)]
+    #[kani::solver(cadical)]
+    #[kani::unwind(9)]
+    fn proof_contract_read_le_u64() {
+        let buf = [kani::any::<u8>(); 8];
+        let _ = read_le_u64(&buf);
+    }
+
+    /// Contract proof: `write_be_u16` satisfies requires (buf.len() >= 2).
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    #[kani::unwind(3)]
+    fn proof_contract_write_be_u16() {
+        let val: u16 = kani::any();
+        let mut buf = [0u8; 2];
+        write_be_u16(&mut buf, val);
+    }
+
+    /// Contract proof: `read_be_u16` requires input.len() >= 2.
+    #[kani::proof_for_contract(read_be_u16)]
+    #[kani::solver(cadical)]
+    #[kani::unwind(3)]
+    fn proof_contract_read_be_u16() {
+        let buf = [kani::any::<u8>(), kani::any::<u8>()];
+        let _ = read_be_u16(&buf);
+    }
+
+    /// Contract proof: `write_be_u32` satisfies requires (buf.len() >= 4).
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    #[kani::unwind(5)]
+    fn proof_contract_write_be_u32() {
+        let val: u32 = kani::any();
+        let mut buf = [0u8; 4];
+        write_be_u32(&mut buf, val);
+    }
+
+    /// Contract proof: `read_be_u32` requires input.len() >= 4.
+    #[kani::proof_for_contract(read_be_u32)]
+    #[kani::solver(cadical)]
+    #[kani::unwind(5)]
+    fn proof_contract_read_be_u32() {
+        let buf = [kani::any::<u8>(); 4];
+        let _ = read_be_u32(&buf);
+    }
+
+    /// Contract proof: `write_le_i32` satisfies requires (buf.len() >= 4).
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    #[kani::unwind(5)]
+    fn proof_contract_write_le_i32() {
+        let val: i32 = kani::any();
+        let mut buf = [0i8; 4];
+        write_le_i32(&mut buf, val);
+    }
+
+    /// Contract proof: `read_le_i32` requires input.len() >= 4.
+    #[kani::proof_for_contract(read_le_i32)]
+    #[kani::solver(cadical)]
+    #[kani::unwind(5)]
+    fn proof_contract_read_le_i32() {
+        let buf = [kani::any::<i8>(); 4];
+        let _ = read_le_i32(&buf);
     }
 }

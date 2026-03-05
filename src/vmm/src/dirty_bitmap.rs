@@ -495,4 +495,193 @@ mod verification {
         kani::cover!(!dirty.is_empty(), "in-bounds mark is recorded");
         kani::cover!(dirty.is_empty(), "out-of-bounds mark is silent");
     }
+
+    // ── is_dirty / lifecycle / word-boundary proofs ───────────────────────────
+
+    /// Proof: is_dirty returns false for any out-of-bounds page index.
+    ///
+    /// A concrete 4-page bitmap (1 word) is used to keep verification tractable.
+    /// Page indices 4..u64::MAX must all return false.
+    /// outer loop: 1 word → unwind(2)
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    #[kani::unwind(2)]
+    fn proof_is_dirty_out_of_bounds_returns_false() {
+        // Concrete 4-page bitmap to avoid symbolic Vec construction overhead.
+        let bitmap = DirtyBitmap::new(0, 4 * PAGE_SIZE);
+
+        // Symbolic out-of-bounds page index.
+        let page_idx: usize = kani::any_where(|&i| i >= 4);
+
+        kani::assert(
+            !bitmap.is_dirty(page_idx),
+            "is_dirty must return false for out-of-bounds page index",
+        );
+        kani::cover!(true, "out-of-bounds is_dirty false path covered");
+    }
+
+    /// Proof: is_dirty reflects mark_dirty for in-bounds pages.
+    ///
+    /// After mark_dirty on page P, is_dirty(P) must return true.
+    /// Uses a concrete 4-page bitmap; page_idx is symbolic in [0, 3].
+    /// No drain needed — is_dirty reads the live bitmap directly.
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    fn proof_is_dirty_reflects_mark_dirty() {
+        let bitmap = DirtyBitmap::new(0, 4 * PAGE_SIZE);
+        let page_idx: usize = kani::any_where(|&i| i < 4);
+        let guest_addr = page_idx as u64 * PAGE_SIZE;
+
+        bitmap.mark_dirty(guest_addr);
+
+        kani::assert(
+            bitmap.is_dirty(page_idx),
+            "is_dirty must return true after mark_dirty on the same page",
+        );
+        kani::cover!(true, "is_dirty reflects mark_dirty path covered");
+    }
+
+    /// Proof: mark_dirty at page A does not affect is_dirty for a distinct page B.
+    ///
+    /// Isolation property: writes to one page must not corrupt adjacent pages.
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    fn proof_mark_dirty_only_affects_target_page() {
+        let bitmap = DirtyBitmap::new(0, 4 * PAGE_SIZE);
+        let page_a: usize = kani::any_where(|&i| i < 4);
+        let page_b: usize = kani::any_where(|&i| i < 4);
+        kani::assume(page_a != page_b);
+
+        let addr_a = page_a as u64 * PAGE_SIZE;
+        bitmap.mark_dirty(addr_a);
+
+        // Page B must still be clean.
+        kani::assert(
+            !bitmap.is_dirty(page_b),
+            "marking page A dirty must not affect page B",
+        );
+        kani::cover!(true, "isolation proof path covered");
+    }
+
+    /// Proof: full lifecycle — mark, drain, all pages become clean.
+    ///
+    /// After drain_dirty_pages, the bitmap is fully reset: is_dirty returns false
+    /// for every page index.
+    /// drain_dirty_pages outer loop: 1 word → unwind(2); inner bit-scan → unwind(65).
+    /// Combined: unwind(66).
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    #[kani::unwind(66)]
+    fn proof_lifecycle_mark_drain_clean() {
+        let bitmap = DirtyBitmap::new(0, 4 * PAGE_SIZE);
+
+        // Mark all 4 pages dirty.
+        for i in 0..4usize {
+            bitmap.mark_dirty(i as u64 * PAGE_SIZE);
+        }
+
+        // Drain clears the bitmap.
+        let _ = bitmap.drain_dirty_pages();
+
+        // All pages must now be clean.
+        kani::assert(!bitmap.is_dirty(0), "page 0 must be clean after drain");
+        kani::assert(!bitmap.is_dirty(1), "page 1 must be clean after drain");
+        kani::assert(!bitmap.is_dirty(2), "page 2 must be clean after drain");
+        kani::assert(!bitmap.is_dirty(3), "page 3 must be clean after drain");
+        kani::cover!(true, "lifecycle mark-drain-clean path covered");
+    }
+
+    /// Proof: page 63 (last bit of word 0) is tracked correctly.
+    ///
+    /// Word boundary: page 63 is the highest bit of the first AtomicU64 word.
+    /// A bitmap with 128 pages covers 2 words; page 63 is the MSB of word 0.
+    /// unwind(66): drain inner bit-scan loop (64 iterations) + 1.
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    #[kani::unwind(66)]
+    fn proof_word_boundary_last_bit_of_word0() {
+        // 128 pages = 2 words; pages 0-63 in word 0, pages 64-127 in word 1.
+        let bitmap = DirtyBitmap::new(0, 128 * PAGE_SIZE);
+        let page_63_addr = 63u64 * PAGE_SIZE;
+
+        bitmap.mark_dirty(page_63_addr);
+
+        kani::assert(
+            bitmap.is_dirty(63),
+            "page 63 (word 0 MSB) must be dirty after mark",
+        );
+
+        let dirty = bitmap.drain_dirty_pages();
+        let mut found = false;
+        for i in 0..dirty.len() {
+            if dirty[i] == page_63_addr {
+                found = true;
+            }
+        }
+        kani::assert(
+            found,
+            "page 63 address must appear in drain_dirty_pages result",
+        );
+        kani::cover!(true, "word-boundary page-63 proof covered");
+    }
+
+    /// Proof: page 64 (first bit of word 1) is tracked correctly.
+    ///
+    /// Word boundary: page 64 is the LSB of the second AtomicU64 word.
+    /// unwind(66): drain inner bit-scan loop (64 iterations) + 1.
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    #[kani::unwind(66)]
+    fn proof_word_boundary_first_bit_of_word1() {
+        // 128 pages = 2 words; page 64 is the LSB of word 1.
+        let bitmap = DirtyBitmap::new(0, 128 * PAGE_SIZE);
+        let page_64_addr = 64u64 * PAGE_SIZE;
+
+        bitmap.mark_dirty(page_64_addr);
+
+        kani::assert(
+            bitmap.is_dirty(64),
+            "page 64 (word 1 LSB) must be dirty after mark",
+        );
+
+        let dirty = bitmap.drain_dirty_pages();
+        let mut found = false;
+        for i in 0..dirty.len() {
+            if dirty[i] == page_64_addr {
+                found = true;
+            }
+        }
+        kani::assert(
+            found,
+            "page 64 address must appear in drain_dirty_pages result",
+        );
+        kani::cover!(true, "word-boundary page-64 proof covered");
+    }
+
+    /// Proof: reset() returns the previous state and leaves bitmap clean.
+    ///
+    /// After marking page 0 dirty and calling reset(), the returned words
+    /// must have bit 0 set (page 0 was dirty) and is_dirty(0) must then
+    /// return false (bitmap cleared by swap-with-zero).
+    /// 4-page bitmap: 1 word → unwind(2).
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    #[kani::unwind(2)]
+    fn proof_reset_clears_and_returns_old_state() {
+        let bitmap = DirtyBitmap::new(0, 4 * PAGE_SIZE);
+        bitmap.mark_dirty(0); // mark page 0 (addr 0)
+
+        let old = bitmap.reset();
+
+        // The returned word must have bit 0 set (page 0 was dirty).
+        kani::assert(!old.is_empty(), "reset must return at least one word");
+        kani::assert(
+            old[0] & 1 != 0,
+            "bit 0 of old word must be set (page 0 was dirty)",
+        );
+
+        // After reset, page 0 must be clean.
+        kani::assert(!bitmap.is_dirty(0), "page 0 must be clean after reset");
+        kani::cover!(true, "reset clears and returns old state path covered");
+    }
 }

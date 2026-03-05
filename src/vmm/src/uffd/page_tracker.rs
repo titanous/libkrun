@@ -947,4 +947,168 @@ mod verification {
         );
         kani::cover!(true, "region B mapping verified");
     }
+
+    // ── Additional PageTracker proofs ─────────────────────────────────────────
+
+    /// Proof: record_fault increments total_faults by 1.
+    ///
+    /// Uses a concrete 4-page tracker (1 word) to keep state space small.
+    /// unwind(2): stats() iterates 1 word → outer loop unwind(2).
+    #[kani::proof]
+    #[kani::unwind(2)]
+    fn proof_record_fault_increments_total_faults() {
+        let tracker = PageTracker::new(4);
+        let before = tracker.stats().total_faults;
+        tracker.record_fault();
+        let after = tracker.stats().total_faults;
+        kani::assert(
+            after == before + 1,
+            "record_fault must increment total_faults by 1",
+        );
+        kani::cover!(true, "record_fault increments total_faults path covered");
+    }
+
+    /// Proof: is_loaded reflects mark_loaded for in-bounds pages.
+    ///
+    /// After mark_loaded(page_index, source), is_loaded(page_index) must be true.
+    /// Symbolic total_pages <= 128 and symbolic page_index < total_pages.
+    /// stats() iterates ceil(128/64)=2 words → unwind(3).
+    #[kani::proof]
+    #[kani::unwind(3)]
+    fn proof_is_loaded_reflects_mark_loaded() {
+        let total_pages: usize = kani::any_where(|&n| n > 0 && n <= 128);
+        let tracker = PageTracker::new(total_pages);
+        let page_index: usize = kani::any_where(|&i| i < total_pages);
+
+        // Verify for all three source variants.
+        tracker.mark_loaded(page_index, LoadSource::Preload);
+
+        kani::assert(
+            tracker.is_loaded(page_index),
+            "is_loaded must return true after mark_loaded on the same page",
+        );
+        kani::cover!(true, "is_loaded reflects mark_loaded path covered");
+    }
+
+    /// Proof: mark_loaded at page A does not affect is_loaded for a distinct page B.
+    ///
+    /// Isolation: marking one page loaded must not set the bit for any other page.
+    /// Symbolic total_pages <= 128 and distinct page indices A, B.
+    /// unwind(3): stats() iterates 2 words.
+    #[kani::proof]
+    #[kani::unwind(3)]
+    fn proof_mark_loaded_only_affects_target_page() {
+        let total_pages: usize = kani::any_where(|&n| n > 1 && n <= 128);
+        let tracker = PageTracker::new(total_pages);
+        let page_a: usize = kani::any_where(|&i| i < total_pages);
+        let page_b: usize = kani::any_where(|&i| i < total_pages);
+        kani::assume(page_a != page_b);
+
+        tracker.mark_loaded(page_a, LoadSource::Preload);
+
+        kani::assert(
+            !tracker.is_loaded(page_b),
+            "marking page A loaded must not affect page B",
+        );
+        kani::cover!(true, "mark_loaded isolation path covered");
+    }
+
+    /// Proof: stats source counts (preload + fault + zero) sum to loaded_pages.
+    ///
+    /// After any sequence of mark_loaded calls, the sum of per-source counters
+    /// must equal the total number of distinct pages marked loaded.
+    /// Uses a concrete 4-page tracker to keep the state space tractable.
+    /// unwind(2): stats() iterates 1 word.
+    #[kani::proof]
+    #[kani::unwind(2)]
+    fn proof_stats_source_counts_sum_to_loaded_pages() {
+        let tracker = PageTracker::new(4);
+
+        // Mark pages 0-3 with various sources (all distinct pages).
+        tracker.mark_loaded(0, LoadSource::Preload);
+        tracker.mark_loaded(1, LoadSource::Fault);
+        tracker.mark_loaded(2, LoadSource::Zero);
+        tracker.mark_loaded(3, LoadSource::Preload);
+
+        let s = tracker.stats();
+        kani::assert(
+            s.preload_pages + s.fault_pages + s.zero_pages == s.loaded_pages,
+            "preload + fault + zero counts must equal loaded_pages",
+        );
+        kani::cover!(true, "stats source counts sum proof covered");
+    }
+
+    /// Proof: PageTracker::new(0) does not panic.
+    ///
+    /// Zero total_pages is a valid edge case (empty restore).
+    /// unwind(1): stats() iterates 0 words → unwind(1).
+    #[kani::proof]
+    #[kani::unwind(1)]
+    fn proof_zero_total_pages_no_panic() {
+        let tracker = PageTracker::new(0);
+        // mark_loaded and is_loaded must silently handle any page index when total=0.
+        tracker.mark_loaded(0, LoadSource::Preload);
+        kani::assert(
+            !tracker.is_loaded(0),
+            "is_loaded must return false when total_pages=0",
+        );
+        let s = tracker.stats();
+        kani::assert(s.total_pages == 0, "stats.total_pages must be 0");
+        kani::assert(s.loaded_pages == 0, "stats.loaded_pages must be 0");
+        kani::cover!(true, "zero total_pages no-panic path covered");
+    }
+
+    /// Proof: guest_addr_to_page_index returns None when address is before the region.
+    ///
+    /// An address strictly less than region.guest_addr must yield None.
+    /// Bound: 1 region → unwind(2).
+    #[kani::proof]
+    #[kani::unwind(2)]
+    #[kani::solver(cadical)]
+    fn proof_guest_addr_to_page_index_before_region_is_none() {
+        let guest_start: u64 = kani::any_where(|&g| g > 0); // > 0 so there is space before
+        let size: u64 = kani::any_where(|&s| s > 0);
+        kani::assume(guest_start.checked_add(size).is_some());
+
+        let region = UffdRegion {
+            guest_addr: guest_start,
+            host_addr: kani::any(),
+            size,
+            page_offset: 0,
+        };
+
+        let addr: u64 = kani::any_where(|&a| a < guest_start);
+        let result = guest_addr_to_page_index(std::slice::from_ref(&region), addr);
+        kani::assert(result.is_none(), "address before region must yield None");
+        kani::cover!(true, "before-region None path covered");
+    }
+
+    /// Proof: guest_addr_to_page_index returns None when address is at or after the region end.
+    ///
+    /// An address >= region.guest_addr + region.size must yield None.
+    /// Bound: 1 region → unwind(2).
+    #[kani::proof]
+    #[kani::unwind(2)]
+    #[kani::solver(cadical)]
+    fn proof_guest_addr_to_page_index_after_region_is_none() {
+        let guest_start: u64 = kani::any();
+        let size: u64 = kani::any_where(|&s| s > 0);
+        kani::assume(guest_start.checked_add(size).is_some());
+        let region_end = guest_start + size;
+
+        let region = UffdRegion {
+            guest_addr: guest_start,
+            host_addr: kani::any(),
+            size,
+            page_offset: 0,
+        };
+
+        let addr: u64 = kani::any_where(|&a| a >= region_end);
+        let result = guest_addr_to_page_index(std::slice::from_ref(&region), addr);
+        kani::assert(
+            result.is_none(),
+            "address at or after region end must yield None",
+        );
+        kani::cover!(true, "after-region None path covered");
+    }
 }

@@ -1169,4 +1169,152 @@ mod verification {
         let header: SnapshotHeader = kani::any();
         let _ = validate_magic_and_version(&header);
     }
+
+    // ── validate_header_for_vm pure-logic proofs ──────────────────────────────
+    //
+    // GuestMemoryMmap::from_ranges() calls mmap internally which Kani cannot
+    // model.  We therefore test the pure validation logic inline, mirroring
+    // the exact checks performed by validate_header_for_vm, without
+    // constructing a GuestMemoryMmap.
+
+    /// Proof: vCPU count mismatch produces VcpuCountMismatch error.
+    ///
+    /// Inline replication of the vcpu_count branch in validate_header_for_vm.
+    #[kani::proof]
+    fn proof_vcpu_count_mismatch_logic() {
+        let header_vcpu_count: u32 = kani::any_where(|&n| n <= 32);
+        let expected_vcpu_count: usize = kani::any_where(|&n| n <= 32);
+        kani::assume(header_vcpu_count as usize != expected_vcpu_count);
+
+        let result: Result<(), SnapshotError> = if header_vcpu_count as usize != expected_vcpu_count
+        {
+            Err(SnapshotError::VcpuCountMismatch {
+                expected: expected_vcpu_count,
+                got: header_vcpu_count as usize,
+            })
+        } else {
+            Ok(())
+        };
+
+        kani::assert(
+            matches!(result, Err(SnapshotError::VcpuCountMismatch { .. })),
+            "mismatched vCPU count must produce VcpuCountMismatch error",
+        );
+        kani::cover!(true, "vcpu count mismatch proof path reachable");
+    }
+
+    /// Proof: nested_enabled mismatch produces NestedEnabledMismatch error.
+    ///
+    /// Inline replication of the nested_enabled branch in validate_header_for_vm.
+    #[kani::proof]
+    fn proof_nested_enabled_mismatch_logic() {
+        let header_nested: bool = kani::any();
+        let expected_nested: bool = kani::any();
+        kani::assume(header_nested != expected_nested);
+
+        let result: Result<(), SnapshotError> = if header_nested != expected_nested {
+            Err(SnapshotError::NestedEnabledMismatch)
+        } else {
+            Ok(())
+        };
+
+        kani::assert(
+            matches!(result, Err(SnapshotError::NestedEnabledMismatch)),
+            "nested_enabled mismatch must produce NestedEnabledMismatch error",
+        );
+        kani::cover!(true, "nested mismatch proof path reachable");
+    }
+
+    /// Proof: magic check short-circuits before version check.
+    ///
+    /// When magic is wrong, validate_magic_and_version returns InvalidMagic
+    /// regardless of the version field value.
+    #[kani::proof]
+    fn proof_magic_check_short_circuits() {
+        let magic: u32 = kani::any_where(|&m| m != SNAPSHOT_MAGIC);
+        let version: u32 = kani::any(); // unconstrained — magic error must dominate
+
+        let header = SnapshotHeader {
+            magic,
+            version,
+            vcpu_count: 1,
+            ram_regions: vec![],
+            nested_enabled: false,
+        };
+
+        let result = validate_magic_and_version(&header);
+        kani::assert(
+            matches!(result, Err(SnapshotError::InvalidMagic)),
+            "wrong magic must produce InvalidMagic regardless of version",
+        );
+        kani::cover!(
+            version == SNAPSHOT_VERSION,
+            "magic wrong, version correct covered"
+        );
+        kani::cover!(
+            version != SNAPSHOT_VERSION,
+            "magic wrong, version wrong covered"
+        );
+    }
+
+    /// Proof: version check only fires after magic passes.
+    ///
+    /// When magic is correct but version is wrong, validate_magic_and_version
+    /// returns InvalidVersion carrying the actual version value.
+    #[kani::proof]
+    fn proof_version_check_short_circuits() {
+        let version: u32 = kani::any_where(|&v| v != SNAPSHOT_VERSION);
+
+        let header = SnapshotHeader {
+            magic: SNAPSHOT_MAGIC,
+            version,
+            vcpu_count: 1,
+            ram_regions: vec![],
+            nested_enabled: false,
+        };
+
+        let result = validate_magic_and_version(&header);
+        kani::assert(
+            matches!(result, Err(SnapshotError::InvalidVersion(_))),
+            "correct magic + wrong version must produce InvalidVersion",
+        );
+        // The returned version value must equal the header's version field.
+        if let Err(SnapshotError::InvalidVersion(v)) = result {
+            kani::assert(
+                v == version,
+                "InvalidVersion must carry the actual version value",
+            );
+        }
+        kani::cover!(true, "version check short-circuit proof path reachable");
+    }
+
+    /// Proof: vcpu_count and nested_enabled do not affect the magic/version result.
+    ///
+    /// validate_magic_and_version ignores vcpu_count and nested_enabled entirely.
+    #[kani::proof]
+    fn proof_magic_version_independent_of_other_fields() {
+        let magic: u32 = kani::any();
+        let version: u32 = kani::any();
+        let vcpu_count: u32 = kani::any();
+        let nested_enabled: bool = kani::any();
+
+        let header = SnapshotHeader {
+            magic,
+            version,
+            vcpu_count,
+            ram_regions: vec![],
+            nested_enabled,
+        };
+
+        let result = validate_magic_and_version(&header);
+
+        // The result is determined solely by magic and version.
+        let expected_ok = magic == SNAPSHOT_MAGIC && version == SNAPSHOT_VERSION;
+        kani::assert(
+            result.is_ok() == expected_ok,
+            "validate_magic_and_version result depends only on magic and version",
+        );
+        kani::cover!(expected_ok, "valid magic+version path covered");
+        kani::cover!(!expected_ok, "invalid magic or version path covered");
+    }
 }

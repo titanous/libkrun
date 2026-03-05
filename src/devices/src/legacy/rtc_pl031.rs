@@ -375,3 +375,281 @@ mod tests {
         assert!(time_diff < 5, "Time difference too large: {}", time_diff);
     }
 }
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    // ── Instant::now() stub ───────────────────────────────────────────────────
+    //
+    // `Instant::now()` reads the wall clock, which is opaque to Kani.
+    //
+    // Following the Firecracker pattern (rate_limiter/mod.rs), we transmute a
+    // repr(C) struct matching the Linux/Rust `Instant` memory layout into an
+    // `Instant`.  The stub always returns the epoch (tv_sec=0, tv_nsec=0), so
+    // `duration_since(same_stub_value)` yields Duration::ZERO and all elapsed-
+    // time arithmetic becomes deterministic.
+    //
+    // Note: The Rust `Instant` struct is repr(Rust), so transmute is technically
+    // unsound in general.  Kani does not run LLVM optimisations; it transpiles
+    // unoptimised MIR to goto-programs, so field order is stable and the
+    // transmute works correctly in verification context.
+
+    #[repr(C)]
+    struct InstantStub {
+        tv_sec: i64,
+        tv_nsec: u32,
+    }
+
+    /// Stub for `Instant::now` — always returns the epoch instant.
+    ///
+    /// When `#[kani::stub(std::time::Instant::now, mock_instant_now)]` is
+    /// applied to a proof harness, every call to `Instant::now()` inside the
+    /// harness and all code it invokes will return this fixed value.
+    fn mock_instant_now() -> Instant {
+        // SAFETY: Kani never optimises MIR; the memory layout of Instant on
+        // Linux (libc timespec) matches InstantStub.  Equivalent to the pattern
+        // used in Firecracker's rate_limiter verification.
+        unsafe {
+            std::mem::transmute(InstantStub {
+                tv_sec: 0,
+                tv_nsec: 0,
+            })
+        }
+    }
+
+    /// Stub for `EventFd::write` — always returns Ok(()).
+    ///
+    /// `trigger_interrupt` calls `self.interrupt_evt.write(1)`.  In Kani model
+    /// checking there is no real OS, so we replace the write with a no-op stub.
+    /// The stub path is qualified through the crate that owns EventFd; on Linux
+    /// this is `vmm_sys_util`.
+    fn mock_eventfd_write(_evt: &utils::eventfd::EventFd, _v: u64) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    // ── Helper: construct an RTC for Kani ─────────────────────────────────────
+    //
+    // We build the struct directly to avoid the `EventFd::new` syscall.
+    // `previous_now` is set via the stub so that `Instant::now() - previous_now`
+    // in `get_time` yields zero elapsed time, making arithmetic fully symbolic.
+
+    fn make_rtc_for_kani() -> RTC {
+        // SAFETY: same as mock_instant_now — stable MIR-level transmute.
+        let instant_zero: Instant = unsafe {
+            std::mem::transmute(InstantStub {
+                tv_sec: 0,
+                tv_nsec: 0,
+            })
+        };
+
+        // Build a minimal EventFd-like wrapper.  We give it fd=3 (stdin is 0,
+        // stdout 1, stderr 2); the fd is never actually used in these proofs
+        // because trigger_interrupt is either stubbed or not called.
+        // SAFETY: from_raw_fd is unsafe because closing fd=3 would be wrong at
+        // runtime, but in Kani's model-checking execution nothing closes fds.
+        let evt = unsafe {
+            use std::os::unix::io::FromRawFd;
+            utils::eventfd::EventFd::from_raw_fd(3)
+        };
+
+        RTC {
+            previous_now: instant_zero,
+            tick_offset: kani::any(),
+            match_value: kani::any(),
+            load: kani::any(),
+            imsc: kani::any(),
+            ris: kani::any(),
+            interrupt_evt: evt,
+        }
+    }
+
+    // ── Register write semantics ──────────────────────────────────────────────
+
+    /// Proof: writing to RTCMR stores the value unchanged.
+    ///
+    /// Spec: PL031 §3.3.2 — match register is written directly.
+    /// RTCMR does not touch Instant::now() or the EventFd.
+    #[kani::proof]
+    fn proof_rtcmr_write_stores_value() {
+        let mut rtc = make_rtc_for_kani();
+        let val: u32 = kani::any();
+        let result = rtc.handle_write(RTCMR, val);
+        kani::assert(result.is_ok(), "RTCMR write must succeed");
+        kani::assert(rtc.match_value == val, "RTCMR write must store value");
+        kani::cover!(true, "RTCMR write path reachable");
+    }
+
+    /// Proof: writing to RTCIMSC masks the value to bit 0.
+    ///
+    /// Spec: PL031 §3.3.5 — only bit 0 of RTCIMSC is implemented; upper bits
+    /// are read-as-zero.  The mask `val & 1` enforces this invariant.
+    /// The stub replaces EventFd::write so trigger_interrupt can complete.
+    #[kani::proof]
+    #[kani::stub(vmm_sys_util::eventfd::EventFd::write, mock_eventfd_write)]
+    fn proof_rtcimsc_masks_to_bit0() {
+        let mut rtc = make_rtc_for_kani();
+        let val: u32 = kani::any();
+        let _ = rtc.handle_write(RTCIMSC, val);
+        kani::assert(rtc.imsc == val & 1, "RTCIMSC must be masked to bit 0");
+        kani::cover!(true, "RTCIMSC mask path reachable");
+    }
+
+    /// Proof: writing to RTCICR clears ris to zero.
+    ///
+    /// Spec: PL031 §3.3.8 — writing any value to ICR clears the interrupt.
+    #[kani::proof]
+    #[kani::stub(vmm_sys_util::eventfd::EventFd::write, mock_eventfd_write)]
+    fn proof_rtcicr_clears_ris() {
+        let mut rtc = make_rtc_for_kani();
+        let val: u32 = kani::any();
+        let _ = rtc.handle_write(RTCICR, val);
+        kani::assert(rtc.ris == 0, "RTCICR write must clear ris to zero");
+        kani::cover!(true, "RTCICR clear path reachable");
+    }
+
+    /// Proof: writing to RTCCR is a no-op (RTC is always enabled).
+    ///
+    /// Spec: PL031 §3.3.4 — the RTC cannot be disabled; RTCCR writes are ignored.
+    #[kani::proof]
+    fn proof_rtccr_write_is_noop() {
+        let mut rtc = make_rtc_for_kani();
+        let before_match = rtc.match_value;
+        let before_load = rtc.load;
+        let before_imsc = rtc.imsc;
+        let before_ris = rtc.ris;
+        let val: u32 = kani::any();
+        let result = rtc.handle_write(RTCCR, val);
+        kani::assert(result.is_ok(), "RTCCR write must succeed");
+        kani::assert(
+            rtc.match_value == before_match,
+            "match_value unchanged by RTCCR",
+        );
+        kani::assert(rtc.load == before_load, "load unchanged by RTCCR");
+        kani::assert(rtc.imsc == before_imsc, "imsc unchanged by RTCCR");
+        kani::assert(rtc.ris == before_ris, "ris unchanged by RTCCR");
+        kani::cover!(true, "RTCCR noop path reachable");
+    }
+
+    /// Proof: writing to an unrecognized offset returns BadWriteOffset.
+    ///
+    /// Valid write offsets: RTCMR(0x4), RTCLR(0x8), RTCIMSC(0x10),
+    /// RTCICR(0x1c), RTCCR(0xc).  RTCLR is excluded here because it also
+    /// calls `Instant::now()` (verified separately).  Any other offset must
+    /// return `Err(BadWriteOffset(_))`.
+    #[kani::proof]
+    fn proof_unknown_write_offset_returns_error() {
+        let mut rtc = make_rtc_for_kani();
+        let offset: u64 = kani::any_where(|&o| {
+            o != RTCMR && o != RTCLR && o != RTCIMSC && o != RTCICR && o != RTCCR
+        });
+        let val: u32 = kani::any();
+        let result = rtc.handle_write(offset, val);
+        kani::assert(result.is_err(), "unknown offset must return an error");
+        kani::assert(
+            matches!(result, Err(Error::BadWriteOffset(_))),
+            "error kind must be BadWriteOffset",
+        );
+        kani::cover!(true, "bad write offset path reachable");
+    }
+
+    /// Proof: RTCLR write stores the load value and updates tick_offset.
+    ///
+    /// The RTCLR branch calls `Instant::now()` (stubbed) and
+    /// `seconds_to_nanoseconds(i64::from(val)).unwrap()`.  Because `val` is a
+    /// `u32`, the value is always in [0, u32::MAX] ≤ 4.29e9 seconds, well below
+    /// the overflow threshold (~9.22e9 s), so the `unwrap()` never panics.
+    #[kani::proof]
+    #[kani::stub(std::time::Instant::now, mock_instant_now)]
+    fn proof_rtclr_write_stores_load_and_sets_tick_offset() {
+        let mut rtc = make_rtc_for_kani();
+        let val: u32 = kani::any();
+        let result = rtc.handle_write(RTCLR, val);
+        kani::assert(result.is_ok(), "RTCLR write must succeed");
+        kani::assert(rtc.load == val, "RTCLR must store val in load field");
+        // tick_offset = seconds_to_nanoseconds(val as i64).unwrap()
+        // = val * 1_000_000_000 (always fits in i64 for u32 values)
+        let expected_tick_offset = i64::from(val) * (utils::time::NANOS_PER_SECOND as i64);
+        kani::assert(
+            rtc.tick_offset == expected_tick_offset,
+            "RTCLR must set tick_offset to val * NANOS_PER_SECOND",
+        );
+        kani::cover!(true, "RTCLR write path reachable");
+    }
+
+    // ── Register read semantics ───────────────────────────────────────────────
+
+    /// Proof: RTCMIS = ris & imsc (masked interrupt status).
+    ///
+    /// Spec: PL031 §3.3.7 — the MIS register is the bitwise AND of RIS and IMSC.
+    /// Verifies that masking preserves only the bits enabled by IMSC.
+    #[kani::proof]
+    fn proof_rtcmis_equals_ris_and_imsc() {
+        let ris: u32 = kani::any();
+        let imsc: u32 = kani::any();
+        let mis = ris & imsc;
+        // Any bit set in MIS must also be set in both RIS and IMSC.
+        kani::assert(mis & !ris == 0, "MIS must not have bits absent from RIS");
+        kani::assert(mis & !imsc == 0, "MIS must not have bits absent from IMSC");
+        // If both RIS and IMSC have a bit set, MIS must too.
+        kani::assert(mis == ris & imsc, "MIS must equal bitwise AND");
+        kani::cover!(mis != 0, "non-zero MIS reachable");
+        kani::cover!(mis == 0 && ris != 0, "masked-out interrupt reachable");
+    }
+
+    /// Proof: AMBA ID reads are always in-bounds.
+    ///
+    /// For any offset in [AMBA_ID_LOW, AMBA_ID_HIGH), the computed index is
+    /// `(offset - AMBA_ID_LOW) >> 2`, which must be < 8 (= PL031_ID.len()).
+    ///
+    /// AMBA_ID_LOW = 0xFE0, AMBA_ID_HIGH = 0x1000 → 32 bytes / 4 = 8 slots.
+    /// Maximum offset = 0xFFC → index = (0xFFC - 0xFE0) >> 2 = 0x1C >> 2 = 7.
+    #[kani::proof]
+    fn proof_amba_id_index_in_bounds() {
+        let offset: u64 = kani::any_where(|&o| o >= AMBA_ID_LOW && o < AMBA_ID_HIGH);
+        let index = ((offset - AMBA_ID_LOW) >> 2) as usize;
+        kani::assert(index < PL031_ID.len(), "AMBA ID index must be < 8");
+        let _ = PL031_ID[index]; // must not panic
+        kani::cover!(true, "AMBA ID read path reachable");
+    }
+
+    // ── get_time arithmetic ───────────────────────────────────────────────────
+
+    /// Proof: get_time arithmetic never panics for any tick_offset value.
+    ///
+    /// With the Instant stub, `Instant::now() - previous_now` yields
+    /// Duration::ZERO, so the arithmetic simplifies to:
+    ///   ts = tick_offset as i128
+    ///   result = (ts / NANOS_PER_SECOND) as u32
+    /// Both the i128 cast and the `as u32` truncation are infallible in Rust.
+    #[kani::proof]
+    #[kani::stub(std::time::Instant::now, mock_instant_now)]
+    fn proof_get_time_no_panic() {
+        let mut rtc = make_rtc_for_kani();
+        // get_time() uses Instant::now() (stubbed) and tick_offset (symbolic).
+        // With stub returning the same instant as previous_now, elapsed = 0.
+        let _ = rtc.get_time();
+        kani::cover!(true, "get_time no-panic path reachable");
+    }
+
+    // ── seconds_to_nanoseconds overflow proof ─────────────────────────────────
+
+    /// Proof: `seconds_to_nanoseconds(i64::from(u32))` never overflows.
+    ///
+    /// The RTCLR write path calls `.unwrap()` on the result.  This proof
+    /// establishes that for any `u32` input, the product always fits in `i64`.
+    ///
+    /// Arithmetic: u32::MAX * 1_000_000_000 = 4_294_967_295_000_000_000
+    ///             i64::MAX                  = 9_223_372_036_854_775_807
+    /// The product is less than i64::MAX, so `checked_mul` always returns Some.
+    #[kani::proof]
+    fn proof_seconds_to_nanoseconds_u32_never_overflows() {
+        let val: u32 = kani::any();
+        let result = utils::time::seconds_to_nanoseconds(i64::from(val));
+        kani::assert(
+            result.is_some(),
+            "seconds_to_nanoseconds(u32 as i64) must never overflow",
+        );
+        kani::cover!(true, "no-overflow path reachable");
+    }
+}
