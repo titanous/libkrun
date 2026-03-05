@@ -47,12 +47,18 @@ bench-boot n="20":
     cargo build -p test-daemon
     cargo build -p test-vsock-proxy
     export KRUN_TEST_GUEST_AGENT_PATH="target/$GUEST_TARGET_ARCH/release/guest-agent"
-    export KRUN_TEST_DAEMON_PATH="target/debug/test-daemon"
-    export KRUN_TEST_VSOCK_PROXY_PATH="target/debug/test-vsock-proxy"
+    # Detect actual build output dir (global .cargo/config.toml may force a target triple)
+    if [ -f "target/$HOST_TARGET_ARCH/debug/test-daemon" ]; then
+        _DAEMON_DIR="target/$HOST_TARGET_ARCH/debug"
+    else
+        _DAEMON_DIR="target/debug"
+    fi
+    export KRUN_TEST_DAEMON_PATH="$_DAEMON_DIR/test-daemon"
+    export KRUN_TEST_VSOCK_PROXY_PATH="$_DAEMON_DIR/test-vsock-proxy"
     RUNNER="target/$HOST_TARGET_ARCH/release/runner"
 
     run_once() {
-        unshare --user --map-root-user --net -- /bin/sh -c \
+        timeout 2m unshare --user --map-root-user --net -- /bin/sh -c \
             "ifconfig lo 127.0.0.1 && exec $RUNNER test --test-case boot-timing-e2e" \
             2>&1 | sed -n 's/.*boot_timing_e2e: \([0-9][0-9]*\)ms.*/\1/p'
     }
