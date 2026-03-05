@@ -54,6 +54,14 @@ mod host {
                 80,
                 24,
             );
+            // Named port so the guest can see "krun-stdout" in sysfs (mirrors what
+            // autoconfigure_console_ports creates when the implicit console is active).
+            builder.add_port_fd(
+                &default_console_info,
+                "krun-stdout",
+                -1,
+                std::io::stdout().as_raw_fd(),
+            );
 
             // Add the multiport console (replaces krun_add_virtio_console_multiport)
             let multiport_console_info = builder.add_virtio_console();

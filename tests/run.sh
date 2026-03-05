@@ -19,8 +19,24 @@ cargo build -p test-daemon
 cargo build -p test-vsock-proxy
 
 export KRUN_TEST_GUEST_AGENT_PATH="target/$GUEST_TARGET_ARCH/debug/guest-agent"
-export KRUN_TEST_DAEMON_PATH="target/debug/test-daemon"
-export KRUN_TEST_VSOCK_PROXY_PATH="target/debug/test-vsock-proxy"
+
+# Detect the actual build output directory.  When a .cargo/config.toml sets an
+# explicit [build] target (e.g. x86_64-unknown-linux-gnu), Cargo places binaries
+# under target/$TARGET/debug rather than target/debug.
+_HOST_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
+if [ -f "target/$_HOST_TRIPLE/debug/test-daemon" ]; then
+    _DAEMON_DIR="target/$_HOST_TRIPLE/debug"
+else
+    _DAEMON_DIR="target/debug"
+fi
+export KRUN_TEST_DAEMON_PATH="$_DAEMON_DIR/test-daemon"
+export KRUN_TEST_VSOCK_PROXY_PATH="$_DAEMON_DIR/test-vsock-proxy"
+
+if [ -f "$_DAEMON_DIR/runner" ]; then
+    _RUNNER="$_DAEMON_DIR/runner"
+else
+    _RUNNER="target/debug/runner"
+fi
 
 # Build runner args: pass through all arguments
 RUNNER_ARGS="$*"
@@ -31,10 +47,10 @@ if [ -n "${KRUN_TEST_BASE_DIR}" ]; then
 fi
 
 if [ -z "${KRUN_NO_UNSHARE}" ] && which unshare 2>&1 >/dev/null; then
-	unshare --user --map-root-user --net -- /bin/sh -c "ifconfig lo 127.0.0.1 && exec target/debug/runner ${RUNNER_ARGS}"
+	unshare --user --map-root-user --net -- /bin/sh -c "ifconfig lo 127.0.0.1 && exec $_RUNNER ${RUNNER_ARGS}"
 else
 	echo "WARNING: Running tests without a network namespace."
 	echo "Tests may fail if the required network ports are already in use."
 	echo
-	target/debug/runner ${RUNNER_ARGS}
+	$_RUNNER ${RUNNER_ARGS}
 fi
