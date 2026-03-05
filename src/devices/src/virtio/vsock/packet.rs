@@ -1262,11 +1262,11 @@ mod verification {
     // the same backing array, and that the two slices returned by hdr() / buf()
     // are adjacent and non-overlapping.
     //
-    // We use a combined buffer of VSOCK_PKT_HDR_SIZE + 8 bytes; the largest loop
-    // fills 8 bytes of the data portion → unwind(9).
+    // We use a combined buffer of VSOCK_PKT_HDR_SIZE + 8 bytes (52 bytes total).
+    // The initialisation loop iterates over all 52 bytes → unwind(53).
     #[kani::proof]
     #[kani::solver(cadical)]
-    #[kani::unwind(9)]
+    #[kani::unwind(53)]
     fn proof_hdr_buf_single_descriptor_layout() {
         const BUF_DATA_SIZE: usize = 8;
         const TOTAL_SIZE: usize = VSOCK_PKT_HDR_SIZE + BUF_DATA_SIZE;
