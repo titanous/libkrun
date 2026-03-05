@@ -134,7 +134,7 @@ impl AsyncNetWorker {
 
         // Wrap TX eventfd for async early — we need to drain TX during backend creation
         // to prevent NETDEV WATCHDOG timeouts if the factory takes a while.
-        let async_tx_evt = match AsyncFd::new(dup_fd(&queue_evts[TX_INDEX])) {
+        let async_tx_evt = match dup_fd(&queue_evts[TX_INDEX]).and_then(AsyncFd::new) {
             Ok(fd) => fd,
             Err(e) => {
                 error!("failed to create AsyncFd for TX queue: {e}");
@@ -142,7 +142,7 @@ impl AsyncNetWorker {
             }
         };
 
-        let async_stop = match AsyncFd::new(dup_fd(&stop_fd)) {
+        let async_stop = match dup_fd(&stop_fd).and_then(AsyncFd::new) {
             Ok(fd) => fd,
             Err(e) => {
                 error!("failed to create AsyncFd for stop: {e}");
@@ -150,7 +150,7 @@ impl AsyncNetWorker {
             }
         };
 
-        let async_resync = match AsyncFd::new(dup_fd(&resync_fd)) {
+        let async_resync = match dup_fd(&resync_fd).and_then(AsyncFd::new) {
             Ok(fd) => fd,
             Err(e) => {
                 error!("failed to create AsyncFd for resync: {e}");
@@ -158,7 +158,7 @@ impl AsyncNetWorker {
             }
         };
 
-        let async_quiesce = match AsyncFd::new(dup_fd(&quiesce_fd)) {
+        let async_quiesce = match dup_fd(&quiesce_fd).and_then(AsyncFd::new) {
             Ok(fd) => fd,
             Err(e) => {
                 error!("failed to create AsyncFd for quiesce: {e}");
@@ -166,7 +166,7 @@ impl AsyncNetWorker {
             }
         };
 
-        let async_resume = match AsyncFd::new(dup_fd(&resume_fd)) {
+        let async_resume = match dup_fd(&resume_fd).and_then(AsyncFd::new) {
             Ok(fd) => fd,
             Err(e) => {
                 error!("failed to create AsyncFd for resume: {e}");
@@ -639,9 +639,14 @@ fn push_to_rx_queue(
 }
 
 /// Duplicate a file descriptor for use with AsyncFd.
-fn dup_fd(evt: &EventFd) -> OwnedFd {
-    // SAFETY: We're duplicating a valid fd that we own
-    unsafe { OwnedFd::from_raw_fd(libc::dup(evt.as_raw_fd())) }
+fn dup_fd(evt: &EventFd) -> std::io::Result<OwnedFd> {
+    // SAFETY: We're duplicating a valid fd that we own.
+    let raw = unsafe { libc::dup(evt.as_raw_fd()) };
+    if raw < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: raw is a valid non-negative fd returned by dup().
+    Ok(unsafe { OwnedFd::from_raw_fd(raw) })
 }
 
 #[cfg(test)]
@@ -675,7 +680,7 @@ mod tests {
     #[test]
     fn test_dup_fd() {
         let evt = EventFd::new(0).unwrap();
-        let duped = dup_fd(&evt);
+        let duped = dup_fd(&evt).expect("dup_fd should succeed");
         // The duped fd should be different from the original
         assert_ne!(duped.as_raw_fd(), evt.as_raw_fd());
     }

@@ -62,7 +62,7 @@ struct VirtioNetConfig {
     max_virtqueue_pairs: u16,
 }
 
-// Safe because it only has data and has no implicit padding.
+// SAFETY: VirtioNetConfig is #[repr(C, packed)] with no padding bytes; all bit patterns are valid for all fields.
 unsafe impl ByteValued for VirtioNetConfig {}
 
 use super::async_backend::AsyncNetBackendFactory;
@@ -86,6 +86,18 @@ pub enum VirtioNetBackend {
 }
 
 impl Clone for VirtioNetBackend {
+    /// # Double-close risk for fd-carrying variants
+    ///
+    /// `UnixstreamFd` and `UnixgramFd` store a raw `RawFd` integer. Cloning duplicates
+    /// the integer without duplicating the underlying OS file description. If both the
+    /// original and the clone are independently passed to `NetWorker::new`, each call to
+    /// `OwnedFd::from_raw_fd` inside the worker will assume exclusive ownership of the
+    /// same fd, causing a double-close (UB) when the second `OwnedFd` is dropped.
+    ///
+    /// The only safe call site is `Net::activate` (device.rs), where the clone is stored
+    /// back in `self.cfg_backend` as a re-activation guard while the original is moved into
+    /// `NetWorker::new`. Callers must ensure that at most one copy reaches `NetWorker::new`
+    /// at any time. Do not clone these variants for any other purpose.
     fn clone(&self) -> Self {
         match self {
             Self::UnixstreamFd(fd) => Self::UnixstreamFd(*fd),
@@ -411,4 +423,55 @@ impl VirtioDevice for Net {
         self.worker_queue_generation.fetch_add(1, Ordering::SeqCst);
         let _ = self.worker_resync_fd.write(1);
     }
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    // ---------------------------------------------------------------------------
+    // ByteValued round-trip for VirtioNetConfig
+    //
+    // VirtioNetConfig is `#[repr(C, packed)]` (no padding) and is written to
+    // guest config space via ByteValued::as_slice.  A size or layout mismatch
+    // would corrupt network MAC, status, or queue-pair count configuration.
+    // ---------------------------------------------------------------------------
+
+    /// Proof: any bit pattern is a valid VirtioNetConfig (ByteValued correctness).
+    ///
+    /// VirtioNetConfig is `#[repr(C, packed)]` with fields:
+    ///   mac([u8; 6]) + status(u16) + max_virtqueue_pairs(u16) = 10 bytes total.
+    /// The packed repr eliminates all padding; all bit patterns are valid (POD).
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    fn proof_byte_valued_virtio_net_config_roundtrip() {
+        let bytes: [u8; 10] = kani::any();
+        // from_slice must succeed for any 10-byte input — no invalid bit patterns.
+        let val = VirtioNetConfig::from_slice(&bytes)
+            .expect("VirtioNetConfig: from_slice must succeed for any 10 bytes");
+        // as_slice must produce exactly size_of::<VirtioNetConfig>() bytes.
+        kani::assert(
+            val.as_slice().len() == std::mem::size_of::<VirtioNetConfig>(),
+            "VirtioNetConfig: as_slice length must equal size_of",
+        );
+        // Bytes are preserved identically (identity round-trip).
+        kani::assert(
+            val.as_slice() == bytes,
+            "VirtioNetConfig: byte round-trip must be identity",
+        );
+        kani::cover!(true, "VirtioNetConfig ByteValued roundtrip reachable");
+    }
+
+    /// Verify: VirtioNetConfig size is exactly 10 bytes.
+    ///
+    /// mac(6) + status(2) + max_virtqueue_pairs(2) = 10 bytes.
+    /// `#[repr(C, packed)]` eliminates any trailing or inter-field padding.
+    /// This is a compile-time assertion (const usize at compile time).
+    const _: () = {
+        let _ = [(); 1][if std::mem::size_of::<VirtioNetConfig>() == 10 {
+            0
+        } else {
+            1
+        }];
+    };
 }

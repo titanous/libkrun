@@ -40,6 +40,7 @@ use libc::{c_char, size_t};
 use polly::event_manager::EventManager;
 use std::collections::HashMap;
 use std::convert::TryInto;
+use std::num::NonZeroU64;
 #[cfg(feature = "net")]
 use std::os::fd::RawFd;
 use std::path::PathBuf;
@@ -368,7 +369,7 @@ impl TryFrom<ContextConfig> for NitroEnclave {
 unsafe fn load_krunfw_payload(
     krunfw: &KrunfwBindings,
     vmr: &mut VmResources,
-) -> Result<(), libloading::Error> {
+) -> Result<(), StartError> {
     let mut kernel_guest_addr: u64 = 0;
     let mut kernel_entry_addr: u64 = 0;
     let mut kernel_size: usize = 0;
@@ -379,8 +380,11 @@ unsafe fn load_krunfw_payload(
             &mut kernel_size as *mut usize,
         )
     };
+    if kernel_host_addr.is_null() {
+        return Err(StartError::MissingFirmware);
+    }
     let kernel_bundle = KernelBundle {
-        host_addr: kernel_host_addr as u64,
+        host_addr: NonZeroU64::new(kernel_host_addr as u64).ok_or(StartError::MissingFirmware)?,
         guest_addr: kernel_guest_addr,
         entry_addr: kernel_entry_addr,
         size: kernel_size,
@@ -391,16 +395,24 @@ unsafe fn load_krunfw_payload(
     {
         let mut qboot_size: usize = 0;
         let qboot_host_addr = unsafe { (krunfw.get_qboot)(&mut qboot_size as *mut usize) };
+        if qboot_host_addr.is_null() {
+            return Err(StartError::MissingFirmware);
+        }
         let qboot_bundle = QbootBundle {
-            host_addr: qboot_host_addr as u64,
+            host_addr: NonZeroU64::new(qboot_host_addr as u64)
+                .ok_or(StartError::MissingFirmware)?,
             size: qboot_size,
         };
         vmr.set_qboot_bundle(qboot_bundle).unwrap();
 
         let mut initrd_size: usize = 0;
         let initrd_host_addr = unsafe { (krunfw.get_initrd)(&mut initrd_size as *mut usize) };
+        if initrd_host_addr.is_null() {
+            return Err(StartError::MissingFirmware);
+        }
         let initrd_bundle = InitrdBundle {
-            host_addr: initrd_host_addr as u64,
+            host_addr: NonZeroU64::new(initrd_host_addr as u64)
+                .ok_or(StartError::MissingFirmware)?,
             size: initrd_size,
         };
         vmr.set_initrd_bundle(initrd_bundle).unwrap();
@@ -1114,6 +1126,21 @@ impl Builder {
             ctx_cfg.vmr.set_console_output(console_output);
         }
 
+        // SAFETY: Privilege drop ordering invariant:
+        // 1. setgid() MUST be called before setuid(). Once the UID is dropped to non-root,
+        //    subsequent setgid() calls will fail with EPERM.
+        // 2. These syscalls are process-wide; this function must only be called from a
+        //    single-threaded context (before any threads are spawned, or with all threads
+        //    terminated). POSIX specifies that setuid()/setgid() have undefined behavior in
+        //    multithreaded processes on some platforms; Linux propagates the change to all
+        //    threads but this cannot be relied upon portably.
+        // 3. libkrun API contract: `Builder::set_vmm_uid()` / `Builder::set_vmm_gid()` are
+        //    documented to require that `Builder::build()` is called before any application
+        //    threads are spawned. The caller is responsible for upholding this precondition.
+        //    Violation (calling build() after spawning threads when uid/gid are set) is
+        //    unsound and the caller bears responsibility for the resulting undefined behavior.
+        // See: setuid(2), setgid(2) — "In a multithreaded process, setuid() changes the
+        //    UIDs of all threads."
         if let Some(gid) = ctx_cfg.vmm_gid {
             if unsafe { libc::setgid(gid) } != 0 {
                 return Err(StartError::Setgid(std::io::Error::last_os_error()));

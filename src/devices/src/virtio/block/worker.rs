@@ -44,7 +44,7 @@ pub struct RequestHeader {
     _reserved: u32,
     sector: u64,
 }
-// Safe because RequestHeader only contains plain data.
+// SAFETY: RequestHeader is #[repr(C)] with no padding bytes; all bit patterns are valid for all fields.
 unsafe impl ByteValued for RequestHeader {}
 
 #[derive(Copy, Clone, Default)]
@@ -54,7 +54,7 @@ pub struct DiscardWriteData {
     num_sectors: u32,
     flags: u32,
 }
-// Safe because DiscardWriteData only contains plain data.
+// SAFETY: DiscardWriteData is #[repr(C)] with no padding bytes; all bit patterns are valid for all fields.
 unsafe impl ByteValued for DiscardWriteData {}
 
 pub struct BlockWorker<B: BlockBackend> {

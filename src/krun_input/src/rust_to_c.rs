@@ -66,6 +66,9 @@ where
             userdata: *const c_void,
             _reserved: *const c_void,
         ) -> i32 {
+            if instance.is_null() {
+                return -1;
+            }
             let actual_userdata = if userdata.is_null() {
                 None
             } else {
@@ -91,6 +94,9 @@ where
             name_buf: *mut u8,
             name_buf_len: usize,
         ) -> i32 {
+            if instance.is_null() {
+                return InputBackendError::InternalError as i32;
+            }
             let config_obj = unsafe { &*(instance as *const I) };
             let name_buf_slice = unsafe { std::slice::from_raw_parts_mut(name_buf, name_buf_len) };
 
@@ -105,6 +111,9 @@ where
             name_buf: *mut u8,
             name_buf_len: usize,
         ) -> i32 {
+            if instance.is_null() {
+                return InputBackendError::InternalError as i32;
+            }
             let config_obj = unsafe { &*(instance as *const I) };
             let name_buf_slice = unsafe { std::slice::from_raw_parts_mut(name_buf, name_buf_len) };
 
@@ -118,6 +127,9 @@ where
             instance: *mut c_void,
             ids: *mut InputDeviceIds,
         ) -> i32 {
+            if instance.is_null() {
+                return InputBackendError::InternalError as i32;
+            }
             let config_obj = unsafe { &*(instance as *const I) };
             let ids = unsafe { &mut *ids };
 
@@ -133,6 +145,9 @@ where
             bitmap_buf: *mut u8,
             bitmap_buf_len: usize,
         ) -> i32 {
+            if instance.is_null() {
+                return InputBackendError::InternalError as i32;
+            }
             let config_obj = unsafe { &*(instance as *const I) };
             let bitmap_buf_slice =
                 unsafe { std::slice::from_raw_parts_mut(bitmap_buf, bitmap_buf_len) };
@@ -148,6 +163,9 @@ where
             abs_axis: u8,
             abs_info: *mut InputAbsInfo,
         ) -> i32 {
+            if instance.is_null() {
+                return InputBackendError::InternalError as i32;
+            }
             let config_obj = unsafe { &*(instance as *const I) };
             let abs_info = unsafe { &mut *abs_info };
 
@@ -162,6 +180,9 @@ where
             bitmap_buf: *mut u8,
             bitmap_buf_len: usize,
         ) -> i32 {
+            if instance.is_null() {
+                return InputBackendError::InternalError as i32;
+            }
             let config_obj = unsafe { &*(instance as *const I) };
             let bitmap_buf_slice =
                 unsafe { std::slice::from_raw_parts_mut(bitmap_buf, bitmap_buf_len) };
@@ -206,6 +227,9 @@ where
             userdata: *const c_void,
             _reserved: *const c_void,
         ) -> i32 {
+            if instance.is_null() {
+                return -1;
+            }
             let actual_userdata = if userdata.is_null() {
                 None
             } else {
@@ -227,6 +251,9 @@ where
         }
 
         extern "C" fn get_ready_efd_fn<I: InputEventsImpl>(instance: *mut c_void) -> i32 {
+            if instance.is_null() {
+                return InputBackendError::InternalError as i32;
+            }
             let events_obj = unsafe { &*(instance as *const I) };
             match events_obj.get_read_notify_fd() {
                 Ok(fd) => fd.as_raw_fd(),
@@ -238,6 +265,9 @@ where
             instance: *mut c_void,
             out_event: *mut crate::InputEvent,
         ) -> i32 {
+            if instance.is_null() {
+                return InputBackendError::InternalError as i32;
+            }
             let events_obj = unsafe { &mut *(instance as *mut I) };
             let out_event = unsafe { &mut *out_event };
 

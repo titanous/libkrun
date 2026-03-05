@@ -186,12 +186,12 @@ impl Vcpus for VcpuList {
                     | (4 << ICC_CTLR_EL1_PRI_BITS_SHIFT),
             ),
             SYSREG_CNTHCTL_EL2 => {
-                let val: u64 = 0;
+                let mut val: u64 = 0;
                 let ret = unsafe {
                     hv_vcpu_get_sys_reg(
                         vcpuid,
                         hv_sys_reg_t_HV_SYS_REG_CNTHCTL_EL2,
-                        &val as *const _ as *mut _,
+                        &mut val as *mut u64,
                     )
                 };
                 if ret == HV_SUCCESS {
@@ -201,12 +201,12 @@ impl Vcpus for VcpuList {
                 }
             }
             SYSREG_MDCCINT_EL1 => {
-                let val: u64 = 0;
+                let mut val: u64 = 0;
                 let ret = unsafe {
                     hv_vcpu_get_sys_reg(
                         vcpuid,
                         hv_sys_reg_t_HV_SYS_REG_MDCCINT_EL1,
-                        &val as *const _ as *mut _,
+                        &mut val as *mut u64,
                     )
                 };
                 if ret == HV_SUCCESS {

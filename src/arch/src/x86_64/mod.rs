@@ -37,7 +37,8 @@ use vmm_sys_util::align_upwards;
 #[derive(Copy, Clone, Default)]
 struct BootParamsWrapper(boot_params);
 
-// It is safe to initialize BootParamsWrap which is a wrapper over `boot_params` (a series of ints).
+// SAFETY: BootParamsWrapper wraps boot_params which is a #[repr(C)] struct containing only integer
+// fields; all bit patterns are valid for the wrapped type.
 unsafe impl ByteValued for BootParamsWrapper {}
 
 /// Errors thrown while configuring x86_64 system.

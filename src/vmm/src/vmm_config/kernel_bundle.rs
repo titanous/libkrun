@@ -2,11 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::fmt::{Display, Formatter, Result};
+use std::num::NonZeroU64;
 
 /// Data structure holding the attributes read from the `libkrunfw` kernel config.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct KernelBundle {
-    pub host_addr: u64,
+    pub host_addr: NonZeroU64,
     pub guest_addr: u64,
     pub entry_addr: u64,
     pub size: usize,
@@ -35,9 +36,9 @@ impl Display for KernelBundleError {
 }
 
 /// Data structure holding the attributes read from the `libkrunfw` qboot config.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct QbootBundle {
-    pub host_addr: u64,
+    pub host_addr: NonZeroU64,
     pub size: usize,
 }
 
@@ -58,8 +59,8 @@ impl Display for QbootBundleError {
 }
 
 /// Data structure holding the attributes read from the `libkrunfw` initrd config.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct InitrdBundle {
-    pub host_addr: u64,
+    pub host_addr: NonZeroU64,
     pub size: usize,
 }

@@ -299,7 +299,7 @@ struct VirtioBlkConfig {
     write_zeroes_may_unmap: u8,
 }
 
-// Safe because it only has data and has no implicit padding.
+// SAFETY: VirtioBlkConfig is #[repr(C, packed)] with no padding bytes; all bit patterns are valid for all fields.
 unsafe impl ByteValued for VirtioBlkConfig {}
 
 /// Storage for block device backend - either sync backend or async factory.

@@ -1349,4 +1349,128 @@ pub struct SuppGroups {
     // uint32_t	groups[];
 }
 
+// WARNING: This `ByteValued` impl only covers the fixed-size header (`nr_groups: u32`).
+// `SuppGroups` is a variable-length structure: in the FUSE wire format it is immediately
+// followed by `nr_groups` × 4 bytes of supplementary group IDs (a flexible C array).
+// Those group IDs are NOT included in this struct and are therefore NOT accessible via
+// `ByteValued::from_slice` or `as_slice`.  This is security-sensitive: callers that need
+// the actual group list must read the raw group IDs directly from the message buffer at
+// the offset immediately following this header (i.e., `buf[size_of::<SuppGroups>()..]`),
+// using `nr_groups` to know how many `u32` values to parse.  Relying solely on this struct
+// for credential checks will silently lose all supplementary group information.
 unsafe impl ByteValued for SuppGroups {}
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    // ---------------------------------------------------------------------------
+    // ByteValued round-trips for FUSE protocol headers
+    //
+    // The FUSE protocol relies on casting raw guest bytes directly into these
+    // structs (via ByteValued::from_slice).  A bug here — e.g. a non-POD field,
+    // padding that ByteValued's transmute-based impl fills arbitrarily, or a
+    // size mismatch — would cause silent data corruption on every FUSE request.
+    // These proofs verify that the critical path structs survive the full
+    // from_slice → as_slice round-trip with identity bytes.
+    // ---------------------------------------------------------------------------
+
+    /// Proof: any bit pattern is a valid FUSE InHeader (ByteValued correctness).
+    ///
+    /// InHeader is `#[repr(C)]` with all integer fields (no padding):
+    ///   len(u32) + opcode(u32) + unique(u64) + nodeid(u64) + uid(u32)
+    ///   + gid(u32) + pid(u32) + padding(u32) = 40 bytes.
+    /// ByteValued requires that all bit patterns are valid and that the byte
+    /// representation is stable (from_slice is the inverse of as_slice).
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    fn proof_byte_valued_in_header_roundtrip() {
+        let bytes: [u8; 40] = kani::any();
+        // from_slice must succeed for any 40-byte input — no invalid bit patterns.
+        let val = InHeader::from_slice(&bytes)
+            .expect("InHeader: from_slice must succeed for any 40 bytes");
+        // as_slice must produce exactly size_of::<InHeader>() bytes.
+        kani::assert(
+            val.as_slice().len() == std::mem::size_of::<InHeader>(),
+            "InHeader: as_slice length must equal size_of",
+        );
+        // The serialised representation is identical to the input bytes.
+        kani::assert(
+            val.as_slice() == bytes,
+            "InHeader: byte round-trip must be identity",
+        );
+        kani::cover!(true, "InHeader ByteValued roundtrip reachable");
+    }
+
+    /// Verify: InHeader size is exactly 40 bytes.
+    ///
+    /// The FUSE kernel ABI specifies the wire size of fuse_in_header as 40 bytes.
+    /// A size mismatch would cause every FUSE request to be mis-parsed.
+    /// This is a compile-time assertion (const usize at compile time).
+    const _: () = {
+        let _ = [(); 1][if std::mem::size_of::<InHeader>() == 40 {
+            0
+        } else {
+            1
+        }];
+    };
+
+    /// Proof: any bit pattern is a valid FUSE OutHeader (ByteValued correctness).
+    ///
+    /// OutHeader is `#[repr(C)]` with fields len(u32) + error(i32) + unique(u64)
+    /// = 16 bytes total.  The `error` field is an i32; all bit patterns are valid
+    /// for signed integers in Rust.
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    fn proof_byte_valued_out_header_roundtrip() {
+        let bytes: [u8; 16] = kani::any();
+        // from_slice must succeed for any 16-byte input.
+        let val = OutHeader::from_slice(&bytes)
+            .expect("OutHeader: from_slice must succeed for any 16 bytes");
+        // as_slice must produce exactly size_of::<OutHeader>() bytes.
+        kani::assert(
+            val.as_slice().len() == std::mem::size_of::<OutHeader>(),
+            "OutHeader: as_slice length must equal size_of",
+        );
+        // Byte identity round-trip.
+        kani::assert(
+            val.as_slice() == bytes,
+            "OutHeader: byte round-trip must be identity",
+        );
+        kani::cover!(true, "OutHeader ByteValued roundtrip reachable");
+    }
+
+    /// Verify: OutHeader size is exactly 16 bytes.
+    ///
+    /// The FUSE kernel ABI specifies the wire size of fuse_out_header as 16 bytes.
+    /// This is a compile-time assertion (const usize at compile time).
+    const _: () = {
+        let _ = [(); 1][if std::mem::size_of::<OutHeader>() == 16 {
+            0
+        } else {
+            1
+        }];
+    };
+
+    /// Proof: any bit pattern is a valid FUSE Dirent (ByteValued correctness).
+    ///
+    /// Dirent is `#[repr(C)]` with fields ino(u64) + off(u64) + namelen(u32)
+    /// + type_(u32) = 24 bytes total.  Used for readdir results; a size or
+    /// layout mismatch would corrupt directory listing for every readdir call.
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    fn proof_byte_valued_dirent_roundtrip() {
+        let bytes: [u8; 24] = kani::any();
+        let val =
+            Dirent::from_slice(&bytes).expect("Dirent: from_slice must succeed for any 24 bytes");
+        kani::assert(
+            val.as_slice().len() == std::mem::size_of::<Dirent>(),
+            "Dirent: as_slice length must equal size_of",
+        );
+        kani::assert(
+            val.as_slice() == bytes,
+            "Dirent: byte round-trip must be identity",
+        );
+        kani::cover!(true, "Dirent ByteValued roundtrip reachable");
+    }
+}

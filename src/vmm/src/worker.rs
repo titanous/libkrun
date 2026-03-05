@@ -37,6 +37,42 @@ pub fn start_worker_thread(
     Ok(())
 }
 
+/// Validates that a convert_memory operation is within region bounds and fits
+/// in syscall parameter types.
+///
+/// Returns Ok((offset, size)) on success where both are safe for use in
+/// madvise (as usize) and fallocate (as i64).
+/// Returns Err if: size is zero, offset out of region, size + offset > region, size > i64::MAX,
+/// or offset > i64::MAX.
+#[cfg(any(feature = "tee", kani))]
+pub(crate) fn validate_convert_bounds(
+    gpa: u64,
+    size: u64,
+    region_start: u64,
+    region_size: u64,
+) -> Result<(u64, u64), &'static str> {
+    if size == 0 {
+        return Err("size cannot be zero");
+    }
+    if gpa < region_start {
+        return Err("gpa before region start");
+    }
+    let offset = gpa - region_start;
+    let end = offset
+        .checked_add(size)
+        .ok_or("offset + size overflows u64")?;
+    if end > region_size {
+        return Err("range exceeds region");
+    }
+    if size > i64::MAX as u64 {
+        return Err("size exceeds i64::MAX");
+    }
+    if offset > i64::MAX as u64 {
+        return Err("offset exceeds i64::MAX");
+    }
+    Ok((offset, size))
+}
+
 impl super::Vmm {
     fn match_worker_message(&self, msg: WorkerMessage) {
         match msg {
@@ -110,12 +146,30 @@ impl super::Vmm {
             return;
         }
 
-        let offset = properties.gpa - region_start;
+        let region = region.unwrap();
+        let region_size = region.len();
+
+        let (offset, _) = match validate_convert_bounds(
+            properties.gpa,
+            properties.size,
+            region_start,
+            region_size,
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                error!(
+                    "convert_memory: invalid bounds for GPA 0x{:x} size 0x{:x}: {}",
+                    properties.gpa, properties.size, e
+                );
+                sender.send(false).unwrap();
+                return;
+            }
+        };
 
         if properties.private {
             let region_addr = MemoryRegionAddress(offset);
 
-            let Ok(host_startaddr) = region.unwrap().get_host_address(region_addr) else {
+            let Ok(host_startaddr) = region.get_host_address(region_addr) else {
                 error!(
                     "host address corresponding to memory region address 0x{:x} not found",
                     region_addr.raw_value()
@@ -135,6 +189,7 @@ impl super::Vmm {
             if ret < 0 {
                 error!("unable to advise kernel that memory region corresponding to GPA 0x{:x} will likely not be needed (madvise)", properties.gpa);
                 sender.send(false).unwrap();
+                return;
             }
         } else {
             let ret = unsafe {
@@ -149,9 +204,121 @@ impl super::Vmm {
             if ret < 0 {
                 error!("unable to allocate space in guest_memfd for shared memory (fallocate)");
                 sender.send(false).unwrap();
+                return;
             }
         }
 
         sender.send(true).unwrap();
+    }
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    fn simulated_host_address_valid(gpa: u64, region_start: u64, region_size: u64) -> bool {
+        gpa >= region_start && gpa < region_start.saturating_add(region_size)
+    }
+
+    /// Proof: validate_convert_bounds correctly enforces all safety preconditions
+    /// for madvise and fallocate calls in convert_memory.
+    ///
+    /// GAP-022: convert_memory calls madvise/fallocate with offset and size derived
+    /// from WorkerMessage without checking region bounds or i64 cast safety.
+    /// The fix extracts validate_convert_bounds which checks all conditions.
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    fn proof_worker_madvise_size_within_region() {
+        let region_start: u64 = kani::any_where(|&s: &u64| s <= u64::MAX - 0x10000);
+        let region_size: u64 = kani::any_where(|&sz| sz > 0 && sz <= 0x10000);
+        let gpa: u64 = kani::any();
+        let properties_size: u64 = kani::any();
+
+        kani::assume(simulated_host_address_valid(gpa, region_start, region_size));
+
+        match validate_convert_bounds(gpa, properties_size, region_start, region_size) {
+            Ok((offset, size)) => {
+                kani::assert(offset + size <= region_size, "madvise range within region");
+                kani::assert(size <= i64::MAX as u64, "size fits i64");
+                kani::cover!(true, "valid convert accepted");
+            }
+            Err(_) => {
+                kani::cover!(true, "invalid convert rejected");
+            }
+        }
+    }
+
+    /// Proof: validate_convert_bounds enforces fallocate range safety.
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    fn proof_worker_fallocate_size_within_region() {
+        let region_start: u64 = kani::any_where(|&s: &u64| s <= u64::MAX - 0x10000);
+        let region_size: u64 = kani::any_where(|&sz| sz > 0 && sz <= 0x10000);
+        let gpa: u64 = kani::any();
+        let properties_size: u64 = kani::any();
+
+        kani::assume(simulated_host_address_valid(gpa, region_start, region_size));
+
+        match validate_convert_bounds(gpa, properties_size, region_start, region_size) {
+            Ok((offset, size)) => {
+                kani::assert(
+                    offset + size <= region_size,
+                    "fallocate range within region",
+                );
+                // Safe to cast: both fit in i64
+                let _offset_i64 = offset as i64;
+                let _size_i64 = size as i64;
+                kani::assert(_offset_i64 >= 0, "offset non-negative after cast");
+                kani::assert(_size_i64 >= 0, "size non-negative after cast");
+                kani::cover!(true, "valid fallocate range");
+            }
+            Err(_) => {
+                kani::cover!(true, "invalid rejected");
+            }
+        }
+    }
+
+    /// Proof: validate_convert_bounds prevents i64 cast overflow for size.
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    fn proof_worker_fallocate_size_fits_i64() {
+        let properties_size: u64 = kani::any();
+        let region_start: u64 = kani::any_where(|&s: &u64| s <= u64::MAX - 0x10000);
+        let region_size: u64 = kani::any_where(|&sz| sz > 0 && sz <= 0x10000);
+        let gpa: u64 = kani::any();
+
+        kani::assume(simulated_host_address_valid(gpa, region_start, region_size));
+
+        match validate_convert_bounds(gpa, properties_size, region_start, region_size) {
+            Ok((_, size)) => {
+                kani::assert(size <= i64::MAX as u64, "size safe for i64 cast");
+                kani::cover!(true, "size fits i64");
+            }
+            Err(_) => {
+                kani::cover!(true, "oversized or out-of-bounds rejected");
+            }
+        }
+    }
+
+    /// Proof: validate_convert_bounds rejects zero size.
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    fn proof_worker_size_cannot_be_zero() {
+        let region_start: u64 = kani::any();
+        let region_size: u64 = kani::any_where(|&sz| sz > 0);
+        let gpa: u64 = kani::any_where(|&g: &u64| {
+            g >= region_start && g < region_start.saturating_add(region_size)
+        });
+
+        // Test with size == 0, which must always be rejected
+        match validate_convert_bounds(gpa, 0, region_start, region_size) {
+            Ok(_) => {
+                kani::assert(false, "size==0 must always be rejected");
+            }
+            Err(msg) => {
+                kani::assert(msg.contains("zero"), "error message mentions zero size");
+                kani::cover!(true, "zero size correctly rejected");
+            }
+        }
     }
 }

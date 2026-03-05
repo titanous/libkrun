@@ -70,6 +70,7 @@ struct LinuxDirent64 {
     d_reclen: libc::c_ushort,
     d_ty: libc::c_uchar,
 }
+// SAFETY: LinuxDirent64 is #[repr(C, packed)] with no padding bytes; all bit patterns are valid for all fields.
 unsafe impl ByteValued for LinuxDirent64 {}
 
 macro_rules! scoped_cred {
@@ -108,10 +109,19 @@ macro_rules! scoped_cred {
             fn drop(&mut self) {
                 let res = unsafe { libc::syscall($syscall_nr, -1, 0, -1) };
                 if res < 0 {
-                    error!(
-                        "failed to change credentials back to root: {}",
+                    // SAFETY: abort is safe to call at any time and is the correct
+                    // response here. Failing to restore credentials back to root is a
+                    // security boundary violation — the thread would continue running
+                    // as a non-root UID/GID, which is unacceptable in a hypervisor
+                    // context. We cannot use panic!() because panicking in a Drop impl
+                    // causes a double-panic and abort anyway, but the abort path via
+                    // panic is less explicit. Call abort() directly to make the intent
+                    // clear and avoid any unwinding side-effects.
+                    eprintln!(
+                        "FATAL: failed to restore credentials to root: {}",
                         io::Error::last_os_error(),
                     );
+                    std::process::abort();
                 }
             }
         }
@@ -740,20 +750,29 @@ impl PassthroughFs {
 
         let mut rem = &buf[..];
         while !rem.is_empty() {
-            // We only use debug asserts here because these values are coming from the kernel and we
-            // trust them implicitly.
-            debug_assert!(
-                rem.len() >= size_of::<LinuxDirent64>(),
-                "not enough space left in `rem`"
-            );
+            let rem_len = rem.len();
+
+            let d_reclen_u16 = if rem_len >= size_of::<LinuxDirent64>() {
+                let (front, _) = rem.split_at(size_of::<LinuxDirent64>());
+                LinuxDirent64::from_slice(front)
+                    .expect("unable to get LinuxDirent64 from slice")
+                    .d_reclen
+            } else {
+                0
+            };
+
+            let advance =
+                match validate_dirent_step(rem_len, d_reclen_u16, size_of::<LinuxDirent64>()) {
+                    Ok(n) => n,
+                    Err(_) => break,
+                };
 
             let (front, back) = rem.split_at(size_of::<LinuxDirent64>());
 
             let dirent64 =
                 LinuxDirent64::from_slice(front).expect("unable to get LinuxDirent64 from slice");
 
-            let namelen = dirent64.d_reclen as usize - size_of::<LinuxDirent64>();
-            debug_assert!(namelen <= back.len(), "back is smaller than `namelen`");
+            let namelen = advance - size_of::<LinuxDirent64>();
 
             let name = &back[..namelen];
             let term = name
@@ -774,14 +793,9 @@ impl PassthroughFs {
                 })
             };
 
-            debug_assert!(
-                rem.len() >= dirent64.d_reclen as usize,
-                "rem is smaller than `d_reclen`"
-            );
-
             match res {
                 Ok(0) => break,
-                Ok(_) => rem = &rem[dirent64.d_reclen as usize..],
+                Ok(_) => rem = &rem[advance..],
                 Err(e) => return Err(e),
             }
         }
@@ -2374,5 +2388,85 @@ impl FileSystem for PassthroughFs {
         self.cfg.export_fsid = FS_UNIQUE_ID.fetch_add(1, Ordering::Relaxed);
         self.cfg.export_table = Some(export_table);
         self.cfg.export_fsid
+    }
+}
+
+/// Validates one step of a getdents64 iteration.
+///
+/// Returns Ok(d_reclen_usize) if this entry is safe to process and advance by.
+/// Returns Err if any of the invariants A-E fail:
+///   A: rem_len >= HEADER (enough bytes for the fixed header)
+///   B: d_reclen >= HEADER (no underflow in namelen = d_reclen - HEADER)
+///   C: d_reclen - HEADER <= rem_len - HEADER (name fits in back)
+///   D: d_reclen <= rem_len (advance stays within buffer)
+///   E: d_reclen > 0 (progress guaranteed, no infinite loop)
+pub(crate) fn validate_dirent_step(
+    rem_len: usize,
+    d_reclen: u16,
+    header_size: usize,
+) -> Result<usize, &'static str> {
+    let d = d_reclen as usize;
+    if rem_len < header_size {
+        return Err("rem_len < header: mid-entry exhaustion");
+    }
+    if d == 0 {
+        return Err("d_reclen == 0: infinite loop");
+    }
+    if d < header_size {
+        return Err("d_reclen < header: namelen underflow");
+    }
+    if d > rem_len {
+        return Err("d_reclen > rem_len: advance out of bounds");
+    }
+    Ok(d)
+}
+
+#[cfg(kani)]
+mod verification {
+    use std::mem::size_of;
+
+    /// Proof: validate_dirent_step enforces all getdents64 iteration invariants.
+    ///
+    /// GAP-025: do_readdir iterates getdents64 output trusting d_reclen to be valid.
+    /// Original code had only debug_assert! guards (no-ops in release). The fix
+    /// replaces them with real guards via validate_dirent_step. This proof verifies
+    /// the helper enforces all 5 invariants (A-E).
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    #[kani::unwind(9)]
+    fn proof_do_readdir_iteration_in_bounds() {
+        const BUF_LEN: usize = 512;
+        const HEADER: usize = size_of::<super::LinuxDirent64>();
+
+        let filled: usize = kani::any_where(|&n: &usize| n <= BUF_LEN);
+        let mut offset: usize = 0;
+        let mut step = 0usize;
+
+        while offset < filled {
+            kani::assume(step < 8);
+            step += 1;
+
+            let rem_len = filled - offset;
+            let d_reclen: u16 = kani::any();
+
+            match super::validate_dirent_step(rem_len, d_reclen, HEADER) {
+                Ok(advance) => {
+                    // When valid, all invariants hold:
+                    kani::assert(rem_len >= HEADER, "A: header fits");
+                    kani::assert(advance >= HEADER, "B: no underflow");
+                    kani::assert(advance <= rem_len, "D: advance in bounds");
+                    kani::assert(advance > 0, "E: progress guaranteed");
+                    offset += advance;
+                }
+                Err(_) => {
+                    // Guard correctly rejected this entry — iteration stops
+                    kani::cover!(true, "invalid entry rejected, iteration stops");
+                    break;
+                }
+            }
+        }
+
+        kani::cover!(offset == filled, "clean iteration");
+        kani::cover!(step == 0, "empty buffer");
     }
 }

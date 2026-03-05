@@ -22,8 +22,8 @@ pub struct VirtioConsoleControl {
     pub value: u16,
 }
 
-// Safe because it only has data and has no implicit padding.
-// But NOTE that this relies on CPU being little endian, to have correct semantics
+// SAFETY: VirtioConsoleControl is #[repr(C, packed(4))] with no padding bytes; all bit patterns
+// are valid for all fields (u32, u16, u16). NOTE: correct field semantics require a little-endian CPU.
 unsafe impl ByteValued for VirtioConsoleControl {}
 
 #[derive(Copy, Clone, Debug, Default)]
@@ -35,8 +35,8 @@ pub struct VirtioConsoleResize {
     pub rows: u16,
 }
 
-// Safe because it only has data and has no implicit padding.
-// but NOTE, that we rely on CPU being little endian, for the values to be correct
+// SAFETY: VirtioConsoleResize is #[repr(C, packed)] with no padding bytes; all bit patterns
+// are valid for all fields (u16, u16). NOTE: correct field semantics require a little-endian CPU.
 unsafe impl ByteValued for VirtioConsoleResize {}
 
 pub enum Payload {
@@ -149,5 +149,79 @@ impl ConsoleControl {
         if let Err(e) = self.queue_evt.write(1) {
             log::trace!("ConsoleControl failed to write to notify {e}")
         }
+    }
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    // ---------------------------------------------------------------------------
+    // ByteValued round-trips for virtio console control structs
+    //
+    // These structs are sent over the console control virtqueue as raw bytes.
+    // A ByteValued layout bug (wrong size, unexpected padding) would corrupt
+    // every port-add, port-open, or resize control message.
+    // ---------------------------------------------------------------------------
+
+    /// Proof: any bit pattern is a valid VirtioConsoleControl (ByteValued correctness).
+    ///
+    /// VirtioConsoleControl is `#[repr(C, packed(4))]` with fields:
+    ///   id(u32) + event(u16) + value(u16) = 8 bytes total.
+    /// The packed(4) repr avoids trailing padding while keeping 4-byte alignment
+    /// for the u32.  All bit patterns of u32/u16 are valid in Rust.
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    fn proof_byte_valued_virtio_console_control_roundtrip() {
+        let bytes: [u8; 8] = kani::any();
+        // from_slice must succeed for any 8-byte input — no invalid bit patterns.
+        let val = VirtioConsoleControl::from_slice(&bytes)
+            .expect("VirtioConsoleControl: from_slice must succeed for any 8 bytes");
+        // as_slice must produce exactly size_of::<VirtioConsoleControl>() bytes.
+        kani::assert(
+            val.as_slice().len() == std::mem::size_of::<VirtioConsoleControl>(),
+            "VirtioConsoleControl: as_slice length must equal size_of",
+        );
+        // Bytes are preserved identically.
+        kani::assert(
+            val.as_slice() == bytes,
+            "VirtioConsoleControl: byte round-trip must be identity",
+        );
+        kani::cover!(true, "VirtioConsoleControl ByteValued roundtrip reachable");
+    }
+
+    /// Verify: VirtioConsoleControl size is exactly 8 bytes.
+    ///
+    /// id(4) + event(2) + value(2) = 8 bytes.  The virtio console spec
+    /// (§5.3.6) requires the control header to be exactly this size.
+    /// This is a compile-time assertion (const usize at compile time).
+    const _: () = {
+        let _ = [(); 1][if std::mem::size_of::<VirtioConsoleControl>() == 8 {
+            0
+        } else {
+            1
+        }];
+    };
+
+    /// Proof: any bit pattern is a valid VirtioConsoleResize (ByteValued correctness).
+    ///
+    /// VirtioConsoleResize is `#[repr(C, packed)]` with fields:
+    ///   cols(u16) + rows(u16) = 4 bytes total, no padding.
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    fn proof_byte_valued_virtio_console_resize_roundtrip() {
+        let bytes: [u8; 4] = kani::any();
+        // from_slice must succeed for any 4-byte input.
+        let val = VirtioConsoleResize::from_slice(&bytes)
+            .expect("VirtioConsoleResize: from_slice must succeed for any 4 bytes");
+        kani::assert(
+            val.as_slice().len() == std::mem::size_of::<VirtioConsoleResize>(),
+            "VirtioConsoleResize: as_slice length must equal size_of",
+        );
+        kani::assert(
+            val.as_slice() == bytes,
+            "VirtioConsoleResize: byte round-trip must be identity",
+        );
+        kani::cover!(true, "VirtioConsoleResize ByteValued roundtrip reachable");
     }
 }

@@ -1230,6 +1230,10 @@ mod tests {
         assert!(state.is_ok());
         assert!(vcpu.restore_state(state.unwrap()).is_ok());
 
+        // Wrap in ManuallyDrop to prevent double-close: we manually close the fd
+        // here to force the next ioctl to fail, and ManuallyDrop ensures VcpuFd
+        // does not close it again on drop.
+        let mut vcpu = std::mem::ManuallyDrop::new(vcpu);
         unsafe { libc::close(vcpu.fd.as_raw_fd()) };
         let state = VcpuState {
             cpuid: CpuId::new(1),

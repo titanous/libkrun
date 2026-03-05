@@ -38,6 +38,7 @@ mod defs {
             pub num_scanouts: u32,
             pub num_capsets: u32,
         }
+        // SAFETY: virtio_gpu_config is #[repr(C)] with no padding bytes; all bit patterns are valid for all fields.
         unsafe impl ByteValued for virtio_gpu_config {}
     }
 }

@@ -22,6 +22,7 @@ struct VirtioInputEvent {
     value: i32,
 }
 
+// SAFETY: VirtioInputEvent is #[repr(C)] with no padding bytes; all bit patterns are valid for all fields (u16, u16, i32).
 unsafe impl ByteValued for VirtioInputEvent {}
 
 pub struct InputWorker {

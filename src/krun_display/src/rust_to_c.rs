@@ -6,7 +6,7 @@ use log::error;
 use std::ffi::c_void;
 use std::marker::PhantomData;
 use std::ptr;
-use std::ptr::{null, null_mut};
+use std::ptr::null;
 
 pub trait DisplayBackendNew<T: Sync> {
     fn new(userdata: Option<&T>) -> Self;
@@ -48,12 +48,10 @@ impl<T: Sync, I: DisplayBackendBasicFramebuffer + DisplayBackendNew<T>> IntoDisp
             userdata: *const c_void,
             _reserved: *const c_void,
         ) -> i32 {
+            if instance.is_null() {
+                return -1;
+            }
             unsafe {
-                assert_ne!(
-                    instance,
-                    null_mut(),
-                    "Pointer to location where to create instance cannot be null"
-                );
                 let userdata_ref = (userdata as *const T).as_ref();
                 *(instance as *mut *mut I) = Box::into_raw(Box::new(I::new(userdata_ref)));
             }
@@ -61,15 +59,20 @@ impl<T: Sync, I: DisplayBackendBasicFramebuffer + DisplayBackendNew<T>> IntoDisp
         }
 
         extern "C" fn destroy_fn<I>(instance: *mut c_void) -> i32 {
+            if instance.is_null() {
+                return 0;
+            }
             drop(unsafe { Box::from_raw(instance as *mut I) });
             0
         }
 
         fn cast_instance<'a, I: DisplayBackendBasicFramebuffer>(
             instance: *mut c_void,
-        ) -> &'a mut I {
-            assert_ne!(instance, null_mut());
-            unsafe { &mut *(instance as *mut I) }
+        ) -> Option<&'a mut I> {
+            if instance.is_null() {
+                return None;
+            }
+            Some(unsafe { &mut *(instance as *mut I) })
         }
 
         extern "C" fn configure_scanout_fn<I: DisplayBackendBasicFramebuffer>(
@@ -81,12 +84,15 @@ impl<T: Sync, I: DisplayBackendBasicFramebuffer + DisplayBackendNew<T>> IntoDisp
             height: u32,
             format: u32,
         ) -> i32 {
+            let Some(obj) = cast_instance::<I>(instance) else {
+                return DisplayBackendError::InternalError as i32;
+            };
             let Ok(format) = ResourceFormat::try_from(format) else {
                 error!("Unknown display format: {format}");
                 return DisplayBackendError::InvalidParam as i32;
             };
 
-            from_rust_result(cast_instance::<I>(instance).configure_scanout(
+            from_rust_result(obj.configure_scanout(
                 scanout_id,
                 display_width,
                 display_height,
@@ -100,7 +106,10 @@ impl<T: Sync, I: DisplayBackendBasicFramebuffer + DisplayBackendNew<T>> IntoDisp
             instance: *mut c_void,
             scanout_id: u32,
         ) -> i32 {
-            from_rust_result(cast_instance::<I>(instance).disable_scanout(scanout_id))
+            let Some(obj) = cast_instance::<I>(instance) else {
+                return DisplayBackendError::InternalError as i32;
+            };
+            from_rust_result(obj.disable_scanout(scanout_id))
         }
 
         extern "C" fn alloc_frame<I: DisplayBackendBasicFramebuffer>(
@@ -109,7 +118,10 @@ impl<T: Sync, I: DisplayBackendBasicFramebuffer + DisplayBackendNew<T>> IntoDisp
             buffer: *mut *mut u8,
             buffer_size: *mut usize,
         ) -> i32 {
-            match cast_instance::<I>(instance).alloc_frame(scanout_id) {
+            let Some(obj) = cast_instance::<I>(instance) else {
+                return DisplayBackendError::InternalError as i32;
+            };
+            match obj.alloc_frame(scanout_id) {
                 Ok((frame_id, allocated_buffer)) => {
                     unsafe {
                         *buffer_size = allocated_buffer.len();
@@ -127,9 +139,12 @@ impl<T: Sync, I: DisplayBackendBasicFramebuffer + DisplayBackendNew<T>> IntoDisp
             frame_id: u32,
             rect: *const Rect,
         ) -> i32 {
+            let Some(obj) = cast_instance::<I>(instance) else {
+                return DisplayBackendError::InternalError as i32;
+            };
             // SAFETY: The pointer obtained from the bindings should be safe
             let rect: Option<&Rect> = unsafe { ptr_to_option_ref(rect) };
-            from_rust_result(cast_instance::<I>(instance).present_frame(scanout_id, frame_id, rect))
+            from_rust_result(obj.present_frame(scanout_id, frame_id, rect))
         }
 
         DisplayBackend {

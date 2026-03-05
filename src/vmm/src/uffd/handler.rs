@@ -4,8 +4,8 @@
 //! UffdHandler: registers guest memory with userfaultfd and resolves page faults.
 
 use super::page_tracker::{
-    guest_addr_to_page_index, guest_to_host, host_to_guest, is_eexist, LoadSource, PageTracker,
-    PageTrackerStats, UffdRegion,
+    guest_addr_to_page_index, host_to_guest, is_eexist, LoadSource, PageTracker, PageTrackerStats,
+    UffdRegion,
 };
 use crate::snapshot_store::{system_page_size, SnapshotStore};
 use crate::vm_exit::SharedVmExit;
@@ -14,6 +14,14 @@ use std::sync::Arc;
 use std::thread;
 use tokio::sync::oneshot;
 use userfaultfd::Uffd;
+
+/// Clamps a copy length to not exceed the available bytes in a region.
+/// Returns the clamped length: min(chunk_len, region_end - host_addr).
+/// Assumes host_addr <= region_end (callers must ensure the host_addr is within the region).
+pub(crate) fn clamp_uffd_copy_len(host_addr: u64, region_end: u64, chunk_len: usize) -> usize {
+    let max_len = (region_end - host_addr) as usize;
+    chunk_len.min(max_len)
+}
 
 /// Handler for UFFD-driven demand paging.
 ///
@@ -55,8 +63,20 @@ async fn preload_task(
         match result {
             Ok((guest_addr, data)) => {
                 // Translate guest address to host address for UFFD copy
-                let host_addr = match guest_to_host(&regions, guest_addr) {
-                    Some(addr) => addr,
+                let (host_addr, region_end) = match regions
+                    .iter()
+                    .find(|r| guest_addr >= r.guest_addr && guest_addr < r.guest_addr + r.size)
+                {
+                    Some(region) => {
+                        let offset = guest_addr - region.guest_addr;
+                        let ha = region.host_addr.checked_add(offset).unwrap_or_else(|| {
+                            panic!("uffd: host_addr + offset overflows u64 for guest_addr 0x{guest_addr:x}");
+                        });
+                        let re = region.host_addr.checked_add(region.size).unwrap_or_else(|| {
+                            panic!("uffd: host_addr + region.size overflows u64 for guest_addr 0x{guest_addr:x}");
+                        });
+                        (ha, re)
+                    }
                     None => {
                         log::warn!(
                             "preload chunk at 0x{guest_addr:x} not in registered regions, skipping"
@@ -65,12 +85,21 @@ async fn preload_task(
                     }
                 };
 
+                // Clamp copy length to the registered region boundary.
+                let copy_len = clamp_uffd_copy_len(host_addr, region_end, data.len());
+                if copy_len < data.len() {
+                    log::warn!(
+                        "preload chunk at 0x{guest_addr:x} exceeds region end by {} bytes, clamping",
+                        data.len() - copy_len
+                    );
+                }
+
                 let result = unsafe {
                     uffd.copy(
                         data.as_ptr() as *const _,
                         host_addr as *mut _,
-                        data.len(), // multi-page len (e.g., 4MB for FsSnapshotStore)
-                        true,       // wake
+                        copy_len, // multi-page len (e.g., 4MB for FsSnapshotStore)
+                        true,     // wake
                     )
                 };
 
@@ -78,7 +107,7 @@ async fn preload_task(
                     Ok(_) => {
                         // Successfully copied chunk. Mark all pages in the chunk as loaded via preload.
                         // Chunk is typically multi-page (e.g., 4MB chunks from FsSnapshotStore).
-                        let chunk_pages = data.len().div_ceil(system_page_size() as usize);
+                        let chunk_pages = copy_len.div_ceil(system_page_size() as usize);
                         if let Some(start_page_index) =
                             guest_addr_to_page_index(&regions, guest_addr)
                         {
@@ -310,8 +339,13 @@ impl UffdHandler {
                             Ok(None) => {
                                 // Reclaimed page — resolve via zeropage ioctl.
                                 // Maps the kernel shared zero page — no data copy, no physical allocation.
-                                let result =
-                                    unsafe { uffd_clone.zeropage(host_addr as *mut _, 4096, true) };
+                                let result = unsafe {
+                                    uffd_clone.zeropage(
+                                        host_addr as *mut _,
+                                        system_page_size() as usize,
+                                        true,
+                                    )
+                                };
                                 match result {
                                     Ok(_) => {
                                         if let Some(page_index) =
@@ -372,5 +406,45 @@ fn signal_error(vm_exit: &SharedVmExit, message: String) {
         if exit.is_none() {
             *exit = Some(crate::vm_exit::VmExit::Error { message });
         }
+    }
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::clamp_uffd_copy_len;
+
+    /// Proof: clamp_uffd_copy_len ensures the copy never exceeds the region boundary.
+    ///
+    /// GAP-015: preload_task calls uffd.copy with data.len() bytes starting at
+    /// host_addr, without verifying host_addr + data.len() <= region_end. The fix
+    /// extracts clamp_uffd_copy_len which clamps to the region boundary. This proof
+    /// verifies the clamped length is always safe.
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    fn proof_uffd_copy_chunk_within_region() {
+        let region_start: u64 = kani::any_where(|&s: &u64| s < u64::MAX / 2);
+        let region_size: u64 = kani::any_where(|&s: &u64| s > 0 && s < u64::MAX / 2);
+        kani::assume(region_start.checked_add(region_size).is_some());
+        let region_end = region_start + region_size;
+
+        let host_addr: u64 = kani::any_where(|&a: &u64| a >= region_start && a < region_end);
+        let chunk_len: usize = kani::any_where(|&l: &usize| l > 0 && l <= 4 * 1024 * 1024);
+
+        let copy_len = clamp_uffd_copy_len(host_addr, region_end, chunk_len);
+
+        // Post-condition: copy never extends past region_end
+        kani::assert(
+            host_addr
+                .checked_add(copy_len as u64)
+                .map_or(false, |end| end <= region_end),
+            "clamped copy does not extend past region_end",
+        );
+        kani::assert(
+            copy_len <= chunk_len,
+            "clamped length never exceeds original",
+        );
+
+        kani::cover!(copy_len < chunk_len, "clamping was needed");
+        kani::cover!(copy_len == chunk_len, "no clamping needed");
     }
 }

@@ -230,9 +230,33 @@ impl AsyncBlockWorker {
         // Wrap eventfds in AsyncFd for async-compatible waiting
         // SAFETY: We own these fds and they remain valid for the lifetime of this function.
         // We duplicate the fds because AsyncFd takes ownership but we still need the original EventFd.
-        let queue_fd_dup = unsafe { OwnedFd::from_raw_fd(libc::dup(queue_evt.as_raw_fd())) };
-        let stop_fd_dup = unsafe { OwnedFd::from_raw_fd(libc::dup(stop_fd.as_raw_fd())) };
-        let resync_fd_dup = unsafe { OwnedFd::from_raw_fd(libc::dup(resync_fd.as_raw_fd())) };
+        let raw = unsafe { libc::dup(queue_evt.as_raw_fd()) };
+        if raw < 0 {
+            error!(
+                "async block worker: dup(queue_evt) failed: {}",
+                std::io::Error::last_os_error()
+            );
+            return;
+        }
+        let queue_fd_dup = unsafe { OwnedFd::from_raw_fd(raw) };
+        let raw = unsafe { libc::dup(stop_fd.as_raw_fd()) };
+        if raw < 0 {
+            error!(
+                "async block worker: dup(stop_fd) failed: {}",
+                std::io::Error::last_os_error()
+            );
+            return;
+        }
+        let stop_fd_dup = unsafe { OwnedFd::from_raw_fd(raw) };
+        let raw = unsafe { libc::dup(resync_fd.as_raw_fd()) };
+        if raw < 0 {
+            error!(
+                "async block worker: dup(resync_fd) failed: {}",
+                std::io::Error::last_os_error()
+            );
+            return;
+        }
+        let resync_fd_dup = unsafe { OwnedFd::from_raw_fd(raw) };
 
         let async_queue_fd =
             AsyncFd::new(queue_fd_dup).expect("failed to create AsyncFd for queue");
@@ -240,8 +264,24 @@ impl AsyncBlockWorker {
         let async_resync_fd =
             AsyncFd::new(resync_fd_dup).expect("failed to create AsyncFd for resync");
 
-        let quiesce_fd_dup = unsafe { OwnedFd::from_raw_fd(libc::dup(quiesce_fd.as_raw_fd())) };
-        let resume_fd_dup = unsafe { OwnedFd::from_raw_fd(libc::dup(resume_fd.as_raw_fd())) };
+        let raw = unsafe { libc::dup(quiesce_fd.as_raw_fd()) };
+        if raw < 0 {
+            error!(
+                "async block worker: dup(quiesce_fd) failed: {}",
+                std::io::Error::last_os_error()
+            );
+            return;
+        }
+        let quiesce_fd_dup = unsafe { OwnedFd::from_raw_fd(raw) };
+        let raw = unsafe { libc::dup(resume_fd.as_raw_fd()) };
+        if raw < 0 {
+            error!(
+                "async block worker: dup(resume_fd) failed: {}",
+                std::io::Error::last_os_error()
+            );
+            return;
+        }
+        let resume_fd_dup = unsafe { OwnedFd::from_raw_fd(raw) };
         let async_quiesce_fd =
             AsyncFd::new(quiesce_fd_dup).expect("failed to create AsyncFd for quiesce");
         let async_resume_fd =
@@ -287,7 +327,8 @@ impl AsyncBlockWorker {
                                         metrics.bytes_written.fetch_add(batch_result.total_bytes, Ordering::Relaxed);
                                         metrics.write_latency_us.fetch_add(batch_result.elapsed_us, Ordering::Relaxed);
                                         for (index, status, len, status_ptr) in batch_result.results {
-                                            unsafe { std::ptr::write_volatile(status_ptr, status); }
+                                            // SAFETY: status_ptr is NonNull and points into a live guest memory region.
+                                            unsafe { std::ptr::write_volatile(status_ptr.as_ptr(), status); }
                                             metrics.in_flight.fetch_sub(1, Ordering::Relaxed);
                                             complete_request(&mut queue, &mem, &interrupt, RequestResult { index, status, len });
                                         }
@@ -304,7 +345,8 @@ impl AsyncBlockWorker {
                                 match handle.await {
                                     Ok(batch_result) => {
                                         for (index, status, len, status_ptr) in batch_result.results {
-                                            unsafe { std::ptr::write_volatile(status_ptr, status); }
+                                            // SAFETY: status_ptr is NonNull and points into a live guest memory region.
+                                            unsafe { std::ptr::write_volatile(status_ptr.as_ptr(), status); }
                                             metrics.in_flight.fetch_sub(1, Ordering::Relaxed);
                                             complete_request(&mut queue, &mem, &interrupt, RequestResult { index, status, len });
                                         }
@@ -325,7 +367,8 @@ impl AsyncBlockWorker {
                                     }
                                 };
                                 for flush_parsed in flush_requests_in_progress.drain(..) {
-                                    unsafe { std::ptr::write_volatile(flush_parsed.status_ptr, flush_status); }
+                                    // SAFETY: status_ptr is NonNull and points into a live guest memory region.
+                                    unsafe { std::ptr::write_volatile(flush_parsed.status_ptr.as_ptr(), flush_status); }
                                     metrics.flushes.fetch_add(1, Ordering::Relaxed);
                                     metrics.in_flight.fetch_sub(1, Ordering::Relaxed);
                                     complete_request(&mut queue, &mem, &interrupt, RequestResult {
@@ -361,7 +404,8 @@ impl AsyncBlockWorker {
                                     }
                                 };
                                 for flush_parsed in flush_reqs {
-                                    unsafe { std::ptr::write_volatile(flush_parsed.status_ptr, flush_status); }
+                                    // SAFETY: status_ptr is NonNull and points into a live guest memory region.
+                                    unsafe { std::ptr::write_volatile(flush_parsed.status_ptr.as_ptr(), flush_status); }
                                     metrics.flushes.fetch_add(1, Ordering::Relaxed);
                                     metrics.in_flight.fetch_sub(1, Ordering::Relaxed);
                                     complete_request(&mut queue, &mem, &interrupt, RequestResult {
@@ -668,9 +712,10 @@ impl AsyncBlockWorker {
 
                             // Complete all requests in the batch
                             for (index, status, len, status_ptr) in batch_result.results {
-                                // Write status byte to guest memory
+                                // Write status byte to guest memory.
+                                // SAFETY: status_ptr is NonNull and points into a live guest memory region.
                                 unsafe {
-                                    std::ptr::write_volatile(status_ptr, status);
+                                    std::ptr::write_volatile(status_ptr.as_ptr(), status);
                                 }
                                 metrics.in_flight.fetch_sub(1, Ordering::Relaxed);
                                 complete_request(&mut queue, &mem, &interrupt, RequestResult { index, status, len });
@@ -752,8 +797,9 @@ impl AsyncBlockWorker {
 
                     // Complete all flush requests that were waiting
                     for flush_parsed in flush_requests_in_progress.drain(..) {
+                        // SAFETY: status_ptr is NonNull and points into a live guest memory region.
                         unsafe {
-                            std::ptr::write_volatile(flush_parsed.status_ptr, flush_status);
+                            std::ptr::write_volatile(flush_parsed.status_ptr.as_ptr(), flush_status);
                         }
                         metrics.flushes.fetch_add(1, Ordering::Relaxed);
                         metrics.in_flight.fetch_sub(1, Ordering::Relaxed);
@@ -802,8 +848,9 @@ impl AsyncBlockWorker {
                             trace!("async block worker: coalescing {} flushes (no writes since last flush)", flush_count);
 
                             for flush_parsed in pending_flushes.drain(..) {
+                                // SAFETY: status_ptr is NonNull and points into a live guest memory region.
                                 unsafe {
-                                    std::ptr::write_volatile(flush_parsed.status_ptr, flush_status);
+                                    std::ptr::write_volatile(flush_parsed.status_ptr.as_ptr(), flush_status);
                                 }
                                 metrics.flushes.fetch_add(1, Ordering::Relaxed);
                                 metrics.in_flight.fetch_sub(1, Ordering::Relaxed);
@@ -946,9 +993,12 @@ fn spawn_read_task(
         metrics.in_flight.fetch_sub(1, Ordering::Relaxed);
         metrics.concurrent_reads.fetch_sub(1, Ordering::Relaxed);
 
-        // Write status byte to guest memory
+        // Write status byte to guest memory.
+        // SAFETY: status_ptr is NonNull and points into a live guest memory region
+        // that outlives this spawn_local task (guest RAM is kept alive for the duration
+        // of any in-flight request).
         unsafe {
-            std::ptr::write_volatile(parsed.status_ptr, status);
+            std::ptr::write_volatile(parsed.status_ptr.as_ptr(), status);
         }
 
         let _ = completion_tx
@@ -992,47 +1042,58 @@ fn start_write_batch(
         }
     }
 
-    // Collect writes to actually process (the deduplicated ones)
-    let mut to_process: Vec<&QueuedWrite> =
-        dedup_map.values().map(|&(_, idx)| &writes[idx]).collect();
+    // Collect (offset, index-into-writes) for the deduplicated writes to process,
+    // then sort by offset for better sequential I/O.
+    let mut to_process_indices: Vec<(u64, usize)> = dedup_map
+        .values()
+        .map(|&(_, idx)| (writes[idx].offset, idx))
+        .collect();
+    to_process_indices.sort_by_key(|&(offset, _)| offset);
 
-    // Sort by offset for better sequential I/O
-    to_process.sort_by_key(|w| w.offset);
-
-    // Track which writes were deduplicated (not in to_process)
+    // Track which writes were selected for processing.
     let processed_indices: std::collections::HashSet<usize> =
         dedup_map.values().map(|&(_, idx)| idx).collect();
 
     debug!(
         "start_write_batch: after dedup, {} writes to process, {} deduplicated",
-        to_process.len(),
-        writes.len() - to_process.len()
+        to_process_indices.len(),
+        writes.len() - to_process_indices.len()
     );
 
-    // Prepare batch data
-    // Each entry: (offset, bufs, index, status_ptr)
-    let mut batch_writes: Vec<(u64, Vec<VolatileSliceGuard>)> =
-        Vec::with_capacity(to_process.len());
-    let mut batch_meta: Vec<(u16, *mut u8)> = Vec::with_capacity(to_process.len());
+    // Wrap all writes in Option so we can take ownership of selected entries
+    // without cloning the non-Clone VolatileSliceGuard buffers.
+    let mut writes_opt: Vec<Option<QueuedWrite>> = writes.into_iter().map(Some).collect();
 
-    for w in &to_process {
-        if let Request::Write { bufs, offset } = &w.parsed.request {
-            batch_writes.push((*offset, bufs.clone()));
-            batch_meta.push((w.parsed.index, w.parsed.status_ptr));
+    // Prepare batch data — consume the selected writes by index.
+    // Each entry: (offset, bufs)
+    let mut batch_writes: Vec<(u64, Vec<VolatileSliceGuard>)> =
+        Vec::with_capacity(to_process_indices.len());
+    let mut batch_meta: Vec<(u16, std::ptr::NonNull<u8>)> =
+        Vec::with_capacity(to_process_indices.len());
+
+    for (_offset, idx) in &to_process_indices {
+        // Take ownership out of the slot (each index appears at most once).
+        if let Some(w) = writes_opt[*idx].take() {
+            if let Request::Write { bufs, offset } = w.parsed.request {
+                batch_writes.push((offset, bufs));
+                batch_meta.push((w.parsed.index, w.parsed.status_ptr));
+            }
         }
     }
 
-    // Collect deduplicated writes (completed with success, 0 bytes)
-    let mut deduped_completions: Vec<(u16, u8, u32, *mut u8)> = Vec::new();
-    for (idx, w) in writes.iter().enumerate() {
+    // Collect deduplicated writes (completed immediately as success).
+    let mut deduped_completions: Vec<(u16, u8, u32, std::ptr::NonNull<u8>)> = Vec::new();
+    for (idx, slot) in writes_opt.into_iter().enumerate() {
         if !processed_indices.contains(&idx) {
-            // This write was deduplicated - complete it immediately as success
-            deduped_completions.push((
-                w.parsed.index,
-                VIRTIO_BLK_S_OK as u8,
-                0, // 0 bytes written (deduplicated)
-                w.parsed.status_ptr,
-            ));
+            if let Some(w) = slot {
+                // This write was deduplicated - complete it immediately as success
+                deduped_completions.push((
+                    w.parsed.index,
+                    VIRTIO_BLK_S_OK as u8,
+                    0, // 0 bytes written (deduplicated)
+                    w.parsed.status_ptr,
+                ));
+            }
         }
     }
 
@@ -1043,7 +1104,7 @@ fn start_write_batch(
         let batch_results = disk.write_batch(batch_writes).await;
         let elapsed_us = start.elapsed().as_micros() as u64;
 
-        let mut results: Vec<(u16, u8, u32, *mut u8)> =
+        let mut results: Vec<(u16, u8, u32, std::ptr::NonNull<u8>)> =
             Vec::with_capacity(batch_meta.len() + deduped_completions.len());
         let mut total_bytes: u64 = 0;
 
@@ -1088,7 +1149,7 @@ enum RequestType {
 fn parse_request(
     mem: &GuestMemoryMmap,
     head: crate::virtio::queue::DescriptorChain,
-) -> Result<(Request, *mut u8), RequestError> {
+) -> Result<(Request, std::ptr::NonNull<u8>), RequestError> {
     let mut reader = Reader::new(mem, head.clone())
         .map_err(|e| RequestError::ReadingFromDescriptor(io::Error::other(e)))?;
 
@@ -1099,14 +1160,15 @@ fn parse_request(
         .read_obj()
         .map_err(RequestError::ReadingFromDescriptor)?;
 
-    // Get pointer to status byte (last byte of writer region)
-    let status_ptr = unsafe {
-        let available = writer.available_bytes();
-        if available == 0 {
-            return Err(RequestError::InvalidDataLength);
-        }
-        writer.get_status_ptr()
-    };
+    // Get pointer to status byte (last byte of writer region).
+    // get_status_ptr() returns None only when the writable region is empty,
+    // which we guard against here so the ? below is unreachable at runtime.
+    if writer.available_bytes() == 0 {
+        return Err(RequestError::InvalidDataLength);
+    }
+    let status_ptr: std::ptr::NonNull<u8> = writer
+        .get_status_ptr()
+        .expect("get_status_ptr: writable region non-empty (checked above)");
 
     let request = match request_header.request_type {
         VIRTIO_BLK_T_IN => {
@@ -1945,7 +2007,8 @@ mod tests {
                         offset: i * 512,
                     },
                     index: i as u16,
-                    status_ptr: std::ptr::null_mut(),
+                    // Test sentinel: NonNull::dangling() is never dereferenced in this test.
+                    status_ptr: std::ptr::NonNull::dangling(),
                 },
                 offset: i * 512,
                 len: 512,

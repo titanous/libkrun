@@ -63,15 +63,38 @@ impl From<Direction> for spa::utils::Direction {
     }
 }
 
-// SAFETY: Safe as the structure can be sent to another thread.
+// SAFETY: `PwBackend` contains `ThreadLoop`, `Core`, and `Context` from the
+// pipewire-rs crate, none of which implement `Send` or `Sync` on their own
+// because they wrap raw C pointers into the PipeWire C library.
+//
+// The following invariants make these impls sound:
+//
+// Send: A `PwBackend` value is constructed once and then transferred to a
+// single owning thread (the virtio-snd worker). The non-Send fields
+// (`ThreadLoop`, `Core`, `Context`) are never accessed concurrently from
+// multiple threads; they are always accessed under `thread_loop.lock()` /
+// `lock_guard.unlock()`, which calls `pw_thread_loop_lock()` internally.
+// `pw_thread_loop_lock()` suspends the PipeWire loop thread and gives
+// exclusive access to the caller, so at most one thread accesses these
+// objects at a time. Moving the whole struct across a thread boundary is
+// therefore safe.
+//
+// Sync: All mutation of `ThreadLoop`, `Core`, `Context`, and the stream
+// objects goes through `thread_loop.lock()` before any access, guaranteeing
+// mutual exclusion. The remaining fields (`stream_params`, `stream_hash`,
+// `stream_listener`) are wrapped in `RwLock` / `Arc<RwLock<...>>` and are
+// independently safe to share. Shared references (`&PwBackend`) from multiple
+// threads are therefore safe because every code path that touches the
+// non-`Sync` fields acquires `pw_thread_loop_lock()` first.
+//
+// Verified against PipeWire API documentation for the `pw_thread_loop_lock`
+// / `pw_thread_loop_unlock` contract: the lock is a recursive mutex that
+// serialises the calling thread with the loop thread.
 unsafe impl Send for PwBackend {}
 
-// SAFETY: Safe as the structure can be shared with another thread as the state
-// is protected with a lock.
+// See the `Send` impl above for the safety justification.
 unsafe impl Sync for PwBackend {}
 
-// FIXME: make PwBackend impl Send on all fields.
-#[allow(clippy::non_send_fields_in_send_ty)]
 pub struct PwBackend {
     pub stream_params: Arc<RwLock<Vec<Stream>>>,
     thread_loop: ThreadLoop,

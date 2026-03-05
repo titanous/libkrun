@@ -330,6 +330,12 @@ impl VsockPacket {
     /// Also note: calling `len()` on the returned slice will yield the buffer size, which may be
     ///            (and often is) larger than the length of the packet data. The packet data length
     ///            is stored in the packet header, and accessible via `VsockPacket::len()`.
+    ///
+    /// # Safety
+    ///
+    /// The raw pointer stored in `self.buf` is shared between `buf()` and `buf_mut()`. Callers
+    /// must not hold a reference returned by `buf()` while also calling `buf_mut()`, and vice
+    /// versa, as doing so would create aliased mutable references — undefined behaviour.
     pub fn buf(&self) -> Option<&[u8]> {
         self.buf.map(|ptr| {
             // This is safe since bound checks have already been performed when creating the packet
@@ -345,6 +351,12 @@ impl VsockPacket {
     /// Also note: calling `len()` on the returned slice will yield the buffer size, which may be
     ///            (and often is) larger than the length of the packet data. The packet data length
     ///            is stored in the packet header, and accessible via `VsockPacket::len()`.
+    ///
+    /// # Safety
+    ///
+    /// The raw pointer stored in `self.buf` is shared between `buf()` and `buf_mut()`. Callers
+    /// must not hold a reference returned by `buf()` while also calling `buf_mut()`, and vice
+    /// versa, as doing so would create aliased mutable references — undefined behaviour.
     pub fn buf_mut(&mut self) -> Option<&mut [u8]> {
         self.buf.map(|ptr| {
             // This is safe since bound checks have already been performed when creating the packet
@@ -475,17 +487,22 @@ impl VsockPacket {
     }
 
     pub fn unix_path(&self) -> Option<&str> {
-        if self.buf_size >= 108 {
-            let cstr =
-                unsafe { CStr::from_ptr(&self.buf().unwrap()[2] as *const _ as *const c_char) };
-            cstr.to_str().ok()
-        } else {
-            None
+        let buf = self.buf()?;
+        if buf.len() < 108 {
+            return None;
         }
+        if !buf[2..].contains(&0u8) {
+            return None; // no null terminator — would be OOB
+        }
+        let cstr = unsafe { CStr::from_ptr(&buf[2] as *const _ as *const c_char) };
+        cstr.to_str().ok()
     }
 
     #[cfg(target_os = "linux")]
     fn parse_address(buf: &[u8], addr_len: u32) -> Option<SockaddrStorage> {
+        if !Self::validate_parse_address_len(addr_len, buf.len()) {
+            return None;
+        }
         let sockaddr: SockaddrStorage = unsafe {
             SockaddrStorage::from_raw(&buf[0] as *const _ as *const sockaddr, Some(addr_len))?
         };
@@ -505,6 +522,13 @@ impl VsockPacket {
         }
 
         Some(sockaddr)
+    }
+
+    /// Validates that addr_len does not exceed the buffer length for parse_address.
+    /// This is the bounds check that must hold before SockaddrStorage::from_raw.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn validate_parse_address_len(addr_len: u32, buf_len: usize) -> bool {
+        addr_len as usize <= buf_len
     }
 
     #[cfg(target_os = "macos")]
@@ -706,6 +730,13 @@ impl VsockPacket {
         }
     }
 
+    /// Construct a `VsockPacket` backed by a freshly-allocated header buffer for use in
+    /// Kani proofs.
+    ///
+    /// NOTE: All proofs using this constructor test the `buf = None` path only (control
+    /// packets with no data buffer). See `proof_hdr_buf_non_overlapping` and
+    /// `proof_hdr_buf_single_descriptor_layout` in the `verification` module for the
+    /// `buf = Some(...)` path.
     #[cfg(kani)]
     fn new_for_verification() -> (Self, Vec<u8>) {
         let mut hdr_buf = vec![0u8; VSOCK_PKT_HDR_SIZE];
@@ -1033,5 +1064,257 @@ mod verification {
             assert!(result.is_some());
             kani::cover!(true, "read_release_req Some path reachable");
         }
+    }
+
+    // ── GAP-002: unix_path OOB read via CStr::from_ptr ───────────────────────
+    //
+    // `unix_path` guards `buf_size >= 108` but originally did NOT ensure a null
+    // byte exists within `buf[2..buf_size]`. A guest could supply a 108-byte
+    // buffer with no null byte, causing `CStr::from_ptr` to scan past the
+    // allocation.
+    //
+    // Fix: added `if !buf[2..].contains(&0u8) { return None; }` before the
+    // unsafe call. This proof calls unix_path() directly on a null-free buffer
+    // and verifies it returns None (the fixed behaviour).
+    //
+    // buf_size = 110: loop fills indices 0..110 → unwind(111).
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    #[kani::unwind(111)]
+    fn proof_unix_path_no_null_terminator_is_oob() {
+        let buf_size: usize = 110; // >= 108 so the buf_size guard passes
+
+        let mut hdr_buf = vec![0u8; VSOCK_PKT_HDR_SIZE];
+        // Fill with 0xFF — no null bytes anywhere
+        let mut data_buf: Vec<u8> = vec![0xFFu8; buf_size];
+
+        let pkt = VsockPacket {
+            hdr: hdr_buf.as_mut_ptr(),
+            buf: Some(data_buf.as_mut_ptr()),
+            buf_size,
+        };
+
+        // After the fix: unix_path() returns None when no null in buf[2..]
+        let result = pkt.unix_path();
+        kani::assert(
+            result.is_none(),
+            "unix_path must return None when buf[2..] has no null terminator",
+        );
+        kani::cover!(true, "null-free buffer correctly rejected");
+    }
+
+    // ── GAP-009: parse_address addr_len unchecked against buf bounds ──────────
+    //
+    // `parse_address` received `addr_len` from a guest-controlled vsock packet
+    // header field and passed it to `SockaddrStorage::from_raw` without
+    // checking that `addr_len <= buf.len()`. If addr_len > buf.len(), from_raw
+    // could read beyond the slice.
+    //
+    // Fix: extracted `validate_parse_address_len(addr_len, buf.len())` helper
+    // and call it before from_raw. This proof verifies the helper's contract
+    // directly: it returns true iff addr_len <= buf_len.
+    //
+    // Note: parse_address (and the helper) is Linux-only.
+    #[cfg(target_os = "linux")]
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    #[kani::unwind(17)]
+    fn proof_parse_address_addr_len_bounds() {
+        const BUF_LEN: usize = 16;
+        let addr_len: u32 = kani::any_where(|&v| v <= 255);
+
+        if VsockPacket::validate_parse_address_len(addr_len, BUF_LEN) {
+            kani::assert(
+                addr_len as usize <= BUF_LEN,
+                "addr_len within buf bounds when helper returns true",
+            );
+            kani::cover!(true, "valid addr_len accepted");
+        } else {
+            kani::assert(
+                addr_len as usize > BUF_LEN,
+                "helper returns false only for oversized addr_len",
+            );
+            kani::cover!(true, "oversized addr_len rejected");
+        }
+    }
+
+    // ── GAP-017: buf and buf_mut slice contract ────────────────────────────────
+    //
+    // `buf()` and `buf_mut()` both construct slices from `self.buf: Option<*mut u8>`
+    // (Copy). The structural aliasing is intentional and documented in Safety
+    // comments; callers are responsible for avoiding simultaneous mutable+shared
+    // access. This proof verifies the functional contract: each accessor returns
+    // a slice of exactly buf_size bytes starting at the correct base pointer.
+    //
+    // buf_size = 8: loop fills 8 bytes → unwind(9).
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    #[kani::unwind(9)]
+    fn proof_buf_buf_mut_no_aliasing() {
+        let buf_size: usize = 8;
+        let mut hdr_buf = vec![0u8; VSOCK_PKT_HDR_SIZE];
+        let mut data_buf: Vec<u8> = vec![0u8; buf_size];
+        for byte in data_buf.iter_mut() {
+            *byte = kani::any();
+        }
+        let raw_ptr: *mut u8 = data_buf.as_mut_ptr();
+
+        let mut pkt = VsockPacket {
+            hdr: hdr_buf.as_mut_ptr(),
+            buf: Some(raw_ptr),
+            buf_size,
+        };
+
+        // Verify buf() returns slice of exactly buf_size bytes from correct pointer
+        let shared = pkt.buf().unwrap();
+        kani::assert(shared.len() == buf_size, "buf() returns buf_size bytes");
+        kani::assert(
+            shared.as_ptr() == raw_ptr as *const u8,
+            "buf() uses the raw pointer",
+        );
+
+        let _ = shared; // explicitly end lifetime before calling buf_mut
+
+        // Verify buf_mut() returns slice of exactly buf_size bytes from correct pointer
+        let mutable = pkt.buf_mut().unwrap();
+        kani::assert(
+            mutable.len() == buf_size,
+            "buf_mut() returns buf_size bytes",
+        );
+        kani::assert(
+            mutable.as_mut_ptr() == raw_ptr,
+            "buf_mut() uses the raw pointer",
+        );
+
+        kani::cover!(true, "buf accessors return correct slices");
+    }
+
+    // ── M16: hdr/buf aliasing invariant — separate-descriptor case ────────────
+    //
+    // In the normal two-descriptor path (from_tx_virtq_head / from_rx_virtq_head
+    // with two descriptors), `hdr` and `buf` point into different guest-memory
+    // regions backed by different descriptors. This proof verifies that the byte
+    // ranges returned by `hdr()` and `buf()` do not overlap when the pointers
+    // come from two independent allocations.
+    //
+    // hdr is VSOCK_PKT_HDR_SIZE (44) bytes; buf_size is constrained to <=8 to
+    // keep the solver tractable. The largest loop in the proof body is the fill
+    // loop over data_buf (8 bytes) → unwind(9).
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    #[kani::unwind(9)]
+    fn proof_hdr_buf_non_overlapping() {
+        let buf_size: usize = kani::any_where(|&s: &usize| s > 0 && s <= 8);
+
+        let mut hdr_buf = vec![0u8; VSOCK_PKT_HDR_SIZE];
+        let mut data_buf: Vec<u8> = vec![0u8; buf_size];
+        for byte in data_buf.iter_mut() {
+            *byte = kani::any();
+        }
+
+        let hdr_ptr: *mut u8 = hdr_buf.as_mut_ptr();
+        let buf_ptr: *mut u8 = data_buf.as_mut_ptr();
+
+        let pkt = VsockPacket {
+            hdr: hdr_ptr,
+            buf: Some(buf_ptr),
+            buf_size,
+        };
+
+        let hdr_slice = pkt.hdr();
+        let buf_slice = pkt.buf().unwrap();
+
+        // Both slices must have the expected lengths.
+        kani::assert(
+            hdr_slice.len() == VSOCK_PKT_HDR_SIZE,
+            "hdr() length equals VSOCK_PKT_HDR_SIZE",
+        );
+        kani::assert(buf_slice.len() == buf_size, "buf() length equals buf_size");
+
+        // The two slices must not overlap: since they come from separate Vec
+        // allocations, their address ranges are disjoint. We verify this by
+        // checking that neither range's start falls inside the other.
+        let hdr_start = hdr_slice.as_ptr() as usize;
+        let hdr_end = hdr_start + VSOCK_PKT_HDR_SIZE;
+        let buf_start = buf_slice.as_ptr() as usize;
+        let buf_end = buf_start + buf_size;
+
+        // Ranges [hdr_start, hdr_end) and [buf_start, buf_end) are non-overlapping
+        // iff one ends before the other starts.
+        kani::assert(
+            hdr_end <= buf_start || buf_end <= hdr_start,
+            "hdr() and buf() slices must not overlap",
+        );
+
+        kani::cover!(true, "hdr and buf non-overlap path reachable");
+    }
+
+    // ── M16: hdr/buf aliasing invariant — single-descriptor case ─────────────
+    //
+    // Since Linux 6.2, the guest virtio-vsock driver may use a single descriptor
+    // that holds both the header and the data buffer. In `from_rx_virtq_head`,
+    // when `!head.has_next() && head.len > VSOCK_PKT_HDR_SIZE`, `buf` is set to
+    // `head.addr + VSOCK_PKT_HDR_SIZE`. Both `hdr` and `buf` therefore point
+    // into the SAME underlying allocation, at non-overlapping adjacent offsets.
+    //
+    // This proof verifies that layout: hdr occupies [0, VSOCK_PKT_HDR_SIZE) and
+    // buf occupies [VSOCK_PKT_HDR_SIZE, VSOCK_PKT_HDR_SIZE + buf_size) within
+    // the same backing array, and that the two slices returned by hdr() / buf()
+    // are adjacent and non-overlapping.
+    //
+    // We use a combined buffer of VSOCK_PKT_HDR_SIZE + 8 bytes; the largest loop
+    // fills 8 bytes of the data portion → unwind(9).
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    #[kani::unwind(9)]
+    fn proof_hdr_buf_single_descriptor_layout() {
+        const BUF_DATA_SIZE: usize = 8;
+        const TOTAL_SIZE: usize = VSOCK_PKT_HDR_SIZE + BUF_DATA_SIZE;
+
+        let mut combined: Vec<u8> = vec![0u8; TOTAL_SIZE];
+        for byte in combined.iter_mut() {
+            *byte = kani::any();
+        }
+
+        // Mirror what from_rx_virtq_head does: hdr → base, buf → base + HDR_SIZE
+        let hdr_ptr: *mut u8 = combined.as_mut_ptr();
+        // Safety: combined has TOTAL_SIZE bytes; VSOCK_PKT_HDR_SIZE < TOTAL_SIZE.
+        let buf_ptr: *mut u8 = unsafe { hdr_ptr.add(VSOCK_PKT_HDR_SIZE) };
+
+        let pkt = VsockPacket {
+            hdr: hdr_ptr,
+            buf: Some(buf_ptr),
+            buf_size: BUF_DATA_SIZE,
+        };
+
+        let hdr_slice = pkt.hdr();
+        let buf_slice = pkt.buf().unwrap();
+
+        // Lengths must match the respective fields.
+        kani::assert(
+            hdr_slice.len() == VSOCK_PKT_HDR_SIZE,
+            "hdr() length equals VSOCK_PKT_HDR_SIZE",
+        );
+        kani::assert(
+            buf_slice.len() == BUF_DATA_SIZE,
+            "buf() length equals BUF_DATA_SIZE",
+        );
+
+        let hdr_start = hdr_slice.as_ptr() as usize;
+        let buf_start = buf_slice.as_ptr() as usize;
+
+        // The two regions must be adjacent: buf starts exactly where hdr ends.
+        kani::assert(
+            buf_start == hdr_start + VSOCK_PKT_HDR_SIZE,
+            "buf() starts immediately after hdr() in the single-descriptor layout",
+        );
+
+        // And therefore they do not overlap.
+        kani::assert(
+            hdr_start + VSOCK_PKT_HDR_SIZE <= buf_start,
+            "hdr() and buf() slices are non-overlapping in single-descriptor layout",
+        );
+
+        kani::cover!(true, "single-descriptor adjacent layout path reachable");
     }
 }

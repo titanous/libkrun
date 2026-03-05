@@ -17,14 +17,9 @@ use futures::stream::{self, StreamExt};
 
 use crate::snapshot::{IncrementalSnapshot, SnapshotHeader, VmSnapshot};
 
-/// Get the system page size in bytes.
-///
-/// On Linux x86_64: 4096 bytes
-/// On Linux aarch64: 65536 bytes
-/// Returns the result of libc::sysconf(libc::_SC_PAGESIZE)
-pub fn system_page_size() -> u64 {
-    unsafe { libc::sysconf(libc::_SC_PAGESIZE) as u64 }
-}
+// Re-export so existing callers that do `use crate::snapshot_store::system_page_size`
+// continue to compile without change.
+pub use crate::snapshot::{sysconf_to_page_size, system_page_size};
 
 /// Default preload chunk size: 4MB.
 const PRELOAD_CHUNK_SIZE: u64 = 4 * 1024 * 1024;
@@ -1194,5 +1189,39 @@ mod tests {
         // 2. These addresses are stored in an internal excluded set
         // 3. When read_page is called for an excluded address, it returns Ok(None)
         assert!(true, "set_excluded_pages contract verified");
+    }
+}
+
+#[cfg(kani)]
+mod verification {
+    use crate::snapshot::sysconf_to_page_size;
+
+    /// Proof: sysconf_to_page_size correctly handles all i64 values.
+    ///
+    /// GAP-026: system_page_size() casts sysconf's i64 return to u64. For the
+    /// error sentinel -1, the unchecked cast produces u64::MAX. The fix extracts
+    /// sysconf_to_page_size which checks for non-positive values. This proof
+    /// verifies the helper is correct.
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    fn proof_sysconf_pagesize_cast_safety() {
+        let result: i64 = kani::any();
+
+        match sysconf_to_page_size(result) {
+            Some(page_size) => {
+                kani::assert(result > 0, "helper only returns Some for positive values");
+                kani::assert(
+                    page_size == result as u64,
+                    "value preserved for positive i64",
+                );
+                kani::assert(page_size > 0, "page size is positive");
+                kani::cover!(page_size == 4096, "typical 4KB page size");
+            }
+            None => {
+                kani::assert(result <= 0, "helper returns None for non-positive values");
+                kani::cover!(result == -1, "error sentinel -1 rejected");
+                kani::cover!(result == 0, "zero rejected");
+            }
+        }
     }
 }

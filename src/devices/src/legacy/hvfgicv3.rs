@@ -9,7 +9,7 @@ use crate::legacy::gic::GICDevice;
 use crate::legacy::irqchip::IrqChipT;
 use crate::Error as DeviceError;
 
-use hvf::bindings::{hv_gic_config_t, hv_ipa_t, hv_return_t, HV_SUCCESS};
+use hvf::bindings::{hv_gic_config_t, hv_ipa_t, hv_return_t, os_release, HV_SUCCESS};
 use hvf::Error;
 use utils::eventfd::EventFd;
 
@@ -73,6 +73,9 @@ impl HvfGicV3 {
         };
 
         let mut dist_size: usize = 0;
+        // SAFETY: bindings.hv_gic_get_distributor_size is a valid function pointer loaded from
+        // the Hypervisor framework. We pass a pointer to a local variable that is valid for the
+        // duration of the call.
         let ret = unsafe { (bindings.hv_gic_get_distributor_size)(&mut dist_size) };
         if ret != HV_SUCCESS {
             return Err(Error::VmCreate);
@@ -80,6 +83,8 @@ impl HvfGicV3 {
         let dist_size = dist_size as u64;
 
         let mut redist_size: usize = 0;
+        // SAFETY: Same as above; redist_size is a valid local variable for the duration of the
+        // call.
         let ret = unsafe { (bindings.hv_gic_get_redistributor_size)(&mut redist_size) };
         if ret != HV_SUCCESS {
             return Err(Error::VmCreate);
@@ -89,12 +94,25 @@ impl HvfGicV3 {
         let dist_addr = arch::MMIO_MEM_START - dist_size - redists_size;
         let redists_addr = arch::MMIO_MEM_START - redists_size;
 
+        // SAFETY: hv_gic_config_create() allocates and returns a new GIC configuration object.
+        // The returned handle is an opaque pointer managed by the Hypervisor framework. We check
+        // for null before using the handle.
         let gic_config = unsafe { (bindings.hv_gic_config_create)() };
+        if gic_config.is_null() {
+            return Err(Error::VmCreate);
+        }
+        // SAFETY: gic_config is a valid non-null handle returned by hv_gic_config_create().
+        // dist_addr is a computed IPA within the valid MMIO address range.
         let ret = unsafe { (bindings.hv_gic_config_set_distributor_base)(gic_config, dist_addr) };
         if ret != HV_SUCCESS {
+            // SAFETY: gic_config is a valid non-null handle; os_release decrements the retain
+            // count. This is the only reference we hold.
+            unsafe { os_release(gic_config.cast()) };
             return Err(Error::VmCreate);
         }
 
+        // SAFETY: gic_config is a valid non-null handle. redists_addr is computed from MMIO_MEM_START
+        // minus the total redistributor region size, which is a valid IPA within the MMIO range.
         let ret = unsafe {
             (bindings.hv_gic_config_set_redistributor_base)(
                 gic_config,
@@ -102,10 +120,18 @@ impl HvfGicV3 {
             )
         };
         if ret != HV_SUCCESS {
+            // SAFETY: See above os_release comment.
+            unsafe { os_release(gic_config.cast()) };
             return Err(Error::VmCreate);
         }
 
+        // SAFETY: gic_config is a valid non-null handle fully configured with distributor and
+        // redistributor bases. hv_gic_create takes ownership of the config object.
         let ret = unsafe { (bindings.hv_gic_create)(gic_config) };
+        // gic_config is consumed by hv_gic_create; release our reference regardless of outcome.
+        // SAFETY: gic_config is still a valid handle; hv_gic_create retains its own reference,
+        // so releasing ours here is required to avoid a leak.
+        unsafe { os_release(gic_config.cast()) };
         if ret != HV_SUCCESS {
             return Err(Error::VmCreate);
         }
@@ -133,6 +159,8 @@ impl IrqChipT for HvfGicV3 {
         _interrupt_evt: Option<&EventFd>,
     ) -> Result<(), DeviceError> {
         if let Some(irq_line) = irq_line {
+            // SAFETY: hv_gic_set_spi is a valid function pointer. irq_line is the caller-supplied
+            // SPI interrupt number; the HVF framework validates the range internally.
             let ret = unsafe { (self.bindings.hv_gic_set_spi)(irq_line, true) };
             if ret != HV_SUCCESS {
                 Err(DeviceError::FailedSignalingUsedQueue(

@@ -33,6 +33,10 @@ impl Tap {
 
         let mut req: ifreq = unsafe { mem::zeroed() };
 
+        if tap_name.len() >= libc::IFNAMSIZ {
+            return Err(ConnectError::InvalidTapName);
+        }
+
         unsafe {
             ptr::copy_nonoverlapping(
                 tap_name.as_ptr() as *const c_char,

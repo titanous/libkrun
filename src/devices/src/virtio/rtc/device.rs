@@ -912,55 +912,55 @@ mod verification {
     // size at the type level via `std::mem::size_of`, which is a compile-time
     // constant that Kani resolves immediately.
 
-    /// Proof: ReqHead is exactly 8 bytes (virtio-rtc spec §5.16.6.1).
-    #[kani::proof]
-    fn proof_req_head_size() {
-        kani::assert(
-            std::mem::size_of::<ReqHead>() == 8,
-            "ReqHead must be 8 bytes per virtio-rtc spec",
-        );
-        kani::cover!(true, "ReqHead size proof reachable");
-    }
+    /// Verify: ReqHead is exactly 8 bytes (virtio-rtc spec §5.16.6.1).
+    /// This is a compile-time assertion (const usize at compile time).
+    const _: () = {
+        let _ = [(); 1][if std::mem::size_of::<ReqHead>() == 8 {
+            0
+        } else {
+            1
+        }];
+    };
 
-    /// Proof: RespHead is exactly 8 bytes.
-    #[kani::proof]
-    fn proof_resp_head_size() {
-        kani::assert(
-            std::mem::size_of::<RespHead>() == 8,
-            "RespHead must be 8 bytes per virtio-rtc spec",
-        );
-        kani::cover!(true, "RespHead size proof reachable");
-    }
+    /// Verify: RespHead is exactly 8 bytes.
+    /// This is a compile-time assertion (const usize at compile time).
+    const _: () = {
+        let _ = [(); 1][if std::mem::size_of::<RespHead>() == 8 {
+            0
+        } else {
+            1
+        }];
+    };
 
-    /// Proof: RespCfg is exactly 16 bytes (header + num_clocks + padding).
-    #[kani::proof]
-    fn proof_resp_cfg_size() {
-        kani::assert(
-            std::mem::size_of::<RespCfg>() == 16,
-            "RespCfg must be 16 bytes per virtio-rtc spec",
-        );
-        kani::cover!(true, "RespCfg size proof reachable");
-    }
+    /// Verify: RespCfg is exactly 16 bytes (header + num_clocks + padding).
+    /// This is a compile-time assertion (const usize at compile time).
+    const _: () = {
+        let _ = [(); 1][if std::mem::size_of::<RespCfg>() == 16 {
+            0
+        } else {
+            1
+        }];
+    };
 
-    /// Proof: RespRead is exactly 16 bytes (header + clock_ns Le64).
-    #[kani::proof]
-    fn proof_resp_read_size() {
-        kani::assert(
-            std::mem::size_of::<RespRead>() == 16,
-            "RespRead must be 16 bytes per virtio-rtc spec",
-        );
-        kani::cover!(true, "RespRead size proof reachable");
-    }
+    /// Verify: RespRead is exactly 16 bytes (header + clock_ns Le64).
+    /// This is a compile-time assertion (const usize at compile time).
+    const _: () = {
+        let _ = [(); 1][if std::mem::size_of::<RespRead>() == 16 {
+            0
+        } else {
+            1
+        }];
+    };
 
-    /// Proof: RespReadCross is exactly 24 bytes (header + clock_ns + counter_value).
-    #[kani::proof]
-    fn proof_resp_read_cross_size() {
-        kani::assert(
-            std::mem::size_of::<RespReadCross>() == 24,
-            "RespReadCross must be 24 bytes per virtio-rtc spec",
-        );
-        kani::cover!(true, "RespReadCross size proof reachable");
-    }
+    /// Verify: RespReadCross is exactly 24 bytes (header + clock_ns + counter_value).
+    /// This is a compile-time assertion (const usize at compile time).
+    const _: () = {
+        let _ = [(); 1][if std::mem::size_of::<RespReadCross>() == 24 {
+            0
+        } else {
+            1
+        }];
+    };
 
     // ── Protocol dispatch proofs ──────────────────────────────────────────────
 

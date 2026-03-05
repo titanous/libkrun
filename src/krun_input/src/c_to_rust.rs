@@ -88,7 +88,20 @@ pub struct InputConfigInstance {
     vtable: header::krun_input_config_vtable,
 }
 
+// SAFETY: `InputConfigInstance` holds a `*mut c_void` that points to a C-allocated object whose
+// lifetime is managed by this struct (created on construction, freed in Drop). The vtable methods
+// are invoked only through `&self` or `&mut self` Rust references that enforce Rust's aliasing
+// rules at the call site, so there is no concurrent mutation through the raw pointer on the Rust
+// side. The underlying C implementation is required by the ABI contract to be thread-safe for all
+// vtable methods — sending the instance to another thread and calling methods from that thread is
+// therefore sound.
 unsafe impl Send for InputConfigInstance {}
+// SAFETY: All shared (`&self`) vtable calls in `InputQueryConfig` forward to C methods that are
+// documented to be callable concurrently. No interior mutation of the Rust struct fields occurs
+// through a shared reference; the raw pointer is only cast to `*const I` (not `*mut I`) in
+// `query_*` callbacks, so no data race can arise from concurrent shared access on the Rust side.
+// If the underlying C implementation does not support concurrent vtable calls this impl must be
+// removed and access synchronized externally.
 unsafe impl Sync for InputConfigInstance {}
 
 assert_not_impl_any!(InputEventProviderInstance: Sync, Send);

@@ -38,7 +38,7 @@ pub struct VirtioConsoleConfig {
     emerg_wr: u32,
 }
 
-// Safe because it only has data and has no implicit padding.
+// SAFETY: VirtioConsoleConfig is #[repr(C, packed)] with no padding bytes; all bit patterns are valid for all fields.
 unsafe impl ByteValued for VirtioConsoleConfig {}
 
 impl VirtioConsoleConfig {

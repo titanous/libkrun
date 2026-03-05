@@ -145,6 +145,7 @@ pub struct virtio_gpu_ctrl_hdr {
     pub ring_idx: u8,
     pub padding: [u8; 3],
 }
+// SAFETY: virtio_gpu_ctrl_hdr is #[repr(C)] with no padding bytes; all bit patterns are valid for all fields.
 unsafe impl ByteValued for virtio_gpu_ctrl_hdr {}
 
 /* data passed in the cursor vq */
@@ -157,6 +158,7 @@ pub struct virtio_gpu_cursor_pos {
     pub y: u32,
     pub padding: u32,
 }
+// SAFETY: virtio_gpu_cursor_pos is #[repr(C)] with no padding bytes; all bit patterns are valid for all fields.
 unsafe impl ByteValued for virtio_gpu_cursor_pos {}
 
 /* VIRTIO_GPU_CMD_UPDATE_CURSOR, VIRTIO_GPU_CMD_MOVE_CURSOR */
@@ -169,6 +171,7 @@ pub struct virtio_gpu_update_cursor {
     pub hot_y: u32,                 /* update only */
     pub padding: u32,
 }
+// SAFETY: virtio_gpu_update_cursor is #[repr(C)] with no padding bytes; all bit patterns are valid for all fields.
 unsafe impl ByteValued for virtio_gpu_update_cursor {}
 
 /* data passed in the control vq, 2d related */
@@ -181,6 +184,7 @@ pub struct virtio_gpu_rect {
     pub width: u32,
     pub height: u32,
 }
+// SAFETY: virtio_gpu_rect is #[repr(C)] with no padding bytes; all bit patterns are valid for all fields.
 unsafe impl ByteValued for virtio_gpu_rect {}
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
@@ -190,6 +194,7 @@ pub struct virtio_gpu_get_edid {
     pub padding: u32,
 }
 
+// SAFETY: virtio_gpu_get_edid is #[repr(C)] with no padding bytes; all bit patterns are valid for all fields.
 unsafe impl ByteValued for virtio_gpu_get_edid {}
 
 /* VIRTIO_GPU_CMD_RESOURCE_UNREF */
@@ -199,6 +204,7 @@ pub struct virtio_gpu_resource_unref {
     pub resource_id: u32,
     pub padding: u32,
 }
+// SAFETY: virtio_gpu_resource_unref is #[repr(C)] with no padding bytes; all bit patterns are valid for all fields.
 unsafe impl ByteValued for virtio_gpu_resource_unref {}
 
 /* VIRTIO_GPU_CMD_RESOURCE_CREATE_2D: create a 2d resource with a format */
@@ -210,6 +216,7 @@ pub struct virtio_gpu_resource_create_2d {
     pub width: u32,
     pub height: u32,
 }
+// SAFETY: virtio_gpu_resource_create_2d is #[repr(C)] with no padding bytes; all bit patterns are valid for all fields.
 unsafe impl ByteValued for virtio_gpu_resource_create_2d {}
 
 /* VIRTIO_GPU_CMD_SET_SCANOUT */
@@ -220,6 +227,7 @@ pub struct virtio_gpu_set_scanout {
     pub scanout_id: u32,
     pub resource_id: u32,
 }
+// SAFETY: virtio_gpu_set_scanout is #[repr(C)] with no padding bytes; all bit patterns are valid for all fields.
 unsafe impl ByteValued for virtio_gpu_set_scanout {}
 
 /* VIRTIO_GPU_CMD_RESOURCE_FLUSH */
@@ -230,6 +238,7 @@ pub struct virtio_gpu_resource_flush {
     pub resource_id: u32,
     pub padding: u32,
 }
+// SAFETY: virtio_gpu_resource_flush is #[repr(C)] with no padding bytes; all bit patterns are valid for all fields.
 unsafe impl ByteValued for virtio_gpu_resource_flush {}
 
 /* VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D: simple transfer to_host */
@@ -241,6 +250,7 @@ pub struct virtio_gpu_transfer_to_host_2d {
     pub resource_id: u32,
     pub padding: u32,
 }
+// SAFETY: virtio_gpu_transfer_to_host_2d is #[repr(C)] with no padding bytes; all bit patterns are valid for all fields.
 unsafe impl ByteValued for virtio_gpu_transfer_to_host_2d {}
 
 #[derive(Copy, Clone, Debug, Default, IntoBytes, Immutable, FromBytes)]
@@ -250,6 +260,7 @@ pub struct virtio_gpu_mem_entry {
     pub length: u32,
     pub padding: u32,
 }
+// SAFETY: virtio_gpu_mem_entry is #[repr(C)] with no padding bytes; all bit patterns are valid for all fields.
 unsafe impl ByteValued for virtio_gpu_mem_entry {}
 
 /* VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING */
@@ -259,6 +270,7 @@ pub struct virtio_gpu_resource_attach_backing {
     pub resource_id: u32,
     pub nr_entries: u32,
 }
+// SAFETY: virtio_gpu_resource_attach_backing is #[repr(C)] with no padding bytes; all bit patterns are valid for all fields.
 unsafe impl ByteValued for virtio_gpu_resource_attach_backing {}
 
 /* VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING */
@@ -268,6 +280,7 @@ pub struct virtio_gpu_resource_detach_backing {
     pub resource_id: u32,
     pub padding: u32,
 }
+// SAFETY: virtio_gpu_resource_detach_backing is #[repr(C)] with no padding bytes; all bit patterns are valid for all fields.
 unsafe impl ByteValued for virtio_gpu_resource_detach_backing {}
 
 #[derive(Copy, Clone, Debug, Default, FromBytes, IntoBytes, Immutable)]
@@ -277,6 +290,7 @@ pub struct virtio_gpu_display_one {
     pub enabled: u32,
     pub flags: u32,
 }
+// SAFETY: virtio_gpu_display_one is #[repr(C)] with no padding bytes; all bit patterns are valid for all fields.
 unsafe impl ByteValued for virtio_gpu_display_one {}
 
 /* VIRTIO_GPU_RESP_OK_DISPLAY_INFO */
@@ -287,6 +301,7 @@ pub struct virtio_gpu_resp_display_info {
     pub hdr: virtio_gpu_ctrl_hdr,
     pub pmodes: [virtio_gpu_display_one; VIRTIO_GPU_MAX_SCANOUTS as usize],
 }
+// SAFETY: virtio_gpu_resp_display_info is #[repr(C)] with no padding bytes; all bit patterns are valid for all fields.
 unsafe impl ByteValued for virtio_gpu_resp_display_info {}
 
 const EDID_BLOB_MAX_SIZE: usize = 1024;
@@ -300,6 +315,7 @@ pub struct virtio_gpu_resp_edid {
     pub edid: [u8; EDID_BLOB_MAX_SIZE],
 }
 
+// SAFETY: virtio_gpu_resp_edid is #[repr(C)] with no padding bytes; all bit patterns are valid for all fields.
 unsafe impl ByteValued for virtio_gpu_resp_edid {}
 
 /* data passed in the control vq, 3d related */
@@ -314,6 +330,7 @@ pub struct virtio_gpu_box {
     pub h: u32,
     pub d: u32,
 }
+// SAFETY: virtio_gpu_box is #[repr(C)] with no padding bytes; all bit patterns are valid for all fields.
 unsafe impl ByteValued for virtio_gpu_box {}
 
 /* VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D, VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D */
@@ -327,6 +344,7 @@ pub struct virtio_gpu_transfer_host_3d {
     pub stride: u32,
     pub layer_stride: u32,
 }
+// SAFETY: virtio_gpu_transfer_host_3d is #[repr(C)] with no padding bytes; all bit patterns are valid for all fields.
 unsafe impl ByteValued for virtio_gpu_transfer_host_3d {}
 
 /* VIRTIO_GPU_CMD_RESOURCE_CREATE_3D */
@@ -347,6 +365,7 @@ pub struct virtio_gpu_resource_create_3d {
     pub flags: u32,
     pub padding: u32,
 }
+// SAFETY: virtio_gpu_resource_create_3d is #[repr(C)] with no padding bytes; all bit patterns are valid for all fields.
 unsafe impl ByteValued for virtio_gpu_resource_create_3d {}
 
 /* VIRTIO_GPU_CMD_CTX_CREATE */
@@ -358,6 +377,7 @@ pub struct virtio_gpu_ctx_create {
     pub context_init: u32,
     pub debug_name: [u8; 64],
 }
+// SAFETY: virtio_gpu_ctx_create is #[repr(C)] with no padding bytes; all bit patterns are valid for all fields.
 unsafe impl ByteValued for virtio_gpu_ctx_create {}
 
 impl Default for virtio_gpu_ctx_create {
@@ -386,6 +406,7 @@ impl fmt::Debug for virtio_gpu_ctx_create {
 #[derive(Copy, Clone, Debug, Default, FromBytes, IntoBytes, Immutable)]
 #[repr(C)]
 pub struct virtio_gpu_ctx_destroy {}
+// SAFETY: virtio_gpu_ctx_destroy is #[repr(C)] with no fields and no padding; all bit patterns are valid.
 unsafe impl ByteValued for virtio_gpu_ctx_destroy {}
 
 /* VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE, VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE */
@@ -395,6 +416,7 @@ pub struct virtio_gpu_ctx_resource {
     pub resource_id: u32,
     pub padding: u32,
 }
+// SAFETY: virtio_gpu_ctx_resource is #[repr(C)] with no padding bytes; all bit patterns are valid for all fields.
 unsafe impl ByteValued for virtio_gpu_ctx_resource {}
 
 /* VIRTIO_GPU_CMD_SUBMIT_3D */
@@ -417,6 +439,7 @@ pub struct virtio_gpu_cmd_submit {
     // of the virtio buffer.
     pub num_in_fences: u32,
 }
+// SAFETY: virtio_gpu_cmd_submit is #[repr(C)] with no padding bytes; all bit patterns are valid for all fields.
 unsafe impl ByteValued for virtio_gpu_cmd_submit {}
 
 pub const VIRTIO_GPU_CAPSET_VIRGL: u32 = 1;
@@ -432,6 +455,7 @@ pub struct virtio_gpu_get_capset_info {
     pub capset_index: u32,
     pub padding: u32,
 }
+// SAFETY: virtio_gpu_get_capset_info is #[repr(C)] with no padding bytes; all bit patterns are valid for all fields.
 unsafe impl ByteValued for virtio_gpu_get_capset_info {}
 
 /* VIRTIO_GPU_RESP_OK_CAPSET_INFO */
@@ -444,6 +468,7 @@ pub struct virtio_gpu_resp_capset_info {
     pub capset_max_size: u32,
     pub padding: u32,
 }
+// SAFETY: virtio_gpu_resp_capset_info is #[repr(C)] with no padding bytes; all bit patterns are valid for all fields.
 unsafe impl ByteValued for virtio_gpu_resp_capset_info {}
 
 /* VIRTIO_GPU_CMD_GET_CAPSET */
@@ -453,6 +478,7 @@ pub struct virtio_gpu_get_capset {
     pub capset_id: u32,
     pub capset_version: u32,
 }
+// SAFETY: virtio_gpu_get_capset is #[repr(C)] with no padding bytes; all bit patterns are valid for all fields.
 unsafe impl ByteValued for virtio_gpu_get_capset {}
 
 /* VIRTIO_GPU_RESP_OK_CAPSET */
@@ -462,6 +488,8 @@ pub struct virtio_gpu_resp_capset {
     pub hdr: virtio_gpu_ctrl_hdr,
     pub capset_data: PhantomData<[u8]>,
 }
+// SAFETY: virtio_gpu_resp_capset is #[repr(C)]; hdr has no padding and all bit patterns valid;
+// PhantomData<[u8]> is zero-sized with no invalid bit patterns.
 unsafe impl ByteValued for virtio_gpu_resp_capset {}
 
 /* VIRTIO_GPU_RESP_OK_RESOURCE_PLANE_INFO */
@@ -475,6 +503,7 @@ pub struct virtio_gpu_resp_resource_plane_info {
     pub strides: [u32; 4],
     pub offsets: [u32; 4],
 }
+// SAFETY: virtio_gpu_resp_resource_plane_info is #[repr(C)] with no padding bytes; all bit patterns are valid for all fields.
 unsafe impl ByteValued for virtio_gpu_resp_resource_plane_info {}
 
 pub const PLANE_INFO_MAX_COUNT: usize = 4;
@@ -491,6 +520,7 @@ pub struct virtio_gpu_resource_create_blob {
     pub blob_id: u64,
     pub size: u64,
 }
+// SAFETY: virtio_gpu_resource_create_blob is #[repr(C)] with no padding bytes; all bit patterns are valid for all fields.
 unsafe impl ByteValued for virtio_gpu_resource_create_blob {}
 
 #[derive(Copy, Clone, Debug, Default, FromBytes, IntoBytes, Immutable)]
@@ -500,6 +530,7 @@ pub struct virtio_gpu_resource_map_blob {
     pub padding: u32,
     pub offset: u64,
 }
+// SAFETY: virtio_gpu_resource_map_blob is #[repr(C)] with no padding bytes; all bit patterns are valid for all fields.
 unsafe impl ByteValued for virtio_gpu_resource_map_blob {}
 
 #[derive(Copy, Clone, Debug, Default, FromBytes, IntoBytes, Immutable)]
@@ -508,6 +539,7 @@ pub struct virtio_gpu_resource_unmap_blob {
     pub resource_id: u32,
     pub padding: u32,
 }
+// SAFETY: virtio_gpu_resource_unmap_blob is #[repr(C)] with no padding bytes; all bit patterns are valid for all fields.
 unsafe impl ByteValued for virtio_gpu_resource_unmap_blob {}
 
 #[derive(Copy, Clone, Debug, Default, FromBytes, IntoBytes, Immutable)]
@@ -517,6 +549,7 @@ pub struct virtio_gpu_resp_map_info {
     pub map_info: u32,
     pub padding: u32,
 }
+// SAFETY: virtio_gpu_resp_map_info is #[repr(C)] with no padding bytes; all bit patterns are valid for all fields.
 unsafe impl ByteValued for virtio_gpu_resp_map_info {}
 
 #[derive(Copy, Clone, Debug, Default, FromBytes, IntoBytes, Immutable)]
@@ -525,6 +558,7 @@ pub struct virtio_gpu_resource_assign_uuid {
     pub resource_id: u32,
     pub padding: u32,
 }
+// SAFETY: virtio_gpu_resource_assign_uuid is #[repr(C)] with no padding bytes; all bit patterns are valid for all fields.
 unsafe impl ByteValued for virtio_gpu_resource_assign_uuid {}
 
 #[derive(Copy, Clone, Debug, Default, FromBytes, IntoBytes, Immutable)]
@@ -533,6 +567,7 @@ pub struct virtio_gpu_resp_resource_uuid {
     pub hdr: virtio_gpu_ctrl_hdr,
     pub uuid: [u8; 16],
 }
+// SAFETY: virtio_gpu_resp_resource_uuid is #[repr(C)] with no padding bytes; all bit patterns are valid for all fields.
 unsafe impl ByteValued for virtio_gpu_resp_resource_uuid {}
 
 /* VIRTIO_GPU_CMD_SET_SCANOUT_BLOB */
@@ -549,6 +584,7 @@ pub struct virtio_gpu_set_scanout_blob {
     pub strides: [u32; 4],
     pub offsets: [u32; 4],
 }
+// SAFETY: virtio_gpu_set_scanout_blob is #[repr(C)] with no padding bytes; all bit patterns are valid for all fields.
 unsafe impl ByteValued for virtio_gpu_set_scanout_blob {}
 
 /* simple formats for fbcon/X use */

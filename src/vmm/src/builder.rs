@@ -12,6 +12,8 @@ use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::fs::File;
 use std::io::{self, IsTerminal, Read};
+#[cfg(test)]
+use std::num::NonZeroU64;
 use std::os::fd::AsRawFd;
 use std::os::fd::{BorrowedFd, FromRawFd};
 use std::path::PathBuf;
@@ -167,6 +169,8 @@ pub enum StartMicrovmError {
     Internal(Error),
     /// Cannot inject the kernel into the guest memory due to a problem with the bundle.
     InvalidKernelBundle(vm_memory::mmap::MmapRegionError),
+    /// A kernel/qboot/initrd bundle has an invalid address range (overflow or zero size).
+    InvalidBundleAddressRange(&'static str),
     /// The kernel command line is invalid.
     KernelCmdline(String),
     /// The kernel doesn't fit into the microVM memory.
@@ -361,6 +365,9 @@ impl Display for StartMicrovmError {
                     "Cannot inject the kernel into the guest memory due to a problem with the \
                      bundle. {err_msg}"
                 )
+            }
+            InvalidBundleAddressRange(msg) => {
+                write!(f, "Invalid bundle address range: {msg}")
             }
             KernelCmdline(ref err) => write!(f, "Invalid kernel command line: {err}"),
             KernelDoesNotFit(load_addr, size) => write!(
@@ -1074,17 +1081,30 @@ pub fn build_microvm(
     let mut serial_ttys = Vec::new();
 
     for s in &vm_resources.serial_consoles {
-        let input = unsafe { BorrowedFd::borrow_raw(s.input_fd) };
-        if input.is_terminal() {
-            serial_ttys.push(input);
+        // Check >= 0 before borrow_raw: a negative fd (sentinel "not configured") must not
+        // be wrapped in BorrowedFd because the OS fd namespace only contains non-negative values.
+        if s.input_fd >= 0 {
+            // SAFETY: input_fd is a valid, open file descriptor supplied by the caller. It remains
+            // open for the lifetime of the `BorrowedFd` here (used only for the `is_terminal()`
+            // check immediately below).
+            let input = unsafe { BorrowedFd::borrow_raw(s.input_fd) };
+            if input.is_terminal() {
+                serial_ttys.push(input);
+            }
         }
         let input: Option<Box<dyn devices::legacy::ReadableFd + Send>> = if s.input_fd >= 0 {
+            // SAFETY: input_fd is a valid, open file descriptor exclusively owned by this
+            // serial console configuration. Ownership is transferred to the File here; the
+            // caller must not use input_fd after calling build_microvm.
             Some(Box::new(unsafe { File::from_raw_fd(s.input_fd) }))
         } else {
             None
         };
 
         let output: Option<Box<dyn io::Write + Send>> = if s.output_fd >= 0 {
+            // SAFETY: output_fd is a valid, open file descriptor exclusively owned by this
+            // serial console configuration. Ownership is transferred to the File here; the
+            // caller must not use output_fd after calling build_microvm.
             Some(Box::new(unsafe { File::from_raw_fd(s.output_fd) }))
         } else {
             None
@@ -1311,7 +1331,7 @@ pub fn build_microvm(
         #[cfg(target_arch = "x86_64")]
         pio_device_manager,
         #[cfg(target_os = "macos")]
-        dirty_bitmaps: Vec::new(),
+        dirty_bitmaps: std::sync::Arc::new(Vec::new()),
         nested_enabled: vm_resources.nested_enabled,
         dirty_tracking_enabled: false,
         #[cfg(target_os = "macos")]
@@ -1786,7 +1806,7 @@ fn load_payload(
                 if let Some(kernel_bundle) = &_vm_resources.kernel_bundle {
                     (
                         kernel_bundle.entry_addr,
-                        kernel_bundle.host_addr,
+                        kernel_bundle.host_addr.get(),
                         kernel_bundle.guest_addr,
                         kernel_bundle.size,
                     )
@@ -1794,6 +1814,10 @@ fn load_payload(
                     return Err(StartMicrovmError::MissingKernelConfig);
                 };
 
+            // Precondition: host_addr + size must not overflow and size must be non-zero.
+            // These invariants must hold before constructing the slice from FFI-returned values.
+            validate_bundle_range(kernel_host_addr, kernel_size as u64)
+                .map_err(StartMicrovmError::InvalidBundleAddressRange)?;
             let kernel_data =
                 unsafe { std::slice::from_raw_parts(kernel_host_addr as *mut u8, kernel_size) };
             if kernel_guest_addr + kernel_size as u64 > _arch_mem_info.ram_last_addr {
@@ -1813,7 +1837,7 @@ fn load_payload(
                 if let Some(kernel_bundle) = &_vm_resources.kernel_bundle {
                     (
                         kernel_bundle.entry_addr,
-                        kernel_bundle.host_addr,
+                        kernel_bundle.host_addr.get(),
                         kernel_bundle.guest_addr,
                         kernel_bundle.size,
                     )
@@ -1868,6 +1892,9 @@ fn load_payload(
 
                     // SAFETY: kernel_host_addr points to valid kernel data of size kernel_size,
                     // provided by the kernel bundle loader.
+                    // Precondition: host_addr + size must not overflow and size must be non-zero.
+                    validate_bundle_range(kernel_host_addr, kernel_size as u64)
+                        .map_err(StartMicrovmError::InvalidBundleAddressRange)?;
                     let kernel_data = unsafe {
                         std::slice::from_raw_parts(kernel_host_addr as *const u8, kernel_size)
                     };
@@ -1921,13 +1948,16 @@ fn load_payload(
             let (kernel_host_addr, kernel_guest_addr, kernel_size) =
                 if let Some(kernel_bundle) = &_vm_resources.kernel_bundle {
                     (
-                        kernel_bundle.host_addr,
+                        kernel_bundle.host_addr.get(),
                         kernel_bundle.guest_addr,
                         kernel_bundle.size,
                     )
                 } else {
                     return Err(StartMicrovmError::MissingKernelConfig);
                 };
+            // Precondition: host_addr + size must not overflow and size must be non-zero.
+            validate_bundle_range(kernel_host_addr, kernel_size as u64)
+                .map_err(StartMicrovmError::InvalidBundleAddressRange)?;
             let kernel_data =
                 unsafe { std::slice::from_raw_parts(kernel_host_addr as *mut u8, kernel_size) };
             guest_mem
@@ -1936,10 +1966,13 @@ fn load_payload(
 
             let (qboot_host_addr, qboot_size) =
                 if let Some(qboot_bundle) = &_vm_resources.qboot_bundle {
-                    (qboot_bundle.host_addr, qboot_bundle.size)
+                    (qboot_bundle.host_addr.get(), qboot_bundle.size)
                 } else {
                     return Err(StartMicrovmError::MissingKernelConfig);
                 };
+            // Precondition: host_addr + size must not overflow and size must be non-zero.
+            validate_bundle_range(qboot_host_addr, qboot_size as u64)
+                .map_err(StartMicrovmError::InvalidBundleAddressRange)?;
             let qboot_data =
                 unsafe { std::slice::from_raw_parts(qboot_host_addr as *mut u8, qboot_size) };
             guest_mem
@@ -1948,10 +1981,13 @@ fn load_payload(
 
             let (initrd_host_addr, initrd_size) =
                 if let Some(initrd_bundle) = &_vm_resources.initrd_bundle {
-                    (initrd_bundle.host_addr, initrd_bundle.size)
+                    (initrd_bundle.host_addr.get(), initrd_bundle.size)
                 } else {
                     return Err(StartMicrovmError::MissingKernelConfig);
                 };
+            // Precondition: host_addr + size must not overflow and size must be non-zero.
+            validate_bundle_range(initrd_host_addr, initrd_size as u64)
+                .map_err(StartMicrovmError::InvalidBundleAddressRange)?;
             let initrd_data =
                 unsafe { std::slice::from_raw_parts(initrd_host_addr as *mut u8, initrd_size) };
             guest_mem
@@ -2811,6 +2847,13 @@ fn setup_terminal_raw_mode(
             Ok(old_mode) => {
                 let raw_fd = term_fd.as_raw_fd();
                 vmm.exit_observers.push(Arc::new(Mutex::new(move || {
+                    // SAFETY: raw_fd is an integer copy of the terminal file descriptor that was
+                    // open and valid when `setup_terminal_raw_mode` was called. The caller
+                    // (libkrun API) is responsible for keeping the fd open until the VM exits and
+                    // exit observers run. This `BorrowedFd` does not take ownership of the fd and
+                    // does not close it; it exists only for the duration of this call. This is a
+                    // known lifetime escape: the fd integer outlives the `BorrowedFd` it was
+                    // borrowed from, but the fd itself remains valid per the caller contract.
                     if let Err(e) =
                         term_restore_mode(unsafe { BorrowedFd::borrow_raw(raw_fd) }, &old_mode)
                     {
@@ -3181,7 +3224,7 @@ pub mod tests {
     > {
         let mut vm_resources = VmResources::default();
         vm_resources.kernel_bundle = Some(KernelBundle {
-            host_addr: 0x1000,
+            host_addr: NonZeroU64::new(0x1000).unwrap(),
             guest_addr: 0x1000,
             entry_addr: 0x1000,
             size: 0x1000,
@@ -3314,5 +3357,66 @@ pub mod tests {
     fn test_kernel_cmdline_err_to_startuvm_err() {
         let err = StartMicrovmError::from(kernel::cmdline::Error::HasSpace);
         let _ = format!("{err}{err:?}");
+    }
+}
+
+/// Validates that `host_addr + size` doesn't overflow u64 and `size > 0`.
+/// Called before `slice::from_raw_parts(host_addr as *const u8, size)`.
+/// Returns `Err` if the arithmetic would be unsafe.
+pub(crate) fn validate_bundle_range(host_addr: u64, size: u64) -> Result<(), &'static str> {
+    if size == 0 {
+        return Err("bundle size is zero");
+    }
+    if host_addr.checked_add(size).is_none() {
+        return Err("host_addr + size overflows u64");
+    }
+    Ok(())
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// Proof: validate_bundle_range correctly rejects unsafe inputs and allows safe ones.
+    ///
+    /// GAP-014: Five sites in build_microvm call slice::from_raw_parts(host_addr, size)
+    /// with values from libkrunfw FFI. Without a bounds check, host_addr + size can overflow
+    /// u64, making the pointer arithmetic undefined. The fix extracts validate_bundle_range
+    /// which checks both conditions. This proof verifies the helper is correct.
+    #[kani::proof]
+    fn proof_kernel_bundle_slice_no_overflow() {
+        let host_addr: u64 = kani::any();
+        let bundle_size: u64 = kani::any();
+
+        match validate_bundle_range(host_addr, bundle_size) {
+            Ok(()) => {
+                // When the guard passes, both invariants must hold:
+                kani::assert(
+                    bundle_size > 0,
+                    "bundle_size must be non-zero when guard passes",
+                );
+                kani::assert(
+                    host_addr.checked_add(bundle_size).is_some(),
+                    "host_addr + bundle_size must not overflow when guard passes",
+                );
+                // The end address is representable:
+                let end = host_addr + bundle_size; // safe because checked_add succeeded
+                kani::assert(
+                    end > host_addr,
+                    "end address is strictly greater than start",
+                );
+                kani::cover!(true, "valid bundle range accepted");
+            }
+            Err(_) => {
+                // Guard correctly rejected invalid inputs:
+                let invalid = bundle_size == 0 || host_addr.checked_add(bundle_size).is_none();
+                kani::assert(invalid, "guard only rejects zero-size or overflow inputs");
+                kani::cover!(bundle_size == 0, "zero bundle_size rejected");
+                kani::cover!(
+                    host_addr.checked_add(bundle_size).is_none(),
+                    "overflow rejected"
+                );
+            }
+        }
     }
 }

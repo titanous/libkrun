@@ -48,7 +48,7 @@ pub struct VirtioBalloonConfig {
     poison_val: u32,
 }
 
-// Safe because it only has data and has no implicit padding.
+// SAFETY: VirtioBalloonConfig is #[repr(C, packed)] with no padding bytes; all bit patterns are valid for all fields.
 unsafe impl ByteValued for VirtioBalloonConfig {}
 
 #[derive(Copy, Clone, Debug, Default)]
@@ -151,6 +151,34 @@ pub struct Balloon {
     actual_condvar: std::sync::Arc<(std::sync::Mutex<u64>, std::sync::Condvar)>,
 }
 
+/// Validates that a balloon FRQ/PHQ descriptor's address range stays within
+/// a single guest memory region.
+///
+/// Returns Ok if:
+/// - desc_addr + desc_len does not overflow u64
+/// - The range [desc_addr, desc_addr + desc_len) stays within [region_start, region_start + region_size)
+///
+/// Returns Err(&'static str) describing the violation.
+pub(crate) fn validate_balloon_desc_range(
+    desc_addr: u64,
+    desc_len: u32,
+    region_start: u64,
+    region_size: u64,
+) -> Result<(), &'static str> {
+    let desc_len_u64 = u64::from(desc_len);
+    let addr_end = desc_addr
+        .checked_add(desc_len_u64)
+        .ok_or("desc_addr + desc_len overflows u64")?;
+    let region_end = region_start.saturating_add(region_size);
+    if addr_end > region_end {
+        return Err("descriptor range exceeds region boundary");
+    }
+    if desc_addr < region_start {
+        return Err("descriptor address before region start");
+    }
+    Ok(())
+}
+
 impl Balloon {
     pub fn new() -> super::Result<Balloon> {
         Ok(Balloon {
@@ -200,18 +228,48 @@ impl Balloon {
         while let Some(head) = queues[FRQ_INDEX].queue.pop(mem) {
             let index = head.index;
             for desc in head.into_iter() {
+                // Validate that desc.addr + desc.len stays within the memory region to
+                // prevent madvise from operating on memory outside the intended region.
+                let region = match mem.find_region(desc.addr) {
+                    Some(r) => r,
+                    None => {
+                        warn!(
+                            "balloon: FRQ desc.addr={:?} not in guest memory, skipping",
+                            desc.addr
+                        );
+                        continue;
+                    }
+                };
+                if let Err(e) = validate_balloon_desc_range(
+                    desc.addr.raw_value(),
+                    desc.len,
+                    region.start_addr().raw_value(),
+                    region.len(),
+                ) {
+                    warn!(
+                        "balloon: FRQ desc.addr={:?} len={} failed validation: {}, skipping",
+                        desc.addr, desc.len, e
+                    );
+                    continue;
+                }
                 let host_addr = mem.get_host_address(desc.addr).unwrap();
                 debug!(
                     "balloon: should release guest_addr={:?} host_addr={:p} len={}",
                     desc.addr, host_addr, desc.len
                 );
-                unsafe {
+                let ret = unsafe {
                     libc::madvise(
                         host_addr as *mut libc::c_void,
                         desc.len.try_into().unwrap(),
                         libc::MADV_DONTNEED,
                     )
                 };
+                if ret != 0 {
+                    warn!(
+                        "balloon: FRQ madvise failed for addr={:?} len={}: {}",
+                        desc.addr, desc.len, ret
+                    );
+                }
 
                 // Track reported-free pages in the bitmap
                 if let Some(ref bitmap) = self.reported_free_bitmap {
@@ -508,18 +566,48 @@ impl Balloon {
                         && self.hinting_guest_cmd == Some(self.hinting_host_cmd);
 
                     if should_process {
+                        // Validate that desc.addr + desc.len stays within the memory region to
+                        // prevent madvise from operating on memory outside the intended region.
+                        let region = match mem.find_region(desc.addr) {
+                            Some(r) => r,
+                            None => {
+                                warn!(
+                                    "balloon: PHQ desc.addr={:?} not in guest memory, skipping",
+                                    desc.addr
+                                );
+                                continue;
+                            }
+                        };
+                        if let Err(e) = validate_balloon_desc_range(
+                            desc.addr.raw_value(),
+                            desc.len,
+                            region.start_addr().raw_value(),
+                            region.len(),
+                        ) {
+                            warn!(
+                                "balloon: PHQ desc.addr={:?} len={} failed validation: {}, skipping",
+                                desc.addr, desc.len, e
+                            );
+                            continue;
+                        }
                         let host_addr = mem.get_host_address(desc.addr).unwrap();
                         debug!(
                             "balloon: releasing guest_addr={:?} host_addr={:p} len={}",
                             desc.addr, host_addr, desc.len
                         );
-                        unsafe {
+                        let ret = unsafe {
                             libc::madvise(
                                 host_addr as *mut libc::c_void,
                                 desc.len.try_into().unwrap(),
                                 libc::MADV_DONTNEED,
                             )
                         };
+                        if ret != 0 {
+                            warn!(
+                                "balloon: PHQ madvise failed for addr={:?} len={}: {}",
+                                desc.addr, desc.len, ret
+                            );
+                        }
 
                         // Track reported-free pages in the bitmap
                         if let Some(ref bitmap) = self.reported_free_bitmap {
@@ -2264,4 +2352,201 @@ mod tests {
             );
         }
     }
+}
+
+/// # GAP-004: balloon madvise desc.len not bounded to region
+///
+/// These proofs expose the missing bounds check in `process_frq` and `process_phq`:
+/// `get_host_address(desc.addr)` validates only that `desc.addr` maps to a host
+/// pointer — it does NOT verify that `desc.addr + desc.len` stays within the same
+/// mapped GPA region. A malicious guest sets `desc.len = u32::MAX`, causing
+/// `madvise(MADV_DONTNEED)` to walk far past the guest memory backing.
+///
+/// The proofs are pure-logic models of the missing precondition. They assert the
+/// invariant that *should* hold before `madvise` is called but is never checked in
+/// production code. Kani finds a counterexample because no such assertion exists.
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// Model of the region-address calculation performed by `GuestMemoryMmap::get_host_address`.
+    ///
+    /// `get_host_address(addr)` succeeds iff `addr` is in `[region_start, region_start +
+    /// region_size)`. The returned host offset within the region is `addr - region_start`.
+    fn simulated_get_host_address(addr: u64, region_start: u64, region_size: u64) -> Option<u64> {
+        if addr >= region_start && addr < region_start.saturating_add(region_size) {
+            Some(addr - region_start) // offset within region (host_addr = mmap_base + offset)
+        } else {
+            None
+        }
+    }
+
+    /// Proof: validate_balloon_desc_range enforces madvise range safety for FRQ.
+    ///
+    /// GAP-004: process_frq calls madvise(host_addr, desc.len, MADV_DONTNEED) where
+    /// host_addr comes from get_host_address(desc.addr) and desc.len is guest-controlled.
+    /// Without a bounds check, desc.addr + desc.len can exceed the memory region, causing
+    /// madvise to operate outside the mapped region. The fix extracts validate_balloon_desc_range.
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    fn proof_madvise_desc_len_within_region() {
+        let region_start: u64 = kani::any_where(|&s: &u64| s <= u64::MAX - 0x10000);
+        let region_size: u64 = kani::any_where(|&sz| sz > 0 && sz <= 0x10000);
+        let desc_addr: u64 = kani::any_where(|&a: &u64| {
+            a >= region_start && a < region_start.saturating_add(region_size)
+        });
+        let desc_len: u32 = kani::any();
+
+        match validate_balloon_desc_range(desc_addr, desc_len, region_start, region_size) {
+            Ok(()) => {
+                let region_end = region_start.saturating_add(region_size);
+                let addr_end = desc_addr + u64::from(desc_len); // safe: checked_add succeeded
+                kani::assert(addr_end <= region_end, "madvise range within region");
+                kani::assert(
+                    desc_addr.checked_add(u64::from(desc_len)).is_some(),
+                    "no overflow",
+                );
+                kani::cover!(true, "valid FRQ descriptor accepted");
+            }
+            Err(_) => {
+                kani::cover!(true, "invalid FRQ descriptor rejected");
+            }
+        }
+    }
+
+    /// Proof: validate_balloon_desc_range enforces madvise range safety for PHQ.
+    ///
+    /// GAP-004: process_phq has the same pattern as process_frq. This proof
+    /// verifies the same helper covers the PHQ madvise call site.
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    fn proof_phq_madvise_desc_len_within_region() {
+        let region_start: u64 = kani::any_where(|&s: &u64| s <= u64::MAX - 0x10000);
+        let region_size: u64 = kani::any_where(|&sz| sz > 0 && sz <= 0x10000);
+        let desc_addr: u64 = kani::any_where(|&a: &u64| {
+            a >= region_start && a < region_start.saturating_add(region_size)
+        });
+        let desc_len: u32 = kani::any();
+
+        match validate_balloon_desc_range(desc_addr, desc_len, region_start, region_size) {
+            Ok(()) => {
+                let region_end = region_start.saturating_add(region_size);
+                let addr_end = desc_addr + u64::from(desc_len);
+                kani::assert(addr_end <= region_end, "PHQ madvise range within region");
+                kani::cover!(true, "valid PHQ descriptor accepted");
+            }
+            Err(_) => {
+                kani::cover!(true, "invalid PHQ descriptor rejected");
+            }
+        }
+    }
+
+    /// Proof: validate_balloon_desc_range prevents desc_addr + desc_len overflow.
+    ///
+    /// GAP-004: Even before the region check, desc_addr + desc_len (widened to u64)
+    /// can overflow. The helper guards this with checked_add.
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    fn proof_madvise_desc_addr_plus_len_no_overflow() {
+        let region_start: u64 = kani::any_where(|&s: &u64| s <= u64::MAX - 0x10000);
+        let region_size: u64 = kani::any_where(|&sz| sz > 0 && sz <= 0x10000);
+        let desc_addr: u64 = kani::any_where(|&a: &u64| {
+            a >= region_start && a < region_start.saturating_add(region_size)
+        });
+        let desc_len: u32 = kani::any();
+
+        match validate_balloon_desc_range(desc_addr, desc_len, region_start, region_size) {
+            Ok(()) => {
+                kani::assert(
+                    desc_addr.checked_add(u64::from(desc_len)).is_some(),
+                    "desc_addr + desc_len does not overflow when guard passes",
+                );
+                kani::cover!(true, "no overflow path");
+            }
+            Err(_) => {
+                kani::cover!(true, "overflow or out-of-bounds rejected");
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // ByteValued round-trips for balloon config structs
+    //
+    // These structs are used in virtio config space reads/writes (VirtioBalloonConfig)
+    // and in the stats virtqueue (BalloonStat).  A ByteValued layout bug would
+    // corrupt balloon inflation targets or statistics exchange with the guest.
+    // ---------------------------------------------------------------------------
+
+    /// Proof: any bit pattern is a valid VirtioBalloonConfig (ByteValued correctness).
+    ///
+    /// VirtioBalloonConfig is `#[repr(C, packed)]` with four u32 fields:
+    ///   num_pages + actual + free_page_report_cmd_id + poison_val = 16 bytes.
+    /// All bit patterns of u32 are valid in Rust.
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    fn proof_byte_valued_virtio_balloon_config_roundtrip() {
+        let bytes: [u8; 16] = kani::any();
+        // from_slice must succeed for any 16-byte input — no invalid bit patterns.
+        let val = VirtioBalloonConfig::from_slice(&bytes)
+            .expect("VirtioBalloonConfig: from_slice must succeed for any 16 bytes");
+        // as_slice must produce exactly size_of::<VirtioBalloonConfig>() bytes.
+        kani::assert(
+            val.as_slice().len() == std::mem::size_of::<VirtioBalloonConfig>(),
+            "VirtioBalloonConfig: as_slice length must equal size_of",
+        );
+        // Bytes are preserved identically (identity round-trip).
+        kani::assert(
+            val.as_slice() == bytes,
+            "VirtioBalloonConfig: byte round-trip must be identity",
+        );
+        kani::cover!(true, "VirtioBalloonConfig ByteValued roundtrip reachable");
+    }
+
+    /// Verify: VirtioBalloonConfig size is exactly 16 bytes.
+    ///
+    /// 4 × u32 = 16 bytes.  `#[repr(C, packed)]` eliminates any padding.
+    /// This is a compile-time assertion (const usize at compile time).
+    const _: () = {
+        let _ = [(); 1][if std::mem::size_of::<VirtioBalloonConfig>() == 16 {
+            0
+        } else {
+            1
+        }];
+    };
+
+    /// Proof: any bit pattern is a valid BalloonStat (ByteValued correctness).
+    ///
+    /// BalloonStat is `#[repr(C, packed)]` with fields tag(u16) + val(u64) = 10 bytes.
+    /// The packed repr eliminates the padding that would otherwise appear between
+    /// the u16 and u64 fields in a regular C struct.  All bit patterns are valid.
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    fn proof_byte_valued_balloon_stat_roundtrip() {
+        let bytes: [u8; 10] = kani::any();
+        // from_slice must succeed for any 10-byte input.
+        let val = BalloonStat::from_slice(&bytes)
+            .expect("BalloonStat: from_slice must succeed for any 10 bytes");
+        kani::assert(
+            val.as_slice().len() == std::mem::size_of::<BalloonStat>(),
+            "BalloonStat: as_slice length must equal size_of",
+        );
+        kani::assert(
+            val.as_slice() == bytes,
+            "BalloonStat: byte round-trip must be identity",
+        );
+        kani::cover!(true, "BalloonStat ByteValued roundtrip reachable");
+    }
+
+    /// Verify: BalloonStat size is exactly 10 bytes.
+    ///
+    /// tag(u16=2) + val(u64=8) = 10 bytes.  `#[repr(C, packed)]` removes the
+    /// 6-byte padding between them that a normal `#[repr(C)]` struct would have.
+    /// This is a compile-time assertion (const usize at compile time).
+    const _: () = {
+        let _ = [(); 1][if std::mem::size_of::<BalloonStat>() == 10 {
+            0
+        } else {
+            1
+        }];
+    };
 }

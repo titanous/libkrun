@@ -20,7 +20,7 @@ use super::filesystem::{
     Context, DirEntry, Entry, Extensions, FileSystem, GetxattrReply, ListxattrReply, SecContext,
     ZeroCopyReader, ZeroCopyWriter,
 };
-use super::fs_utils::einval;
+use super::fs_utils::{einval, system_page_size};
 use super::fuse::*;
 use super::fuse_dispatch::{self, MAX_BUFFER_SIZE};
 use super::{FsError as Error, Result};
@@ -873,7 +873,9 @@ impl Server {
         let flags_64 = ((flags2 as u64) << 32) | (flags as u64);
         let capable = FsOptions::from_bits_truncate(flags_64);
 
-        let page_size: u32 = unsafe { libc::sysconf(libc::_SC_PAGESIZE).try_into().unwrap() };
+        let page_size: u32 = system_page_size()
+            .try_into()
+            .expect("page size exceeds u32");
         let max_pages = ((MAX_BUFFER_SIZE - 1) / page_size) + 1;
 
         match self.fs.init(capable) {
@@ -1551,8 +1553,16 @@ fn take_object<T: ByteValued>(data: &[u8]) -> Result<(T, &[u8])> {
     }
 
     let (object_bytes, remaining_bytes) = data.split_at(size_of::<T>());
-    // SAFETY: `T` implements `ByteValued` that guarantees that it is safe to instantiate
-    // `T` with random data.
+    // SAFETY:
+    // - `object_bytes` is a sub-slice of a valid message buffer obtained from a virtio
+    //   descriptor chain, so the pointer is valid and non-null for `size_of::<T>()` bytes.
+    // - The length check above guarantees that `size_of::<T>()` bytes are available, so the
+    //   read does not go out of bounds.
+    // - `read_unaligned` is used (rather than a plain pointer dereference) because the
+    //   underlying buffer may not satisfy T's alignment requirements; `read_unaligned` makes
+    //   no alignment assumption and copies the bytes directly.
+    // - `T: ByteValued` guarantees that every possible bit pattern is a valid value of `T`,
+    //   so constructing `T` from arbitrary bytes is sound.
     let object: T = unsafe { std::ptr::read_unaligned(object_bytes.as_ptr() as *const T) };
     Ok((object, remaining_bytes))
 }

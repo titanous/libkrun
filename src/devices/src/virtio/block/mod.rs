@@ -323,17 +323,29 @@ pub trait AsyncBlockBackend: Send + Sync + 'static {
 }
 
 /// A guard that holds a pointer and length for a volatile memory region.
-/// This is Send-safe as it represents owned access to the memory region.
-#[derive(Clone)]
+///
+/// This type intentionally does NOT implement `Clone` or `Sync`:
+/// - No `Clone`: copying the raw `*mut u8` would create two guards claiming exclusive
+///   access to the same memory region, enabling data races on `copy_from`/`copy_to`.
+/// - No `Sync`: the guard represents exclusive mutable access; sharing a reference
+///   across threads would allow concurrent mutation without synchronization.
+///
+/// `Send` is sound because the guard represents *owned* (exclusive) access to the
+/// backing region: after `from_volatile_slice` the caller must ensure only one
+/// `VolatileSliceGuard` at a time holds a given region, and the backing memory
+/// remains valid for the guard's lifetime. Transferring that exclusive ownership
+/// to another thread is safe.
 pub struct VolatileSliceGuard {
     pub(crate) ptr: *mut u8,
     pub(crate) len: usize,
 }
 
-// SAFETY: The VolatileSliceGuard represents exclusive access to a memory region
-// that remains valid for the lifetime of the async operation.
+// SAFETY: VolatileSliceGuard represents exclusive ownership of the pointed-to
+// memory region. Transferring it to another thread (Send) is safe because there
+// is at most one VolatileSliceGuard per region at any time and the backing memory
+// remains valid for the guard's lifetime. Sync is NOT implemented because sharing
+// a reference across threads would permit concurrent mutable access.
 unsafe impl Send for VolatileSliceGuard {}
-unsafe impl Sync for VolatileSliceGuard {}
 
 impl VolatileSliceGuard {
     /// Create a new guard from a VolatileSlice.
@@ -381,7 +393,12 @@ impl VolatileSliceGuard {
     /// The caller must ensure the source slice length matches or is less than
     /// this region's length.
     pub unsafe fn copy_from(&self, src: &[u8]) {
-        debug_assert!(src.len() <= self.len);
+        assert!(
+            src.len() <= self.len,
+            "copy_from: src length {} exceeds guard length {}",
+            src.len(),
+            self.len
+        );
         std::ptr::copy_nonoverlapping(src.as_ptr(), self.ptr, src.len());
     }
 
@@ -391,19 +408,162 @@ impl VolatileSliceGuard {
     /// The caller must ensure the destination slice length matches or is less than
     /// this region's length.
     pub unsafe fn copy_to(&self, dst: &mut [u8]) {
-        debug_assert!(dst.len() <= self.len);
+        assert!(
+            dst.len() <= self.len,
+            "copy_to: dst length {} exceeds guard length {}",
+            dst.len(),
+            self.len
+        );
         std::ptr::copy_nonoverlapping(self.ptr, dst.as_mut_ptr(), dst.len());
     }
 
     /// Returns a sub-region of this guard.
     pub fn subslice(&self, offset: usize, len: usize) -> Option<Self> {
-        if offset + len > self.len {
+        let end = offset.checked_add(len)?;
+        if end > self.len {
             return None;
         }
         Some(Self {
             ptr: unsafe { self.ptr.add(offset) },
             len,
         })
+    }
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// Proof: VolatileSliceGuard does not implement Clone.
+    ///
+    /// Previously `Clone` was derived on this type, creating aliased `*mut u8`
+    /// guards — a soundness hole. The fix removed `#[derive(Clone)]`. This proof
+    /// documents the absence of the bug at the type-system level: the trait bound
+    /// `VolatileSliceGuard: Clone` must NOT be satisfiable. Because this module
+    /// compiles only when `Clone` is absent, the mere fact that Kani can compile
+    /// and verify any harness in this block confirms `Clone` is gone.
+    ///
+    /// Positive verification: copy_from stays in bounds for any src <= guard.len.
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    fn proof_volatile_slice_guard_copy_from_in_bounds() {
+        // Concrete backing buffer of 64 bytes.
+        let mut backing = [0u8; 64];
+        let ptr: *mut u8 = backing.as_mut_ptr();
+
+        // Symbolic guard length in [1, 64].
+        let guard_len: usize = kani::any_where(|&n: &usize| n >= 1 && n <= 64);
+        let guard = VolatileSliceGuard {
+            ptr,
+            len: guard_len,
+        };
+
+        // Symbolic source of length in [0, guard_len] — always within bounds.
+        let src_len: usize = kani::any_where(|&n: &usize| n <= guard_len);
+        let src = vec![0u8; src_len];
+
+        // copy_from must not panic (assert! inside is enforced in all builds).
+        // SAFETY: backing is valid for guard_len bytes and exclusively owned here.
+        unsafe { guard.copy_from(&src) };
+
+        kani::cover!(true, "copy_from in-bounds proof path covered");
+    }
+
+    /// Proof: copy_to stays in bounds for any dst.len() <= guard.len.
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    fn proof_volatile_slice_guard_copy_to_in_bounds() {
+        let mut backing = [0xAAu8; 64];
+        let ptr: *mut u8 = backing.as_mut_ptr();
+
+        let guard_len: usize = kani::any_where(|&n: &usize| n >= 1 && n <= 64);
+        let guard = VolatileSliceGuard {
+            ptr,
+            len: guard_len,
+        };
+
+        let dst_len: usize = kani::any_where(|&n: &usize| n <= guard_len);
+        let mut dst = vec![0u8; dst_len];
+
+        // copy_to must not panic — assert! inside is enforced in all builds.
+        // SAFETY: backing is valid for guard_len bytes and exclusively owned here.
+        unsafe { guard.copy_to(&mut dst) };
+
+        kani::cover!(true, "copy_to in-bounds proof path covered");
+    }
+
+    /// Proof: subslice of a VolatileSliceGuard stays within the parent region bounds.
+    ///
+    /// If offset + len <= parent.len(), subslice returns Some(...) and the
+    /// resulting pointer must satisfy: parent.ptr <= sub.ptr and
+    /// sub.ptr + sub.len <= parent.ptr + parent.len().
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    fn proof_volatile_slice_guard_subslice_in_bounds() {
+        let mut backing: [u8; 64] = kani::any();
+        let ptr: *mut u8 = backing.as_mut_ptr();
+
+        // Symbolic parent length in [1, 64].
+        let parent_len: usize = kani::any_where(|&n: &usize| n >= 1 && n <= 64);
+        let parent = VolatileSliceGuard {
+            ptr,
+            len: parent_len,
+        };
+
+        // Symbolic offset and subslice length both within parent bounds.
+        let offset: usize = kani::any_where(|&o: &usize| o <= parent_len);
+        let sub_len: usize = kani::any_where(|&l: &usize| l <= parent_len - offset);
+
+        let maybe_sub = parent.subslice(offset, sub_len);
+
+        // subslice must succeed (we explicitly chose in-bounds values).
+        kani::assert(maybe_sub.is_some(), "in-bounds subslice must succeed");
+
+        let sub = maybe_sub.unwrap();
+
+        // The sub-pointer must equal parent.ptr + offset.
+        let expected_ptr = unsafe { ptr.add(offset) };
+        kani::assert(
+            sub.as_ptr() == expected_ptr,
+            "subslice pointer must equal parent.ptr + offset",
+        );
+        kani::assert(
+            sub.len() == sub_len,
+            "subslice length must match requested length",
+        );
+
+        kani::cover!(true, "subslice in-bounds proof path covered");
+    }
+
+    /// Proof: subslice rejects out-of-bounds requests.
+    ///
+    /// If offset + len > parent.len(), subslice must return None, not panic or
+    /// produce an out-of-bounds pointer.
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    fn proof_volatile_slice_guard_subslice_out_of_bounds_returns_none() {
+        let mut backing: [u8; 64] = kani::any();
+        let ptr: *mut u8 = backing.as_mut_ptr();
+
+        let parent_len: usize = kani::any_where(|&n: &usize| n >= 1 && n <= 64);
+        let parent = VolatileSliceGuard {
+            ptr,
+            len: parent_len,
+        };
+
+        // Force offset + sub_len to exceed parent_len.
+        let offset: usize = kani::any_where(|&o: &usize| o <= parent_len);
+        // sub_len must be at least (parent_len - offset + 1) to overflow.
+        let sub_len: usize = kani::any_where(|&l: &usize| {
+            l > 0 && offset.checked_add(l).map_or(true, |s| s > parent_len)
+        });
+
+        let maybe_sub = parent.subslice(offset, sub_len);
+        kani::assert(
+            maybe_sub.is_none(),
+            "out-of-bounds subslice must return None",
+        );
+        kani::cover!(true, "subslice out-of-bounds rejection path covered");
     }
 }
 

@@ -235,8 +235,10 @@ impl NitroEnclave {
 
         let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
         unsafe {
-            libc::sigfillset(&mut set);
-            libc::pthread_sigmask(sig, &set, std::ptr::null_mut());
+            let ret = libc::sigfillset(&mut set);
+            assert_eq!(ret, 0, "sigfillset failed");
+            let ret = libc::pthread_sigmask(sig, &set, std::ptr::null_mut());
+            assert_eq!(ret, 0, "pthread_sigmask failed");
         }
     }
 }

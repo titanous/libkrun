@@ -183,11 +183,14 @@ pub struct VmSnapshot {
 pub fn dump_memory(guest_memory: &GuestMemoryMmap, path: &Path) -> Result<(), SnapshotError> {
     let mut file = File::create(path)?;
     for region in guest_memory.iter() {
-        let host_addr = guest_memory
-            .get_host_address(region.start_addr())
-            .map_err(|e| SnapshotError::Serialize(format!("Invalid guest address: {e}")))?;
-        let len = region.len() as usize;
-        let slice = unsafe { std::slice::from_raw_parts(host_addr, len) };
+        let region_start = region.start_addr().raw_value();
+        let region_len = region.len();
+        let vhp = crate::get_validated_host_ptr(guest_memory, region_start).ok_or_else(|| {
+            SnapshotError::Serialize(format!("Invalid guest address: {region_start:#x}"))
+        })?;
+        let slice = vhp
+            .as_slice(region_len as usize)
+            .map_err(|e| SnapshotError::Serialize(format!("Memory region slice invalid: {e}")))?;
         file.write_all(slice)?;
     }
     file.sync_all()?;
@@ -207,17 +210,48 @@ pub fn load_memory(guest_memory: &GuestMemoryMmap, path: &Path) -> Result<(), Sn
     }
 
     for region in guest_memory.iter() {
-        let host_addr = guest_memory
-            .get_host_address(region.start_addr())
-            .map_err(|e| SnapshotError::Deserialize(format!("Invalid guest address: {e}")))?;
-        let len = region.len() as usize;
-        let slice = unsafe { std::slice::from_raw_parts_mut(host_addr, len) };
+        let region_start = region.start_addr().raw_value();
+        let region_len = region.len();
+        let mut vhp =
+            crate::get_validated_host_ptr(guest_memory, region_start).ok_or_else(|| {
+                SnapshotError::Deserialize(format!("Invalid guest address: {region_start:#x}"))
+            })?;
+        let slice = vhp
+            .as_slice_mut(region_len as usize)
+            .map_err(|e| SnapshotError::Deserialize(format!("Memory region slice invalid: {e}")))?;
         file.read_exact(slice)?;
     }
     Ok(())
 }
 
 /// Compute total RAM size from guest memory regions.
+/// Convert sysconf result to page size.
+///
+/// Pure function that validates the sysconf(_SC_PAGESIZE) return value.
+/// Returns Some(page_size) for positive values, None for non-positive values
+/// (including the error sentinel -1).
+///
+/// This helper is extracted for testability in Kani proofs.
+pub fn sysconf_to_page_size(result: i64) -> Option<u64> {
+    if result <= 0 {
+        None
+    } else {
+        Some(result as u64)
+    }
+}
+
+/// Get the system page size in bytes using `sysconf(_SC_PAGESIZE)`.
+///
+/// Panics if `sysconf` returns a non-positive value, which would indicate a broken
+/// system configuration.  This is unconditionally available (not feature-gated) so
+/// that non-snapshot code paths (e.g., kernel bundle validation, UFFD handler) can
+/// use it without pulling in the full snapshot-store dependency.
+pub fn system_page_size() -> u64 {
+    // SAFETY: sysconf is a pure query that does not modify any memory or process state.
+    let result = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    sysconf_to_page_size(result).expect("sysconf(_SC_PAGESIZE) returned non-positive value")
+}
+
 pub fn total_ram_size(guest_memory: &GuestMemoryMmap) -> u64 {
     guest_memory.iter().map(|r| r.len()).sum()
 }

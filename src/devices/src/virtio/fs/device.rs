@@ -33,6 +33,7 @@ impl Default for VirtioFsConfig {
     }
 }
 
+// SAFETY: VirtioFsConfig is #[repr(C, packed)] with no padding bytes; all bit patterns are valid for all fields.
 unsafe impl ByteValued for VirtioFsConfig {}
 
 pub struct Fs {

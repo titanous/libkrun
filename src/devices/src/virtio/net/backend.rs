@@ -13,6 +13,8 @@ pub enum ConnectError {
     TunSetIff(io::Error),
     TunSetVnetHdrSz(io::Error),
     TunSetOffload(io::Error),
+    /// Tap interface name is too long (must be < IFNAMSIZ bytes).
+    InvalidTapName,
 }
 
 #[allow(dead_code)]

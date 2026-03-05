@@ -947,7 +947,11 @@ impl VirtioGpu {
             )
         };
         if ret == libc::MAP_FAILED {
-            panic!("UNMAP failed");
+            error!(
+                "virtio_gpu: resource_unmap_blob mmap failed for resource_id={} shmem_offset=0x{:x}",
+                resource_id, shmem_offset
+            );
+            return Err(ErrUnspec);
         }
 
         resource.shmem_offset = None;
