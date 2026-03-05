@@ -210,6 +210,8 @@ CONFIG_DM_INTEGRITY=n
 # SELinux and audit not needed in microVM (~5ms savings from AUDIT alone)
 CONFIG_SECURITY_SELINUX=n
 CONFIG_AUDIT=n
+# Slab allocator sysfs stats not needed in microVM; saves ~3ms from slab_sysfs_init
+CONFIG_SLABINFO=n
 KCONFIG_EOF
           '';
         });
