@@ -1,6 +1,6 @@
 # VMM Crate
 
-Last verified: 2026-03-03
+Last verified: 2026-03-04
 
 ## Purpose
 Core virtual machine manager. Orchestrates VM lifecycle: build, run, snapshot/restore, dirty page tracking.
@@ -54,6 +54,7 @@ Core virtual machine manager. Orchestrates VM lifecycle: build, run, snapshot/re
   - `BuiltVm::restore_from_store(vmstate_bytes, store, &rt)` starts vCPUs paused, restores memory+state via eager preload, then resumes (Linux-only)
   - `BuiltVm::restore_from_store_with_uffd(vmstate_bytes, store, rt)` pre-validates vmstate at `BuiltVm` level (defense-in-depth), starts vCPUs paused, delegates to `Vmm::restore_from_store_with_uffd`, returns handler thread handle (Linux + `uffd` feature)
   - `restore_incremental_snapshot` now reads from `path.join("vmstate")` (directory-based format, not flat file)
+  - `build_microvm` injects `KRUN_STDIN_DEV`, `KRUN_STDOUT_DEV`, `KRUN_STDERR_DEV` kernel cmdline params with virtio console port device paths (e.g., `/dev/vportNpM`) for named console ports (`krun-stdin`, `krun-stdout`, `krun-stderr`); guest init reads these to set up stdio redirects without scanning sysfs
 - **Expects**: Valid `VmResources` from libkrun crate; KVM/HVF available at runtime
 
 ## Dependencies

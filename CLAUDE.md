@@ -1,17 +1,18 @@
 # libkrun
 
-Last verified: 2026-03-03
+Last verified: 2026-03-04
 
 ## Tech Stack
-- Language: Rust (workspace) + C (init binary)
+- Language: Rust (workspace + init binary)
 - Hypervisor: KVM (Linux), HVF (macOS)
 - Network stack: tokio (async workers)
 - Serialization: bincode (snapshots)
 - Build: justfile + Cargo workspace
 
 ## Commands
-- `just check` - Format check + clippy
-- `just build` - Build release library
+- `just build-init` - Build the guest init binary (static musl, x86_64)
+- `just check` - Format check + clippy (includes init crate)
+- `just build` - Build init + release library
 - `just test` - Run unit tests for all crates
 - `just integration` - Run all integration tests (libkrunfw must be in test-prefix/lib64/)
 - `just integration <name>` - Run a single named integration test
@@ -38,7 +39,7 @@ Last verified: 2026-03-03
 - `tests/` - Integration test workspace (host+guest test cases run inside VMs)
 - `fuzz/` - Cargo-fuzz package with 5 harnesses (snapshot deser, FUSE parsing, block request, descriptor chain, vhost-user msg)
 - Kani bounded model checking: 22 proofs live inline as `#[cfg(kani)] mod verification` in their respective source files (dirty_bitmap.rs, gdt.rs, snapshot.rs, page_tracker.rs, reclaimed_bitmap.rs)
-- `init/` - Rust init binary compiled for guest (embedded when `embedded_init` feature on)
+- `init/` - Rust init binary (`init/src/main.rs`) compiled as static musl binary for guest (embedded when `embedded_init` feature on); separate Cargo workspace with `init/.cargo/config.toml` targeting x86_64-unknown-linux-musl
 - `vendor/vhost/` - Patched vhost 0.15.0 crate (adds DEVICE_STATE protocol methods); used via `[patch.crates-io]`
 - `vendor/vhost-user-backend/` - Patched vhost-user-backend 0.21.0 (vm-memory 0.18 compat); used by test daemons
 - `vendor/virtio-queue/` - Patched virtio-queue 0.17.0 (vm-memory 0.18 compat); used by test daemons
@@ -89,5 +90,5 @@ The guest kernel must have `CONFIG_SERIAL_8250=y`, `CONFIG_SERIAL_8250_CONSOLE=y
 ## Boundaries
 - `tests/Cargo.lock` is separate from root `Cargo.lock` (different workspace)
 - Root workspace uses `vm-memory` 0.18; test daemons also use 0.18 with vendored patches for compatibility
-- `init/init` is a C binary, not part of the Cargo workspace
+- `init/` is a separate Rust workspace (own Cargo.toml with `[workspace]`), not part of the root Cargo workspace; built via `just build-init` targeting x86_64-unknown-linux-musl
 - `vendor/vhost/`, `vendor/vhost-user-backend/`, `vendor/virtio-queue/` are patched via `[patch.crates-io]` in root `Cargo.toml`; do not update versions without verifying patches (DEVICE_STATE, vm-memory compat) are preserved
