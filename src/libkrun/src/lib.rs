@@ -422,6 +422,7 @@ pub struct ConsoleDeviceInfo {
 pub struct Builder {
     config: ContextConfig,
     kernel_cmdline: Vec<String>,
+    extra_kernel_args: Vec<String>,
     /// Number of console devices added (for computing device paths)
     console_count: u32,
 }
@@ -937,6 +938,14 @@ impl Builder {
         self
     }
 
+    /// Append extra kernel cmdline args without replacing the default cmdline or
+    /// the builder-injected params (init path, exec path, env, etc.).
+    pub fn add_kernel_cmdline_args(&mut self, args: &[&str]) -> &mut Self {
+        self.extra_kernel_args
+            .extend(args.iter().map(|s| s.to_string()));
+        self
+    }
+
     /// Enable the memory balloon device, exposing it through the Rust API via VmHandle::balloon().
     #[cfg(not(feature = "tee"))]
     pub fn enable_balloon(&mut self) -> &mut Self {
@@ -1002,21 +1011,24 @@ impl Builder {
         }
 
         let kernel_cmdline = if self.kernel_cmdline.is_empty() {
+            let mut cmdline = vec![
+                DEFAULT_KERNEL_CMDLINE.to_owned(),
+                format!("init={INIT_PATH}"),
+                ctx_cfg.get_exec_path(),
+                ctx_cfg.get_workdir(),
+                ctx_cfg.get_block_root(),
+                ctx_cfg.get_rlimits(),
+                ctx_cfg.get_env(),
+            ];
+            cmdline.extend(self.extra_kernel_args);
             KernelCmdlineConfig {
-                cmdline: vec![
-                    DEFAULT_KERNEL_CMDLINE.to_owned(),
-                    format!("init={INIT_PATH}"),
-                    ctx_cfg.get_exec_path(),
-                    ctx_cfg.get_workdir(),
-                    ctx_cfg.get_block_root(),
-                    ctx_cfg.get_rlimits(),
-                    ctx_cfg.get_env(),
-                ],
+                cmdline,
                 args: vec![format!(" -- {}", ctx_cfg.get_args())],
             }
         } else {
             let mut cmdline = self.kernel_cmdline;
             cmdline.push(ctx_cfg.get_env());
+            cmdline.extend(self.extra_kernel_args);
             KernelCmdlineConfig {
                 cmdline,
                 args: vec![format!(" -- {}", ctx_cfg.get_args())],

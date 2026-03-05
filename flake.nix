@@ -191,11 +191,12 @@ CONFIG_VMGENID=y
 # CONFIG_RANDOM_TRUST_CPU=y ensures DRBG has CPU entropy (RDRAND) without needing jent.
 CONFIG_CRYPTO_JITTERENTROPY=n
 CONFIG_RANDOM_TRUST_CPU=y
-# Serial 8250 disabled in production (~12ms savings for serial8250_init).
-# For earlycon debugging: flip these to =y and add earlycon=uart8250,io,0x3f8,115200 to cmdline
-CONFIG_SERIAL_8250=n
-CONFIG_SERIAL_8250_CONSOLE=n
-CONFIG_SERIAL_EARLYCON=n
+# Serial 8250: compiled in but probing disabled at runtime via 8250.nr_uarts=0 in DEFAULT_KERNEL_CMDLINE.
+# This preserves earlycon capability without recompiling: to debug, remove 8250.nr_uarts=0 from
+# DEFAULT_KERNEL_CMDLINE and add earlycon=uart8250,io,0x3f8,115200 to the kernel cmdline.
+CONFIG_SERIAL_8250=y
+CONFIG_SERIAL_8250_CONSOLE=y
+CONFIG_SERIAL_EARLYCON=y
 # Unused filesystems (rootfs is virtiofs; ext4 kept for app/block use)
 CONFIG_BTRFS_FS=n
 CONFIG_XFS_FS=n

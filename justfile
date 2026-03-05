@@ -35,10 +35,12 @@ integration test="all":
     mkdir -p test-prefix/lib64
     cd tests && RUST_LOG=trace LD_LIBRARY_PATH="$(realpath ../test-prefix/lib64/)" ./run.sh test --test-case "{{test}}"
 
-# Benchmark boot-timing-e2e with release builds; prints min/max/mean/stddev/median.
+# Benchmark boot-timing-e2e with release builds; prints min/p50/p95/mean/max/stddev.
 # Runs one warmup iteration then N timed samples.
-# Usage: just bench-boot [n]
-bench-boot n="20":
+# vcpus: vCPU count passed to the VM (default 1).
+# extra_cmdline: extra kernel cmdline args to inject (e.g. "swiotlb=noforce").
+# Usage: just bench-boot [n] [vcpus] [extra_cmdline]
+bench-boot n="20" vcpus="1" extra_cmdline="":
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p test-prefix/lib64
@@ -59,6 +61,8 @@ bench-boot n="20":
     fi
     export KRUN_TEST_DAEMON_PATH="$_DAEMON_DIR/test-daemon"
     export KRUN_TEST_VSOCK_PROXY_PATH="$_DAEMON_DIR/test-vsock-proxy"
+    export KRUN_BENCH_VCPUS="{{vcpus}}"
+    export KRUN_BENCH_EXTRA_CMDLINE="{{extra_cmdline}}"
     RUNNER="target/$HOST_TARGET_ARCH/release/runner"
 
     run_once() {
@@ -72,7 +76,9 @@ bench-boot n="20":
         printf '%s\n' "$output" | sed -n 's/.*boot_timing_e2e: \([0-9][0-9]*\)ms.*/\1/p'
     }
 
-    printf 'Warming up...\n'
+    label="vcpus={{vcpus}}"
+    if [ -n "{{extra_cmdline}}" ]; then label="$label extra_cmdline='{{extra_cmdline}}'"; fi
+    printf 'Warming up... (%s)\n' "$label"
     warmup=$(run_once)
     printf '  warmup: %sms\n' "$warmup"
 
@@ -88,24 +94,35 @@ bench-boot n="20":
         printf '  run %2d: %sms\n' "$i" "$ms"
     done
 
-    printf '\nResults (%d samples):\n' {{n}}
-    sorted=($(printf '%s\n' "${samples[@]}" | sort -n))
-    n={{n}}
-    if (( n % 2 == 1 )); then
-        median=${sorted[$((n / 2))]}
-    else
-        median=$(( (${sorted[$((n / 2 - 1))]} + ${sorted[$((n / 2))]}) / 2 ))
-    fi
-    printf '%s\n' "${samples[@]}" | gawk -v med="$median" '
-        { a[NR]=$1; sum+=$1; if(NR==1||$1<min)min=$1; if(NR==1||$1>max)max=$1 }
+    printf '\nResults (%s, %d samples):\n' "$label" {{n}}
+    printf '%s\n' "${samples[@]}" | gawk '
+        { a[NR]=$1; sum+=$1 }
         END {
             n=NR; mean=sum/n
             for(i=1;i<=n;i++) v+=(a[i]-mean)^2
             sd=sqrt(v/n)
-            printf "  n=%d  min=%dms  median=%dms  mean=%.1fms  max=%dms  stddev=%.1fms\n",
-                   n, min, med, mean, max, sd
+            # Sort (insertion sort, fine for n<=100)
+            for(i=2;i<=n;i++) { x=a[i]; j=i-1; while(j>=1&&a[j]>x){a[j+1]=a[j];j--}; a[j+1]=x }
+            min=a[1]; max=a[n]
+            # p50 (median)
+            if(n%2==1) p50=a[int(n/2)+1]; else p50=(a[n/2]+a[n/2+1])/2
+            # p95: nearest-rank ceil(0.95*n), 1-indexed
+            r95=int(0.95*n); if(r95*100<95*n) r95++; if(r95>n) r95=n
+            p95=a[r95]
+            printf "  n=%d  min=%dms  p50=%dms  p95=%dms  mean=%.1fms  max=%dms  stddev=%.1fms\n",
+                   n, min, p50, p95, mean, max, sd
         }
     '
+
+# Sweep bench-boot over 1, 2, and 4 vCPUs (like Firecracker parametric benchmarks).
+# Usage: just bench-sweep [n]
+bench-sweep n="20":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for vcpus in 1 2 4; do
+        just bench-boot "{{n}}" "$vcpus"
+        printf '\n'
+    done
 
 # Full fast suite: check + test + miri + proptest + loom + shuttle
 all: check test miri proptest loom shuttle

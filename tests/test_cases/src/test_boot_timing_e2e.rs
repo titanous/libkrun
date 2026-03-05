@@ -77,8 +77,13 @@ mod host {
                 direct_io: false,
             };
 
+            let vcpus: u8 = std::env::var("KRUN_BENCH_VCPUS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1);
+
             let mut builder = krun::Builder::new();
-            builder.vm_config(1, 256)?;
+            builder.vm_config(vcpus, 256)?;
             setup_fs_builder(&mut builder, &test_setup)?;
             builder.add_virtiofs(FS_TAG, Box::new(fs), None);
             builder.add_block_cfg(block_cfg);
@@ -89,6 +94,14 @@ mod host {
             );
             builder.enable_balloon();
             builder.add_vsock_port(VSOCK_PORT, sock_path, false);
+
+            // Allow injecting extra kernel cmdline args for benchmarking (e.g. "swiotlb=noforce").
+            if let Ok(extra) = std::env::var("KRUN_BENCH_EXTRA_CMDLINE") {
+                if !extra.is_empty() {
+                    let args: Vec<&str> = extra.split_whitespace().collect();
+                    builder.add_kernel_cmdline_args(&args);
+                }
+            }
 
             let t0 = Instant::now();
             let context = builder.build()?;
