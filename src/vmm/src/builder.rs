@@ -1290,7 +1290,7 @@ pub fn build_microvm(
         )?;
     }
 
-    // We use this atomic to record the exit code set by init/init.c in the VM.
+    // We use this atomic to record the exit code set by init/src/main.rs in the VM.
     let exit_code = Arc::new(AtomicI32::new(i32::MAX));
 
     // Shared VM exit state.
