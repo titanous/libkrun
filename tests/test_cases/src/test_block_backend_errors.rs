@@ -56,30 +56,38 @@ mod host {
 mod guest {
     use super::*;
     use crate::Test;
+    use std::os::unix::fs::OpenOptionsExt;
     use std::fs::OpenOptions;
     use std::io::{Read, Seek, SeekFrom};
 
+    // O_DIRECT requires 512-byte aligned buffers.
+    #[repr(align(512))]
+    struct AlignedSector([u8; 512]);
+
     impl Test for TestBlockBackendErrors {
         fn in_guest(self: Box<Self>) {
+            // O_DIRECT bypasses the page cache so each read goes directly to
+            // the backend, ensuring sector-5 errors aren't hidden by readahead.
             let mut f = OpenOptions::new()
                 .read(true)
                 .write(true)
+                .custom_flags(libc::O_DIRECT)
                 .open("/dev/vda")
                 .expect("Failed to open /dev/vda");
 
             // Sector 0: good sector — read should succeed and return 0xAA bytes
-            let mut buf = vec![0u8; 512];
-            f.read_exact(&mut buf).expect("sector 0 read should succeed");
+            let mut buf = AlignedSector([0u8; 512]);
+            f.read_exact(&mut buf.0).expect("sector 0 read should succeed");
             assert!(
-                buf.iter().all(|&b| b == 0xAA),
+                buf.0.iter().all(|&b| b == 0xAA),
                 "sector 0 should be all 0xAA, got {:?}",
-                &buf[..4]
+                &buf.0[..4]
             );
 
             // Sector 5: error sector — read should fail with EIO
             f.seek(SeekFrom::Start(5 * 512))
                 .expect("seek to sector 5 should succeed");
-            let result = f.read_exact(&mut buf);
+            let result = f.read_exact(&mut buf.0);
             assert!(
                 result.is_err(),
                 "sector 5 read should return an error (EIO from backend)"
