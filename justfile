@@ -58,9 +58,14 @@ bench-boot n="20":
     RUNNER="target/$HOST_TARGET_ARCH/release/runner"
 
     run_once() {
-        timeout 2m unshare --user --map-root-user --net -- /bin/sh -c \
+        # Capture output first (avoids fd-leak issue where orphaned start-vm
+        # subprocess holds the pipe open, preventing sed from seeing EOF).
+        local output
+        output=$(timeout --kill-after=10 120 \
+            unshare --user --map-root-user --net -- /bin/sh -c \
             "ifconfig lo 127.0.0.1 && exec $RUNNER test --test-case boot-timing-e2e" \
-            2>&1 | sed -n 's/.*boot_timing_e2e: \([0-9][0-9]*\)ms.*/\1/p'
+            2>&1) || true
+        printf '%s\n' "$output" | sed -n 's/.*boot_timing_e2e: \([0-9][0-9]*\)ms.*/\1/p'
     }
 
     printf 'Warming up...\n'
