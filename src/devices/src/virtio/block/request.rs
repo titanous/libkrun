@@ -264,25 +264,12 @@ mod verification {
     #[kani::solver(cadical)]
     fn proof_get_status_ptr_null_case_when_empty() {
         // Zero-length buffer → status_byte_offset must return None.
+        // This is the critical check: when buf_len == 0, checked_sub(1) returns None,
+        // causing get_status_ptr() to propagate None to the caller (via the ? operator).
         let result = status_byte_offset(0usize);
         kani::assert(
             result.is_none(),
             "status_byte_offset(0) must return None (prevents underflow)",
-        );
-
-        // Mirror what get_status_ptr() does in the empty-buffers branch:
-        // the ? operator returns None from the function, propagating the
-        // absence of a valid pointer to the caller as Option::None.
-        let status_ptr: Option<std::ptr::NonNull<u8>> = if result.is_some() {
-            // Would be Some(_) — but this branch is unreachable for buf_len == 0.
-            None
-        } else {
-            None
-        };
-
-        kani::assert(
-            status_ptr.is_none(),
-            "empty-buffers path must yield None status_ptr",
         );
 
         kani::cover!(true, "None status_ptr (empty buffers) proof path covered");

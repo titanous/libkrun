@@ -454,21 +454,12 @@ mod tests {
         let found_h_bstr = BrandString::from_bytes_unchecked(b"1.A5.2MH3.20GHx4.30GHz");
         assert_eq!(found_h_bstr.find_freq().unwrap(), b"4.30GHz");
     }
-}
 
-/// GAP-020: brand_string REG_BUF_SIZE * 4 size assumption
-///
-/// `as_bytes` and `as_bytes_mut` call `slice::from_raw_parts` with length
-/// `REG_BUF_SIZE * 4`, implicitly assuming `size_of::<u32>() == 4`.
-/// These proofs document and lock down that assumption.
-#[cfg(kani)]
-mod verification {
-    use super::*;
-
-    /// Verify: as_bytes returns a slice whose length equals the full buffer byte size.
+    /// Test: as_bytes returns a slice whose length equals the full buffer byte size.
     ///
-    /// Documents that `as_bytes()` exposes all `REG_BUF_SIZE * 4` bytes, not
-    /// a truncated or padded view. This is a compile-time assertion.
+    /// GAP-020 (platform-assumption verification): `as_bytes` and `as_bytes_mut`
+    /// call `slice::from_raw_parts` with length `REG_BUF_SIZE * 4`, implicitly assuming
+    /// `size_of::<u32>() == 4`. This test documents and verifies that assumption.
     #[test]
     fn test_as_bytes_len_equals_buf_size() {
         let bstr = BrandString::new();

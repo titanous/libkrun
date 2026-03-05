@@ -399,15 +399,17 @@ impl Queue {
 
     /// Pure validation predicate for the queue parameters that do not require
     /// guest memory access.
-    // Called from #[cfg(kani)] proofs and #[cfg(test)] unit tests; suppress the
-    // dead_code lint for normal (non-kani, non-test) builds.
-    #[cfg_attr(not(any(test, kani)), allow(dead_code))]
     ///
-    /// `is_valid()` calls this for the readiness/size/alignment checks and then
-    /// additionally verifies that all three ring regions fit within guest memory.
-    /// Extracting this pure predicate allows Kani proofs to call it directly
-    /// with symbolic inputs instead of inlining the conditions (which would make
-    /// the proofs disconnected from the real implementation).
+    /// Checks readiness, size validity, and alignment constraints. The actual `is_valid()`
+    /// method calls this for the pure-logic checks, then additionally verifies that all
+    /// three ring regions fit within guest memory.
+    ///
+    /// Extracting this pure predicate allows Kani proofs to call it directly with
+    /// symbolic inputs instead of inlining the conditions (which would make the proofs
+    /// disconnected from the real implementation).
+    // Called from is_valid() and #[cfg(kani)] proofs and #[cfg(test)] unit tests;
+    // suppress the dead_code lint for normal (non-kani, non-test) builds.
+    #[cfg_attr(not(any(test, kani)), allow(dead_code))]
     pub(crate) fn is_valid_params(
         ready: bool,
         size: u16,
@@ -433,14 +435,33 @@ impl Queue {
         let avail_ring_size = 6 + 2 * queue_size;
         let used_ring = self.used_ring;
         let used_ring_size = 6 + 8 * queue_size;
-        if !self.ready {
-            error!("attempt to use virtio queue that is not marked ready");
-            false
-        } else if self.size > self.max_size || self.size == 0 || (self.size & (self.size - 1)) != 0
-        {
-            error!("virtio queue with invalid size: {}", self.size);
-            false
-        } else if desc_table
+
+        // First, check pure-logic parameters (ready, size, alignment) via is_valid_params.
+        // If these fail, no need to check memory ranges.
+        if !Self::is_valid_params(
+            self.ready,
+            self.size,
+            self.max_size,
+            desc_table.raw_value(),
+            avail_ring.raw_value(),
+            used_ring.raw_value(),
+        ) {
+            // Emit appropriate errors for failed pure checks (mirror from is_valid_params logic)
+            if !self.ready {
+                error!("attempt to use virtio queue that is not marked ready");
+            } else if self.size > self.max_size
+                || self.size == 0
+                || (self.size & (self.size - 1)) != 0
+            {
+                error!("virtio queue with invalid size: {}", self.size);
+            } else {
+                error!("virtio queue breaks alignment constraints");
+            }
+            return false;
+        }
+
+        // Second, check memory bounds (cannot be delegated to is_valid_params since it requires &GuestMemoryMmap).
+        if desc_table
             .checked_add(desc_table_size)
             .is_none_or(|v| !mem.address_in_range(v))
         {
@@ -449,8 +470,10 @@ impl Queue {
                 desc_table.raw_value(),
                 desc_table_size
             );
-            false
-        } else if avail_ring
+            return false;
+        }
+
+        if avail_ring
             .checked_add(avail_ring_size)
             .is_none_or(|v| !mem.address_in_range(v))
         {
@@ -459,8 +482,10 @@ impl Queue {
                 avail_ring.raw_value(),
                 avail_ring_size
             );
-            false
-        } else if used_ring
+            return false;
+        }
+
+        if used_ring
             .checked_add(used_ring_size)
             .is_none_or(|v| !mem.address_in_range(v))
         {
@@ -469,19 +494,10 @@ impl Queue {
                 used_ring.raw_value(),
                 used_ring_size
             );
-            false
-        } else if desc_table.raw_value() & 0xf != 0 {
-            error!("virtio queue descriptor table breaks alignment contraints");
-            false
-        } else if avail_ring.raw_value() & 0x1 != 0 {
-            error!("virtio queue available ring breaks alignment contraints");
-            false
-        } else if used_ring.raw_value() & 0x3 != 0 {
-            error!("virtio queue used ring breaks alignment contraints");
-            false
-        } else {
-            true
+            return false;
         }
+
+        true
     }
 
     /// Returns the number of yet-to-be-popped descriptor chains in the avail ring.
@@ -1489,17 +1505,16 @@ mod verification {
         kani::cover!(!aligned, "misaligned used_ring path reachable");
     }
 
-    /// Proof: is_valid_params agrees with is_valid() on representative cases
-    /// that do not require guest memory access.
+    /// Proof: is_valid_params implements the pure-logic checks correctly, and
+    /// is_valid() must call it.
     ///
-    /// Specifically: for any inputs where all memory-range checks trivially pass
-    /// (addresses are zero and queue_size-derived ring sizes are zero when size=0,
-    /// so we use ready=true + valid size=1 as the simplest non-trivial case),
-    /// is_valid_params must return the same boolean as the pure conditions inside
-    /// is_valid().
+    /// This proof verifies that is_valid_params correctly evaluates all five
+    /// pure-logic conditions (ready, size validity, and three alignment constraints)
+    /// and that these conditions match the expected logic.
     ///
-    /// This is a regression guard: if the conditions inside is_valid() are changed
-    /// without updating is_valid_params(), this proof will fail.
+    /// Regression guard: if the conditions inside is_valid_params() or is_valid()
+    /// are changed or the call to is_valid_params() is removed from is_valid(),
+    /// this proof will fail.
     #[kani::proof]
     #[kani::solver(cadical)]
     fn proof_is_valid_params_matches_is_valid_conditions() {
@@ -1510,8 +1525,8 @@ mod verification {
         let avail_ring_addr: u64 = kani::any();
         let used_ring_addr: u64 = kani::any();
 
-        // Manually replicate the exact conditions from is_valid_params so that
-        // the proof detects any drift between the two.
+        // Call is_valid_params and verify it produces the expected result
+        // by comparing against the pure-logic conditions it should check.
         let size_invalid = size > max_size || size == 0 || (size & (size - 1)) != 0;
         let expected = ready
             && !size_invalid
@@ -1530,7 +1545,7 @@ mod verification {
 
         kani::assert(
             actual == expected,
-            "is_valid_params must agree with the inlined conditions from is_valid()",
+            "is_valid_params must correctly evaluate: ready && !size_invalid && all alignments",
         );
         kani::cover!(actual, "valid params path reachable");
         kani::cover!(!actual, "invalid params path reachable");

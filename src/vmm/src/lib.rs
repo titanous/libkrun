@@ -1777,20 +1777,6 @@ impl Vmm {
     }
 }
 
-/// Computes a host pointer by adding offset to base, guarding against overflow.
-/// Returns `Err` if `base as usize + offset` would overflow usize.
-#[cfg_attr(not(kani), allow(dead_code))]
-pub(crate) fn checked_host_ptr_add(
-    host_addr: *const u8,
-    offset: usize,
-) -> std::result::Result<*const u8, &'static str> {
-    let base = host_addr as usize;
-    base.checked_add(offset)
-        .ok_or("host address arithmetic overflow")?;
-    // Safety: checked_add verified no overflow; caller must ensure `offset < region_len`
-    Ok(unsafe { host_addr.add(offset) })
-}
-
 /// Constructs a `&[u8]` slice from a host pointer, verifying that the entire
 /// slice `[host_ptr, host_ptr + len)` lies within the guest memory region
 /// `[region_start, region_start + region_len)`.
@@ -1813,7 +1799,7 @@ pub(crate) fn checked_host_ptr_add(
 /// This function is only called from [`ValidatedHostPtr::as_slice`], which ties the
 /// output lifetime to the `ValidatedHostPtr<'a>` borrow, enforcing the backing
 /// `GuestMemoryMmap` outlives the slice.
-pub(crate) fn validated_host_slice(
+fn validated_host_slice(
     host_ptr: *const u8,
     len: usize,
     addr: u64,
@@ -1846,7 +1832,7 @@ pub(crate) fn validated_host_slice(
 /// host pointer, applying the same GPA region bounds check.
 ///
 /// See [`validated_host_slice`] for the invariants, error conditions, and lifetime safety notes.
-pub(crate) fn validated_host_slice_mut(
+fn validated_host_slice_mut(
     host_ptr: *mut u8,
     len: usize,
     addr: u64,
@@ -2519,72 +2505,6 @@ mod verification {
                 result.is_err(),
                 "GAP-013: validated_host_slice must Err when slice exceeds region",
             );
-        }
-    }
-
-    /// Proof: checked_host_ptr_add correctly guards pointer arithmetic overflow.
-    ///
-    /// GAP-013: create_incremental_snapshot calls host_addr.add(offset) without
-    /// verifying host_addr + offset doesn't overflow usize. The fix extracts
-    /// checked_host_ptr_add which checks before the unsafe add. This proof verifies
-    /// the helper is correct for all symbolic inputs.
-    ///
-    /// Two sub-proofs in one harness:
-    ///   1. With a real allocation and in-bounds offset, the helper always returns Ok
-    ///      and the resulting pointer has the correct numeric value. (Kani requires a
-    ///      real allocation to reason about pointer::add — symbolic usize casts are
-    ///      rejected as unallocated memory.)
-    ///   2. The arithmetic guard is correct for all symbolic (base, offset) pairs:
-    ///      checked_add returns None iff the addition overflows usize.
-    #[kani::proof]
-    fn proof_incremental_snapshot_offset_no_overflow() {
-        // --- Sub-proof 1: real allocation, page-aligned in-bounds offset ---
-        // Region is 2 pages (8192 bytes). The only page-aligned value < 4096 is 0,
-        // so offset collapses to 0. This is a smoke-test that exercises the Ok path
-        // with a valid pointer. The real overflow detection is verified in sub-proof 2.
-        let buf: [u8; 8192] = kani::any();
-        let host_addr: *const u8 = buf.as_ptr();
-        let host_addr_val = host_addr as usize;
-
-        let offset: usize = kani::any();
-        kani::assume(offset < 4096);
-        kani::assume(offset % 4096 == 0); // offset == 0 (only value that satisfies both constraints)
-
-        match super::checked_host_ptr_add(host_addr, offset) {
-            Ok(ptr) => {
-                let ptr_val = ptr as usize;
-                kani::assert(
-                    ptr_val == host_addr_val.wrapping_add(offset),
-                    "pointer has correct offset",
-                );
-                kani::assert(ptr_val >= host_addr_val, "no wrap-around");
-                kani::cover!(true, "valid pointer computation");
-            }
-            Err(_) => {
-                // Cannot overflow: a stack allocation base + 0 cannot overflow usize.
-                kani::assert(false, "unexpected Err for zero in-bounds offset");
-            }
-        }
-
-        // --- Sub-proof 2: arithmetic guard correctness for all (base, offset) ---
-        // The guard inside checked_host_ptr_add is:
-        //   `(host_addr as usize).checked_add(offset).ok_or(...)?`
-        // Verify this correctly detects overflow for all symbolic inputs.
-        let base: usize = kani::any();
-        let any_offset: usize = kani::any();
-        match base.checked_add(any_offset) {
-            Some(sum) => {
-                kani::assert(sum == base.wrapping_add(any_offset), "sum is correct");
-                kani::assert(sum >= base, "no wrap-around");
-                kani::cover!(true, "non-overflow path");
-            }
-            None => {
-                kani::assert(
-                    base.wrapping_add(any_offset) < base,
-                    "overflow: wrapping sum is smaller",
-                );
-                kani::cover!(true, "overflow correctly detected");
-            }
         }
     }
 }

@@ -257,11 +257,17 @@ mod tests {
 mod verification {
     use super::*;
 
-    /// Proof: after the fix, check_bounds passing implies host_addr + dax_offset is safe.
+    /// Assumption: when check_bounds passes, host_addr + dax_offset is safe.
     ///
-    /// Previously check_bounds only validated `dax_offset + len <= size` without
-    /// checking whether `host_addr + dax_offset` wraps around u64::MAX. The fix
-    /// adds `checked_add` at each arithmetic site, so this proof now PASSES.
+    /// This is a mathematical assumption about the relationship between check_bounds
+    /// and pointer arithmetic. Previously check_bounds only validated `dax_offset + len <= size`
+    /// without checking whether `host_addr + dax_offset` wraps around u64::MAX. The fix
+    /// adds `checked_add` at each arithmetic site (map_file, map_data, unmap) to guard
+    /// against overflow.
+    ///
+    /// This proof verifies the mathematical invariant: given the preconditions, the
+    /// address sum does not overflow. The production functions (map_file, map_data, unmap)
+    /// use this as a defensive check before calling mmap.
     #[kani::proof]
     fn proof_check_bounds_no_overflow() {
         // Symbolic host_addr — constrained so the full window fits in address space.
@@ -280,21 +286,23 @@ mod verification {
         // Precondition: check_bounds must succeed (the offset/len are in-window).
         kani::assume(mapper.check_bounds(dax_offset, len).is_ok());
 
-        // After the fix, map_file uses checked_add and returns Err on overflow,
-        // so any path that reaches mmap has a non-overflowing addr. Assert that
-        // the addition is safe — this now holds because the overflow case returns early.
+        // Verify the mathematical invariant: when check_bounds passes with these
+        // constraints, host_addr + dax_offset cannot overflow u64.
         kani::assert(
             host_addr.checked_add(dax_offset).is_some(),
             "host_addr + dax_offset must not overflow u64 after check_bounds passes",
         );
     }
 
-    /// Proof: the mmap address computation `host_addr + dax_offset` does not overflow.
+    /// Assumption: the mmap address computation `host_addr + dax_offset` does not overflow.
     ///
-    /// Previously this addition was unchecked. After the fix, all three mmap call
-    /// sites (`map_file`, `map_data`, `unmap`) use `checked_add` and return
-    /// `InvalidInput` on overflow, so the mmap is only reached when the sum is safe.
-    /// This proof now PASSES.
+    /// This is a mathematical assumption about valid address ranges. Previously this
+    /// addition was unchecked (unsafely assuming callers provide valid offsets).
+    /// After the fix, all three mmap call sites (`map_file`, `map_data`, `unmap`)
+    /// use `checked_add` and return `InvalidInput` on overflow, ensuring the sum
+    /// is safe before reaching mmap.
+    ///
+    /// This proof documents the invariant used to justify those defensive checks.
     #[kani::proof]
     fn proof_map_file_addr_no_overflow() {
         let host_addr: u64 = kani::any();
@@ -311,9 +319,8 @@ mod verification {
         kani::assume(dax_offset.checked_add(len).is_some());
         kani::assume(dax_offset + len <= size);
 
-        // map_file now uses checked_add for `host_addr + dax_offset`. Any overflow
-        // returns Err before reaching mmap. Assert the sum does not overflow — this
-        // now holds because the fix guards it.
+        // Verify the mathematical invariant: given the preconditions, host_addr + dax_offset
+        // cannot overflow u64. This justifies the checked_add guards in map_file/map_data/unmap.
         kani::assert(
             host_addr.checked_add(dax_offset).is_some(),
             "map_file address computation host_addr + dax_offset must not overflow",

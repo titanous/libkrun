@@ -2451,10 +2451,15 @@ mod verification {
 
             match super::validate_dirent_step(rem_len, d_reclen, HEADER) {
                 Ok(advance) => {
-                    // When valid, all invariants hold:
+                    // When validate_dirent_step returns Ok, all invariants hold:
+                    // A: rem_len >= HEADER — checked by validate_dirent_step line 2409
+                    // (tautological assertion kept for documentation of the invariant)
                     kani::assert(rem_len >= HEADER, "A: header fits");
+                    // B: advance >= HEADER — checked by validate_dirent_step line 2415
                     kani::assert(advance >= HEADER, "B: no underflow");
+                    // D: advance <= rem_len — checked by validate_dirent_step line 2418
                     kani::assert(advance <= rem_len, "D: advance in bounds");
+                    // E: advance > 0 — checked by validate_dirent_step line 2412
                     kani::assert(advance > 0, "E: progress guaranteed");
                     offset += advance;
                 }

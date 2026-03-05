@@ -485,7 +485,7 @@ impl<'a> Writer<'a> {
     pub fn get_status_ptr(&self) -> Option<std::ptr::NonNull<u8>> {
         // Status is at the last byte of the last buffer.
         let last = self.buffer.buffers.back()?;
-        let offset = status_byte_offset(last.len()).expect("get_status_ptr: last region is empty");
+        let offset = status_byte_offset(last.len())?;
         // SAFETY: ptr_guard_mut().as_ptr() is non-null (it points into a live VolatileSlice
         // backed by guest memory), and offset == last.len() - 1 < last.len(), so the resulting
         // address is within the same allocation.  NonNull::new_unchecked is safe here because
