@@ -43,6 +43,7 @@ mod host {
     use crate::minimal_filesystem::MinimalFileSystem;
     use crate::{Test, TestSetup};
     use std::io::Read;
+    use std::os::unix::io::AsRawFd;
     use std::os::unix::net::UnixListener;
     use std::process::Child;
     use std::thread;
@@ -95,6 +96,21 @@ mod host {
 
             let vm_thread = thread::spawn(move || context.run());
 
+            // Set 30-second timeout on accept() so the runner fails fast instead of
+            // hanging indefinitely if the guest never connects over vsock.
+            unsafe {
+                let timeval = libc::timeval {
+                    tv_sec: 30,
+                    tv_usec: 0,
+                };
+                libc::setsockopt(
+                    listener.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_RCVTIMEO,
+                    &timeval as *const _ as *const libc::c_void,
+                    std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+                );
+            }
             let (mut stream, _) = listener.accept().unwrap();
             let t_accept_ms = t0.elapsed().as_millis() as u64;
             stream
