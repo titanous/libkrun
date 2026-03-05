@@ -18,6 +18,7 @@
         # Extensions: miri (interpreter), rust-src (needed by miri/asan), llvm-tools-preview (sanitizer runtime).
         nightlyToolchain = pkgs.rust-bin.nightly.latest.default.override {
           extensions = [ "miri" "rust-src" "llvm-tools-preview" ];
+          targets = [ "x86_64-unknown-linux-musl" ];
         };
 
         # Kani requires an exact nightly to match the kani-compiler binary in its release bundle.
@@ -115,8 +116,12 @@
           case "$1" in
             +nightly)
               shift
-              # Prepend nightly bin to PATH so cargo can find cargo-miri, cargo-fuzz, etc.
-              exec env "PATH=${nightlyToolchain}/bin:$PATH" "${nightlyToolchain}/bin/cargo" "$@"
+              # Prepend nightly bin to PATH and set RUSTC explicitly so cargo uses
+              # the nightly rustc (not the stable one on PATH) even when dispatched
+              # via this wrapper rather than a real rustup proxy.
+              exec env "PATH=${nightlyToolchain}/bin:$PATH" \
+                       "RUSTC=${nightlyToolchain}/bin/rustc" \
+                       "${nightlyToolchain}/bin/cargo" "$@"
               ;;
             +stable)
               shift
@@ -127,7 +132,9 @@
               # integration-asan's run.sh) works without rustup installed.
               case "''${RUSTUP_TOOLCHAIN:-}" in
                 nightly)
-                  exec env "PATH=${nightlyToolchain}/bin:$PATH" "${nightlyToolchain}/bin/cargo" "$@"
+                  exec env "PATH=${nightlyToolchain}/bin:$PATH" \
+                           "RUSTC=${nightlyToolchain}/bin/rustc" \
+                           "${nightlyToolchain}/bin/cargo" "$@"
                   ;;
                 nightly-*)
                   # kani sets RUSTUP_TOOLCHAIN=nightly-2025-11-21-x86_64-unknown-linux-gnu;

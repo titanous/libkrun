@@ -1,9 +1,13 @@
 # Feature set used by all targets.
 features := "embedded_init,snapshot,uffd,blk,vhost-user"
 
-# Build the guest init binary (static musl)
+# Build the guest init binary (static musl, nightly for panic=immediate-abort + build-std).
+# RUSTFLAGS overrides config.toml to add the nightly-only flags without breaking
+# stable cargo check/clippy. -Z build-std recompiles std/core with panic_abort,
+# eliminating the unwinding + formatting machinery (~300KB reduction).
 build-init:
-    cd init && cargo build --release
+    cd init && RUSTFLAGS="-C relocation-model=static -C link-arg=-no-pie -Z unstable-options -C panic=immediate-abort" \
+        cargo +nightly build --release -Z build-std=std,panic_abort
     cp init/target/x86_64-unknown-linux-musl/release/krun-init init/init
 
 # Default: check
