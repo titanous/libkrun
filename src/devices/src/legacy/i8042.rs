@@ -72,6 +72,7 @@ const BUF_SIZE: usize = 16;
 
 #[cfg_attr(feature = "snapshot", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Fields read via serde deserialization
 struct I8042State {
     status: u8,
     control: u8,

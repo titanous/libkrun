@@ -1891,6 +1891,7 @@ impl<'a> ValidatedHostPtr<'a> {
     /// Returns the raw host pointer. The pointer is valid for `'a` (the lifetime of the
     /// backing `GuestMemoryMmap`). Use [`as_slice`](Self::as_slice) to obtain a
     /// bounds-checked slice from it.
+    #[allow(dead_code)] // Used in snapshot paths, not in loom builds
     pub(crate) fn as_ptr(&self) -> *const u8 {
         self.ptr
     }

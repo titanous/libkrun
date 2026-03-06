@@ -56,6 +56,7 @@ const DEFAULT_BAUD_DIVISOR: u16 = 12; // 9600 bps
 
 #[cfg_attr(feature = "snapshot", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Fields read via serde deserialization
 struct Serial16550State {
     interrupt_enable: u8,
     interrupt_identification: u8,

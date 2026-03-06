@@ -149,11 +149,10 @@ impl Snapshottable for Cmos {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     #[cfg(feature = "snapshot")]
     fn test_cmos_snapshot_preserves_index_and_data() {
+        use super::*;
         // Create a CMOS device with known memory layout
         let mut cmos = Cmos::new(1024 * 1024 * 1024, 0);
 

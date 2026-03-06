@@ -3363,6 +3363,7 @@ pub mod tests {
 /// Validates that `host_addr + size` doesn't overflow u64 and `size > 0`.
 /// Called before `slice::from_raw_parts(host_addr as *const u8, size)`.
 /// Returns `Err` if the arithmetic would be unsafe.
+#[allow(dead_code)] // Used in vhost-user/efi feature paths
 pub(crate) fn validate_bundle_range(host_addr: u64, size: u64) -> Result<(), &'static str> {
     if size == 0 {
         return Err("bundle size is zero");
