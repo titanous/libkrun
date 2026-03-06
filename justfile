@@ -303,12 +303,12 @@ kani-playback name:
 
 # Excluded subsystems (no tests exist for these)
 # Note: mutants_excludes relies on sh -c word splitting to expand multiple -e flags.
-mutants_excludes := "-e 'src/rutabaga_gfx' -e 'src/hvf' -e 'src/devices/src/virtio/gpu' -e 'src/devices/src/virtio/snd' -e 'src/devices/src/virtio/input'"
+mutants_excludes := "-e 'src/rutabaga_gfx' -e 'src/hvf' -e 'src/devices/src/virtio/gpu' -e 'src/devices/src/virtio/snd' -e 'src/devices/src/virtio/input' -e 'src/krun_display'"
 
 # timeout: seconds per mutant test run (default 3600 for full run, use 60 for quick checks)
 # jobs: parallel workers (default 4)
 # Full mutation test suite. Produces mutants.out/outcomes.json.
-mutants timeout="3600" jobs="4":
+mutants timeout="3600" jobs="32":
     cargo mutants \
       --features {{features}} \
       {{mutants_excludes}} \
@@ -316,7 +316,7 @@ mutants timeout="3600" jobs="4":
       --jobs {{jobs}}
 
 # Run mutation tests scoped to files changed vs origin/main (fast; suitable for CI on PRs).
-mutants-diff timeout="60" jobs="4":
+mutants-diff timeout="60" jobs="32":
     cargo mutants \
       --features {{features}} \
       {{mutants_excludes}} \

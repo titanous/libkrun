@@ -1,82 +1,149 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
-use vm_memory::ByteValued;
+use std::fs::File;
+use std::io::Write;
+use std::os::unix::net::UnixStream;
+use std::sync::{Arc, Mutex};
 
-/// Local replica of `VhostUserMsgHeader` from vendor/vhost/src/vhost_user/message.rs.
-///
-/// The original is `pub(super)` and cannot be accessed outside the vhost crate.
-/// This replica has the same on-wire layout:
-///   request(u32) + flags(u32) + size(u32) = 12 bytes total.
-///
-/// This exercises:
-/// 1. `ByteValued` zero-copy deserialization of arbitrary bytes as a header
-/// 2. Flag field parsing: version bits [1:0], REPLY bit [2], NEED_REPLY bit [3]
-/// 3. Request type validation (whether the u32 maps to a known FrontendReq)
-/// 4. Size field interpretation
-#[derive(Copy, Clone, Default, Debug)]
-#[repr(C, packed)]
-struct VhostUserMsgHeaderReplica {
-    request: u32,
-    flags: u32,
-    size: u32,
+use libfuzzer_sys::fuzz_target;
+use vhost::vhost_user::message::{
+    VhostUserConfigFlags, VhostUserInflight, VhostUserLog, VhostUserMemoryRegion,
+    VhostUserProtocolFeatures, VhostUserSharedMsg, VhostUserSingleMemoryRegion,
+    VhostUserVringAddrFlags, VhostUserVringState, VhostTransferStateDirection,
+    VhostTransferStatePhase,
+};
+use vhost::vhost_user::{BackendReqHandler, GpuBackend, VhostUserBackendReqHandlerMut};
+
+type Result<T> = std::result::Result<T, vhost::vhost_user::Error>;
+
+/// A minimal backend: returns empty/zero responses for capability queries and
+/// `InvalidParam` for operations requiring real resources (fds, memory regions).
+/// Any of these responses are valid from the protocol's perspective — the fuzzer
+/// drives the frontend side, so the backend result doesn't matter; what matters
+/// is that handle_request() reaches the message dispatch without panicking.
+struct NullBackend;
+
+impl VhostUserBackendReqHandlerMut for NullBackend {
+    fn set_owner(&mut self) -> Result<()> {
+        Ok(())
+    }
+    fn reset_owner(&mut self) -> Result<()> {
+        Ok(())
+    }
+    fn reset_device(&mut self) -> Result<()> {
+        Ok(())
+    }
+    fn get_features(&mut self) -> Result<u64> {
+        Ok(0)
+    }
+    fn set_features(&mut self, _: u64) -> Result<()> {
+        Ok(())
+    }
+    fn set_mem_table(&mut self, _: &[VhostUserMemoryRegion], _: Vec<File>) -> Result<()> {
+        Ok(())
+    }
+    fn set_vring_num(&mut self, _: u32, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn set_vring_addr(
+        &mut self,
+        _: u32,
+        _: VhostUserVringAddrFlags,
+        _: u64,
+        _: u64,
+        _: u64,
+        _: u64,
+    ) -> Result<()> {
+        Ok(())
+    }
+    fn set_vring_base(&mut self, _: u32, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn get_vring_base(&mut self, index: u32) -> Result<VhostUserVringState> {
+        Ok(VhostUserVringState::new(index, 0))
+    }
+    fn set_vring_kick(&mut self, _: u8, _: Option<File>) -> Result<()> {
+        Ok(())
+    }
+    fn set_vring_call(&mut self, _: u8, _: Option<File>) -> Result<()> {
+        Ok(())
+    }
+    fn set_vring_err(&mut self, _: u8, _: Option<File>) -> Result<()> {
+        Ok(())
+    }
+    fn get_protocol_features(&mut self) -> Result<VhostUserProtocolFeatures> {
+        Ok(VhostUserProtocolFeatures::empty())
+    }
+    fn set_protocol_features(&mut self, _: u64) -> Result<()> {
+        Ok(())
+    }
+    fn get_queue_num(&mut self) -> Result<u64> {
+        Ok(1)
+    }
+    fn set_vring_enable(&mut self, _: u32, _: bool) -> Result<()> {
+        Ok(())
+    }
+    fn get_config(&mut self, _: u32, _: u32, _: VhostUserConfigFlags) -> Result<Vec<u8>> {
+        Ok(vec![])
+    }
+    fn set_config(&mut self, _: u32, _: &[u8], _: VhostUserConfigFlags) -> Result<()> {
+        Ok(())
+    }
+    fn set_gpu_socket(&mut self, _: GpuBackend) -> Result<()> {
+        Err(vhost::vhost_user::Error::InvalidParam)
+    }
+    fn get_shared_object(&mut self, _: VhostUserSharedMsg) -> Result<File> {
+        Err(vhost::vhost_user::Error::InvalidParam)
+    }
+    fn get_inflight_fd(&mut self, _: &VhostUserInflight) -> Result<(VhostUserInflight, File)> {
+        Err(vhost::vhost_user::Error::InvalidParam)
+    }
+    fn set_inflight_fd(&mut self, _: &VhostUserInflight, _: File) -> Result<()> {
+        Err(vhost::vhost_user::Error::InvalidParam)
+    }
+    fn get_max_mem_slots(&mut self) -> Result<u64> {
+        Ok(0)
+    }
+    fn add_mem_region(&mut self, _: &VhostUserSingleMemoryRegion, _: File) -> Result<()> {
+        Err(vhost::vhost_user::Error::InvalidParam)
+    }
+    fn remove_mem_region(&mut self, _: &VhostUserSingleMemoryRegion) -> Result<()> {
+        Err(vhost::vhost_user::Error::InvalidParam)
+    }
+    fn set_device_state_fd(
+        &mut self,
+        _: VhostTransferStateDirection,
+        _: VhostTransferStatePhase,
+        _: File,
+    ) -> Result<Option<File>> {
+        Err(vhost::vhost_user::Error::InvalidParam)
+    }
+    fn check_device_state(&mut self) -> Result<()> {
+        Err(vhost::vhost_user::Error::InvalidParam)
+    }
+    fn set_log_base(&mut self, _: &VhostUserLog, _: File) -> Result<()> {
+        Err(vhost::vhost_user::Error::InvalidParam)
+    }
 }
 
-// SAFETY: VhostUserMsgHeaderReplica is #[repr(C, packed)] with only POD fields.
-unsafe impl ByteValued for VhostUserMsgHeaderReplica {}
-
-// Bit masks from VhostUserHeaderFlag (message.rs).
-const VERSION_MASK: u32 = 0x3;
-const REPLY_FLAG: u32 = 0x4;
-const NEED_REPLY_FLAG: u32 = 0x8;
-const RESERVED_BITS: u32 = !0xf;
-
-// Known FrontendReq variants (from message.rs enum definition).
-const KNOWN_REQUEST_TYPES: &[u32] = &[
-    1,  // GET_FEATURES
-    2,  // SET_FEATURES
-    3,  // SET_OWNER
-    4,  // RESET_OWNER
-    5,  // SET_MEM_TABLE
-    8,  // SET_VRING_NUM
-    9,  // SET_VRING_ADDR
-    10, // SET_VRING_BASE
-    11, // GET_VRING_BASE
-    12, // SET_VRING_KICK
-    13, // SET_VRING_CALL
-    14, // SET_VRING_ERR
-    15, // GET_PROTOCOL_FEATURES
-    16, // SET_PROTOCOL_FEATURES
-];
-
 fuzz_target!(|data: &[u8]| {
-    // VhostUserMsgHeaderReplica is 12 bytes. Pad with zeros if input is too short.
-    let mut buf = [0u8; std::mem::size_of::<VhostUserMsgHeaderReplica>()];
-    let copy_len = data.len().min(buf.len());
-    buf[..copy_len].copy_from_slice(&data[..copy_len]);
-
-    // Interpret arbitrary bytes as a message header.
-    // SAFETY: Any bit pattern is valid for a ByteValued type.
-    let header = VhostUserMsgHeaderReplica {
-        request: u32::from_le_bytes(buf[0..4].try_into().unwrap()),
-        flags: u32::from_le_bytes(buf[4..8].try_into().unwrap()),
-        size: u32::from_le_bytes(buf[8..12].try_into().unwrap()),
+    // Create a real Unix socket pair: one end for injecting fuzz bytes as a
+    // vhost-user frontend message, other end handed to BackendReqHandler.
+    let (mut tx, rx) = match UnixStream::pair() {
+        Ok(pair) => pair,
+        Err(_) => return,
     };
 
-    // Exercise flag parsing — mirrors VhostUserMsgHeader::get_version(), is_reply(), etc.
-    let _version = header.flags & VERSION_MASK;
-    let _is_reply = (header.flags & REPLY_FLAG) != 0;
-    let _needs_reply = (header.flags & NEED_REPLY_FLAG) != 0;
-    let _has_reserved = (header.flags & RESERVED_BITS) != 0;
+    // Write the full fuzz payload then drop the writer so the reader sees EOF
+    // after consuming the message. handle_request() will return an Err on EOF
+    // or malformed data — that's expected and fine.
+    let _ = tx.write_all(data);
+    drop(tx);
 
-    // Exercise request type validation.
-    // Copy packed field to local to avoid unaligned reference (E0793).
-    let request = header.request;
-    let _is_known = KNOWN_REQUEST_TYPES.contains(&request);
-
-    // Exercise size field interpretation.
-    // In production: size must be <= MAX_MSG_SIZE (4096). Check the boundary.
-    const MAX_MSG_SIZE: u32 = 0x1000;
-    let _size_valid = header.size <= MAX_MSG_SIZE;
-    let _size_overflow = header.size.checked_add(12); // header + body overflow check
+    // Run the real vhost-user message parser + dispatcher.
+    // handle_request(): recv_header → validate → recv_body → dispatch to backend.
+    // Panics are bugs; Err results are expected for arbitrary input.
+    let backend = Arc::new(Mutex::new(NullBackend));
+    let mut handler = BackendReqHandler::from_stream(rx, backend);
+    let _ = handler.handle_request();
 });

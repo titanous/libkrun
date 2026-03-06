@@ -22,6 +22,7 @@ vm-memory = { version = "0.18", features = ["backend-mmap"] }
 # Include all features needed by the fuzz targets.
 devices = { path = "../src/devices", features = ["blk", "vhost-user"] }
 vmm = { path = "../src/vmm", features = ["snapshot"] }
+vhost = { version = "0.15", features = ["vhost-user-backend"] }
 
 # Must mirror root [patch.crates-io] — the fuzz workspace is separate and
 # does not inherit patches from the root workspace.
