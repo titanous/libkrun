@@ -306,6 +306,9 @@ kani-playback name:
 # Unit tests for devices/vmm don't need to boot a real VM, so this is sufficient.
 mutants_features := "snapshot,uffd,blk,vhost-user"
 
+# Features for integration mutation testing (includes embedded_init).
+mutants_integration_features := "embedded_init,snapshot,uffd,blk,vhost-user"
+
 # Packages to mutate. Explicit -p flags prevent cargo-mutants from building the full
 # workspace, which avoids bindgen crates (krun_input, krun_display) that require libclang
 # but are not needed for the packages under test. krun_input is a workspace member but
@@ -344,6 +347,27 @@ mutants-list:
       --features {{mutants_features}} \
       {{mutants_excludes}} \
       --json
+
+# Mutation tests that include VM-booting integration tests in tests/vm_boot.rs.
+# These catch mutants in Builder::build, Context::run, and VmExit plumbing that
+# unit tests cannot reach.
+#
+# Strategy: set KRUN_INIT_BIN to the absolute path of the built init binary so
+# devices/build.rs can copy it into OUT_DIR even when cargo-mutants copies the
+# workspace to a temp dir without the gitignored init/init file.
+#
+# Requires: libkrunfw in LD_LIBRARY_PATH (set by the Nix shell).
+mutants-integration timeout="30" jobs="32":
+    just build-init
+    KRUN_INIT_BIN="$(realpath init/init)" \
+    LD_LIBRARY_PATH="$(realpath test-prefix/lib64/)${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+    cargo mutants \
+      -p libkrun \
+      --features {{mutants_integration_features}} \
+      --gitignore true \
+      --timeout {{timeout}} \
+      --jobs {{jobs}} \
+      -- -- --include-ignored --test-threads 1
 
 # Print summary of last mutation run from mutants.out/outcomes.json.
 mutants-summary:
