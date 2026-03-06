@@ -217,6 +217,8 @@ If a `kani::cover!()` returns UNSATISFIABLE, investigate — your assumptions ma
 
 Coverage annotations should verify that **symbolic inputs** reach interesting regions of the state space, not that deterministic code produces its expected output. Place `cover!` on input conditions or branch-point conditions, not on post-assertion outcomes.
 
+To verify check ordering (e.g., magic validated before version), cover multiple sub-conditions within the triggered branch: `kani::cover!(magic != MAGIC && version == VERSION, "magic wrong, version right")` and `kani::cover!(magic != MAGIC && version != VERSION, "both wrong")`. If the implementation swapped check order, the error variant or satisfiability would change.
+
 ## Kani Feature Reference
 
 ### Symbolic Values
