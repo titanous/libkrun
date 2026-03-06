@@ -2463,7 +2463,11 @@ mod verification {
                 }
                 Err(_) => {
                     // Guard correctly rejected this entry — iteration stops
-                    kani::cover!(true, "invalid entry rejected, iteration stops");
+                    kani::cover!(rem_len < HEADER, "entry rejected: header does not fit");
+                    kani::cover!(
+                        rem_len >= HEADER && d_reclen == 0,
+                        "entry rejected: zero reclen"
+                    );
                     break;
                 }
             }

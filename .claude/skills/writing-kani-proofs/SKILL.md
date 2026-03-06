@@ -290,8 +290,11 @@ To verify check ordering (e.g., magic validated before version), cover multiple 
 
 The unwind bound must be `max_iterations + 1` for each loop. When a proof has nested loops, the outermost unwind applies to ALL loops.
 
+**No loops = no `#[kani::unwind]` attribute.** Kani determines the bound automatically when there are no loops. Do NOT add `#[kani::unwind(1)]` to loopless proofs — it is unnecessary clutter. Just note `Bound: no loops.` in the doc comment.
+
 | Code Pattern | Loop Count | Unwind |
 |-------------|-----------|--------|
+| No loops | 0 | omit attribute |
 | `Vec::new(n)` where n <= K | K iterations | K + 1 |
 | Byte loop (u16 LE) | 2 | 3 |
 | Byte loop (u32 LE) | 4 | 5 |
@@ -552,3 +555,4 @@ Work through this for every proof:
 - Returns Some iff buffer has sufficient length
 - Each size threshold verified independently
 - Security-critical: verify fix for specific vulnerability classes
+

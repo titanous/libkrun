@@ -283,59 +283,177 @@ mod tests {
 mod verification {
     use super::*;
 
-    /// Proof: valid_char accepts exactly printable ASCII (0x20..=0x7E).
+    /// Proof: valid_char accepts exactly the printable ASCII range [0x20, 0x7E].
+    ///
+    /// Verifies boundary values directly: 0x1F (below range), 0x20 (space, range start),
+    /// 0x7E (tilde, range end), and 0x7F (DEL, above range). Also uses a symbolic byte
+    /// to verify the full range property exhaustively.
+    /// Breaking valid_char to accept 0x1F or reject 0x20 would fail this proof.
+    ///
+    /// Bound: no loops; unwind(1) is sufficient.
     #[kani::proof]
     fn proof_valid_char_ascii_range() {
+        // Boundary value assertions — these catch off-by-one errors in the range check.
+        kani::assert(!valid_char('\x1F'), "0x1F is below printable range");
+        kani::assert(valid_char(' '), "0x20 (space) is range start");
+        kani::assert(valid_char('~'), "0x7E (tilde) is range end");
+        kani::assert(!valid_char('\x7F'), "0x7F (DEL) is above printable range");
+
+        // Symbolic exhaustive check over all u8 values.
         let byte: u8 = kani::any();
         let c = byte as char;
-        let result = valid_char(c);
-        let expected = byte >= 0x20 && byte <= 0x7E;
+        let in_range = byte >= 0x20 && byte <= 0x7E;
         kani::assert(
-            result == expected,
-            "valid_char must accept exactly printable ASCII",
+            valid_char(c) == in_range,
+            "valid_char must accept exactly printable ASCII [0x20, 0x7E]",
         );
-        kani::cover!(result, "printable ASCII accepted path reachable");
-        kani::cover!(!result, "non-printable ASCII rejected path reachable");
+
+        // Coverage: verify both branches of the range check are exercised.
+        kani::cover!(byte < 0x20, "below-range byte exercised");
+        kani::cover!(byte >= 0x20 && byte <= 0x7E, "in-range byte exercised");
+        kani::cover!(byte > 0x7E, "above-range byte exercised");
     }
 
-    /// Proof: has_capacity arithmetic doesn't overflow and correctly rejects.
+    /// Proof: has_capacity returns Ok iff the insertion fits within the capacity limit.
     ///
-    /// For any capacity and current line length, has_capacity returns Ok
-    /// only when there is actually room.
+    /// Constructs a Cmdline with a known length by inserting a key=val pair, then calls
+    /// has_capacity directly on it and asserts the result matches the expected fit.
+    /// Breaking the has_capacity arithmetic (e.g., changing `<` to `<=`) would fail this proof.
+    ///
+    /// Bound: insert_str has one loop over the string chars; unwind(9) covers strings up to 8 chars.
     #[kani::proof]
+    #[kani::unwind(9)]
     #[kani::solver(cadical)]
     fn proof_has_capacity_no_overflow() {
-        let capacity: usize = kani::any_where(|&c| c > 0 && c <= 4096);
-        let line_len: usize = kani::any_where(|&l| l < capacity);
-        let more: usize = kani::any_where(|&m| m <= 4096);
+        // Use capacity large enough to hold at least one small key=val pair.
+        // Capacity range [4, 32] keeps the proof tractable.
+        let capacity: usize = kani::any_where(|&c| c >= 4 && c <= 32);
+        let mut cl = Cmdline::new(capacity);
 
-        let _cl = Cmdline::new(capacity);
-        // Simulate a line of given length by inserting a string.
-        // Instead, directly test the arithmetic:
-        let needs_space = if line_len > 0 { 1usize } else { 0usize };
-        let fits = line_len + more + needs_space < capacity;
+        // Insert a 1-char key and 1-char value ("a=b" = 3 chars) if capacity allows.
+        // This puts the Cmdline into a non-empty state without reimplementing internals.
+        let _ = cl.insert("a", "b");
 
-        // We can't easily set cl.line to arbitrary length, so verify the arithmetic property directly:
-        // The key invariant: no overflow in line_len + more + needs_space
-        if let Some(sum) = line_len.checked_add(more) {
-            if let Some(total) = sum.checked_add(needs_space) {
-                kani::assert(
-                    (total < capacity) == fits,
-                    "has_capacity arithmetic must match expected fits computation",
-                );
-                kani::cover!(fits, "fits-true path reachable");
-                kani::cover!(!fits, "fits-false path reachable");
-            }
-        }
+        // Now test has_capacity with a symbolic `more` against the production method.
+        let more: usize = kani::any_where(|&m| m <= 32);
+        let result = cl.has_capacity(more);
+
+        // The production invariant: Ok iff there is room (accounting for separator space).
+        let current_len = cl.len();
+        let needs_space = usize::from(!cl.is_empty());
+        let fits = current_len + more + needs_space < capacity;
+
+        kani::assert(
+            result.is_ok() == fits,
+            "has_capacity must return Ok iff insertion fits within capacity",
+        );
+
+        // Coverage: verify both outcomes are exercised.
+        kani::cover!(result.is_ok(), "has_capacity Ok path exercised");
+        kani::cover!(result.is_err(), "has_capacity TooLarge path exercised");
+        kani::cover!(cl.is_empty(), "empty cmdline path exercised");
+        kani::cover!(!cl.is_empty(), "non-empty cmdline path exercised");
     }
 
-    /// Proof: Cmdline::new never panics and creates empty cmdline.
+    /// Proof: Cmdline::new never panics and creates an empty cmdline.
+    ///
+    /// Verifies that any non-zero capacity produces an empty, well-formed Cmdline.
+    /// Changing new() to initialise line with content would break this proof.
+    ///
+    /// Bound: no loops; unwind(1) is sufficient.
     #[kani::proof]
     fn proof_cmdline_new_valid() {
         let capacity: usize = kani::any_where(|&c| c > 0 && c <= 4096);
         let cl = Cmdline::new(capacity);
         kani::assert(cl.as_str() == "", "new Cmdline must start empty");
         kani::assert(cl.is_empty(), "new Cmdline must report is_empty() == true");
-        kani::cover!(true, "Cmdline::new valid path reachable");
+        kani::assert(cl.len() == 0, "new Cmdline must have length 0");
+    }
+
+    /// Proof: insert rejects keys containing spaces with Error::HasSpace.
+    ///
+    /// Security property: a key with an embedded space would silently inject an
+    /// extra kernel parameter. Verifies that valid_element's space check is wired
+    /// into insert for the key position.
+    /// Removing the `s.contains(' ')` check in valid_element would break this proof.
+    ///
+    /// Bound: no loops over symbolic data; unwind(1) is sufficient.
+    #[kani::proof]
+    fn proof_insert_rejects_key_with_space() {
+        let mut cl = Cmdline::new(100);
+        let result = cl.insert("key with space", "value");
+        kani::assert(
+            matches!(result, Err(Error::HasSpace)),
+            "insert must reject key containing a space with HasSpace",
+        );
+        kani::assert(
+            cl.as_str() == "",
+            "cmdline must be unmodified after rejected insert",
+        );
+    }
+
+    /// Proof: insert rejects values containing spaces with Error::HasSpace.
+    ///
+    /// Security property: a value with an embedded space would silently inject an
+    /// extra kernel parameter. Verifies that valid_element's space check is wired
+    /// into insert for the value position.
+    /// Removing the `s.contains(' ')` check in valid_element would break this proof.
+    ///
+    /// Bound: no loops over symbolic data; unwind(1) is sufficient.
+    #[kani::proof]
+    fn proof_insert_rejects_val_with_space() {
+        let mut cl = Cmdline::new(100);
+        let result = cl.insert("key", "val ue");
+        kani::assert(
+            matches!(result, Err(Error::HasSpace)),
+            "insert must reject value containing a space with HasSpace",
+        );
+        kani::assert(
+            cl.as_str() == "",
+            "cmdline must be unmodified after rejected insert",
+        );
+    }
+
+    /// Proof: insert rejects keys containing equals signs with Error::HasEquals.
+    ///
+    /// Security property: a key with an embedded equals sign would corrupt the
+    /// key=value structure of the kernel cmdline. Verifies that valid_element's
+    /// equals check is wired into insert for the key position.
+    /// Removing the `s.contains('=')` check in valid_element would break this proof.
+    ///
+    /// Bound: no loops over symbolic data; unwind(1) is sufficient.
+    #[kani::proof]
+    fn proof_insert_rejects_key_with_equals() {
+        let mut cl = Cmdline::new(100);
+        let result = cl.insert("ke=y", "value");
+        kani::assert(
+            matches!(result, Err(Error::HasEquals)),
+            "insert must reject key containing equals with HasEquals",
+        );
+        kani::assert(
+            cl.as_str() == "",
+            "cmdline must be unmodified after rejected insert",
+        );
+    }
+
+    /// Proof: insert rejects values containing equals signs with Error::HasEquals.
+    ///
+    /// Security property: a value with an embedded equals sign would produce a
+    /// malformed key=val=extra entry in the kernel cmdline.
+    /// Removing the `s.contains('=')` check in valid_element would break this proof.
+    ///
+    /// Bound: no loops over symbolic data; unwind(1) is sufficient.
+    #[kani::proof]
+    fn proof_insert_rejects_val_with_equals() {
+        let mut cl = Cmdline::new(100);
+        let result = cl.insert("key", "val=ue");
+        kani::assert(
+            matches!(result, Err(Error::HasEquals)),
+            "insert must reject value containing equals with HasEquals",
+        );
+        kani::assert(
+            cl.as_str() == "",
+            "cmdline must be unmodified after rejected insert",
+        );
     }
 }

@@ -226,6 +226,11 @@ mod verification {
     /// GAP-022: convert_memory calls madvise/fallocate with offset and size derived
     /// from WorkerMessage without checking region bounds or i64 cast safety.
     /// The fix extracts validate_convert_bounds which checks all conditions.
+    /// Breaking change: removing any check in validate_convert_bounds (e.g., the
+    /// `end > region_size` guard) would allow offset+size to exceed region_size,
+    /// failing the first assertion.
+    ///
+    /// Bound: no loops; unwind 1 is sufficient.
     #[kani::proof]
     #[kani::solver(cadical)]
     fn proof_worker_madvise_size_within_region() {
@@ -240,15 +245,30 @@ mod verification {
             Ok((offset, size)) => {
                 kani::assert(offset + size <= region_size, "madvise range within region");
                 kani::assert(size <= i64::MAX as u64, "size fits i64");
-                kani::cover!(true, "valid convert accepted");
+                // Cover: both the gpa-at-region-start and gpa-at-region-end cases.
+                kani::cover!(gpa == region_start, "gpa at region start");
+                kani::cover!(
+                    gpa == region_start.saturating_add(region_size).saturating_sub(1),
+                    "gpa at last byte of region"
+                );
             }
             Err(_) => {
-                kani::cover!(true, "invalid convert rejected");
+                // Cover the two primary rejection causes: out-of-range size and zero size.
+                kani::cover!(properties_size == 0, "rejected: zero size");
+                kani::cover!(
+                    properties_size > region_size,
+                    "rejected: size exceeds region"
+                );
             }
         }
     }
 
     /// Proof: validate_convert_bounds enforces fallocate range safety.
+    ///
+    /// Breaking change: removing the `offset > i64::MAX` or `size > i64::MAX` guard
+    /// would allow unsafe casts to i64, failing the non-negative assertions.
+    ///
+    /// Bound: no loops; unwind 1 is sufficient.
     #[kani::proof]
     #[kani::solver(cadical)]
     fn proof_worker_fallocate_size_within_region() {
@@ -270,15 +290,25 @@ mod verification {
                 let _size_i64 = size as i64;
                 kani::assert(_offset_i64 >= 0, "offset non-negative after cast");
                 kani::assert(_size_i64 >= 0, "size non-negative after cast");
-                kani::cover!(true, "valid fallocate range");
+                kani::cover!(offset == 0, "offset zero (gpa at region start)");
+                kani::cover!(size == 1, "minimum accepted size");
             }
             Err(_) => {
-                kani::cover!(true, "invalid rejected");
+                kani::cover!(properties_size == 0, "rejected: zero size");
+                kani::cover!(
+                    properties_size > 0 && gpa >= region_start,
+                    "rejected: size or overflow"
+                );
             }
         }
     }
 
     /// Proof: validate_convert_bounds prevents i64 cast overflow for size.
+    ///
+    /// Breaking change: removing the `size > i64::MAX as u64` guard would allow
+    /// an oversized `size` to pass through, making the `as i64` cast UB.
+    ///
+    /// Bound: no loops; unwind 1 is sufficient.
     #[kani::proof]
     #[kani::solver(cadical)]
     fn proof_worker_fallocate_size_fits_i64() {
@@ -292,15 +322,27 @@ mod verification {
         match validate_convert_bounds(gpa, properties_size, region_start, region_size) {
             Ok((_, size)) => {
                 kani::assert(size <= i64::MAX as u64, "size safe for i64 cast");
-                kani::cover!(true, "size fits i64");
+                // Cover: prove the non-trivial case where size is large but still fits.
+                kani::cover!(size > 0x1000, "large size fits i64");
+                kani::cover!(size == 1, "minimum size accepted");
             }
             Err(_) => {
-                kani::cover!(true, "oversized or out-of-bounds rejected");
+                // Cover: properties_size > i64::MAX is a specific rejection cause.
+                kani::cover!(
+                    properties_size > i64::MAX as u64,
+                    "rejected: size exceeds i64::MAX"
+                );
+                kani::cover!(properties_size == 0, "rejected: zero size");
             }
         }
     }
 
     /// Proof: validate_convert_bounds rejects zero size.
+    ///
+    /// Breaking change: removing the `size == 0` guard in validate_convert_bounds
+    /// would allow zero-size madvise/fallocate calls (undefined behavior on some kernels).
+    ///
+    /// Bound: no loops; unwind 1 is sufficient.
     #[kani::proof]
     #[kani::solver(cadical)]
     fn proof_worker_size_cannot_be_zero() {
@@ -310,13 +352,76 @@ mod verification {
             g >= region_start && g < region_start.saturating_add(region_size)
         });
 
-        // Test with size == 0, which must always be rejected
+        // Test with size == 0, which must always be rejected.
         // String `.contains()` uses SIMD intrinsics unsupported by Kani; only
         // check that Err is returned (not the message text).
         kani::assert(
             validate_convert_bounds(gpa, 0, region_start, region_size).is_err(),
             "size==0 must always be rejected",
         );
-        kani::cover!(true, "zero size correctly rejected");
+        // Cover the full range of valid GPAs to confirm zero-size is always rejected.
+        kani::cover!(gpa == region_start, "zero size rejected at region start");
+        kani::cover!(gpa > region_start, "zero size rejected at interior GPA");
+    }
+
+    /// Proof (negative): GPA below region_start is always rejected.
+    ///
+    /// Security-critical: a GPA below the region start would compute a negative
+    /// offset (wrapping to a huge u64), giving access to memory outside the region
+    /// (potential TEE host memory exposure). validate_convert_bounds must reject it.
+    ///
+    /// Breaking change: removing the `gpa < region_start` guard in
+    /// validate_convert_bounds would allow underflow and pass this proof.
+    ///
+    /// Bound: no loops; unwind 1 is sufficient.
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    fn proof_worker_gpa_below_region_rejected() {
+        let region_start: u64 = kani::any_where(|&s: &u64| s > 0); // must be > 0 so GPA can be below
+        let region_size: u64 = kani::any_where(|&sz| sz > 0 && sz <= 0x10000);
+        // GPA strictly below region_start.
+        let gpa: u64 = kani::any_where(|&g| g < region_start);
+        let size: u64 = kani::any_where(|&s| s > 0);
+
+        let result = validate_convert_bounds(gpa, size, region_start, region_size);
+
+        kani::assert(result.is_err(), "GPA below region_start must be rejected");
+        // Cover both: GPA just one below start, and GPA much further below start.
+        kani::cover!(gpa == region_start - 1, "GPA one below region_start");
+        kani::cover!(
+            gpa == 0 && region_start > 1,
+            "GPA is zero, region_start is high"
+        );
+    }
+
+    /// Proof (negative): GPA at or above region_start + region_size is always rejected.
+    ///
+    /// Security-critical: a GPA >= region_start + region_size is outside the region;
+    /// allowing it would expose memory beyond the allocated region to syscalls.
+    /// validate_convert_bounds must reject it regardless of size.
+    ///
+    /// Breaking change: removing or weakening the `end > region_size` guard in
+    /// validate_convert_bounds would allow out-of-bounds access.
+    ///
+    /// Bound: no loops; unwind 1 is sufficient.
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    fn proof_worker_gpa_at_or_above_region_end_rejected() {
+        let region_start: u64 = kani::any_where(|&s: &u64| s <= u64::MAX - 0x10000);
+        let region_size: u64 = kani::any_where(|&sz| sz > 0 && sz <= 0x10000);
+        // GPA at or after the end of the region.
+        let region_end = region_start.saturating_add(region_size);
+        let gpa: u64 = kani::any_where(|&g| g >= region_end);
+        let size: u64 = kani::any_where(|&s| s > 0);
+
+        let result = validate_convert_bounds(gpa, size, region_start, region_size);
+
+        kani::assert(
+            result.is_err(),
+            "GPA at or above region_end must be rejected",
+        );
+        // Cover: GPA exactly at region_end, and GPA well beyond it.
+        kani::cover!(gpa == region_end, "GPA exactly at region_end");
+        kani::cover!(gpa > region_end, "GPA past region_end");
     }
 }

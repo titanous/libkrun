@@ -459,7 +459,8 @@ mod verification {
             val.as_slice() == bytes,
             "VirtioNetConfig: byte round-trip must be identity",
         );
-        kani::cover!(true, "VirtioNetConfig ByteValued roundtrip reachable");
+        kani::cover!(bytes == [0u8; 10], "all-zero VirtioNetConfig exercised");
+        kani::cover!(bytes == [0xFFu8; 10], "all-ones VirtioNetConfig exercised");
     }
 
     /// Verify: VirtioNetConfig size is exactly 10 bytes.

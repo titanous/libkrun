@@ -78,7 +78,8 @@ mod verification {
             decoded_dir == expected_dir,
             "direction must survive queue index encode/decode roundtrip",
         );
-        kani::cover!(true, "roundtrip proof path reachable");
+        kani::cover!(port_id == 0 && is_rx, "control port Rx roundtrip exercised");
+        kani::cover!(port_id == 14 && !is_rx, "max port Tx roundtrip exercised");
     }
 
     /// Prove that for any valid port_id, the resulting queue index is strictly
@@ -103,7 +104,11 @@ mod verification {
             q < bound,
             "port_id_to_queue_idx must return an index within num_queues(max_ports)",
         );
-        kani::cover!(true, "in-bounds proof path reachable");
+        kani::cover!(port_id == 0, "control port in-bounds exercised");
+        kani::cover!(
+            port_id == max_ports - 1,
+            "last valid port in-bounds exercised"
+        );
     }
 
     /// Prove that calling queue_idx_to_port_id with a control-queue index (2 or 3)
@@ -145,7 +150,8 @@ mod verification {
             q != 3,
             "queue index 3 (control Tx) must never be returned for a data port",
         );
-        kani::cover!(true, "control-exclusion proof path reachable");
+        kani::cover!(port_id == 0 && is_rx, "control port Rx exclusion exercised");
+        kani::cover!(port_id == 14 && !is_rx, "max port Tx exclusion exercised");
     }
 }
 

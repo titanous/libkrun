@@ -585,6 +585,17 @@ impl VsockPacket {
         }
     }
 
+    #[cfg(kani)]
+    pub fn write_proxy_create(&mut self, req: TsiProxyCreate) {
+        if self.buf_size >= 8 {
+            if let Some(buf) = self.buf_mut() {
+                byte_order::write_le_u32(&mut buf[0..], req.peer_port);
+                byte_order::write_le_u16(&mut buf[4..], req.family);
+                byte_order::write_le_u16(&mut buf[6..], req._type);
+            }
+        }
+    }
+
     pub fn read_connect_req(&self) -> Option<TsiConnectReq> {
         if self.buf_size >= 4 {
             let buf = self.buf().unwrap();
@@ -769,7 +780,9 @@ mod verification {
         let val: u64 = kani::any();
         pkt.set_src_cid(val);
         assert_eq!(pkt.src_cid(), val);
-        kani::cover!(true, "src_cid roundtrip path reachable");
+        kani::cover!(val == 0, "zero src_cid exercised");
+        kani::cover!(val == u64::MAX, "max src_cid exercised");
+        kani::cover!(val > 0 && val < u64::MAX, "interior src_cid exercised");
     }
 
     // u64 fields: byte_order write/read loop iterates 8 bytes → unwind(9)
@@ -781,7 +794,9 @@ mod verification {
         let val: u64 = kani::any();
         pkt.set_dst_cid(val);
         assert_eq!(pkt.dst_cid(), val);
-        kani::cover!(true, "dst_cid roundtrip path reachable");
+        kani::cover!(val == 0, "zero dst_cid exercised");
+        kani::cover!(val == u64::MAX, "max dst_cid exercised");
+        kani::cover!(val > 0 && val < u64::MAX, "interior dst_cid exercised");
     }
 
     // u32 fields: byte_order write/read loop iterates 4 bytes → unwind(5)
@@ -793,7 +808,8 @@ mod verification {
         let val: u32 = kani::any();
         pkt.set_src_port(val);
         assert_eq!(pkt.src_port(), val);
-        kani::cover!(true, "src_port roundtrip path reachable");
+        kani::cover!(val == 0, "zero src_port exercised");
+        kani::cover!(val == u32::MAX, "max src_port exercised");
     }
 
     // u32 fields: byte_order write/read loop iterates 4 bytes → unwind(5)
@@ -805,7 +821,8 @@ mod verification {
         let val: u32 = kani::any();
         pkt.set_dst_port(val);
         assert_eq!(pkt.dst_port(), val);
-        kani::cover!(true, "dst_port roundtrip path reachable");
+        kani::cover!(val == 0, "zero dst_port exercised");
+        kani::cover!(val == u32::MAX, "max dst_port exercised");
     }
 
     // u32 fields: byte_order write/read loop iterates 4 bytes → unwind(5)
@@ -817,7 +834,8 @@ mod verification {
         let val: u32 = kani::any();
         pkt.set_len(val);
         assert_eq!(pkt.len(), val);
-        kani::cover!(true, "len roundtrip path reachable");
+        kani::cover!(val == 0, "zero len exercised");
+        kani::cover!(val == u32::MAX, "max len exercised");
     }
 
     // u16 fields: byte_order write/read loop iterates 2 bytes → unwind(3)
@@ -829,7 +847,8 @@ mod verification {
         let val: u16 = kani::any();
         pkt.set_type(val);
         assert_eq!(pkt.type_(), val);
-        kani::cover!(true, "type roundtrip path reachable");
+        kani::cover!(val == 0, "zero type exercised");
+        kani::cover!(val == u16::MAX, "max type exercised");
     }
 
     // u16 fields: byte_order write/read loop iterates 2 bytes → unwind(3)
@@ -841,7 +860,8 @@ mod verification {
         let val: u16 = kani::any();
         pkt.set_op(val);
         assert_eq!(pkt.op(), val);
-        kani::cover!(true, "op roundtrip path reachable");
+        kani::cover!(val == 0, "zero op exercised");
+        kani::cover!(val == u16::MAX, "max op exercised");
     }
 
     // u32 fields: byte_order write/read loop iterates 4 bytes → unwind(5)
@@ -853,7 +873,8 @@ mod verification {
         let val: u32 = kani::any();
         pkt.set_flags(val);
         assert_eq!(pkt.flags(), val);
-        kani::cover!(true, "flags roundtrip path reachable");
+        kani::cover!(val == 0, "zero flags exercised");
+        kani::cover!(val == u32::MAX, "all flags set exercised");
     }
 
     // u32 fields: byte_order write/read loop iterates 4 bytes → unwind(5)
@@ -865,7 +886,8 @@ mod verification {
         let val: u32 = kani::any();
         pkt.set_buf_alloc(val);
         assert_eq!(pkt.buf_alloc(), val);
-        kani::cover!(true, "buf_alloc roundtrip path reachable");
+        kani::cover!(val == 0, "zero buf_alloc exercised");
+        kani::cover!(val == u32::MAX, "max buf_alloc exercised");
     }
 
     // u32 fields: byte_order write/read loop iterates 4 bytes → unwind(5)
@@ -877,7 +899,8 @@ mod verification {
         let val: u32 = kani::any();
         pkt.set_fwd_cnt(val);
         assert_eq!(pkt.fwd_cnt(), val);
-        kani::cover!(true, "fwd_cnt roundtrip path reachable");
+        kani::cover!(val == 0, "zero fwd_cnt exercised");
+        kani::cover!(val == u32::MAX, "max fwd_cnt exercised");
     }
 
     // Multi-field isolation: largest field is u64 (8 bytes) → unwind(9)
@@ -901,7 +924,11 @@ mod verification {
         assert_eq!(pkt.dst_port(), port);
         assert_eq!(pkt.len(), len);
         assert_eq!(pkt.op(), op);
-        kani::cover!(true, "field isolation proof path reachable");
+        kani::cover!(cid == 0 && port == 0, "all-zero fields exercised");
+        kani::cover!(
+            cid != 0 && port != 0 && len != 0 && op != 0,
+            "all non-zero fields exercised"
+        );
     }
 
     // set_flag calls set_flags (read u32 + write u32): byte_order loops 4 bytes each → unwind(5)
@@ -915,7 +942,9 @@ mod verification {
         pkt.set_flags(initial);
         pkt.set_flag(flag);
         assert_eq!(pkt.flags(), initial | flag);
-        kani::cover!(true, "set_flag OR proof path reachable");
+        // Cover: setting an already-set bit is idempotent; setting a new bit adds it.
+        kani::cover!(initial & flag == flag, "flag already set (idempotent OR)");
+        kani::cover!(initial & flag == 0, "flag was clear before set_flag");
     }
 
     // TSI protocol extensions (libkrun-specific, not in Virtio spec)
@@ -951,11 +980,11 @@ mod verification {
         let result = pkt.sa_family();
         if buf_size < 2 {
             assert!(result.is_none());
-            kani::cover!(true, "None path reachable");
         } else {
             assert!(result.is_some());
-            kani::cover!(true, "Some path reachable");
         }
+        kani::cover!(buf_size == 0, "zero-length buffer yields None");
+        kani::cover!(buf_size == 2, "exact threshold yields Some");
     }
 
     /// Proof: inet_port returns None iff buf_size < 4.
@@ -969,11 +998,11 @@ mod verification {
         let result = pkt.inet_port();
         if buf_size < 4 {
             assert!(result.is_none());
-            kani::cover!(true, "inet_port None path reachable");
         } else {
             assert!(result.is_some());
-            kani::cover!(true, "inet_port Some path reachable");
         }
+        kani::cover!(buf_size == 0, "zero-length buffer yields None");
+        kani::cover!(buf_size == 4, "exact threshold yields Some");
     }
 
     /// Proof: inet_addr returns None iff buf_size < 8.
@@ -987,11 +1016,11 @@ mod verification {
         let result = pkt.inet_addr();
         if buf_size < 8 {
             assert!(result.is_none());
-            kani::cover!(true, "inet_addr None path reachable");
         } else {
             assert!(result.is_some());
-            kani::cover!(true, "inet_addr Some path reachable");
         }
+        kani::cover!(buf_size == 0, "zero-length buffer yields None");
+        kani::cover!(buf_size == 8, "exact threshold yields Some");
     }
 
     /// Proof: read_proxy_create returns None iff buf_size < 8.
@@ -1005,11 +1034,11 @@ mod verification {
         let result = pkt.read_proxy_create();
         if buf_size < 8 {
             assert!(result.is_none());
-            kani::cover!(true, "read_proxy_create None path reachable");
         } else {
             assert!(result.is_some());
-            kani::cover!(true, "read_proxy_create Some path reachable");
         }
+        kani::cover!(buf_size == 0, "zero-length buffer yields None");
+        kani::cover!(buf_size == 8, "exact threshold yields Some");
     }
 
     /// Proof: read_getname_req returns None iff buf_size < 12.
@@ -1023,11 +1052,11 @@ mod verification {
         let result = pkt.read_getname_req();
         if buf_size < 12 {
             assert!(result.is_none());
-            kani::cover!(true, "read_getname_req None path reachable");
         } else {
             assert!(result.is_some());
-            kani::cover!(true, "read_getname_req Some path reachable");
         }
+        kani::cover!(buf_size == 0, "zero-length buffer yields None");
+        kani::cover!(buf_size == 12, "exact threshold yields Some");
     }
 
     /// Proof: read_accept_req returns None iff buf_size < 8.
@@ -1041,11 +1070,11 @@ mod verification {
         let result = pkt.read_accept_req();
         if buf_size < 8 {
             assert!(result.is_none());
-            kani::cover!(true, "read_accept_req None path reachable");
         } else {
             assert!(result.is_some());
-            kani::cover!(true, "read_accept_req Some path reachable");
         }
+        kani::cover!(buf_size == 0, "zero-length buffer yields None");
+        kani::cover!(buf_size == 8, "exact threshold yields Some");
     }
 
     /// Proof: read_release_req returns None iff buf_size < 8.
@@ -1059,11 +1088,11 @@ mod verification {
         let result = pkt.read_release_req();
         if buf_size < 8 {
             assert!(result.is_none());
-            kani::cover!(true, "read_release_req None path reachable");
         } else {
             assert!(result.is_some());
-            kani::cover!(true, "read_release_req Some path reachable");
         }
+        kani::cover!(buf_size == 0, "zero-length buffer yields None");
+        kani::cover!(buf_size == 8, "exact threshold yields Some");
     }
 
     // ── GAP-002: unix_path OOB read via CStr::from_ptr ───────────────────────
@@ -1100,7 +1129,6 @@ mod verification {
             result.is_none(),
             "unix_path must return None when buf[2..] has no null terminator",
         );
-        kani::cover!(true, "null-free buffer correctly rejected");
     }
 
     // ── GAP-009: parse_address addr_len unchecked against buf bounds ──────────
@@ -1128,13 +1156,13 @@ mod verification {
                 addr_len as usize <= BUF_LEN,
                 "addr_len within buf bounds when helper returns true",
             );
-            kani::cover!(true, "valid addr_len accepted");
+            kani::cover!(addr_len as usize <= BUF_LEN, "valid addr_len accepted");
         } else {
             kani::assert(
                 addr_len as usize > BUF_LEN,
                 "helper returns false only for oversized addr_len",
             );
-            kani::cover!(true, "oversized addr_len rejected");
+            kani::cover!(addr_len as usize > BUF_LEN, "oversized addr_len rejected");
         }
     }
 
@@ -1186,7 +1214,7 @@ mod verification {
             "buf_mut() uses the raw pointer",
         );
 
-        kani::cover!(true, "buf accessors return correct slices");
+        kani::cover!(mutable.len() == buf_size, "buf_mut returns buf_size bytes");
     }
 
     // ── M16: hdr/buf aliasing invariant — separate-descriptor case ────────────
@@ -1246,7 +1274,8 @@ mod verification {
             "hdr() and buf() slices must not overlap",
         );
 
-        kani::cover!(true, "hdr and buf non-overlap path reachable");
+        kani::cover!(hdr_end <= buf_start, "hdr ends before buf starts");
+        kani::cover!(buf_end <= hdr_start, "buf ends before hdr starts");
     }
 
     // ── M16: hdr/buf aliasing invariant — single-descriptor case ─────────────
@@ -1315,6 +1344,80 @@ mod verification {
             "hdr() and buf() slices are non-overlapping in single-descriptor layout",
         );
 
-        kani::cover!(true, "single-descriptor adjacent layout path reachable");
+        kani::cover!(
+            buf_start == hdr_start + VSOCK_PKT_HDR_SIZE,
+            "buf immediately follows hdr in single-descriptor layout"
+        );
+    }
+
+    // ── G-04: write_proxy_create / read_proxy_create round-trip ──────────────
+    //
+    // `TsiProxyCreate` is a libkrun-specific TSI protocol extension with no
+    // external specification. `write_proxy_create` serializes the struct into
+    // the packet data buffer as three LE fields: u32 peer_port at [0..4],
+    // u16 family at [4..6], u16 _type at [6..8]. `read_proxy_create` reads
+    // them back in the same layout. This proof verifies the round-trip identity
+    // for all symbolic field values.
+    //
+    // Breaking change: swapping the write offsets of `family` and `_type` in
+    // `write_proxy_create` (or in `read_proxy_create`) would cause the
+    // field-equality assertions to fail.
+    //
+    // write/read loops: largest field is u32 (4 bytes) → unwind(5).
+    /// write_proxy_create serializes exactly what read_proxy_create deserializes.
+    ///
+    /// Verifies the TSI protocol extension round-trip for all symbolic field values.
+    /// The proof exercises both the write path (write_proxy_create) and the read
+    /// path (read_proxy_create) and asserts each field is preserved exactly.
+    ///
+    /// Breaking change: reordering field writes in write_proxy_create or
+    /// changing offset constants in read_proxy_create breaks the equality
+    /// assertions.
+    ///
+    /// Bound: byte_order loops at most 4 bytes per field (u32) → unwind(5).
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    #[kani::unwind(5)]
+    fn proof_write_proxy_create_roundtrip() {
+        // Symbolic field values — cover the full type ranges.
+        let peer_port: u32 = kani::any();
+        let family: u16 = kani::any();
+        let _type: u16 = kani::any();
+
+        // Build a packet backed by an 8-byte data buffer (minimum for proxy create).
+        let mut hdr_buf = vec![0u8; VSOCK_PKT_HDR_SIZE];
+        let mut data_buf = vec![0u8; 8];
+        let mut pkt = VsockPacket {
+            hdr: hdr_buf.as_mut_ptr(),
+            buf: Some(data_buf.as_mut_ptr()),
+            buf_size: 8,
+        };
+
+        // Write the struct.
+        pkt.write_proxy_create(TsiProxyCreate {
+            peer_port,
+            family,
+            _type,
+        });
+
+        // Read it back and verify each field is preserved.
+        let result = pkt
+            .read_proxy_create()
+            .expect("read_proxy_create must return Some for buf_size >= 8");
+        kani::assert(
+            result.peer_port == peer_port,
+            "peer_port round-trips correctly",
+        );
+        kani::assert(result.family == family, "family round-trips correctly");
+        kani::assert(result._type == _type, "_type round-trips correctly");
+
+        kani::cover!(
+            peer_port == 0 && family == 0 && _type == 0,
+            "all-zero fields exercised"
+        );
+        kani::cover!(
+            peer_port != 0 && family != 0 && _type != 0,
+            "all non-zero fields exercised"
+        );
     }
 }

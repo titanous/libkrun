@@ -1399,7 +1399,8 @@ mod verification {
             val.as_slice() == bytes,
             "InHeader: byte round-trip must be identity",
         );
-        kani::cover!(true, "InHeader ByteValued roundtrip reachable");
+        kani::cover!(bytes == [0u8; 40], "all-zero InHeader exercised");
+        kani::cover!(bytes == [0xFFu8; 40], "all-ones InHeader exercised");
     }
 
     /// Verify: InHeader size is exactly 40 bytes.
@@ -1437,7 +1438,8 @@ mod verification {
             val.as_slice() == bytes,
             "OutHeader: byte round-trip must be identity",
         );
-        kani::cover!(true, "OutHeader ByteValued roundtrip reachable");
+        kani::cover!(bytes == [0u8; 16], "all-zero OutHeader exercised");
+        kani::cover!(bytes == [0xFFu8; 16], "all-ones OutHeader exercised");
     }
 
     /// Verify: OutHeader size is exactly 16 bytes.
@@ -1471,6 +1473,7 @@ mod verification {
             val.as_slice() == bytes,
             "Dirent: byte round-trip must be identity",
         );
-        kani::cover!(true, "Dirent ByteValued roundtrip reachable");
+        kani::cover!(bytes == [0u8; 24], "all-zero Dirent exercised");
+        kani::cover!(bytes == [0xFFu8; 24], "all-ones Dirent exercised");
     }
 }

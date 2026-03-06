@@ -162,7 +162,14 @@ mod verification {
         let elapsed = Duration::from_secs(u64::from(elapsed_secs));
         let timeout = Duration::from_secs(u64::from(timeout_secs));
         let _ = remaining_timeout(elapsed, timeout);
-        kani::cover!(true, "remaining_timeout contract proof reachable");
+        kani::cover!(
+            elapsed_secs == timeout_secs,
+            "elapsed == timeout boundary exercised"
+        );
+        kani::cover!(
+            elapsed_secs < timeout_secs,
+            "elapsed < timeout (not expired) exercised"
+        );
     }
 
     /// Proof: when elapsed == timeout, remaining_timeout returns None
@@ -177,7 +184,11 @@ mod verification {
             result.is_none(),
             "elapsed == timeout must return None (expired)",
         );
-        kani::cover!(true, "boundary expired path reachable");
+        kani::cover!(secs == 0, "zero elapsed == zero timeout boundary exercised");
+        kani::cover!(
+            secs == u32::MAX,
+            "max elapsed == max timeout boundary exercised"
+        );
     }
 
     /// Proof: when elapsed > timeout, remaining_timeout returns None.
@@ -195,7 +206,8 @@ mod verification {
             result.is_none(),
             "elapsed > timeout must return None (already expired)",
         );
-        kani::cover!(true, "past-expiry path reachable");
+        kani::cover!(timeout_secs == 0, "zero timeout past-expiry exercised");
+        kani::cover!(extra == 1, "minimal extra elapsed past-expiry exercised");
     }
 
     /// Proof: when elapsed < timeout, remaining is strictly positive.
@@ -218,7 +230,11 @@ mod verification {
                 kani::assert(false, "must return Some when elapsed < timeout");
             }
         }
-        kani::cover!(true, "positive remaining path reachable");
+        kani::cover!(elapsed_secs == 0, "zero elapsed remaining exercised");
+        kani::cover!(
+            elapsed_secs == timeout_secs - 1,
+            "elapsed one second before expiry exercised"
+        );
     }
 
     // ── reaper_wakeup_deadline proofs ─────────────────────────────────────────
@@ -234,7 +250,6 @@ mod verification {
             result == Duration::MAX,
             "empty elapsed list must yield Duration::MAX",
         );
-        kani::cover!(true, "empty list MAX path reachable");
     }
 
     /// Proof: when all connections have expired (elapsed >= timeout), the
@@ -265,7 +280,14 @@ mod verification {
             result == Duration::MAX,
             "all-expired elapsed list must yield Duration::MAX",
         );
-        kani::cover!(true, "all-expired path reachable");
+        kani::cover!(
+            e0_secs == timeout_secs,
+            "entry expired exactly at boundary exercised"
+        );
+        kani::cover!(
+            e0_secs > timeout_secs,
+            "entry expired past boundary exercised"
+        );
     }
 
     /// Proof: when there is one non-expired connection, the deadline is
@@ -286,7 +308,14 @@ mod verification {
             result > Duration::ZERO && result < timeout,
             "single live connection deadline must be in (0, timeout)",
         );
-        kani::cover!(true, "single live connection path reachable");
+        kani::cover!(
+            elapsed_secs == 1,
+            "minimal elapsed single live connection exercised"
+        );
+        kani::cover!(
+            elapsed_secs == timeout_secs - 1,
+            "elapsed one second before expiry exercised"
+        );
     }
 
     /// Proof: the deadline is always > Duration::ZERO when there are live
@@ -310,6 +339,13 @@ mod verification {
             result > Duration::ZERO,
             "wakeup deadline must never be zero",
         );
-        kani::cover!(true, "never-zero deadline path reachable");
+        kani::cover!(
+            elapsed_secs == 0,
+            "zero elapsed never-zero deadline exercised"
+        );
+        kani::cover!(
+            elapsed_secs == timeout_secs - 1,
+            "near-expiry never-zero deadline exercised"
+        );
     }
 }

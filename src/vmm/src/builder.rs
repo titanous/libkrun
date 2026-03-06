@@ -3405,7 +3405,11 @@ mod verification {
                     end > host_addr,
                     "end address is strictly greater than start",
                 );
-                kani::cover!(true, "valid bundle range accepted");
+                kani::cover!(
+                    host_addr == 0,
+                    "zero host_addr with non-zero bundle_size accepted"
+                );
+                kani::cover!(bundle_size == 1, "minimal bundle_size accepted");
             }
             Err(_) => {
                 // Guard correctly rejected invalid inputs:

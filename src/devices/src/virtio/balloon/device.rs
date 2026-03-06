@@ -2369,18 +2369,6 @@ mod tests {
 mod verification {
     use super::*;
 
-    /// Model of the region-address calculation performed by `GuestMemoryMmap::get_host_address`.
-    ///
-    /// `get_host_address(addr)` succeeds iff `addr` is in `[region_start, region_start +
-    /// region_size)`. The returned host offset within the region is `addr - region_start`.
-    fn simulated_get_host_address(addr: u64, region_start: u64, region_size: u64) -> Option<u64> {
-        if addr >= region_start && addr < region_start.saturating_add(region_size) {
-            Some(addr - region_start) // offset within region (host_addr = mmap_base + offset)
-        } else {
-            None
-        }
-    }
-
     /// Proof: validate_balloon_desc_range enforces madvise range safety for FRQ.
     ///
     /// GAP-004: process_frq calls madvise(host_addr, desc.len, MADV_DONTNEED) where
@@ -2406,10 +2394,23 @@ mod verification {
                     desc_addr.checked_add(u64::from(desc_len)).is_some(),
                     "no overflow",
                 );
-                kani::cover!(true, "valid FRQ descriptor accepted");
+                // Cover: desc_len == 0 (trivially valid) vs. desc_len fills region exactly.
+                kani::cover!(desc_len == 0, "zero-length descriptor accepted");
+                kani::cover!(
+                    desc_addr + u64::from(desc_len) == region_start.saturating_add(region_size),
+                    "descriptor fills region to exact boundary"
+                );
             }
             Err(_) => {
-                kani::cover!(true, "invalid FRQ descriptor rejected");
+                // Cover: rejection due to overflow vs. out-of-bounds.
+                kani::cover!(
+                    desc_addr.checked_add(u64::from(desc_len)).is_none(),
+                    "FRQ descriptor rejected due to u64 overflow"
+                );
+                kani::cover!(
+                    desc_addr.checked_add(u64::from(desc_len)).is_some(),
+                    "FRQ descriptor rejected due to out-of-bounds (no overflow)"
+                );
             }
         }
     }
@@ -2433,10 +2434,21 @@ mod verification {
                 let region_end = region_start.saturating_add(region_size);
                 let addr_end = desc_addr + u64::from(desc_len);
                 kani::assert(addr_end <= region_end, "PHQ madvise range within region");
-                kani::cover!(true, "valid PHQ descriptor accepted");
+                kani::cover!(desc_len == 0, "zero-length PHQ descriptor accepted");
+                kani::cover!(
+                    desc_addr + u64::from(desc_len) == region_start.saturating_add(region_size),
+                    "PHQ descriptor fills region to exact boundary"
+                );
             }
             Err(_) => {
-                kani::cover!(true, "invalid PHQ descriptor rejected");
+                kani::cover!(
+                    desc_addr.checked_add(u64::from(desc_len)).is_none(),
+                    "PHQ descriptor rejected due to u64 overflow"
+                );
+                kani::cover!(
+                    desc_addr.checked_add(u64::from(desc_len)).is_some(),
+                    "PHQ descriptor rejected due to out-of-bounds (no overflow)"
+                );
             }
         }
     }
@@ -2461,12 +2473,60 @@ mod verification {
                     desc_addr.checked_add(u64::from(desc_len)).is_some(),
                     "desc_addr + desc_len does not overflow when guard passes",
                 );
-                kani::cover!(true, "no overflow path");
+                kani::cover!(
+                    desc_len == 0,
+                    "zero-length descriptor: no overflow, trivially valid"
+                );
+                kani::cover!(desc_len > 0, "non-zero desc_len within region: no overflow");
             }
             Err(_) => {
-                kani::cover!(true, "overflow or out-of-bounds rejected");
+                kani::cover!(
+                    desc_addr.checked_add(u64::from(desc_len)).is_none(),
+                    "overflow path: desc_addr + desc_len wraps u64"
+                );
+                kani::cover!(
+                    desc_addr.checked_add(u64::from(desc_len)).is_some(),
+                    "no overflow but out-of-bounds: rejection due to region check"
+                );
             }
         }
+    }
+
+    /// Negative proof: validate_balloon_desc_range returns Err when desc_addr + desc_len overflows.
+    ///
+    /// Property: for any desc_addr and desc_len where the u64 sum overflows, the function
+    /// must return Err, never Ok. A guest could supply desc_addr near u64::MAX and a
+    /// large desc_len to trigger overflow; without checked_add this would silently wrap
+    /// and appear in-bounds, allowing madvise to operate on wrong memory.
+    ///
+    /// Production coupling: removing the checked_add guard (using `+` directly) would
+    /// cause an arithmetic overflow panic in debug builds, or silent corruption in release
+    /// builds — this proof catches both by requiring the Err path for all overflow inputs.
+    ///
+    /// Bound: no loops in validate_balloon_desc_range → unwind(1) sufficient.
+    #[kani::proof]
+    #[kani::solver(cadical)]
+    fn proof_desc_range_overflow_returns_err() {
+        // desc_addr near u64::MAX so that adding any nonzero desc_len overflows.
+        let desc_addr: u64 = kani::any_where(|&a: &u64| a > u64::MAX - u32::MAX as u64);
+        let desc_len: u32 = kani::any_where(|&l| l > 0);
+
+        // These must overflow: desc_addr + u64::from(desc_len) > u64::MAX.
+        kani::assume(desc_addr.checked_add(u64::from(desc_len)).is_none());
+
+        // Region is arbitrary — the overflow check fires before the region check.
+        let region_start: u64 = kani::any();
+        let region_size: u64 = kani::any_where(|&sz| sz > 0);
+
+        let result = validate_balloon_desc_range(desc_addr, desc_len, region_start, region_size);
+
+        kani::assert(
+            result.is_err(),
+            "overflow desc_addr + desc_len must always produce Err",
+        );
+        // Cover: confirm the overflow assumption is satisfiable (non-empty input space).
+        kani::cover!(desc_addr > u64::MAX / 2, "high desc_addr exercised");
+        kani::cover!(u64::from(desc_len) > 0x1000, "large desc_len exercised");
     }
 
     // ---------------------------------------------------------------------------
@@ -2499,7 +2559,12 @@ mod verification {
             val.as_slice() == bytes,
             "VirtioBalloonConfig: byte round-trip must be identity",
         );
-        kani::cover!(true, "VirtioBalloonConfig ByteValued roundtrip reachable");
+        // Cover: all-zero bytes vs. all-nonzero bytes (exercises both extremes of u32 fields).
+        kani::cover!(
+            bytes == [0u8; 16],
+            "all-zero VirtioBalloonConfig bytes exercised"
+        );
+        kani::cover!(bytes[0] != 0, "non-zero num_pages field exercised");
     }
 
     /// Verify: VirtioBalloonConfig size is exactly 16 bytes.
@@ -2534,7 +2599,12 @@ mod verification {
             val.as_slice() == bytes,
             "BalloonStat: byte round-trip must be identity",
         );
-        kani::cover!(true, "BalloonStat ByteValued roundtrip reachable");
+        // Cover: all-zero bytes vs. non-zero tag field.
+        kani::cover!(bytes == [0u8; 10], "all-zero BalloonStat bytes exercised");
+        kani::cover!(
+            bytes[0] != 0 || bytes[1] != 0,
+            "non-zero tag field exercised"
+        );
     }
 
     /// Verify: BalloonStat size is exactly 10 bytes.

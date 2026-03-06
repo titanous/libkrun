@@ -240,7 +240,8 @@ mod verification {
             "status_ptr must be aligned for u8 access",
         );
 
-        kani::cover!(true, "non-null status_ptr proof path covered");
+        kani::cover!(buf_len == 1, "minimal buf_len exercised");
+        kani::cover!(buf_len == 256, "maximum buf_len exercised");
     }
 
     /// Proof: status_byte_offset() returns None for buf_len == 0, documenting
@@ -272,7 +273,10 @@ mod verification {
             "status_byte_offset(0) must return None (prevents underflow)",
         );
 
-        kani::cover!(true, "None status_ptr (empty buffers) proof path covered");
+        kani::cover!(
+            result.is_none(),
+            "status_byte_offset(0) returns None confirmed"
+        );
     }
 
     /// Proof: two ParsedRequests whose status bytes come from non-overlapping
@@ -319,7 +323,8 @@ mod verification {
             "non-overlapping requests must have distinct status_ptr values",
         );
 
-        kani::cover!(true, "distinct status_ptr proof path covered");
+        kani::cover!(len_a == 1, "minimal buf_a length exercised");
+        kani::cover!(len_b == 1, "minimal buf_b length exercised");
     }
 
     // ---------------------------------------------------------------------------
@@ -348,7 +353,8 @@ mod verification {
             val.as_slice() == bytes,
             "RequestHeader: byte round-trip must be identity",
         );
-        kani::cover!(true, "RequestHeader ByteValued roundtrip reachable");
+        kani::cover!(bytes == [0u8; 16], "all-zero bytes exercised");
+        kani::cover!(bytes == [0xFFu8; 16], "all-ones bytes exercised");
     }
 
     /// Proof: any bit pattern is a valid DiscardWriteData (ByteValued correctness).
@@ -370,6 +376,7 @@ mod verification {
             val.as_slice() == bytes,
             "DiscardWriteData: byte round-trip must be identity",
         );
-        kani::cover!(true, "DiscardWriteData ByteValued roundtrip reachable");
+        kani::cover!(bytes == [0u8; 16], "all-zero bytes exercised");
+        kani::cover!(bytes == [0xFFu8; 16], "all-ones bytes exercised");
     }
 }

@@ -579,7 +579,11 @@ mod verification {
             stats.preload_pages + stats.fault_pages + stats.zero_pages == stats.loaded_pages,
             "sum of source counts must equal loaded_pages",
         );
-        kani::cover!(true, "same-source dedup path reachable");
+        kani::cover!(page_index == 0, "first page deduplication exercised");
+        kani::cover!(
+            page_index == total_pages - 1,
+            "last page deduplication exercised"
+        );
     }
 
     /// Proof: marking same page with different sources still counts exactly once.
@@ -616,7 +620,11 @@ mod verification {
             stats.fault_pages == 0,
             "fault_pages must be 0 (bit was already set when fault tried)",
         );
-        kani::cover!(true, "different-source dedup path reachable");
+        kani::cover!(page_index == 0, "first page cross-source dedup exercised");
+        kani::cover!(
+            page_index % 64 == 63,
+            "word-boundary page cross-source dedup exercised"
+        );
     }
 
     /// Proof: out-of-bounds page_index is ignored — counters stay at 0.
@@ -643,7 +651,8 @@ mod verification {
             stats.preload_pages == 0,
             "out-of-bounds mark_loaded must not increment preload_pages",
         );
-        kani::cover!(true, "out-of-bounds ignored path reachable");
+        kani::cover!(page_index == total_pages, "exactly-at-bound index ignored");
+        kani::cover!(page_index == usize::MAX, "usize max index ignored");
     }
 
     /// Proof: marking two distinct pages gives loaded_pages == 2.
@@ -676,7 +685,14 @@ mod verification {
             stats.preload_pages == 1 && stats.fault_pages == 1,
             "each source must have count 1",
         );
-        kani::cover!(true, "two-distinct-pages path reachable");
+        kani::cover!(
+            page_a / 64 == page_b / 64,
+            "same word — distinct bits exercised"
+        );
+        kani::cover!(
+            page_a / 64 != page_b / 64,
+            "different words — cross-word isolation exercised"
+        );
     }
 
     /// Proof: all LoadSource variants are accepted by mark_loaded.
@@ -690,15 +706,18 @@ mod verification {
 
         let tracker = PageTracker::new(total_pages);
         tracker.mark_loaded(page_index, LoadSource::Preload);
-        kani::cover!(true, "Preload source accepted");
+        kani::assert(tracker.is_loaded(page_index), "Preload marks page loaded");
 
         let tracker2 = PageTracker::new(total_pages);
         tracker2.mark_loaded(page_index, LoadSource::Fault);
-        kani::cover!(true, "Fault source accepted");
+        kani::assert(tracker2.is_loaded(page_index), "Fault marks page loaded");
 
         let tracker3 = PageTracker::new(total_pages);
         tracker3.mark_loaded(page_index, LoadSource::Zero);
-        kani::cover!(true, "Zero source accepted");
+        kani::assert(tracker3.is_loaded(page_index), "Zero marks page loaded");
+
+        kani::cover!(page_index == 0, "first page exercised");
+        kani::cover!(page_index % 64 == 63, "word-boundary page exercised");
     }
 
     // ── Address translation proofs ────────────────────────────────────────────
@@ -742,7 +761,11 @@ mod verification {
             result == Some(expected_host),
             "host address must be region.host_addr + offset",
         );
-        kani::cover!(true, "in-range Some path reachable");
+        kani::cover!(addr == region_guest, "address at region start exercised");
+        kani::cover!(
+            addr == region_guest + region_size - 1,
+            "address at region end exercised"
+        );
     }
 
     /// Proof: guest_to_host returns None for addresses before any region.
@@ -769,7 +792,10 @@ mod verification {
 
         let result = guest_to_host(&[region], addr);
         kani::assert(result.is_none(), "address before region must produce None");
-        kani::cover!(true, "before-region None path reachable");
+        kani::cover!(
+            addr == region_guest - 1,
+            "address immediately before region exercised"
+        );
     }
 
     /// Proof: guest_to_host returns None for addresses at or after region end.
@@ -800,7 +826,10 @@ mod verification {
             result.is_none(),
             "address at or after region end must produce None",
         );
-        kani::cover!(true, "after-region None path reachable");
+        kani::cover!(
+            addr == region_guest + region_size,
+            "address immediately after region exercised"
+        );
     }
 
     /// Proof: host_to_guest is the left inverse of guest_to_host for a single region.
@@ -837,7 +866,11 @@ mod verification {
             result == ga,
             "host_to_guest must be the inverse of guest_to_host",
         );
-        kani::cover!(true, "host_to_guest inverse roundtrip reachable");
+        kani::cover!(ga == guest_addr, "roundtrip at region start exercised");
+        kani::cover!(
+            ga == guest_addr + size - 1,
+            "roundtrip at region end exercised"
+        );
     }
 
     /// Proof: guest_addr_to_page_index arithmetic is correct for a page-aligned address.
@@ -885,7 +918,8 @@ mod verification {
             computed_index == page_offset + page_k as usize,
             "full page index must be page_offset + page_in_region",
         );
-        kani::cover!(true, "page index computation reachable");
+        kani::cover!(page_k == 0, "first page index exercised");
+        kani::cover!(page_k == num_pages - 1, "last page index exercised");
     }
 
     /// Proof: guest_to_host with 2 non-overlapping regions returns correct mapping.
@@ -935,7 +969,7 @@ mod verification {
             result_a == Some(host_a + (addr_a - guest_a)),
             "address in A maps to A's host",
         );
-        kani::cover!(true, "region A mapping verified");
+        kani::cover!(addr_a == guest_a, "region A start address exercised");
 
         // Address in region B.
         let addr_b: u64 = kani::any();
@@ -945,7 +979,7 @@ mod verification {
             result_b == Some(host_b + (addr_b - guest_b)),
             "address in B maps to B's host",
         );
-        kani::cover!(true, "region B mapping verified");
+        kani::cover!(addr_b == guest_b, "region B start address exercised");
     }
 
     // ── Additional PageTracker proofs ─────────────────────────────────────────
@@ -965,7 +999,7 @@ mod verification {
             after == before + 1,
             "record_fault must increment total_faults by 1",
         );
-        kani::cover!(true, "record_fault increments total_faults path covered");
+        kani::cover!(after == 1, "total_faults incremented from zero");
     }
 
     /// Proof: is_loaded reflects mark_loaded for in-bounds pages.
@@ -987,7 +1021,11 @@ mod verification {
             tracker.is_loaded(page_index),
             "is_loaded must return true after mark_loaded on the same page",
         );
-        kani::cover!(true, "is_loaded reflects mark_loaded path covered");
+        kani::cover!(page_index == 0, "is_loaded reflects mark_loaded at page 0");
+        kani::cover!(
+            page_index % 64 == 63,
+            "is_loaded reflects mark_loaded at word boundary"
+        );
     }
 
     /// Proof: mark_loaded at page A does not affect is_loaded for a distinct page B.
@@ -1010,7 +1048,14 @@ mod verification {
             !tracker.is_loaded(page_b),
             "marking page A loaded must not affect page B",
         );
-        kani::cover!(true, "mark_loaded isolation path covered");
+        kani::cover!(
+            page_a / 64 == page_b / 64,
+            "isolation within same word exercised"
+        );
+        kani::cover!(
+            page_a / 64 != page_b / 64,
+            "isolation across different words exercised"
+        );
     }
 
     /// Proof: stats source counts (preload + fault + zero) sum to loaded_pages.
@@ -1035,15 +1080,14 @@ mod verification {
             s.preload_pages + s.fault_pages + s.zero_pages == s.loaded_pages,
             "preload + fault + zero counts must equal loaded_pages",
         );
-        kani::cover!(true, "stats source counts sum proof covered");
+        kani::cover!(s.loaded_pages == 4, "all four distinct pages loaded");
     }
 
     /// Proof: PageTracker::new(0) does not panic.
     ///
     /// Zero total_pages is a valid edge case (empty restore).
-    /// unwind(1): stats() iterates 0 words → unwind(1).
+    /// Bound: no loops.
     #[kani::proof]
-    #[kani::unwind(1)]
     fn proof_zero_total_pages_no_panic() {
         let tracker = PageTracker::new(0);
         // mark_loaded and is_loaded must silently handle any page index when total=0.
@@ -1055,7 +1099,7 @@ mod verification {
         let s = tracker.stats();
         kani::assert(s.total_pages == 0, "stats.total_pages must be 0");
         kani::assert(s.loaded_pages == 0, "stats.loaded_pages must be 0");
-        kani::cover!(true, "zero total_pages no-panic path covered");
+        kani::cover!(s.total_pages == 0, "zero total_pages yields zero stats");
     }
 
     /// Proof: guest_addr_to_page_index returns None when address is before the region.
@@ -1080,7 +1124,10 @@ mod verification {
         let addr: u64 = kani::any_where(|&a| a < guest_start);
         let result = guest_addr_to_page_index(std::slice::from_ref(&region), addr);
         kani::assert(result.is_none(), "address before region must yield None");
-        kani::cover!(true, "before-region None path covered");
+        kani::cover!(
+            addr == guest_start - 1,
+            "address immediately before region yields None"
+        );
     }
 
     /// Proof: guest_addr_to_page_index returns None when address is at or after the region end.
@@ -1109,6 +1156,9 @@ mod verification {
             result.is_none(),
             "address at or after region end must yield None",
         );
-        kani::cover!(true, "after-region None path covered");
+        kani::cover!(
+            addr == region_end,
+            "address immediately after region yields None"
+        );
     }
 }

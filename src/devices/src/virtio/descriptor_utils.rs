@@ -598,6 +598,11 @@ mod verification {
     /// If buf_len == 0, unsigned subtraction wraps to usize::MAX, causing the
     /// subsequent add(usize::MAX) to point wildly out of bounds. The fix uses
     /// checked_sub via status_byte_offset. This proof verifies the helper.
+    ///
+    /// Breaking change: changing checked_sub to wrapping_sub in status_byte_offset
+    /// would make this proof fail (None branch would be unreachable for buf_len == 0).
+    ///
+    /// Bound: buf_len <= 64 keeps pointer arithmetic finite; no loops.
     #[kani::proof]
     #[kani::solver(cadical)]
     fn proof_get_status_ptr_arithmetic_in_bounds() {
@@ -620,19 +625,25 @@ mod verification {
                     sp_addr >= base && sp_addr < base + buf_len,
                     "pointer in bounds",
                 );
-                kani::cover!(true, "non-empty buffer: valid offset");
+                kani::cover!(buf_len == 1, "single-byte buffer: offset is zero");
+                kani::cover!(buf_len == 64, "max-bound buffer: offset is 63");
             }
             None => {
                 kani::assert(buf_len == 0, "None only returned for empty buffer");
-                kani::cover!(true, "zero-length buffer correctly rejected");
+                kani::cover!(buf_len == 0, "zero-length buffer correctly rejected");
             }
         }
     }
 
-    /// Proof: get_status_ptr selects the byte at index (len - 1), i.e. the LAST byte.
+    /// Proof: status_byte_offset returns (buf_len - 1) for all non-empty buffers.
     ///
-    /// This verifies the functional contract: for a buffer of length N >= 1,
-    /// the status pointer must equal base_ptr + (N - 1), not some other offset.
+    /// Verifies the functional contract: for a buffer of length N >= 1,
+    /// status_byte_offset(N) must return Some(N - 1), not Some(N) or any other offset.
+    ///
+    /// Breaking change: if status_byte_offset returned buf_len instead of buf_len - 1,
+    /// the offset assertion would fail.
+    ///
+    /// Bound: buf_len in [1, 64]; no loops.
     #[kani::proof]
     #[kani::solver(cadical)]
     fn proof_get_status_ptr_selects_last_byte() {
@@ -642,24 +653,32 @@ mod verification {
         let mut backing = vec![0u8; buf_len];
         let buf_ptr: *mut u8 = backing.as_mut_ptr();
 
-        // Replicate the get_status_ptr() arithmetic.
-        let status_ptr: *mut u8 = unsafe { buf_ptr.add(buf_len - 1) };
+        // Call the production function — do not reimplement the arithmetic.
+        let offset = status_byte_offset(buf_len)
+            .expect("status_byte_offset must return Some for non-empty buffer");
+
+        let status_ptr: *mut u8 = unsafe { buf_ptr.add(offset) };
 
         // The offset from base must be exactly buf_len - 1.
-        // This verifies that ptr::add() arithmetic matches integer expectations.
-        let offset = status_ptr as usize - buf_ptr as usize;
+        let computed_offset = status_ptr as usize - buf_ptr as usize;
         kani::assert(
-            offset == buf_len - 1,
+            computed_offset == buf_len - 1,
             "status byte must be at offset (buf_len - 1) from buffer start",
         );
 
-        kani::cover!(true, "last-byte selection proof path covered");
+        kani::cover!(buf_len == 1, "single-byte buffer: offset is zero");
+        kani::cover!(buf_len > 1, "multi-byte buffer: offset is positive");
     }
 
-    /// Proof: get_status_ptr for buf_len == 1 returns the first (and only) byte.
+    /// Proof: status_byte_offset for buf_len == 1 returns offset 0 (the only byte).
     ///
     /// Edge case: a single-byte buffer means the status byte IS the only byte.
-    /// offset = 1 - 1 = 0, so status_ptr == buf_ptr.
+    /// status_byte_offset(1) must return Some(0), so status_ptr == buf_ptr.
+    ///
+    /// Breaking change: if status_byte_offset(1) returned Some(1) instead of Some(0),
+    /// the status_ptr == buf_ptr assertion would fail.
+    ///
+    /// Bound: no symbolic inputs; no loops.
     #[kani::proof]
     #[kani::solver(cadical)]
     fn proof_get_status_ptr_single_byte_buffer() {
@@ -667,15 +686,18 @@ mod verification {
         let buf_ptr: *mut u8 = backing.as_mut_ptr();
         let buf_len: usize = 1;
 
-        let status_ptr: *mut u8 = unsafe { buf_ptr.add(buf_len - 1) };
+        // Call the production function — do not reimplement the arithmetic.
+        let offset = status_byte_offset(buf_len)
+            .expect("status_byte_offset must return Some for buf_len == 1");
 
-        // For a 1-byte buffer, status_ptr must equal buf_ptr exactly.
+        let status_ptr: *mut u8 = unsafe { buf_ptr.add(offset) };
+
+        // For a 1-byte buffer, status_ptr must equal buf_ptr exactly (offset 0).
         kani::assert(
             status_ptr == buf_ptr,
             "single-byte buffer: status_ptr must equal buf_ptr (offset 0)",
         );
-
-        kani::cover!(true, "single-byte buffer status ptr proof covered");
+        kani::assert(offset == 0, "offset for buf_len == 1 must be 0");
     }
 }
 

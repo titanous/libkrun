@@ -146,10 +146,16 @@ mod verification {
     /// Proof: set_klapic_reg does not modify bytes outside the 4-byte write window.
     ///
     /// Writing at offset O must leave bytes outside [O, O+4) unchanged.
-    /// Verifies there is no byte spill from the little-endian i32 write.
+    /// Verifies there is no byte spill from the little-endian i32 write in either
+    /// direction: neither backward (offset 0, the APIC ID register) nor forward
+    /// (offset APIC_LVT0 + 4 = 0x354, the next APIC register slot).
     ///
-    /// Strategy: write at a concrete offset (APIC_LVT0 = 0x350 = 848), then check
-    /// that adjacent bytes at offset 0 are unchanged.
+    /// Would fail if write_le_i32 iterated beyond 4 bytes, or if set_klapic_reg
+    /// used an off-by-one range (e.g. reg_offset..reg_offset + 5).
+    ///
+    /// Strategy: write at APIC_LVT0 = 0x350 = 848, then check both:
+    ///   - backward: offset 0 is unchanged
+    ///   - forward:  offset 0x354 (APIC_LVT0 + 4) is unchanged
     #[kani::proof]
     #[kani::solver(cadical)]
     fn proof_klapic_reg_write_does_not_spill() {
@@ -158,24 +164,39 @@ mod verification {
         let value: u32 = kani::any();
 
         let mut klapic = kvm_bindings::kvm_lapic_state::default();
-        // Record the initial value at a different offset (offset 0 = APIC ID register).
-        let before = get_klapic_reg(&klapic, 0);
+        // Record the initial values at adjacent offsets (both outside the write window).
+        let before_backward = get_klapic_reg(&klapic, 0);
+        let before_forward = get_klapic_reg(&klapic, APIC_LVT0 + 4); // 0x354
 
         set_klapic_reg(&mut klapic, WRITE_OFFSET, value);
 
-        // Offset 0 must be unchanged (it does not overlap with offset 0x350).
-        let after = get_klapic_reg(&klapic, 0);
+        // Offset 0 must be unchanged (far before 0x350).
+        let after_backward = get_klapic_reg(&klapic, 0);
         kani::assert(
-            before == after,
+            before_backward == after_backward,
             "write at APIC_LVT0 must not affect bytes at offset 0",
         );
-        kani::cover!(value != 0, "non-zero write no-spill path covered");
+
+        // Offset 0x354 must be unchanged (immediately after the 4-byte write window).
+        let after_forward = get_klapic_reg(&klapic, APIC_LVT0 + 4);
+        kani::assert(
+            before_forward == after_forward,
+            "write at APIC_LVT0 must not affect bytes at offset APIC_LVT0+4",
+        );
+
+        kani::cover!(value != 0, "non-zero value written: spill check meaningful");
+        kani::cover!(
+            value == u32::MAX,
+            "all-ones write: forward spill would corrupt next register"
+        );
     }
 
     /// Proof: APIC mode constants fit in the 3-bit delivery mode field.
     ///
     /// APIC_MODE_NMI (4) and APIC_MODE_EXTINT (7) must be in [0, 7].
     /// set_apic_delivery_mode only uses bits [2:0] of mode via the 0x700 mask.
+    /// This proof has no symbolic inputs; the cover! is omitted (no branches to
+    /// verify are reachable).
     #[kani::proof]
     fn proof_apic_mode_constants_valid() {
         kani::assert(
@@ -191,7 +212,6 @@ mod verification {
             APIC_MODE_NMI != APIC_MODE_EXTINT,
             "NMI and EXTINT delivery modes must be distinct",
         );
-        kani::cover!(true, "APIC mode constants valid proof reachable");
     }
 
     /// Proof: set_lint correctly configures LVT0 (EXTINT) and LVT1 (NMI) delivery modes.
@@ -229,7 +249,14 @@ mod verification {
             "LVT1 non-mode bits must be preserved",
         );
 
-        kani::cover!(true, "set_lint modes correct proof reachable");
+        kani::cover!(
+            initial_lvt0 & 0x700 != 0,
+            "LVT0 had pre-existing delivery mode bits that were overwritten"
+        );
+        kani::cover!(
+            initial_lvt1 & 0x700 != 0,
+            "LVT1 had pre-existing delivery mode bits that were overwritten"
+        );
     }
 }
 

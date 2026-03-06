@@ -2445,6 +2445,7 @@ mod verification {
     /// `slice::from_raw_parts` pattern (which could produce out-of-bounds slices).
     ///
     /// Expected result: PASS.
+    /// Bound: no loops; no unwind attribute needed.
     #[kani::proof]
     fn proof_collect_dirty_pages_slice_in_bounds() {
         // Symbolic region descriptor (equivalent to a KVM mem_slot entry).

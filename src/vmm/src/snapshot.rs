@@ -118,6 +118,57 @@ pub fn validate_magic_and_version(header: &SnapshotHeader) -> Result<(), Snapsho
     Ok(())
 }
 
+/// Check whether the header's vCPU count matches the expected count.
+///
+/// Extracted for Kani proofs: both production `validate_header_for_vm` and the
+/// proof harness call this function, so changing the check breaks the proof.
+/// TODO: replace proof with direct call to validate_header_for_vm if GuestMemoryMmap becomes mockable.
+pub(crate) fn check_vcpu_count(
+    header: &SnapshotHeader,
+    expected_vcpu_count: usize,
+) -> Result<(), SnapshotError> {
+    if header.vcpu_count as usize != expected_vcpu_count {
+        return Err(SnapshotError::VcpuCountMismatch {
+            expected: expected_vcpu_count,
+            got: header.vcpu_count as usize,
+        });
+    }
+    Ok(())
+}
+
+/// Check whether the header's nested_enabled flag matches the expected value.
+///
+/// Extracted for Kani proofs: both production `validate_header_for_vm` and the
+/// proof harness call this function, so changing the check breaks the proof.
+/// TODO: replace proof with direct call to validate_header_for_vm if GuestMemoryMmap becomes mockable.
+pub(crate) fn check_nested_enabled(
+    header: &SnapshotHeader,
+    expected_nested_enabled: bool,
+) -> Result<(), SnapshotError> {
+    if header.nested_enabled != expected_nested_enabled {
+        return Err(SnapshotError::NestedEnabledMismatch);
+    }
+    Ok(())
+}
+
+/// Check whether the header's RAM region layout matches the guest memory layout.
+///
+/// Extracted for Kani proofs: both production `validate_header_for_vm` and the
+/// proof harness call this function, so changing the check breaks the proof.
+/// TODO: replace proof with direct call to validate_header_for_vm if GuestMemoryMmap becomes mockable.
+pub(crate) fn check_ram_layout(
+    header: &SnapshotHeader,
+    expected_layout: &[(u64, u64)],
+) -> Result<(), SnapshotError> {
+    if header.ram_regions != expected_layout {
+        return Err(SnapshotError::MemoryLayoutMismatch {
+            expected: expected_layout.to_vec(),
+            got: header.ram_regions.clone(),
+        });
+    }
+    Ok(())
+}
+
 pub fn validate_header_for_vm(
     header: &SnapshotHeader,
     guest_memory: &GuestMemoryMmap,
@@ -126,24 +177,12 @@ pub fn validate_header_for_vm(
 ) -> Result<(), SnapshotError> {
     validate_magic_and_version(header)?;
 
-    if header.vcpu_count as usize != expected_vcpu_count {
-        return Err(SnapshotError::VcpuCountMismatch {
-            expected: expected_vcpu_count,
-            got: header.vcpu_count as usize,
-        });
-    }
+    check_vcpu_count(header, expected_vcpu_count)?;
 
-    if header.nested_enabled != expected_nested_enabled {
-        return Err(SnapshotError::NestedEnabledMismatch);
-    }
+    check_nested_enabled(header, expected_nested_enabled)?;
 
     let expected_layout = ram_layout(guest_memory);
-    if header.ram_regions != expected_layout {
-        return Err(SnapshotError::MemoryLayoutMismatch {
-            expected: expected_layout,
-            got: header.ram_regions.clone(),
-        });
-    }
+    check_ram_layout(header, &expected_layout)?;
 
     Ok(())
 }
@@ -1091,13 +1130,18 @@ mod verification {
     ///
     /// For any header where magic != SNAPSHOT_MAGIC, validate_magic_and_version
     /// must return Err(SnapshotError::InvalidMagic).
+    /// Breaking change: changing the first `if` in validate_magic_and_version to use
+    /// a different comparison or error variant would fail this proof.
+    ///
+    /// Bound: no loops; unwind 1 is sufficient.
     #[kani::proof]
     fn proof_invalid_magic_rejected() {
         let magic: u32 = kani::any_where(|&m| m != SNAPSHOT_MAGIC);
+        let version: u32 = kani::any();
 
         let header = SnapshotHeader {
             magic,
-            version: SNAPSHOT_VERSION, // correct version (magic is the error)
+            version,
             vcpu_count: 1,
             ram_regions: vec![],
             nested_enabled: false,
@@ -1108,13 +1152,21 @@ mod verification {
             matches!(result, Err(SnapshotError::InvalidMagic)),
             "wrong magic must produce InvalidMagic error",
         );
-        kani::cover!(true, "error path is reachable");
+        // Cover: verify both cases where version is correct/incorrect are exercised.
+        kani::cover!(version == SNAPSHOT_VERSION, "magic wrong, version correct");
+        kani::cover!(
+            version != SNAPSHOT_VERSION,
+            "magic wrong, version also wrong"
+        );
     }
 
     /// Proof: correct magic but wrong version produces InvalidVersion error.
     ///
     /// For any header where magic == SNAPSHOT_MAGIC and version != SNAPSHOT_VERSION,
     /// validate_magic_and_version must return Err(SnapshotError::InvalidVersion(v)).
+    /// Breaking change: removing or reordering the version check would fail this proof.
+    ///
+    /// Bound: no loops; unwind 1 is sufficient.
     #[kani::proof]
     fn proof_invalid_version_rejected() {
         let version: u32 = kani::any_where(|&v| v != SNAPSHOT_VERSION);
@@ -1132,21 +1184,29 @@ mod verification {
             matches!(result, Err(SnapshotError::InvalidVersion(_))),
             "wrong version (with correct magic) must produce InvalidVersion error",
         );
-        kani::cover!(true, "invalid version error path is reachable");
+        // Cover the full range of wrong versions: 0, max, and interior values all reachable.
+        kani::cover!(version == 0, "version zero rejected");
+        kani::cover!(version == u32::MAX, "version max rejected");
     }
 
     /// Proof: correct magic AND correct version produces Ok(()).
     ///
     /// This is the only valid input combination. All other combinations must fail
     /// (proven by the proofs above).
+    /// Breaking change: returning Err for a valid header would fail this proof.
+    ///
+    /// Bound: no loops; unwind 1 is sufficient.
     #[kani::proof]
     fn proof_valid_header_accepted() {
+        let vcpu_count: u32 = kani::any();
+        let nested_enabled: bool = kani::any();
+
         let header = SnapshotHeader {
             magic: SNAPSHOT_MAGIC,
             version: SNAPSHOT_VERSION,
-            vcpu_count: kani::any(),
+            vcpu_count,
             ram_regions: vec![],
-            nested_enabled: kani::any(),
+            nested_enabled,
         };
 
         let result = validate_magic_and_version(&header);
@@ -1154,13 +1214,19 @@ mod verification {
             result.is_ok(),
             "correct magic and version must produce Ok(())",
         );
-        kani::cover!(true, "valid header accepted path reachable");
+        // Cover both nested_enabled states to ensure neither affects the magic/version result.
+        kani::cover!(nested_enabled, "nested_enabled=true accepted");
+        kani::cover!(!nested_enabled, "nested_enabled=false accepted");
     }
 
     /// Proof: exhaustive check — magic XOR version wrong always fails.
     ///
     /// Explores all combinations where at least one of (magic, version) is wrong.
     /// Together with proof_valid_header_accepted, this covers the full input space.
+    /// Breaking change: making validate_magic_and_version return Ok for invalid inputs
+    /// would fail this proof.
+    ///
+    /// Bound: no loops; unwind 1 is sufficient.
     #[kani::proof]
     fn proof_any_wrong_field_fails() {
         let magic: u32 = kani::any();
@@ -1179,7 +1245,12 @@ mod verification {
 
         let result = validate_magic_and_version(&header);
         kani::assert(result.is_err(), "any wrong field must produce an error");
-        kani::cover!(true, "any-wrong-field error path reachable");
+        // Cover both cases: magic wrong (irrespective of version), and version wrong with correct magic.
+        kani::cover!(magic != SNAPSHOT_MAGIC, "magic-wrong path");
+        kani::cover!(
+            magic == SNAPSHOT_MAGIC && version != SNAPSHOT_VERSION,
+            "magic-ok version-wrong path"
+        );
     }
 
     /// Proof: all three validation outcomes are reachable.
@@ -1207,56 +1278,167 @@ mod verification {
     // ── validate_header_for_vm pure-logic proofs ──────────────────────────────
     //
     // GuestMemoryMmap::from_ranges() calls mmap internally which Kani cannot
-    // model.  We therefore test the pure validation logic inline, mirroring
-    // the exact checks performed by validate_header_for_vm, without
-    // constructing a GuestMemoryMmap.
+    // model.  We therefore extract the pure validation sub-checks into helpers
+    // (check_vcpu_count, check_nested_enabled, check_ram_layout) and call them
+    // directly.  The production validate_header_for_vm delegates to these same
+    // helpers, so a change to either breaks the proof.
+    //
+    // TODO: replace with direct call to validate_header_for_vm if GuestMemoryMmap becomes mockable.
 
     /// Proof: vCPU count mismatch produces VcpuCountMismatch error.
     ///
-    /// Inline replication of the vcpu_count branch in validate_header_for_vm.
+    /// Calls the production `check_vcpu_count` helper (used by validate_header_for_vm).
+    /// Breaking change: altering the comparison or error variant in check_vcpu_count
+    /// would fail this proof.
+    ///
+    /// Bound: no loops; unwind 1 is sufficient.
     #[kani::proof]
     fn proof_vcpu_count_mismatch_logic() {
         let header_vcpu_count: u32 = kani::any_where(|&n| n <= 32);
         let expected_vcpu_count: usize = kani::any_where(|&n| n <= 32);
         kani::assume(header_vcpu_count as usize != expected_vcpu_count);
 
-        let result: Result<(), SnapshotError> = if header_vcpu_count as usize != expected_vcpu_count
-        {
-            Err(SnapshotError::VcpuCountMismatch {
-                expected: expected_vcpu_count,
-                got: header_vcpu_count as usize,
-            })
-        } else {
-            Ok(())
+        let header = SnapshotHeader {
+            magic: SNAPSHOT_MAGIC,
+            version: SNAPSHOT_VERSION,
+            vcpu_count: header_vcpu_count,
+            ram_regions: vec![],
+            nested_enabled: false,
         };
+
+        let result = check_vcpu_count(&header, expected_vcpu_count);
 
         kani::assert(
             matches!(result, Err(SnapshotError::VcpuCountMismatch { .. })),
             "mismatched vCPU count must produce VcpuCountMismatch error",
         );
-        kani::cover!(true, "vcpu count mismatch proof path reachable");
+        if let Err(SnapshotError::VcpuCountMismatch { expected, got }) = result {
+            kani::assert(expected == expected_vcpu_count, "expected field is correct");
+            kani::assert(got == header_vcpu_count as usize, "got field is correct");
+        }
+        // Cover the boundary: 0 vs non-zero expected, to exercise off-by-one edges.
+        kani::cover!(
+            expected_vcpu_count == 0,
+            "expected_vcpu_count=0 (header nonzero)"
+        );
+        kani::cover!(
+            header_vcpu_count == 0,
+            "header_vcpu_count=0 (expected nonzero)"
+        );
     }
 
     /// Proof: nested_enabled mismatch produces NestedEnabledMismatch error.
     ///
-    /// Inline replication of the nested_enabled branch in validate_header_for_vm.
+    /// Calls the production `check_nested_enabled` helper (used by validate_header_for_vm).
+    /// Breaking change: altering the comparison or error variant in check_nested_enabled
+    /// would fail this proof.
+    ///
+    /// Bound: no loops; unwind 1 is sufficient.
     #[kani::proof]
     fn proof_nested_enabled_mismatch_logic() {
         let header_nested: bool = kani::any();
         let expected_nested: bool = kani::any();
         kani::assume(header_nested != expected_nested);
 
-        let result: Result<(), SnapshotError> = if header_nested != expected_nested {
-            Err(SnapshotError::NestedEnabledMismatch)
-        } else {
-            Ok(())
+        let header = SnapshotHeader {
+            magic: SNAPSHOT_MAGIC,
+            version: SNAPSHOT_VERSION,
+            vcpu_count: 1,
+            ram_regions: vec![],
+            nested_enabled: header_nested,
         };
+
+        let result = check_nested_enabled(&header, expected_nested);
 
         kani::assert(
             matches!(result, Err(SnapshotError::NestedEnabledMismatch)),
             "nested_enabled mismatch must produce NestedEnabledMismatch error",
         );
-        kani::cover!(true, "nested mismatch proof path reachable");
+        // Cover both mismatch directions: header=true/expected=false and vice versa.
+        kani::cover!(
+            header_nested && !expected_nested,
+            "header nested=true, expected=false"
+        );
+        kani::cover!(
+            !header_nested && expected_nested,
+            "header nested=false, expected=true"
+        );
+    }
+
+    /// Proof: RAM region layout mismatch produces MemoryLayoutMismatch error.
+    ///
+    /// Calls the production `check_ram_layout` helper (used by validate_header_for_vm).
+    /// This was historically a source of bugs (stale region layout after kernel size changes).
+    /// Breaking change: altering the comparison or error variant in check_ram_layout
+    /// would fail this proof.
+    ///
+    /// Bound: no loops (layout is at most 1 region each, fixed-size comparison); unwind 1.
+    #[kani::proof]
+    fn proof_ram_layout_mismatch_rejected() {
+        // Use single-region layouts of symbolic but bounded size to keep the proof tractable.
+        let header_addr: u64 = kani::any();
+        let header_size: u64 = kani::any_where(|&s| s > 0);
+        let expected_addr: u64 = kani::any();
+        let expected_size: u64 = kani::any_where(|&s| s > 0);
+
+        // Ensure at least one field differs so this is definitely a mismatch.
+        kani::assume(header_addr != expected_addr || header_size != expected_size);
+
+        let header = SnapshotHeader {
+            magic: SNAPSHOT_MAGIC,
+            version: SNAPSHOT_VERSION,
+            vcpu_count: 1,
+            ram_regions: vec![(header_addr, header_size)],
+            nested_enabled: false,
+        };
+
+        let expected_layout = vec![(expected_addr, expected_size)];
+        let result = check_ram_layout(&header, &expected_layout);
+
+        kani::assert(
+            matches!(result, Err(SnapshotError::MemoryLayoutMismatch { .. })),
+            "mismatched RAM layout must produce MemoryLayoutMismatch error",
+        );
+        // Cover: distinguish address-only vs size-only vs both mismatches.
+        kani::cover!(
+            header_addr != expected_addr && header_size == expected_size,
+            "address differs, size matches"
+        );
+        kani::cover!(
+            header_addr == expected_addr && header_size != expected_size,
+            "address matches, size differs"
+        );
+        kani::cover!(
+            header_addr != expected_addr && header_size != expected_size,
+            "both address and size differ"
+        );
+    }
+
+    /// Proof: matching RAM region layout is accepted by check_ram_layout.
+    ///
+    /// Breaking change: returning Err for a matching layout would fail this proof.
+    ///
+    /// Bound: no loops; unwind 1 is sufficient.
+    #[kani::proof]
+    fn proof_ram_layout_match_accepted() {
+        let addr: u64 = kani::any();
+        let size: u64 = kani::any_where(|&s| s > 0);
+
+        let header = SnapshotHeader {
+            magic: SNAPSHOT_MAGIC,
+            version: SNAPSHOT_VERSION,
+            vcpu_count: 1,
+            ram_regions: vec![(addr, size)],
+            nested_enabled: false,
+        };
+
+        // Expected layout is identical to header layout.
+        let expected_layout = vec![(addr, size)];
+        let result = check_ram_layout(&header, &expected_layout);
+
+        kani::assert(result.is_ok(), "identical RAM layout must be accepted");
+        kani::cover!(addr == 0, "zero base address accepted");
+        kani::cover!(size == 1, "minimum size region accepted");
     }
 
     /// Proof: magic check short-circuits before version check.
@@ -1319,7 +1501,9 @@ mod verification {
                 "InvalidVersion must carry the actual version value",
             );
         }
-        kani::cover!(true, "version check short-circuit proof path reachable");
+        // Cover the range: version just off by one, and far out of range.
+        kani::cover!(version == 0, "version 0 (below current) rejected");
+        kani::cover!(version == u32::MAX, "version max (above current) rejected");
     }
 
     /// Proof: vcpu_count and nested_enabled do not affect the magic/version result.

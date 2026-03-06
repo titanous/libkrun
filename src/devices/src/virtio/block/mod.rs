@@ -466,7 +466,8 @@ mod verification {
         // SAFETY: backing is valid for guard_len bytes and exclusively owned here.
         unsafe { guard.copy_from(&src) };
 
-        kani::cover!(true, "copy_from in-bounds proof path covered");
+        kani::cover!(src_len == 0, "zero-length copy_from exercised");
+        kani::cover!(src_len == guard_len, "full-length copy_from exercised");
     }
 
     /// Proof: copy_to stays in bounds for any dst.len() <= guard.len.
@@ -489,7 +490,8 @@ mod verification {
         // SAFETY: backing is valid for guard_len bytes and exclusively owned here.
         unsafe { guard.copy_to(&mut dst) };
 
-        kani::cover!(true, "copy_to in-bounds proof path covered");
+        kani::cover!(dst_len == 0, "zero-length copy_to exercised");
+        kani::cover!(dst_len == guard_len, "full-length copy_to exercised");
     }
 
     /// Proof: subslice of a VolatileSliceGuard stays within the parent region bounds.
@@ -532,7 +534,14 @@ mod verification {
             "subslice length must match requested length",
         );
 
-        kani::cover!(true, "subslice in-bounds proof path covered");
+        kani::cover!(
+            offset == 0 && sub_len == parent_len,
+            "full subslice from start exercised"
+        );
+        kani::cover!(
+            offset == parent_len && sub_len == 0,
+            "zero-length subslice at end exercised"
+        );
     }
 
     /// Proof: subslice rejects out-of-bounds requests.
@@ -563,7 +572,11 @@ mod verification {
             maybe_sub.is_none(),
             "out-of-bounds subslice must return None",
         );
-        kani::cover!(true, "subslice out-of-bounds rejection path covered");
+        kani::cover!(offset == 0, "out-of-bounds from offset zero exercised");
+        kani::cover!(
+            offset == parent_len,
+            "out-of-bounds from end offset exercised"
+        );
     }
 }
 

@@ -187,7 +187,8 @@ mod verification {
             val.as_slice() == bytes,
             "VirtioConsoleControl: byte round-trip must be identity",
         );
-        kani::cover!(true, "VirtioConsoleControl ByteValued roundtrip reachable");
+        kani::cover!(bytes == [0u8; 8], "all-zero bytes exercised");
+        kani::cover!(bytes == [0xFFu8; 8], "all-ones bytes exercised");
     }
 
     /// Verify: VirtioConsoleControl size is exactly 8 bytes.
@@ -222,6 +223,7 @@ mod verification {
             val.as_slice() == bytes,
             "VirtioConsoleResize: byte round-trip must be identity",
         );
-        kani::cover!(true, "VirtioConsoleResize ByteValued roundtrip reachable");
+        kani::cover!(bytes == [0u8; 4], "all-zero bytes exercised");
+        kani::cover!(bytes == [0xFFu8; 4], "all-ones bytes exercised");
     }
 }

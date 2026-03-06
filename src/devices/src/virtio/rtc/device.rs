@@ -893,11 +893,28 @@ mod tests {
     }
 }
 
+// ── Compile-time constant assertions ─────────────────────────────────────────
+//
+// These properties hold at compile time and do not need Kani to verify.
+// They are placed outside `#[cfg(kani)]` so they are checked on every build.
+
+/// Assert: VIRTIO_RTC_S_OK == 0 as required by the virtio spec §5.16.6.2.
+/// Changing this constant breaks the virtio protocol contract.
+const _: () = assert!(
+    uapi::VIRTIO_RTC_S_OK == 0,
+    "VIRTIO_RTC_S_OK must be 0 per virtio-rtc spec"
+);
+
+/// Assert: NUM_CLOCKS == 1 (we advertise exactly one UTC clock).
+/// Accidentally changing this constant would misreport the device capability.
+const _: () = assert!(NUM_CLOCKS == 1, "NUM_CLOCKS must be 1 (UTC clock only)");
+
 /// Mock for `SystemTime::now()` used in Kani proofs.
 ///
 /// Returns a fixed time (UNIX_EPOCH + 1_700_000_000 seconds, an arbitrary
 /// post-2020 timestamp) so that `get_utc_ns()` is deterministic.
 #[cfg(kani)]
+#[allow(dead_code)] // referenced via #[kani::stub], not a direct call
 fn mock_system_time_now() -> std::time::SystemTime {
     std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000)
 }
@@ -968,6 +985,9 @@ mod verification {
     ///
     /// The virtio-rtc spec mandates that clock 0 (UTC) must always be supported.
     /// This calls the production `Rtc::validate_clock_id` directly.
+    /// A bug changing the `if clock_id == 0` branch to return EINVAL breaks this.
+    ///
+    /// Bound: no loops; no symbolic inputs beyond the constant 0.
     #[kani::proof]
     fn proof_clock_cap_clock0_is_ok() {
         let status = Rtc::validate_clock_id(0);
@@ -975,10 +995,17 @@ mod verification {
             status == uapi::VIRTIO_RTC_S_OK,
             "clock 0 must return VIRTIO_RTC_S_OK",
         );
-        kani::cover!(true, "clock 0 OK path reachable");
+        kani::assert(
+            status != uapi::VIRTIO_RTC_S_EINVAL,
+            "clock 0 must not return EINVAL",
+        );
     }
 
     /// Proof: any clock_id other than 0 always returns VIRTIO_RTC_S_EINVAL.
+    ///
+    /// A bug changing the else branch to return S_OK would break this proof.
+    ///
+    /// Bound: no loops; unwind 1 is sufficient.
     #[kani::proof]
     fn proof_clock_cap_nonzero_clock_is_einval() {
         let clock_id: u16 = kani::any_where(|&id| id != 0);
@@ -987,7 +1014,8 @@ mod verification {
             status == uapi::VIRTIO_RTC_S_EINVAL,
             "non-zero clock_id must return VIRTIO_RTC_S_EINVAL",
         );
-        kani::cover!(true, "nonzero clock EINVAL path reachable");
+        kani::cover!(clock_id == 1, "smallest non-zero clock_id");
+        kani::cover!(clock_id == u16::MAX, "largest clock_id");
     }
 
     /// Proof: validate_clock_id returns only VIRTIO_RTC_S_OK or VIRTIO_RTC_S_EINVAL.
@@ -995,6 +1023,9 @@ mod verification {
     /// For any clock_id, the status is either VIRTIO_RTC_S_OK (0) or
     /// VIRTIO_RTC_S_EINVAL (4).  No other status code is produced.  Both
     /// CLOCK_CAP and READ dispatches in `process_req` rely on this invariant.
+    /// Adding a third return value (e.g., EOPNOTSUPP) in a new branch would break this.
+    ///
+    /// Bound: no loops; unwind 1 is sufficient.
     #[kani::proof]
     fn proof_clock_cap_status_is_ok_or_einval() {
         let clock_id: u16 = kani::any();
@@ -1003,28 +1034,42 @@ mod verification {
             status == uapi::VIRTIO_RTC_S_OK || status == uapi::VIRTIO_RTC_S_EINVAL,
             "validate_clock_id status must be OK or EINVAL",
         );
-        kani::cover!(status == uapi::VIRTIO_RTC_S_OK, "OK branch reachable");
-        kani::cover!(
-            status == uapi::VIRTIO_RTC_S_EINVAL,
-            "EINVAL branch reachable"
-        );
+        kani::cover!(clock_id == 0, "OK branch: clock_id 0");
+        kani::cover!(clock_id != 0, "EINVAL branch: non-zero clock_id");
     }
 
-    /// Proof: validate_clock_id is deterministic — two calls with the same
-    /// clock_id always produce the same status.
+    /// Proof: validate_clock_id is a total function mapping exactly two outcomes.
     ///
-    /// Both CLOCK_CAP and READ in `process_req` use this single function, so
-    /// they are guaranteed to agree for every possible clock_id.
+    /// For clock_id == 0, status is VIRTIO_RTC_S_OK (0).
+    /// For clock_id != 0, status is VIRTIO_RTC_S_EINVAL (4).
+    /// No other status values are produced for any u16 input.
+    /// Both CLOCK_CAP and READ dispatches rely on this two-valued output invariant.
+    /// A bug adding a third status code or making clock_id 0 return EINVAL would
+    /// break one of the assertions below.
+    ///
+    /// Bound: no loops; unwind 1 is sufficient.
     #[kani::proof]
-    fn proof_clock_cap_and_read_status_agree() {
-        let clock_id: u16 = kani::any();
-        let cap_status = Rtc::validate_clock_id(clock_id);
-        let rd_status = Rtc::validate_clock_id(clock_id);
+    fn proof_validate_clock_id_exact_mapping() {
+        // Verify the exact output for clock_id == 0 (must be OK).
+        let ok_status = Rtc::validate_clock_id(0);
         kani::assert(
-            cap_status == rd_status,
-            "CLOCK_CAP and READ status must agree for all clock_id values",
+            ok_status == uapi::VIRTIO_RTC_S_OK,
+            "clock_id 0 must map to VIRTIO_RTC_S_OK",
         );
-        kani::cover!(true, "status agreement proof reachable");
+
+        // Verify all non-zero clock_ids map to EINVAL.
+        let nonzero_id: u16 = kani::any_where(|&id| id != 0);
+        let err_status = Rtc::validate_clock_id(nonzero_id);
+        kani::assert(
+            err_status == uapi::VIRTIO_RTC_S_EINVAL,
+            "non-zero clock_id must map to VIRTIO_RTC_S_EINVAL",
+        );
+        kani::assert(
+            err_status != uapi::VIRTIO_RTC_S_OK,
+            "non-zero clock_id must not return OK",
+        );
+        kani::cover!(nonzero_id == 1, "clock_id 1 (first invalid id)");
+        kani::cover!(nonzero_id == u16::MAX, "clock_id u16::MAX (max invalid id)");
     }
 
     // ── get_utc_ns with SystemTime stub ───────────────────────────────────────
@@ -1039,6 +1084,9 @@ mod verification {
     /// The stub replaces `SystemTime::now` with `mock_system_time_now`, which
     /// returns `UNIX_EPOCH + 1_700_000_000s`.  The proof then checks that the
     /// resulting nanosecond value is non-zero and fits in u64.
+    /// A bug making `get_utc_ns` always return 0 would break the `ns > 0` assertion.
+    ///
+    /// Bound: no loops; no symbolic inputs — stub fixes the time.
     #[kani::proof]
     #[kani::stub(std::time::SystemTime::now, mock_system_time_now)]
     fn proof_get_utc_ns_no_panic() {
@@ -1046,30 +1094,11 @@ mod verification {
         // With our fixed stub, duration_since(UNIX_EPOCH) succeeds and the
         // value is 1_700_000_000 * 1e9 = 1.7e18, which fits in a u64.
         kani::assert(ns > 0, "get_utc_ns with fixed stub must return non-zero");
-        kani::cover!(true, "get_utc_ns stub path reachable");
-    }
-
-    // ── Constant value proofs ─────────────────────────────────────────────────
-
-    /// Proof: VIRTIO_RTC_S_OK == 0 as required by the virtio spec.
-    ///
-    /// The spec (§5.16.6.2) defines the success status as 0.
-    #[kani::proof]
-    fn proof_virtio_rtc_s_ok_is_zero() {
+        // The expected value for our stub: 1_700_000_000 * 1_000_000_000
+        let expected: u64 = 1_700_000_000 * 1_000_000_000;
         kani::assert(
-            uapi::VIRTIO_RTC_S_OK == 0,
-            "VIRTIO_RTC_S_OK must be 0 per virtio-rtc spec",
+            ns == expected,
+            "get_utc_ns must equal stub timestamp in nanoseconds",
         );
-        kani::cover!(true, "status constant proof reachable");
-    }
-
-    /// Proof: NUM_CLOCKS == 1.
-    ///
-    /// We advertise exactly one clock (UTC).  This proof ensures that the
-    /// constant is not accidentally changed.
-    #[kani::proof]
-    fn proof_num_clocks_is_one() {
-        kani::assert(NUM_CLOCKS == 1, "NUM_CLOCKS must be 1 (UTC clock only)");
-        kani::cover!(true, "NUM_CLOCKS constant proof reachable");
     }
 }

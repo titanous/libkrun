@@ -178,6 +178,7 @@ mod verification {
     /// kvm_segment.base must equal base as u64.
     ///
     /// This is exhaustive over all 32-bit base values — no bounds needed.
+    /// Bound: no loops; no unwind attribute needed.
     #[kani::proof]
     #[kani::solver(cadical)]
     fn proof_gdt_base_roundtrip() {
@@ -194,13 +195,15 @@ mod verification {
             seg.base == base as u64,
             "decoded base must equal original base",
         );
-        kani::cover!(true, "gdt base roundtrip verified");
+        kani::cover!(base == 0, "zero base exercised");
+        kani::cover!(base == u32::MAX, "max base exercised");
     }
 
     /// Proof: gdt_entry/kvm_segment_from_gdt round-trip preserves limit.
     ///
     /// For all (flags: u16, base: u32, limit: u32 <= 0xFFFFF), the decoded
     /// kvm_segment.limit must equal limit.
+    /// Bound: no loops; no unwind attribute needed.
     #[kani::proof]
     #[kani::solver(cadical)]
     fn proof_gdt_limit_roundtrip() {
@@ -215,13 +218,14 @@ mod verification {
             seg.limit == limit,
             "decoded limit must equal original limit",
         );
-        kani::cover!(true, "gdt limit roundtrip verified");
+        kani::cover!(limit == 0, "zero limit exercised");
+        kani::cover!(limit == 0xFFFFF, "max 20-bit limit exercised");
     }
 
     /// Proof: table_index is preserved in kvm_segment.selector.
     ///
     /// kvm_segment.selector = table_index * 8. This verifies the selector encoding.
-    /// Bound: table_index [0, 255] (u8 full range).
+    /// Bound: table_index [0, 255] (u8 full range). No loops; no unwind attribute needed.
     #[kani::proof]
     #[kani::solver(cadical)]
     fn proof_gdt_selector_encoding() {
@@ -237,7 +241,8 @@ mod verification {
             seg.selector == u16::from(table_index) * 8,
             "selector must equal table_index * 8",
         );
-        kani::cover!(true, "selector encoding verified");
+        kani::cover!(table_index == 0, "null descriptor index exercised");
+        kani::cover!(table_index == u8::MAX, "max table index exercised");
     }
 
     /// Proof: gdt_entry/kvm_segment_from_gdt round-trip preserves single-bit flag fields.
@@ -253,6 +258,7 @@ mod verification {
     ///   s       = flags[4]
     ///
     /// Also verifies that unusable is the complement of present.
+    /// Bound: no loops; no unwind attribute needed.
     #[kani::proof]
     #[kani::solver(cadical)]
     fn proof_gdt_single_bit_flags_roundtrip() {
@@ -297,6 +303,7 @@ mod verification {
     /// Verifies that dpl and type_ are correctly extracted from the GDT entry flags field:
     ///   dpl   = flags[6:5] (2 bits)
     ///   type_ = flags[3:0] (4 bits)
+    /// Bound: no loops; no unwind attribute needed.
     #[kani::proof]
     #[kani::solver(cadical)]
     fn proof_gdt_multi_bit_flags_roundtrip() {

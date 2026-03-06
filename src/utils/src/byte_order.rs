@@ -18,6 +18,7 @@ macro_rules! generate_read_fn {
 macro_rules! generate_write_fn {
     ($fn_name: ident, $data_type: ty, $byte_type: ty, $endian_type: ident) => {
         #[cfg_attr(kani, kani::requires(buf.len() >= std::mem::size_of::<$data_type>()))]
+        #[cfg_attr(kani, kani::modifies(buf))]
         pub fn $fn_name(buf: &mut [$byte_type], n: $data_type) {
             for (byte, read) in buf
                 .iter_mut()
@@ -114,6 +115,13 @@ mod tests {
 mod verification {
     use super::*;
 
+    /// write_le_u16 followed by read_le_u16 is identity for all u16 values.
+    ///
+    /// Verifies the little-endian u16 round-trip: write then read returns the
+    /// original value. Would fail if to_le_bytes or from_le_bytes were swapped
+    /// with big-endian variants, or if the byte loop wrote incorrect indices.
+    ///
+    /// Bound: 2-byte loop unwinds at 3 (2 + 1).
     #[kani::proof]
     #[kani::solver(cadical)]
     #[kani::unwind(3)]
@@ -123,9 +131,17 @@ mod verification {
         write_le_u16(&mut buf, val);
         let result = read_le_u16(&buf);
         kani::assert(result == val, "le_u16 write-read must be identity");
-        kani::cover!(true, "le_u16 roundtrip path reachable");
+        kani::cover!(val == 0, "zero value exercised");
+        kani::cover!(val == u16::MAX, "max value exercised");
+        kani::cover!(val & 0xFF00 != 0, "high byte non-zero exercised");
     }
 
+    /// write_le_u32 followed by read_le_u32 is identity for all u32 values.
+    ///
+    /// Verifies the little-endian u32 round-trip. Would fail if endian conversion
+    /// used big-endian bytes or if the write/read loops had incorrect stride.
+    ///
+    /// Bound: 4-byte loop unwinds at 5 (4 + 1).
     #[kani::proof]
     #[kani::solver(cadical)]
     #[kani::unwind(5)]
@@ -135,9 +151,17 @@ mod verification {
         write_le_u32(&mut buf, val);
         let result = read_le_u32(&buf);
         kani::assert(result == val, "le_u32 write-read must be identity");
-        kani::cover!(true, "le_u32 roundtrip path reachable");
+        kani::cover!(val == 0, "zero value exercised");
+        kani::cover!(val == u32::MAX, "max value exercised");
+        kani::cover!(val & 0xFF00_0000 != 0, "high byte non-zero exercised");
     }
 
+    /// write_le_u64 followed by read_le_u64 is identity for all u64 values.
+    ///
+    /// Verifies the little-endian u64 round-trip. Would fail if the 8-byte loop
+    /// truncated to fewer bytes or used wrong endian conversion.
+    ///
+    /// Bound: 8-byte loop unwinds at 9 (8 + 1).
     #[kani::proof]
     #[kani::solver(cadical)]
     #[kani::unwind(9)]
@@ -147,9 +171,20 @@ mod verification {
         write_le_u64(&mut buf, val);
         let result = read_le_u64(&buf);
         kani::assert(result == val, "le_u64 write-read must be identity");
-        kani::cover!(true, "le_u64 roundtrip path reachable");
+        kani::cover!(val == 0, "zero value exercised");
+        kani::cover!(val == u64::MAX, "max value exercised");
+        kani::cover!(
+            val & 0xFF00_0000_0000_0000 != 0,
+            "high byte non-zero exercised"
+        );
     }
 
+    /// write_le_i32 followed by read_le_i32 is identity for all i32 values.
+    ///
+    /// Verifies the signed little-endian i32 round-trip. Would fail if sign
+    /// extension was applied incorrectly or byte_type cast lost bits.
+    ///
+    /// Bound: 4-byte loop unwinds at 5 (4 + 1).
     #[kani::proof]
     #[kani::solver(cadical)]
     #[kani::unwind(5)]
@@ -159,9 +194,18 @@ mod verification {
         write_le_i32(&mut buf, val);
         let result = read_le_i32(&buf);
         kani::assert(result == val, "le_i32 write-read must be identity");
-        kani::cover!(true, "le_i32 roundtrip path reachable");
+        kani::cover!(val == 0, "zero value exercised");
+        kani::cover!(val == i32::MIN, "min (most-negative) value exercised");
+        kani::cover!(val == i32::MAX, "max value exercised");
+        kani::cover!(val < 0, "negative value exercised");
     }
 
+    /// write_be_u16 followed by read_be_u16 is identity for all u16 values.
+    ///
+    /// Verifies the big-endian u16 round-trip. Would fail if to_be_bytes /
+    /// from_be_bytes were replaced with little-endian variants.
+    ///
+    /// Bound: 2-byte loop unwinds at 3 (2 + 1).
     #[kani::proof]
     #[kani::solver(cadical)]
     #[kani::unwind(3)]
@@ -171,9 +215,17 @@ mod verification {
         write_be_u16(&mut buf, val);
         let result = read_be_u16(&buf);
         kani::assert(result == val, "be_u16 write-read must be identity");
-        kani::cover!(true, "be_u16 roundtrip path reachable");
+        kani::cover!(val == 0, "zero value exercised");
+        kani::cover!(val == u16::MAX, "max value exercised");
+        kani::cover!(val & 0x00FF != 0, "low byte non-zero exercised");
     }
 
+    /// write_be_u32 followed by read_be_u32 is identity for all u32 values.
+    ///
+    /// Verifies the big-endian u32 round-trip. Would fail if endian conversion
+    /// was little-endian or if byte order was partially correct.
+    ///
+    /// Bound: 4-byte loop unwinds at 5 (4 + 1).
     #[kani::proof]
     #[kani::solver(cadical)]
     #[kani::unwind(5)]
@@ -183,16 +235,30 @@ mod verification {
         write_be_u32(&mut buf, val);
         let result = read_be_u32(&buf);
         kani::assert(result == val, "be_u32 write-read must be identity");
-        kani::cover!(true, "be_u32 roundtrip path reachable");
+        kani::cover!(val == 0, "zero value exercised");
+        kani::cover!(val == u32::MAX, "max value exercised");
+        kani::cover!(val & 0x0000_00FF != 0, "low byte non-zero exercised");
     }
 
     // ── Contract-based proofs ─────────────────────────────────────────────────
-    // Each proof_for_contract harness verifies that callers satisfy the
-    // `#[kani::requires]` precondition (sufficient buffer size) and that the
-    // function body is correct under that assumption.
+    // proof_for_contract harnesses verify the `#[kani::requires]` precondition
+    // on each function (buf/input length >= type size).  proof_for_contract
+    // instruments the call site so Kani checks the precondition holds before
+    // allowing the body to execute.
+    //
+    // Read-side harnesses use fixed-size arrays (the only way to construct a
+    // slice of known sufficient length without Vec).  Write-side harnesses use
+    // fixed-size mutable arrays of exactly the required size; proof_for_contract
+    // ensures the `requires` annotation on the generated function is checked.
 
-    /// Contract proof: `write_le_u16` satisfies requires (buf.len() >= 2).
-    #[kani::proof]
+    /// write_le_u16 requires buf.len() >= 2; proof_for_contract checks the precondition.
+    ///
+    /// Kani instruments the call so the `requires(buf.len() >= 2)` annotation is
+    /// verified at the call site. Would fail if the requires bound were lowered
+    /// below 2 while the function still indexes buf[1].
+    ///
+    /// Bound: 2-byte write loop unwinds at 3 (2 + 1).
+    #[kani::proof_for_contract(write_le_u16)]
     #[kani::solver(cadical)]
     #[kani::unwind(3)]
     fn proof_contract_write_le_u16() {
@@ -201,7 +267,9 @@ mod verification {
         write_le_u16(&mut buf, val);
     }
 
-    /// Contract proof: `read_le_u16` requires input.len() >= 2.
+    /// read_le_u16 requires input.len() >= 2; proof_for_contract checks the precondition.
+    ///
+    /// Bound: 2-byte read loop unwinds at 3 (2 + 1).
     #[kani::proof_for_contract(read_le_u16)]
     #[kani::solver(cadical)]
     #[kani::unwind(3)]
@@ -210,8 +278,13 @@ mod verification {
         let _ = read_le_u16(&buf);
     }
 
-    /// Contract proof: `write_le_u32` satisfies requires (buf.len() >= 4).
-    #[kani::proof]
+    /// write_le_u32 requires buf.len() >= 4; proof_for_contract checks the precondition.
+    ///
+    /// Would fail if the requires bound were lowered below 4 while the function
+    /// still writes buf[3].
+    ///
+    /// Bound: 4-byte write loop unwinds at 5 (4 + 1).
+    #[kani::proof_for_contract(write_le_u32)]
     #[kani::solver(cadical)]
     #[kani::unwind(5)]
     fn proof_contract_write_le_u32() {
@@ -220,7 +293,9 @@ mod verification {
         write_le_u32(&mut buf, val);
     }
 
-    /// Contract proof: `read_le_u32` requires input.len() >= 4.
+    /// read_le_u32 requires input.len() >= 4; proof_for_contract checks the precondition.
+    ///
+    /// Bound: 4-byte read loop unwinds at 5 (4 + 1).
     #[kani::proof_for_contract(read_le_u32)]
     #[kani::solver(cadical)]
     #[kani::unwind(5)]
@@ -229,8 +304,13 @@ mod verification {
         let _ = read_le_u32(&buf);
     }
 
-    /// Contract proof: `write_le_u64` satisfies requires (buf.len() >= 8).
-    #[kani::proof]
+    /// write_le_u64 requires buf.len() >= 8; proof_for_contract checks the precondition.
+    ///
+    /// Would fail if the requires bound were lowered below 8 while the function
+    /// still writes buf[7].
+    ///
+    /// Bound: 8-byte write loop unwinds at 9 (8 + 1).
+    #[kani::proof_for_contract(write_le_u64)]
     #[kani::solver(cadical)]
     #[kani::unwind(9)]
     fn proof_contract_write_le_u64() {
@@ -239,7 +319,9 @@ mod verification {
         write_le_u64(&mut buf, val);
     }
 
-    /// Contract proof: `read_le_u64` requires input.len() >= 8.
+    /// read_le_u64 requires input.len() >= 8; proof_for_contract checks the precondition.
+    ///
+    /// Bound: 8-byte read loop unwinds at 9 (8 + 1).
     #[kani::proof_for_contract(read_le_u64)]
     #[kani::solver(cadical)]
     #[kani::unwind(9)]
@@ -248,8 +330,10 @@ mod verification {
         let _ = read_le_u64(&buf);
     }
 
-    /// Contract proof: `write_be_u16` satisfies requires (buf.len() >= 2).
-    #[kani::proof]
+    /// write_be_u16 requires buf.len() >= 2; proof_for_contract checks the precondition.
+    ///
+    /// Bound: 2-byte write loop unwinds at 3 (2 + 1).
+    #[kani::proof_for_contract(write_be_u16)]
     #[kani::solver(cadical)]
     #[kani::unwind(3)]
     fn proof_contract_write_be_u16() {
@@ -258,7 +342,9 @@ mod verification {
         write_be_u16(&mut buf, val);
     }
 
-    /// Contract proof: `read_be_u16` requires input.len() >= 2.
+    /// read_be_u16 requires input.len() >= 2; proof_for_contract checks the precondition.
+    ///
+    /// Bound: 2-byte read loop unwinds at 3 (2 + 1).
     #[kani::proof_for_contract(read_be_u16)]
     #[kani::solver(cadical)]
     #[kani::unwind(3)]
@@ -267,8 +353,10 @@ mod verification {
         let _ = read_be_u16(&buf);
     }
 
-    /// Contract proof: `write_be_u32` satisfies requires (buf.len() >= 4).
-    #[kani::proof]
+    /// write_be_u32 requires buf.len() >= 4; proof_for_contract checks the precondition.
+    ///
+    /// Bound: 4-byte write loop unwinds at 5 (4 + 1).
+    #[kani::proof_for_contract(write_be_u32)]
     #[kani::solver(cadical)]
     #[kani::unwind(5)]
     fn proof_contract_write_be_u32() {
@@ -277,7 +365,9 @@ mod verification {
         write_be_u32(&mut buf, val);
     }
 
-    /// Contract proof: `read_be_u32` requires input.len() >= 4.
+    /// read_be_u32 requires input.len() >= 4; proof_for_contract checks the precondition.
+    ///
+    /// Bound: 4-byte read loop unwinds at 5 (4 + 1).
     #[kani::proof_for_contract(read_be_u32)]
     #[kani::solver(cadical)]
     #[kani::unwind(5)]
@@ -286,8 +376,13 @@ mod verification {
         let _ = read_be_u32(&buf);
     }
 
-    /// Contract proof: `write_le_i32` satisfies requires (buf.len() >= 4).
-    #[kani::proof]
+    /// write_le_i32 requires buf.len() >= 4; proof_for_contract checks the precondition.
+    ///
+    /// Would fail if the requires bound were lowered below 4 while the function
+    /// still writes buf[3] (signed i8 slice).
+    ///
+    /// Bound: 4-byte write loop unwinds at 5 (4 + 1).
+    #[kani::proof_for_contract(write_le_i32)]
     #[kani::solver(cadical)]
     #[kani::unwind(5)]
     fn proof_contract_write_le_i32() {
@@ -296,7 +391,9 @@ mod verification {
         write_le_i32(&mut buf, val);
     }
 
-    /// Contract proof: `read_le_i32` requires input.len() >= 4.
+    /// read_le_i32 requires input.len() >= 4; proof_for_contract checks the precondition.
+    ///
+    /// Bound: 4-byte read loop unwinds at 5 (4 + 1).
     #[kani::proof_for_contract(read_le_i32)]
     #[kani::solver(cadical)]
     #[kani::unwind(5)]

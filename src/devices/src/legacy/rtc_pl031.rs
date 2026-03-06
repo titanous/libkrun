@@ -470,6 +470,9 @@ mod verification {
     ///
     /// Spec: PL031 §3.3.2 — match register is written directly.
     /// RTCMR does not touch Instant::now() or the EventFd.
+    /// A bug replacing the assignment with `self.match_value = 0` would break this proof.
+    ///
+    /// Bound: no loops; unwind 1 is sufficient.
     #[kani::proof]
     fn proof_rtcmr_write_stores_value() {
         let mut rtc = make_rtc_for_kani();
@@ -477,7 +480,8 @@ mod verification {
         let result = rtc.handle_write(RTCMR, val);
         kani::assert(result.is_ok(), "RTCMR write must succeed");
         kani::assert(rtc.match_value == val, "RTCMR write must store value");
-        kani::cover!(true, "RTCMR write path reachable");
+        kani::cover!(val == 0, "zero value stored");
+        kani::cover!(val == u32::MAX, "max value stored");
     }
 
     /// Proof: writing to RTCIMSC masks the value to bit 0.
@@ -485,6 +489,9 @@ mod verification {
     /// Spec: PL031 §3.3.5 — only bit 0 of RTCIMSC is implemented; upper bits
     /// are read-as-zero.  The mask `val & 1` enforces this invariant.
     /// The stub replaces EventFd::write so trigger_interrupt can complete.
+    /// A bug removing the `& 1` mask would break this proof (upper bits would leak).
+    ///
+    /// Bound: no loops; unwind 1 is sufficient.
     #[kani::proof]
     #[kani::stub(vmm_sys_util::eventfd::EventFd::write, mock_eventfd_write)]
     fn proof_rtcimsc_masks_to_bit0() {
@@ -492,25 +499,35 @@ mod verification {
         let val: u32 = kani::any();
         let _ = rtc.handle_write(RTCIMSC, val);
         kani::assert(rtc.imsc == val & 1, "RTCIMSC must be masked to bit 0");
-        kani::cover!(true, "RTCIMSC mask path reachable");
+        kani::cover!(val & !1 != 0, "upper bits present (must be masked out)");
+        kani::cover!(val & 1 == 0, "bit 0 clear path");
+        kani::cover!(val & 1 == 1, "bit 0 set path");
     }
 
     /// Proof: writing to RTCICR clears ris to zero.
     ///
     /// Spec: PL031 §3.3.8 — writing any value to ICR clears the interrupt.
+    /// A bug setting `self.ris = val` instead of `0` would break this proof.
+    ///
+    /// Bound: no loops; unwind 1 is sufficient.
     #[kani::proof]
     #[kani::stub(vmm_sys_util::eventfd::EventFd::write, mock_eventfd_write)]
     fn proof_rtcicr_clears_ris() {
         let mut rtc = make_rtc_for_kani();
+        let initial_ris: u32 = rtc.ris;
         let val: u32 = kani::any();
         let _ = rtc.handle_write(RTCICR, val);
         kani::assert(rtc.ris == 0, "RTCICR write must clear ris to zero");
-        kani::cover!(true, "RTCICR clear path reachable");
+        kani::cover!(initial_ris != 0, "non-zero ris cleared by ICR write");
+        kani::cover!(val != 0, "non-zero ICR write value");
     }
 
     /// Proof: writing to RTCCR is a no-op (RTC is always enabled).
     ///
     /// Spec: PL031 §3.3.4 — the RTC cannot be disabled; RTCCR writes are ignored.
+    /// A bug routing RTCCR to any register assignment would break this proof.
+    ///
+    /// Bound: no loops; unwind 1 is sufficient.
     #[kani::proof]
     fn proof_rtccr_write_is_noop() {
         let mut rtc = make_rtc_for_kani();
@@ -528,7 +545,11 @@ mod verification {
         kani::assert(rtc.load == before_load, "load unchanged by RTCCR");
         kani::assert(rtc.imsc == before_imsc, "imsc unchanged by RTCCR");
         kani::assert(rtc.ris == before_ris, "ris unchanged by RTCCR");
-        kani::cover!(true, "RTCCR noop path reachable");
+        kani::cover!(
+            val != 0,
+            "non-zero RTCCR write (attempted disable) is no-op"
+        );
+        kani::cover!(before_ris != 0, "non-zero ris preserved across RTCCR write");
     }
 
     /// Proof: writing to an unrecognized offset returns BadWriteOffset.
@@ -537,6 +558,9 @@ mod verification {
     /// RTCICR(0x1c), RTCCR(0xc).  RTCLR is excluded here because it also
     /// calls `Instant::now()` (verified separately).  Any other offset must
     /// return `Err(BadWriteOffset(_))`.
+    /// Removing the wildcard arm or changing its return value would break this proof.
+    ///
+    /// Bound: no loops; unwind 1 is sufficient.
     #[kani::proof]
     fn proof_unknown_write_offset_returns_error() {
         let mut rtc = make_rtc_for_kani();
@@ -550,7 +574,12 @@ mod verification {
             matches!(result, Err(Error::BadWriteOffset(_))),
             "error kind must be BadWriteOffset",
         );
-        kani::cover!(true, "bad write offset path reachable");
+        kani::cover!(
+            offset == 0,
+            "offset 0 (RTCDR, read-only) is a bad write offset"
+        );
+        kani::cover!(offset == RTCRIS, "RTCRIS (read-only) is a bad write offset");
+        kani::cover!(offset == RTCMIS, "RTCMIS (read-only) is a bad write offset");
     }
 
     /// Proof: RTCLR write stores the load value and updates tick_offset.
@@ -559,6 +588,9 @@ mod verification {
     /// `seconds_to_nanoseconds(i64::from(val)).unwrap()`.  Because `val` is a
     /// `u32`, the value is always in [0, u32::MAX] ≤ 4.29e9 seconds, well below
     /// the overflow threshold (~9.22e9 s), so the `unwrap()` never panics.
+    /// A bug setting `tick_offset` from the wrong field or formula would break this proof.
+    ///
+    /// Bound: no loops; unwind 1 is sufficient.
     #[kani::proof]
     #[kani::stub(std::time::Instant::now, mock_instant_now)]
     fn proof_rtclr_write_stores_load_and_sets_tick_offset() {
@@ -574,25 +606,39 @@ mod verification {
             rtc.tick_offset == expected_tick_offset,
             "RTCLR must set tick_offset to val * NANOS_PER_SECOND",
         );
-        kani::cover!(true, "RTCLR write path reachable");
+        kani::cover!(val == 0, "zero load value");
+        kani::cover!(val == u32::MAX, "max load value (boundary overflow check)");
     }
 
     // ── Register read semantics ───────────────────────────────────────────────
 
-    /// Proof: RTCMIS = ris & imsc (masked interrupt status).
+    /// Proof: RTCMIS read returns `ris & imsc` (masked interrupt status).
     ///
     /// Spec: PL031 §3.3.7 — the MIS register is the bitwise AND of RIS and IMSC.
-    /// Verifies that masking preserves only the bits enabled by IMSC.
+    /// Verifies that the production `BusDevice::read` path for RTCMIS yields
+    /// exactly `ris & imsc` for all symbolic field values.
+    /// A bug changing the RTCMIS arm (e.g., returning `ris` or `imsc` alone)
+    /// would break this proof.
+    ///
+    /// Bound: no loops; unwind 1 is sufficient.
     #[kani::proof]
     fn proof_rtcmis_equals_ris_and_imsc() {
+        let mut rtc = make_rtc_for_kani();
+        // Constrain imsc to bit 0 only (production write path enforces this).
         let ris: u32 = kani::any();
-        let imsc: u32 = kani::any();
-        let mis = ris & imsc;
+        let imsc: u32 = kani::any_where(|&v| v <= 1);
+        rtc.ris = ris;
+        rtc.imsc = imsc;
+
+        let mut data = [0u8; 4];
+        rtc.read(0, RTCMIS, &mut data);
+        let mis = utils::byte_order::read_le_u32(&data);
+
+        let expected = ris & imsc;
         // Any bit set in MIS must also be set in both RIS and IMSC.
         kani::assert(mis & !ris == 0, "MIS must not have bits absent from RIS");
         kani::assert(mis & !imsc == 0, "MIS must not have bits absent from IMSC");
-        // If both RIS and IMSC have a bit set, MIS must too.
-        kani::assert(mis == ris & imsc, "MIS must equal bitwise AND");
+        kani::assert(mis == expected, "MIS must equal ris & imsc");
         kani::cover!(mis != 0, "non-zero MIS reachable");
         kani::cover!(mis == 0 && ris != 0, "masked-out interrupt reachable");
     }
@@ -604,13 +650,17 @@ mod verification {
     ///
     /// AMBA_ID_LOW = 0xFE0, AMBA_ID_HIGH = 0x1000 → 32 bytes / 4 = 8 slots.
     /// Maximum offset = 0xFFC → index = (0xFFC - 0xFE0) >> 2 = 0x1C >> 2 = 7.
+    /// A bug widening the range or using wrong shift would break this proof.
+    ///
+    /// Bound: no loops; unwind 1 is sufficient.
     #[kani::proof]
     fn proof_amba_id_index_in_bounds() {
         let offset: u64 = kani::any_where(|&o| o >= AMBA_ID_LOW && o < AMBA_ID_HIGH);
         let index = ((offset - AMBA_ID_LOW) >> 2) as usize;
         kani::assert(index < PL031_ID.len(), "AMBA ID index must be < 8");
         let _ = PL031_ID[index]; // must not panic
-        kani::cover!(true, "AMBA ID read path reachable");
+        kani::cover!(offset == AMBA_ID_LOW, "first AMBA ID slot (index 0)");
+        kani::cover!(offset == AMBA_ID_HIGH - 4, "last AMBA ID slot (index 7)");
     }
 
     // ── get_time arithmetic ───────────────────────────────────────────────────
@@ -622,6 +672,9 @@ mod verification {
     ///   ts = tick_offset as i128
     ///   result = (ts / NANOS_PER_SECOND) as u32
     /// Both the i128 cast and the `as u32` truncation are infallible in Rust.
+    /// A bug adding an unchecked division-by-zero would break this proof.
+    ///
+    /// Bound: no loops; unwind 1 is sufficient.
     #[kani::proof]
     #[kani::stub(std::time::Instant::now, mock_instant_now)]
     fn proof_get_time_no_panic() {
@@ -629,7 +682,9 @@ mod verification {
         // get_time() uses Instant::now() (stubbed) and tick_offset (symbolic).
         // With stub returning the same instant as previous_now, elapsed = 0.
         let _ = rtc.get_time();
-        kani::cover!(true, "get_time no-panic path reachable");
+        kani::cover!(rtc.tick_offset == 0, "zero tick_offset");
+        kani::cover!(rtc.tick_offset < 0, "negative tick_offset");
+        kani::cover!(rtc.tick_offset > 0, "positive tick_offset");
     }
 
     // ── seconds_to_nanoseconds overflow proof ─────────────────────────────────
@@ -642,6 +697,10 @@ mod verification {
     /// Arithmetic: u32::MAX * 1_000_000_000 = 4_294_967_295_000_000_000
     ///             i64::MAX                  = 9_223_372_036_854_775_807
     /// The product is less than i64::MAX, so `checked_mul` always returns Some.
+    /// A bug changing `checked_mul` to `wrapping_mul` would not be caught here,
+    /// but the `.unwrap()` in production would panic on overflow inputs > i64::MAX/1e9.
+    ///
+    /// Bound: no loops; unwind 1 is sufficient.
     #[kani::proof]
     fn proof_seconds_to_nanoseconds_u32_never_overflows() {
         let val: u32 = kani::any();
@@ -650,6 +709,10 @@ mod verification {
             result.is_some(),
             "seconds_to_nanoseconds(u32 as i64) must never overflow",
         );
-        kani::cover!(true, "no-overflow path reachable");
+        kani::cover!(val == 0, "zero seconds");
+        kani::cover!(
+            val == u32::MAX,
+            "max u32 seconds (boundary, just under i64 limit)"
+        );
     }
 }

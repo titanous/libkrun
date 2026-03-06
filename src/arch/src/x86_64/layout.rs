@@ -103,6 +103,8 @@ mod verification {
     ///   EBDA_START        .. +0x400    (mptable lives here, ~0x9FC00..0xA0000)
     ///   MMIO_MEM_START    .. 4 GiB     (32-bit MMIO gap, 0xD000_0000..0x1_0000_0000)
     ///   VMGENID_IRQ                    (must not lie in IRQ_BASE..=IRQ_MAX)
+    ///
+    /// Bound: no loops; no unwind attribute needed.
     #[kani::proof]
     fn proof_layout_regions_no_overlap() {
         // ---- region extents ------------------------------------------------
@@ -181,8 +183,6 @@ mod verification {
             ZERO_PAGE_START < CMDLINE_START,
             "zero page must be below the cmdline start address",
         );
-
-        kani::cover!(true, "layout non-overlap proof path reachable");
     }
 
     // ── Additional address arithmetic proofs ──────────────────────────────────
@@ -191,6 +191,7 @@ mod verification {
     ///
     /// MMIO_MEM_START = FIRST_ADDR_PAST_32BITS - MEM_32BIT_GAP_SIZE.
     /// Confirms the gap fills the top 768 MiB of the 32-bit address space exactly.
+    /// Bound: no loops; no unwind attribute needed.
     #[kani::proof]
     fn proof_mmio_gap_arithmetic() {
         // The gap must be exactly MEM_32BIT_GAP_SIZE bytes wide.
@@ -211,8 +212,6 @@ mod verification {
             MMIO_MEM_START < FIRST_ADDR_PAST_32BITS,
             "MMIO_MEM_START must be below 4 GiB",
         );
-
-        kani::cover!(true, "MMIO gap arithmetic proof reachable");
     }
 
     /// Verify FIRMWARE region is within the 32-bit address space and
@@ -220,6 +219,7 @@ mod verification {
     ///
     /// FIRMWARE_START = 0xFFFF_0000, FIRMWARE_SIZE = 65536 (= 0x10000).
     /// Together they exactly fill the top 64 KiB of the 32-bit space.
+    /// Bound: no loops; no unwind attribute needed.
     #[kani::proof]
     fn proof_firmware_region_bounds() {
         // Firmware must start above the MMIO region start.
@@ -240,14 +240,13 @@ mod verification {
             FIRMWARE_SIZE > 0 && FIRMWARE_SIZE.count_ones() == 1,
             "FIRMWARE_SIZE must be a positive power of two",
         );
-
-        kani::cover!(true, "firmware region bounds proof reachable");
     }
 
     /// Verify KVM_TSS_ADDRESS is above the MMIO gap region.
     ///
     /// KVM requires the TSS to be placed in a region the kernel can map; placing it
     /// above FIRST_ADDR_PAST_32BITS guarantees it does not overlap guest RAM.
+    /// Bound: no loops; no unwind attribute needed.
     #[kani::proof]
     fn proof_kvm_tss_above_32bit_space() {
         kani::assert(
@@ -262,14 +261,13 @@ mod verification {
             tss_end.is_some(),
             "KVM_TSS_ADDRESS + 3 pages must not overflow u64",
         );
-
-        kani::cover!(true, "KVM TSS above 32-bit space proof reachable");
     }
 
     /// Verify VMGENID_GUID_OFFSET does not exceed the 4 KB GUID page.
     ///
     /// The GUID (16 bytes) at offset VMGENID_GUID_OFFSET must fit within the
     /// VMGENID_GUID_PAGE (4 KB = 4096 bytes).
+    /// Bound: no loops; no unwind attribute needed.
     #[kani::proof]
     fn proof_vmgenid_guid_offset_within_page() {
         const GUID_SIZE: u64 = 16; // 128-bit GUID
@@ -279,14 +277,13 @@ mod verification {
             VMGENID_GUID_OFFSET + GUID_SIZE <= PAGE_SIZE,
             "GUID (16 bytes at VMGENID_GUID_OFFSET) must fit within the 4 KB GUID page",
         );
-
-        kani::cover!(true, "VMGENID GUID offset within page proof reachable");
     }
 
     /// Verify BOOT_STACK_POINTER properties.
     ///
     /// BOOT_STACK_POINTER (0x8ff0) lies between ZERO_PAGE_START (0x7000) and
     /// CMDLINE_START (0x20000), and is 16-byte aligned (required by x86_64 ABI).
+    /// Bound: no loops; no unwind attribute needed.
     #[kani::proof]
     fn proof_boot_stack_pointer_properties() {
         // Boot stack is above the zero page (the two regions do not overlap here
@@ -307,8 +304,6 @@ mod verification {
             BOOT_STACK_POINTER % 16 == 0,
             "BOOT_STACK_POINTER must be 16-byte aligned",
         );
-
-        kani::cover!(true, "boot stack pointer properties proof reachable");
     }
 
     /// Verify the full low-memory layout ordering.
@@ -317,6 +312,7 @@ mod verification {
     ///   ZERO_PAGE_START (0x7000) < BOOT_STACK_POINTER (0x8ff0) <
     ///   CMDLINE_START (0x20000) < HIMEM_START (0x100000) <
     ///   MMIO_MEM_START (0xD000_0000) < FIRST_ADDR_PAST_32BITS (0x1_0000_0000).
+    /// Bound: no loops; no unwind attribute needed.
     #[kani::proof]
     fn proof_low_memory_layout_monotonic() {
         kani::assert(
@@ -337,7 +333,5 @@ mod verification {
             MMIO_MEM_START < FIRST_ADDR_PAST_32BITS,
             "MMIO_MEM_START < FIRST_ADDR_PAST_32BITS",
         );
-
-        kani::cover!(true, "low-memory monotonic layout proof reachable");
     }
 }

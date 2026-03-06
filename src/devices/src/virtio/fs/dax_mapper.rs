@@ -257,17 +257,18 @@ mod tests {
 mod verification {
     use super::*;
 
-    /// Assumption: when check_bounds passes, host_addr + dax_offset is safe.
+    /// When check_bounds returns Ok, host_addr + dax_offset does not overflow u64.
     ///
-    /// This is a mathematical assumption about the relationship between check_bounds
-    /// and pointer arithmetic. Previously check_bounds only validated `dax_offset + len <= size`
-    /// without checking whether `host_addr + dax_offset` wraps around u64::MAX. The fix
-    /// adds `checked_add` at each arithmetic site (map_file, map_data, unmap) to guard
-    /// against overflow.
+    /// Verifies the safety of the `host_addr + dax_offset` computation performed
+    /// in `map_file`, `map_data`, and `unmap` after a successful `check_bounds`
+    /// call. If check_bounds were weakened to skip the `checked_add(len)` guard,
+    /// the assume preconditions would no longer be entailed by Ok and this proof
+    /// would fail.
     ///
-    /// This proof verifies the mathematical invariant: given the preconditions, the
-    /// address sum does not overflow. The production functions (map_file, map_data, unmap)
-    /// use this as a defensive check before calling mmap.
+    /// Breaking change: removing the `is_none_or(|end| end > self.size)` guard
+    /// from `check_bounds` would allow this proof to fail.
+    ///
+    /// Bound: no loops; no unwind attribute needed.
     #[kani::proof]
     fn proof_check_bounds_no_overflow() {
         // Symbolic host_addr — constrained so the full window fits in address space.
@@ -292,38 +293,90 @@ mod verification {
             host_addr.checked_add(dax_offset).is_some(),
             "host_addr + dax_offset must not overflow u64 after check_bounds passes",
         );
+
+        // Cover both the large-offset and small-offset cases.
+        kani::cover!(dax_offset == 0, "zero dax_offset exercised");
+        kani::cover!(dax_offset > 0, "non-zero dax_offset exercised");
     }
 
-    /// Assumption: the mmap address computation `host_addr + dax_offset` does not overflow.
+    /// check_bounds returns Ok for valid (offset, len) and Err(EINVAL) when dax_offset + len overflows u64.
     ///
-    /// This is a mathematical assumption about valid address ranges. Previously this
-    /// addition was unchecked (unsafely assuming callers provide valid offsets).
-    /// After the fix, all three mmap call sites (`map_file`, `map_data`, `unmap`)
-    /// use `checked_add` and return `InvalidInput` on overflow, ensuring the sum
-    /// is safe before reaching mmap.
+    /// Verifies both the success path and the overflow-rejection guard in check_bounds.
+    /// Previously check_bounds only validated `dax_offset + len <= size` without guarding
+    /// against u64 wrap-around; a guest supplying dax_offset near u64::MAX could bypass
+    /// the size check. The fix uses `checked_add(len).is_none_or(|end| end > self.size)`.
     ///
-    /// This proof documents the invariant used to justify those defensive checks.
+    /// Breaking change: replacing `checked_add(len)` with `dax_offset + len` (unchecked)
+    /// in check_bounds would cause the overflow case to return Ok instead of Err(EINVAL),
+    /// and this proof's Err assertion would fail.
+    ///
+    /// Bound: no loops; no unwind attribute needed.
     #[kani::proof]
     fn proof_map_file_addr_no_overflow() {
         let host_addr: u64 = kani::any();
-        let size: u64 = kani::any_where(|&s| s > 0 && s <= u64::MAX / 2);
-        // Precondition: the mapping window itself must not overflow u64.
+        let size: u64 = kani::any_where(|&s| s > 0);
         kani::assume(host_addr.checked_add(size).is_some());
-
-        let dax_offset: u64 = kani::any_where(|&o| o <= size);
-        let len: u64 = kani::any_where(|&l| l <= size.saturating_sub(dax_offset));
 
         let mapper = LinuxDaxMapper::new(host_addr, size);
 
-        // Establish that the offset/len are within the declared window.
-        kani::assume(dax_offset.checked_add(len).is_some());
-        kani::assume(dax_offset + len <= size);
-
-        // Verify the mathematical invariant: given the preconditions, host_addr + dax_offset
-        // cannot overflow u64. This justifies the checked_add guards in map_file/map_data/unmap.
+        // Case 1: valid (offset, len) — check_bounds must return Ok.
+        let valid_offset: u64 = kani::any_where(|&o| o < size);
+        let valid_len: u64 = kani::any_where(|&l| l > 0 && l <= size - valid_offset);
         kani::assert(
-            host_addr.checked_add(dax_offset).is_some(),
-            "map_file address computation host_addr + dax_offset must not overflow",
+            mapper.check_bounds(valid_offset, valid_len).is_ok(),
+            "check_bounds returns Ok for in-window (offset, len)",
         );
+        kani::cover!(valid_offset == 0, "zero offset accepted");
+        kani::cover!(valid_offset > 0, "non-zero offset accepted");
+
+        // Case 2: overflow — dax_offset + len wraps u64; check_bounds must return Err(EINVAL).
+        let overflow_offset: u64 = kani::any_where(|&o| o > u64::MAX / 2);
+        let overflow_len: u64 = kani::any_where(|&l| overflow_offset.checked_add(l).is_none());
+        let result = mapper.check_bounds(overflow_offset, overflow_len);
+        kani::assert(
+            result.is_err(),
+            "check_bounds returns Err for overflowing (offset, len)",
+        );
+        kani::assert(
+            result.unwrap_err().raw_os_error() == Some(libc::EINVAL),
+            "check_bounds returns EINVAL for overflowing (offset, len)",
+        );
+        kani::cover!(
+            overflow_offset.checked_add(overflow_len).is_none(),
+            "u64 overflow path exercised"
+        );
+    }
+
+    /// check_bounds returns Err(EINVAL) when dax_offset + len overflows u64.
+    ///
+    /// This is the security-critical guard against guest-controlled address
+    /// wrap-around. Without `checked_add`, a guest could supply dax_offset near
+    /// u64::MAX and a small len, causing the sum to wrap to a value <= size and
+    /// bypass the bounds check. The fix uses `checked_add(len).is_none_or(...)`.
+    ///
+    /// Breaking change: replacing `checked_add(len)` with unchecked `+` in
+    /// check_bounds would cause this proof to fail because the wrapped sum
+    /// could satisfy `end <= size`, returning Ok instead of Err(EINVAL).
+    ///
+    /// Bound: no loops; no unwind attribute needed.
+    #[kani::proof]
+    fn proof_check_bounds_overflow_rejected() {
+        let host_addr: u64 = kani::any();
+        let size: u64 = kani::any_where(|&s| s <= u64::MAX / 2);
+        let mapper = LinuxDaxMapper::new(host_addr, size);
+
+        // Inputs where dax_offset + len overflows u64.
+        let dax_offset: u64 = kani::any_where(|&o| o > u64::MAX / 2);
+        let len: u64 = kani::any_where(|&l| dax_offset.checked_add(l).is_none());
+
+        let result = mapper.check_bounds(dax_offset, len);
+
+        kani::assert(result.is_err(), "overflow inputs must be rejected");
+        kani::assert(
+            result.unwrap_err().raw_os_error() == Some(libc::EINVAL),
+            "overflow rejection must use EINVAL",
+        );
+        kani::cover!(dax_offset > u64::MAX / 2, "large dax_offset exercised");
+        kani::cover!(len > 1, "non-trivial len exercised");
     }
 }
