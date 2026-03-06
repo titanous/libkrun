@@ -27,5 +27,11 @@ result
 mutants.out/
 mutants.out.old/
 
+# Large local-only directories (excluded from cargo-mutants workspace copy via --gitignore true)
+.bench/
+.kani/
+.research/
+.cargo/worktrees/
+
 # rustup state (created by Nix shellHook)
 .rustup/
