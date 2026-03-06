@@ -1480,7 +1480,7 @@ pub struct BalloonHandle {
 #[cfg(not(feature = "tee"))]
 #[derive(Debug)]
 pub enum BalloonResult {
-    /// Target reached — actual >= target
+    /// Target reached — actual reached target (>= for inflation, <= for deflation)
     Reached(u64),
     /// Guest stopped making progress — actual stalled at this value
     Stalled(u64),
@@ -1578,12 +1578,20 @@ impl BalloonHandle {
         let (lock, cvar) = &*self.actual_condvar;
         let mut actual = lock.lock().unwrap();
 
+        // Determine direction: inflate (actual needs to grow) or deflate (actual needs to shrink)
+        let deflating = *actual > target_pages;
+
         // Record start time for max_timeout
         let start = std::time::Instant::now();
 
         loop {
-            // Check if target reached
-            if *actual >= target_pages {
+            // Check if target reached (direction-aware)
+            let reached = if deflating {
+                *actual <= target_pages
+            } else {
+                *actual >= target_pages
+            };
+            if reached {
                 return Ok(BalloonResult::Reached(*actual * 4096 / (1024 * 1024)));
             }
 
@@ -2147,6 +2155,80 @@ mod tests {
         assert!(
             matches!(result, Ok(BalloonResult::Reached(actual_mb)) if actual_mb >= 2),
             "await_target() should return Reached when guest notifies target met"
+        );
+    }
+
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn test_balloon_handle_await_target_deflation_does_not_return_immediately() {
+        // BUG: await_target only checks `actual >= target_pages`, which is always true
+        // when deflating (target < actual). It should wait for actual <= target_pages.
+        let balloon = Arc::new(Mutex::new(devices::virtio::Balloon::new().unwrap()));
+        let condvar = balloon.lock().unwrap().actual_condvar();
+        let handle = BalloonHandle::new(balloon, condvar);
+
+        // Set actual to 1024 pages (4 MB) — simulating an inflated balloon
+        let (lock, _cvar) = &*handle.actual_condvar;
+        {
+            let mut actual = lock.lock().unwrap();
+            *actual = 1024;
+        }
+
+        // await_target with target 1 MB (256 pages) — deflation request.
+        // With the bug: returns Reached(4) immediately because 1024 >= 256.
+        // Correct: should return Stalled because no one signals deflation progress.
+        let stall_timeout = std::time::Duration::from_millis(50);
+        let max_timeout = std::time::Duration::from_secs(1);
+        let result = handle.await_target(1, stall_timeout, Some(max_timeout));
+
+        assert!(
+            matches!(result, Ok(BalloonResult::Stalled(_))),
+            "await_target() for deflation should NOT return Reached immediately; \
+             it must wait for actual to decrease. Got: {result:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn test_balloon_handle_await_target_deflation_reached_with_notification() {
+        // Test that await_target returns Reached when guest deflates to target
+        use std::thread;
+
+        let balloon = Arc::new(Mutex::new(devices::virtio::Balloon::new().unwrap()));
+        let condvar = balloon.lock().unwrap().actual_condvar();
+        let handle = BalloonHandle::new(balloon, condvar);
+
+        // Start with actual at 1024 pages (4 MB)
+        let actual_condvar = handle.actual_condvar.clone();
+        {
+            let (lock, _) = &*actual_condvar;
+            let mut actual = lock.lock().unwrap();
+            *actual = 1024;
+        }
+
+        // Spawn thread to simulate guest deflating after delay
+        let condvar_clone = actual_condvar.clone();
+        let guest_thread = thread::spawn(move || {
+            thread::sleep(std::time::Duration::from_millis(50));
+            let (lock, cvar) = &*condvar_clone;
+            {
+                let mut actual = lock.lock().unwrap();
+                *actual = 128; // 128 pages = 0 MB (below 1 MB target of 256 pages)
+                drop(actual);
+            }
+            cvar.notify_all();
+        });
+
+        // Await deflation to 1 MB (256 pages)
+        let stall_timeout = std::time::Duration::from_millis(200);
+        let max_timeout = std::time::Duration::from_secs(2);
+        let result = handle.await_target(1, stall_timeout, Some(max_timeout));
+
+        guest_thread.join().unwrap();
+
+        assert!(
+            matches!(result, Ok(BalloonResult::Reached(actual_mb)) if actual_mb <= 1),
+            "await_target() for deflation should return Reached when actual drops to target. Got: {result:?}"
         );
     }
 

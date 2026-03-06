@@ -116,18 +116,22 @@ mod host {
                 .resize(0)
                 .map_err(|e| anyhow::anyhow!("deflate resize failed: {e:?}"))?;
 
-            // Wait for actual to drop (guest deflates asynchronously)
-            for _ in 0..60 {
-                if balloon.actual() < 4 {
-                    break;
+            // Use await_target for deflation — verifies the direction-aware comparison
+            let deflate_result = balloon
+                .await_target(0, Duration::from_secs(5), Some(Duration::from_secs(30)))
+                .map_err(|e| anyhow::anyhow!("await_target deflate failed: {e:?}"))?;
+
+            match deflate_result {
+                krun::BalloonResult::Reached(actual) => {
+                    assert!(
+                        actual < 4,
+                        "expected actual < 4MB after deflate to 0, got {actual}MB"
+                    );
                 }
-                std::thread::sleep(Duration::from_millis(500));
+                krun::BalloonResult::Stalled(actual) => {
+                    panic!("balloon deflation stalled at {actual}MB, did not reach 0MB target");
+                }
             }
-            assert!(
-                balloon.actual() < 4,
-                "balloon did not deflate after resize(0): actual={}MB",
-                balloon.actual()
-            );
 
             stream.write_all(b"DEFLATED").unwrap();
 

@@ -2351,6 +2351,94 @@ mod tests {
                 500,
             );
         }
+
+        /// Shuttle test for deflation: VMM waits for actual to decrease to target.
+        ///
+        /// Models BalloonHandle::await_target for deflation:
+        ///   - "guest" thread: decreases actual_pages and signals condvar
+        ///   - "VMM" thread: waits on condvar until actual <= target
+        ///
+        /// Verifies: condvar wait terminates, no deadlock, correct final value.
+        #[test]
+        fn shuttle_balloon_deflation_condvar_no_deadlock() {
+            shuttle::check_random(
+                || {
+                    let initial_pages: u64 = 128;
+                    let target_pages: u64 = 32; // deflate from 128 to 32
+
+                    let actual_condvar: Arc<(Mutex<u64>, Condvar)> =
+                        Arc::new((Mutex::new(initial_pages), Condvar::new()));
+
+                    // "Guest" thread: deflates to target
+                    let condvar_guest = Arc::clone(&actual_condvar);
+                    let guest = thread::spawn(move || {
+                        let (lock, cvar) = &*condvar_guest;
+                        let mut val = lock.lock().unwrap();
+                        *val = target_pages;
+                        cvar.notify_all();
+                    });
+
+                    // "VMM" thread: await_target loop for deflation
+                    let condvar_vmm = Arc::clone(&actual_condvar);
+                    let vmm = thread::spawn(move || {
+                        let (lock, cvar) = &*condvar_vmm;
+                        let mut actual = lock.lock().unwrap();
+                        while *actual > target_pages {
+                            actual = cvar.wait(actual).unwrap();
+                        }
+                        assert!(
+                            *actual <= target_pages,
+                            "await_target deflation must observe actual <= target, got {}",
+                            *actual
+                        );
+                    });
+
+                    guest.join().unwrap();
+                    vmm.join().unwrap();
+                },
+                1000,
+            );
+        }
+
+        /// Shuttle test: incremental deflation, guest sends multiple updates.
+        #[test]
+        fn shuttle_balloon_incremental_deflation_no_deadlock() {
+            shuttle::check_random(
+                || {
+                    let initial_pages: u64 = 128;
+                    let target_pages: u64 = 32;
+
+                    let actual_condvar: Arc<(Mutex<u64>, Condvar)> =
+                        Arc::new((Mutex::new(initial_pages), Condvar::new()));
+
+                    // Guest sends decremental updates
+                    let condvar_guest = Arc::clone(&actual_condvar);
+                    let guest = thread::spawn(move || {
+                        for pages in (target_pages..initial_pages).rev() {
+                            let (lock, cvar) = &*condvar_guest;
+                            let mut val = lock.lock().unwrap();
+                            *val = pages;
+                            cvar.notify_all();
+                        }
+                    });
+
+                    // VMM waits until actual reaches target
+                    let condvar_vmm = Arc::clone(&actual_condvar);
+                    let vmm = thread::spawn(move || {
+                        let (lock, cvar) = &*condvar_vmm;
+                        let mut actual = lock.lock().unwrap();
+                        while *actual > target_pages {
+                            actual = cvar.wait(actual).unwrap();
+                        }
+                        assert!(*actual <= target_pages);
+                    });
+
+                    guest.join().unwrap();
+                    vmm.join().unwrap();
+                },
+                500,
+            );
+        }
     }
 }
 
