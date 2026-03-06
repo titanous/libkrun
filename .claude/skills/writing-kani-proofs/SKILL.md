@@ -227,6 +227,7 @@ Coverage annotations should verify that **symbolic inputs** reach interesting re
 | Constrained symbolic | `kani::any_where(\|&v\| cond)` | Bounded state space |
 | Custom generation | `impl kani::Arbitrary for T` | Complex types with invariants |
 | Derive generation | `#[cfg_attr(kani, derive(kani::Arbitrary))]` | Simple structs/enums |
+| Arbitrary array | `kani::Arbitrary::any_array::<N>()` | Fixed-size `[T; N]` |
 | Path constraint | `kani::assume(cond)` | Filter input space |
 
 ### Assertions and Coverage
@@ -312,6 +313,138 @@ done
 
 Then add `#[kani::solver(winner)]` to the proof. Omit the attribute only if cadical (the default) wins.
 
+## Advanced Proof Techniques
+
+### Centralized Invariant Helpers
+
+Extract type invariants into an `is_valid()` method reusable across proofs and `Arbitrary` impls. One change updates all proofs:
+
+```rust
+impl TokenBucket {
+    fn is_valid(&self) -> bool {
+        self.size != 0
+            && self.refill_time != 0
+            && self.budget <= self.size
+    }
+}
+
+// In Arbitrary:
+kani::assume(bucket.is_valid());
+
+// In proofs:
+bucket.auto_replenish();
+kani::assert(bucket.is_valid(), "invariant preserved after replenish");
+```
+
+### Custom Arbitrary with Factory + Invariant
+
+Don't just set fields — construct through production APIs, then fuzz internal state:
+
+```rust
+#[cfg(kani)]
+impl kani::Arbitrary for TokenBucket {
+    fn any() -> TokenBucket {
+        // Use production constructor to guarantee structural validity
+        let bucket = TokenBucket::new(kani::any(), kani::any(), kani::any());
+        kani::assume(bucket.is_some());
+        let mut bucket = bucket.unwrap();
+        // Fuzz mutable internal state within invariant bounds
+        bucket.budget = kani::any();
+        kani::assume(bucket.is_valid());
+        bucket
+    }
+}
+```
+
+### Simplified Abstraction Layers
+
+When production types have loops (e.g. multi-region memory with binary search), create a single-element variant that eliminates the loop. This can reduce unwind from N+1 to 0, a 10-100x solver speedup:
+
+```rust
+/// Single-region memory model — eliminates find_region loop.
+pub struct ProofGuestMemory {
+    the_region: GuestRegionMmap,
+}
+
+impl GuestMemory for ProofGuestMemory {
+    fn find_region(&self, addr: GuestAddress) -> Option<&Self::R> {
+        // No loop — direct check against single region
+        self.the_region.to_region_addr(addr).map(|_| &self.the_region)
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(0)]  // No loops left to unwind
+fn proof_add_used() {
+    let mem = ProofGuestMemory::new(kani::any());
+    // ...
+}
+```
+
+### Semantic Stubs with State
+
+When stubbing functions that have behavioral contracts (e.g. monotonic time), maintain state in the stub:
+
+```rust
+mod stubs {
+    static mut LAST_SECONDS: i64 = 0;
+
+    fn instant_now() -> Instant {
+        let next = kani::any_where(|n| *n >= unsafe { LAST_SECONDS });
+        unsafe { LAST_SECONDS = next; }
+        // ... construct Instant from next
+    }
+}
+
+#[kani::proof]
+#[kani::stub(Instant::now, stubs::instant_now)]
+fn proof_token_refill_monotonic() { ... }
+```
+
+### Intentional Scope Bounds
+
+When full verification is infeasible, explicitly bound the proof scope with a documented justification:
+
+```rust
+/// Verify descriptor chain processing for chains up to length 4.
+/// Production max is 256, but 4 covers: empty, single, boundary (power-of-2),
+/// and multi-element cases. Bugs in chain walking are length-independent.
+const MAX_DESC_LENGTH: usize = 4;
+
+#[kani::proof]
+#[kani::unwind(5)]  // MAX_DESC_LENGTH + 1
+fn proof_iovec_read() {
+    let nr_descs: usize = kani::any_where(|&n| n <= MAX_DESC_LENGTH);
+    // ...
+}
+```
+
+### Specific Error Condition Assertions
+
+In negative proofs, don't just check `Err(_)` — assert which condition triggered the error:
+
+```rust
+if queue.add_used(index, kani::any()).is_ok() {
+    assert_eq!(queue.next_used, old_next + Wrapping(1));
+} else {
+    // State unchanged on error
+    assert_eq!(queue.next_used, old_next);
+    // Error was specifically due to bounds violation
+    assert!(index >= queue.size);
+}
+```
+
+### Bare `kani::cover!()` as Liveness Check
+
+Use `kani::cover!()` without a condition on error paths to verify they are reachable. If assumptions over-constrain, this fails UNSATISFIABLE, revealing the bug:
+
+```rust
+if result == BucketReduction::Failure {
+    kani::cover!();  // Fails if no execution can reach this path
+    assert!(bucket.budget < cost);
+}
+```
+
 ## Kani Limitations to Work Around
 
 ### Cannot model OS syscalls
@@ -330,6 +463,16 @@ fn validated_host_slice(ptr: *const u8, len: usize, addr: u64, region_start: u64
 fn proof_validated_host_slice_bounds() {
     // Symbolic region + address → verify bounds check
 }
+```
+
+When OS-dependent types can't be constructed at all in Kani (e.g. `MmapRegion` needs `sysconf`), transmute from a layout-compatible struct as a last resort. Document the assumption and reference the upstream issue:
+
+```rust
+// MmapRegionBuilder::build() calls libc::sysconf — cannot stub.
+// Transmute is sound here because Kani does not reorder repr(Rust) fields.
+// TODO: replace when kani supports foreign function stubs (#XYZ)
+let stub = MmapRegionStub { addr, size, ... };
+let region: MmapRegion<()> = unsafe { std::mem::transmute(stub) };
 ```
 
 ### Vec/collection bounds
