@@ -43,7 +43,6 @@ mod verification {
     ///
     /// Bound: [unwind rationale]
     #[kani::proof]
-    #[kani::solver(cadical)]
     #[kani::unwind(N)]
     fn proof_descriptive_name() {
         // 1. Symbolic inputs
@@ -244,7 +243,7 @@ Coverage annotations should verify that **symbolic inputs** reach interesting re
 |-----------|--------|-----|
 | Proof marker | `#[kani::proof]` | Entry point for verification |
 | Loop bound | `#[kani::unwind(N)]` | N = max iterations + 1 |
-| Solver | `#[kani::solver(cadical)]` | SAT solver (cadical, kissat, minisat, z3) |
+| Solver | `#[kani::solver(cadical)]` | Pin fastest solver per proof (see solver sweep below) |
 | Contract proof | `#[kani::proof_for_contract(f)]` | Verify f's requires/ensures |
 | Stub verified | `#[kani::stub_verified(f)]` | Trust f's proven contract |
 | Stub replace | `#[kani::stub(orig, replacement)]` | Replace function in proof |
@@ -299,6 +298,19 @@ The unwind bound must be `max_iterations + 1` for each loop. When a proof has ne
 | Combined outer words + inner bits | ceil(N/64) + 64 | ceil(N/64) + 65 |
 
 Always document unwind rationale in the proof's doc comment.
+
+## Solver Sweep
+
+Different solvers have wildly different performance on different proofs (10x+ differences are common). After a proof passes, sweep all solvers on that specific harness and tag it with the fastest:
+
+```bash
+for solver in cadical kissat minisat z3; do
+  echo "=== $solver ==="
+  time cargo kani --harness proof_name -- --solver $solver
+done
+```
+
+Then add `#[kani::solver(winner)]` to the proof. Omit the attribute only if cadical (the default) wins.
 
 ## Kani Limitations to Work Around
 
