@@ -2182,6 +2182,1049 @@ mod tests {
         );
     }
 
+    // ContextConfig getter method tests — verify exact format strings
+    #[test]
+    fn test_get_workdir_none() {
+        let cfg = ContextConfig::default();
+        assert_eq!(cfg.get_workdir(), "");
+    }
+
+    #[test]
+    fn test_get_workdir_some() {
+        let mut cfg = ContextConfig::default();
+        cfg.workdir = Some("/home/user".to_string());
+        assert_eq!(cfg.get_workdir(), "KRUN_WORKDIR=/home/user");
+    }
+
+    #[test]
+    fn test_get_exec_path_none() {
+        let cfg = ContextConfig::default();
+        assert_eq!(cfg.get_exec_path(), "");
+    }
+
+    #[test]
+    fn test_get_exec_path_some() {
+        let mut cfg = ContextConfig::default();
+        cfg.exec_path = Some("/usr/bin/app".to_string());
+        assert_eq!(cfg.get_exec_path(), "KRUN_INIT=/usr/bin/app");
+    }
+
+    #[test]
+    fn test_get_env_none() {
+        let cfg = ContextConfig::default();
+        assert_eq!(cfg.get_env(), "");
+    }
+
+    #[test]
+    fn test_get_env_some() {
+        let mut cfg = ContextConfig::default();
+        cfg.env = Some("FOO=bar BAZ=qux".to_string());
+        assert_eq!(cfg.get_env(), "FOO=bar BAZ=qux");
+    }
+
+    #[test]
+    fn test_get_args_none() {
+        let cfg = ContextConfig::default();
+        assert_eq!(cfg.get_args(), "");
+    }
+
+    #[test]
+    fn test_get_args_some() {
+        let mut cfg = ContextConfig::default();
+        cfg.args = Some("--verbose --output /tmp/out".to_string());
+        assert_eq!(cfg.get_args(), "--verbose --output /tmp/out");
+    }
+
+    #[test]
+    fn test_get_rlimits_none() {
+        let cfg = ContextConfig::default();
+        assert_eq!(cfg.get_rlimits(), "");
+    }
+
+    #[test]
+    fn test_get_rlimits_some() {
+        let mut cfg = ContextConfig::default();
+        cfg.rlimits = Some("NOFILE=1024".to_string());
+        assert_eq!(cfg.get_rlimits(), "KRUN_RLIMITS=NOFILE=1024");
+    }
+
+    #[test]
+    #[cfg(feature = "blk")]
+    fn test_get_block_root_none() {
+        let cfg = ContextConfig::default();
+        assert_eq!(cfg.get_block_root(), "");
+    }
+
+    #[test]
+    #[cfg(feature = "blk")]
+    fn test_get_block_root_some_device_only() {
+        let mut cfg = ContextConfig::default();
+        cfg.block_root = Some(BlockRootConfig {
+            device: "/dev/vda".to_string(),
+            fstype: None,
+            options: None,
+        });
+        assert_eq!(cfg.get_block_root(), "KRUN_BLOCK_ROOT_DEVICE=/dev/vda");
+    }
+
+    #[test]
+    #[cfg(feature = "blk")]
+    fn test_get_block_root_with_fstype() {
+        let mut cfg = ContextConfig::default();
+        cfg.block_root = Some(BlockRootConfig {
+            device: "/dev/vda".to_string(),
+            fstype: Some("ext4".to_string()),
+            options: None,
+        });
+        assert_eq!(
+            cfg.get_block_root(),
+            "KRUN_BLOCK_ROOT_DEVICE=/dev/vda KRUN_BLOCK_ROOT_FSTYPE=ext4"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "blk")]
+    fn test_get_block_root_with_options() {
+        let mut cfg = ContextConfig::default();
+        cfg.block_root = Some(BlockRootConfig {
+            device: "/dev/vda".to_string(),
+            fstype: Some("ext4".to_string()),
+            options: Some("ro,noatime".to_string()),
+        });
+        let result = cfg.get_block_root();
+        assert!(result.contains("KRUN_BLOCK_ROOT_DEVICE=/dev/vda"));
+        assert!(result.contains("KRUN_BLOCK_ROOT_FSTYPE=ext4"));
+        assert!(result.contains("KRUN_BLOCK_ROOT_OPTIONS=ro,noatime"));
+    }
+
+    // Builder field-setting method tests
+    #[test]
+    fn test_builder_workdir_sets_field() {
+        let mut builder = Builder::new();
+        builder.workdir("/home/user".to_string());
+        assert_eq!(builder.config.workdir, Some("/home/user".to_string()));
+    }
+
+    #[test]
+    fn test_builder_exec_path_sets_field() {
+        let mut builder = Builder::new();
+        builder.exec_path("/usr/bin/app".to_string());
+        assert_eq!(builder.config.exec_path, Some("/usr/bin/app".to_string()));
+    }
+
+    #[test]
+    fn test_builder_env_sets_field() {
+        let mut builder = Builder::new();
+        builder.env("FOO=bar".to_string());
+        assert_eq!(builder.config.env, Some("FOO=bar".to_string()));
+    }
+
+    #[test]
+    fn test_builder_args_sets_field() {
+        let mut builder = Builder::new();
+        builder.args("--flag".to_string());
+        assert_eq!(builder.config.args, Some("--flag".to_string()));
+    }
+
+    #[test]
+    fn test_builder_rlimits_sets_field() {
+        let mut builder = Builder::new();
+        builder.rlimits("NOFILE=1024".to_string());
+        assert_eq!(builder.config.rlimits, Some("NOFILE=1024".to_string()));
+    }
+
+    #[test]
+    fn test_builder_gpu_virgl_flags_sets_field() {
+        let mut builder = Builder::new();
+        builder.gpu_virgl_flags(0xdeadbeef);
+        assert_eq!(builder.config.gpu_virgl_flags, Some(0xdeadbeef));
+    }
+
+    #[test]
+    fn test_builder_gpu_shm_size_sets_field() {
+        let mut builder = Builder::new();
+        builder.gpu_shm_size(64 * 1024 * 1024);
+        assert_eq!(builder.config.gpu_shm_size, Some(64 * 1024 * 1024));
+    }
+
+    #[test]
+    fn test_builder_console_output_sets_field() {
+        let mut builder = Builder::new();
+        builder.console_output(PathBuf::from("/tmp/console.log"));
+        assert_eq!(
+            builder.config.console_output,
+            Some(PathBuf::from("/tmp/console.log"))
+        );
+    }
+
+    #[test]
+    fn test_builder_vmm_uid_sets_field() {
+        let mut builder = Builder::new();
+        builder.vmm_uid(1000);
+        assert_eq!(builder.config.vmm_uid, Some(1000));
+    }
+
+    #[test]
+    fn test_builder_vmm_gid_sets_field() {
+        let mut builder = Builder::new();
+        builder.vmm_gid(1000);
+        assert_eq!(builder.config.vmm_gid, Some(1000));
+    }
+
+    #[test]
+    fn test_builder_set_kernel_cmdline_stores_args() {
+        let mut builder = Builder::new();
+        builder.set_kernel_cmdline(vec!["foo=bar", "baz"]);
+        assert_eq!(
+            builder.kernel_cmdline,
+            vec!["foo=bar".to_string(), "baz".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_builder_add_kernel_cmdline_args_extends() {
+        let mut builder = Builder::new();
+        builder.add_kernel_cmdline_args(&["quiet", "ro"]);
+        assert!(builder.extra_kernel_args.contains(&"quiet".to_string()));
+        assert!(builder.extra_kernel_args.contains(&"ro".to_string()));
+    }
+
+    #[test]
+    fn test_builder_add_vsock_port_inserts_entry() {
+        let mut builder = Builder::new();
+        builder.add_vsock_port(5000, PathBuf::from("/tmp/port.sock"), true);
+        let map = builder.config.unix_ipc_port_map.as_ref().unwrap();
+        assert!(map.contains_key(&5000));
+        let (path, listen) = &map[&5000];
+        assert_eq!(path, &PathBuf::from("/tmp/port.sock"));
+        assert!(*listen);
+    }
+
+    #[test]
+    fn test_builder_add_vsock_port_multiple_entries() {
+        let mut builder = Builder::new();
+        builder.add_vsock_port(5000, PathBuf::from("/tmp/a.sock"), true);
+        builder.add_vsock_port(5001, PathBuf::from("/tmp/b.sock"), false);
+        let map = builder.config.unix_ipc_port_map.as_ref().unwrap();
+        assert_eq!(map.len(), 2);
+        assert!(map.contains_key(&5001));
+    }
+
+    #[test]
+    fn test_builder_port_map_success_when_no_net() {
+        let mut builder = Builder::new();
+        let mut map = HashMap::new();
+        map.insert(8080u16, 8080u16);
+        let result = builder.port_map(map);
+        assert!(result.is_ok());
+        assert!(builder.config.tsi_port_map.is_some());
+    }
+
+    #[test]
+    #[cfg(feature = "net")]
+    fn test_builder_port_map_fails_after_add_net_device() {
+        let mut builder = Builder::new();
+        builder.add_net_device(VirtioNetBackend::UnixstreamFd(-1), [0u8; 6], 0);
+        let mut map = HashMap::new();
+        map.insert(8080u16, 8080u16);
+        let result = builder.port_map(map);
+        assert!(result.is_err(), "port_map should fail when net_index != 0");
+    }
+
+    #[test]
+    #[cfg(feature = "net")]
+    fn test_builder_add_net_device_increments_net_index() {
+        let mut builder = Builder::new();
+        assert_eq!(builder.config.net_index, 0);
+        builder.add_net_device(VirtioNetBackend::UnixstreamFd(-1), [0u8; 6], 0);
+        assert_eq!(
+            builder.config.net_index, 1,
+            "net_index should be 1 after first add_net_device"
+        );
+        builder.add_net_device(VirtioNetBackend::UnixstreamFd(-1), [0u8; 6], 0);
+        assert_eq!(
+            builder.config.net_index, 2,
+            "net_index should be 2 after second add_net_device"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "blk")]
+    fn test_builder_add_block_cfg_appends() {
+        use devices::virtio::block::{ImageType, SyncMode};
+        use devices::virtio::CacheType;
+        use vmm::vmm_config::block::BlockDeviceConfig;
+        let mut builder = Builder::new();
+        let blk = BlockDeviceConfig {
+            block_id: "disk0".to_string(),
+            cache_type: CacheType::Writeback,
+            disk_type: BlockDeviceType::Image {
+                path: "/dev/null".to_string(),
+                format: ImageType::Raw,
+                sync_mode: SyncMode::None,
+            },
+            is_disk_read_only: false,
+            direct_io: false,
+        };
+        builder.add_block_cfg(blk);
+        assert_eq!(builder.config.block_cfgs.len(), 1);
+    }
+
+    // next_console_device_index arithmetic tests
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn test_next_console_device_index_default() {
+        // balloon(1) + rng(1) + rtc(1) + implicit_console(1) = 4
+        let builder = Builder::new();
+        assert_eq!(builder.next_console_device_index(), 4);
+    }
+
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn test_next_console_device_index_without_implicit_console() {
+        // balloon(1) + rng(1) + rtc(1) + no_implicit(0) = 3
+        let mut builder = Builder::new();
+        builder.config.vmr.disable_implicit_console = true;
+        assert_eq!(builder.next_console_device_index(), 3);
+    }
+
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn test_next_console_device_index_with_one_console_added() {
+        // balloon(1) + rng(1) + rtc(1) + implicit(1) + 1 console = 5
+        let mut builder = Builder::new();
+        builder.console_count = 1;
+        assert_eq!(builder.next_console_device_index(), 5);
+    }
+
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn test_next_console_device_index_with_two_consoles_added() {
+        let mut builder = Builder::new();
+        builder.console_count = 2;
+        assert_eq!(builder.next_console_device_index(), 6);
+    }
+
+    // console_port_path static function
+    #[test]
+    fn test_console_port_path_format() {
+        assert_eq!(Builder::console_port_path(4, 0), "/dev/vport4p0");
+        assert_eq!(Builder::console_port_path(4, 1), "/dev/vport4p1");
+        assert_eq!(Builder::console_port_path(5, 0), "/dev/vport5p0");
+        assert_eq!(Builder::console_port_path(0, 3), "/dev/vport0p3");
+    }
+
+    // add_virtio_console_with_ports tests
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn test_add_virtio_console_with_ports_returns_correct_paths() {
+        let mut builder = Builder::new();
+        // default index is 4 (balloon+rng+rtc+implicit_console)
+        let paths = builder.add_virtio_console_with_ports(vec![
+            devices::virtio::PortDescription {
+                name: "port0".into(),
+                input: None,
+                output: None,
+                terminal: None,
+            },
+            devices::virtio::PortDescription {
+                name: "port1".into(),
+                input: None,
+                output: None,
+                terminal: None,
+            },
+        ]);
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[0], "/dev/vport4p0");
+        assert_eq!(paths[1], "/dev/vport4p1");
+    }
+
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn test_add_virtio_console_with_ports_increments_console_count() {
+        let mut builder = Builder::new();
+        assert_eq!(builder.console_count, 0);
+        builder.add_virtio_console_with_ports(vec![]);
+        assert_eq!(builder.console_count, 1);
+        builder.add_virtio_console_with_ports(vec![]);
+        assert_eq!(builder.console_count, 2);
+    }
+
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn test_add_virtio_console_with_ports_second_uses_next_index() {
+        let mut builder = Builder::new();
+        let paths1 =
+            builder.add_virtio_console_with_ports(vec![devices::virtio::PortDescription {
+                name: "a".into(),
+                input: None,
+                output: None,
+                terminal: None,
+            }]);
+        let paths2 =
+            builder.add_virtio_console_with_ports(vec![devices::virtio::PortDescription {
+                name: "b".into(),
+                input: None,
+                output: None,
+                terminal: None,
+            }]);
+        assert_eq!(paths1[0], "/dev/vport4p0");
+        assert_eq!(paths2[0], "/dev/vport5p0");
+    }
+
+    // add_virtio_console tests
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn test_add_virtio_console_returns_correct_device_index() {
+        let mut builder = Builder::new();
+        let info = builder.add_virtio_console();
+        assert_eq!(
+            info.device_index, 4,
+            "first console should be at device index 4"
+        );
+        assert_eq!(info.console_id, 0);
+    }
+
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn test_add_virtio_console_second_increments_index() {
+        let mut builder = Builder::new();
+        let info1 = builder.add_virtio_console();
+        let info2 = builder.add_virtio_console();
+        assert_eq!(info1.device_index, 4);
+        assert_eq!(info2.device_index, 5);
+        assert_eq!(info1.console_id, 0);
+        assert_eq!(info2.console_id, 1);
+    }
+
+    // add_port tests
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn test_add_port_returns_correct_path() {
+        let mut builder = Builder::new();
+        let info = builder.add_virtio_console();
+        let path = builder.add_port(
+            &info,
+            devices::virtio::PortDescription {
+                name: "myport".into(),
+                input: None,
+                output: None,
+                terminal: None,
+            },
+        );
+        assert_eq!(path, Some("/dev/vport4p0".to_string()));
+    }
+
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn test_add_port_second_port_increments_index() {
+        let mut builder = Builder::new();
+        let info = builder.add_virtio_console();
+        let path0 = builder.add_port(
+            &info,
+            devices::virtio::PortDescription {
+                name: "p0".into(),
+                input: None,
+                output: None,
+                terminal: None,
+            },
+        );
+        let path1 = builder.add_port(
+            &info,
+            devices::virtio::PortDescription {
+                name: "p1".into(),
+                input: None,
+                output: None,
+                terminal: None,
+            },
+        );
+        assert_eq!(path0, Some("/dev/vport4p0".to_string()));
+        assert_eq!(path1, Some("/dev/vport4p1".to_string()));
+    }
+
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn test_add_port_invalid_console_id_returns_none() {
+        let mut builder = Builder::new();
+        let info = ConsoleDeviceInfo {
+            console_id: 99,
+            device_index: 4,
+        };
+        let path = builder.add_port(
+            &info,
+            devices::virtio::PortDescription {
+                name: "x".into(),
+                input: None,
+                output: None,
+                terminal: None,
+            },
+        );
+        assert_eq!(path, None);
+    }
+
+    // add_port_fd tests (negative fds → None input/output)
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn test_add_port_fd_negative_fds_returns_path() {
+        let mut builder = Builder::new();
+        let info = builder.add_virtio_console();
+        let path = builder.add_port_fd(&info, "myport", -1, -1);
+        assert_eq!(path, Some("/dev/vport4p0".to_string()));
+    }
+
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn test_add_port_fd_with_valid_input_fd() {
+        let mut builder = Builder::new();
+        let info = builder.add_virtio_console();
+        // stdin (fd 0) is a valid readable fd
+        let path = builder.add_port_fd(&info, "port", 0, -1);
+        // Should succeed and return a path
+        assert!(
+            path.is_some(),
+            "add_port_fd with valid input fd should succeed"
+        );
+        assert_eq!(path.unwrap(), "/dev/vport4p0");
+    }
+
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn test_add_port_fd_with_valid_output_fd() {
+        let mut builder = Builder::new();
+        let info = builder.add_virtio_console();
+        // stdout (fd 1) is a valid writable fd
+        let path = builder.add_port_fd(&info, "port", -1, 1);
+        assert!(
+            path.is_some(),
+            "add_port_fd with valid output fd should succeed"
+        );
+        assert_eq!(path.unwrap(), "/dev/vport4p0");
+    }
+
+    // add_port_console_fd tests
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn test_add_port_console_fd_negative_fds_returns_path() {
+        let mut builder = Builder::new();
+        let info = builder.add_virtio_console();
+        let path = builder.add_port_console_fd(&info, -1, -1, 80, 24);
+        assert_eq!(path, Some("/dev/vport4p0".to_string()));
+    }
+
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn test_add_port_console_fd_with_valid_fds() {
+        let mut builder = Builder::new();
+        let info = builder.add_virtio_console();
+        let path = builder.add_port_console_fd(&info, 0, 1, 80, 24);
+        assert!(
+            path.is_some(),
+            "add_port_console_fd with valid fds should succeed"
+        );
+        assert_eq!(path.unwrap(), "/dev/vport4p0");
+    }
+
+    // disable_implicit_console tests
+    #[test]
+    fn test_disable_implicit_console_succeeds_when_no_consoles() {
+        let mut builder = Builder::new();
+        assert!(builder.disable_implicit_console().is_ok());
+        assert!(builder.config.vmr.disable_implicit_console);
+    }
+
+    #[test]
+    fn test_disable_implicit_console_fails_after_console_added() {
+        let mut builder = Builder::new();
+        builder.console_count = 1;
+        let result = builder.disable_implicit_console();
+        assert!(
+            matches!(result, Err(BuilderError::ConsoleAlreadyAdded)),
+            "should fail when consoles already added"
+        );
+    }
+
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn test_disable_implicit_console_changes_device_index() {
+        let mut builder = Builder::new();
+        builder.disable_implicit_console().unwrap();
+        // Without implicit console: balloon(1) + rng(1) + rtc(1) = 3
+        assert_eq!(builder.next_console_device_index(), 3);
+    }
+
+    // set_rng_backend test
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn test_builder_set_rng_backend_stores_backend() {
+        let mut builder = Builder::new();
+        assert!(builder.config.vmr.rng_backend.is_none());
+        builder.set_rng_backend(Box::new(OsRngBackend));
+        assert!(builder.config.vmr.rng_backend.is_some());
+    }
+
+    // add_port_fd fd boundary tests: fd=0 (valid) vs fd=-1 (invalid)
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn test_add_port_fd_stdin_sets_input() {
+        let mut builder = Builder::new();
+        let info = builder.add_virtio_console();
+        // fd=0 (stdin): should be treated as valid (< 0 is false for 0)
+        builder.add_port_fd(&info, "port", 0, -1);
+        if let VirtioConsoleConfigMode::Custom(ports) =
+            &builder.config.vmr.virtio_consoles[info.console_id]
+        {
+            assert!(
+                ports[0].input.is_some(),
+                "fd=0 should produce Some(input), not None"
+            );
+            assert!(
+                ports[0].output.is_none(),
+                "output_fd=-1 should produce None"
+            );
+        } else {
+            panic!("unexpected console mode");
+        }
+    }
+
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn test_add_port_fd_stdout_sets_output() {
+        let mut builder = Builder::new();
+        let info = builder.add_virtio_console();
+        // fd=1 (stdout): should be treated as valid
+        builder.add_port_fd(&info, "port", -1, 1);
+        if let VirtioConsoleConfigMode::Custom(ports) =
+            &builder.config.vmr.virtio_consoles[info.console_id]
+        {
+            assert!(ports[0].input.is_none(), "input_fd=-1 should produce None");
+            assert!(
+                ports[0].output.is_some(),
+                "fd=1 should produce Some(output), not None"
+            );
+        } else {
+            panic!("unexpected console mode");
+        }
+    }
+
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn test_add_port_console_fd_stdin_sets_input() {
+        let mut builder = Builder::new();
+        let info = builder.add_virtio_console();
+        builder.add_port_console_fd(&info, 0, -1, 80, 24);
+        if let VirtioConsoleConfigMode::Custom(ports) =
+            &builder.config.vmr.virtio_consoles[info.console_id]
+        {
+            assert!(ports[0].input.is_some(), "fd=0 should produce Some(input)");
+            assert!(
+                ports[0].output.is_none(),
+                "output_fd=-1 should produce None"
+            );
+        } else {
+            panic!("unexpected console mode");
+        }
+    }
+
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn test_add_port_console_fd_stdout_sets_output() {
+        let mut builder = Builder::new();
+        let info = builder.add_virtio_console();
+        builder.add_port_console_fd(&info, -1, 1, 80, 24);
+        if let VirtioConsoleConfigMode::Custom(ports) =
+            &builder.config.vmr.virtio_consoles[info.console_id]
+        {
+            assert!(ports[0].input.is_none(), "input_fd=-1 should produce None");
+            assert!(
+                ports[0].output.is_some(),
+                "fd=1 should produce Some(output)"
+            );
+        } else {
+            panic!("unexpected console mode");
+        }
+    }
+
+    // add_port_fd: output_fd=0 catches the < → <= boundary for output (line 878)
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn test_add_port_fd_stdin_as_output_sets_output() {
+        // fd=0 as output fd: original (< 0) treats it as valid → Some
+        // mutant (<= 0) would treat it as invalid → None
+        let mut builder = Builder::new();
+        let info = builder.add_virtio_console();
+        builder.add_port_fd(&info, "port", -1, 0);
+        if let VirtioConsoleConfigMode::Custom(ports) =
+            &builder.config.vmr.virtio_consoles[info.console_id]
+        {
+            assert!(
+                ports[0].output.is_some(),
+                "output_fd=0 should produce Some(output) (not None); mutant changes < to <="
+            );
+        } else {
+            panic!("unexpected console mode");
+        }
+    }
+
+    // add_port_console_fd: output_fd=0 catches the < → <= boundary for output (line 909)
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn test_add_port_console_fd_stdin_as_output_sets_output() {
+        let mut builder = Builder::new();
+        let info = builder.add_virtio_console();
+        builder.add_port_console_fd(&info, -1, 0, 80, 24);
+        if let VirtioConsoleConfigMode::Custom(ports) =
+            &builder.config.vmr.virtio_consoles[info.console_id]
+        {
+            assert!(
+                ports[0].output.is_some(),
+                "output_fd=0 should produce Some(output); mutant changes < to <="
+            );
+        } else {
+            panic!("unexpected console mode");
+        }
+    }
+
+    // blk feature: block_root, root_block_cfg, data_block_cfg, take_block_cfg
+    #[test]
+    #[cfg(all(feature = "blk", not(feature = "tee")))]
+    fn test_builder_block_root_sets_config() {
+        let mut builder = Builder::new();
+        builder.block_root(
+            "vda".to_string(),
+            Some("ext4".to_string()),
+            Some("ro".to_string()),
+        );
+        let root = builder.config.block_root.as_ref().unwrap();
+        assert_eq!(root.device, "vda");
+        assert_eq!(root.fstype, Some("ext4".to_string()));
+        assert_eq!(root.options, Some("ro".to_string()));
+    }
+
+    #[test]
+    #[cfg(feature = "blk")]
+    fn test_builder_root_block_cfg_sets_field() {
+        use devices::virtio::block::{ImageType, SyncMode};
+        use devices::virtio::CacheType;
+        use vmm::vmm_config::block::BlockDeviceConfig;
+        let mut builder = Builder::new();
+        let blk = BlockDeviceConfig {
+            block_id: "root".to_string(),
+            cache_type: CacheType::Writeback,
+            disk_type: BlockDeviceType::Image {
+                path: "/dev/null".to_string(),
+                format: ImageType::Raw,
+                sync_mode: SyncMode::None,
+            },
+            is_disk_read_only: true,
+            direct_io: false,
+        };
+        builder.root_block_cfg(blk);
+        assert!(builder.config.root_block_cfg.is_some());
+        assert_eq!(
+            builder.config.root_block_cfg.as_ref().unwrap().block_id,
+            "root"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "blk")]
+    fn test_builder_data_block_cfg_sets_field() {
+        use devices::virtio::block::{ImageType, SyncMode};
+        use devices::virtio::CacheType;
+        use vmm::vmm_config::block::BlockDeviceConfig;
+        let mut builder = Builder::new();
+        let blk = BlockDeviceConfig {
+            block_id: "data".to_string(),
+            cache_type: CacheType::Writeback,
+            disk_type: BlockDeviceType::Image {
+                path: "/dev/null".to_string(),
+                format: ImageType::Raw,
+                sync_mode: SyncMode::None,
+            },
+            is_disk_read_only: false,
+            direct_io: false,
+        };
+        builder.data_block_cfg(blk);
+        assert!(builder.config.data_block_cfg.is_some());
+        assert_eq!(
+            builder.config.data_block_cfg.as_ref().unwrap().block_id,
+            "data"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "blk")]
+    fn test_context_config_take_block_cfg_returns_items() {
+        use devices::virtio::block::{ImageType, SyncMode};
+        use devices::virtio::CacheType;
+        use vmm::vmm_config::block::BlockDeviceConfig;
+        let mut cfg = ContextConfig::default();
+        let blk = BlockDeviceConfig {
+            block_id: "disk0".to_string(),
+            cache_type: CacheType::Writeback,
+            disk_type: BlockDeviceType::Image {
+                path: "/dev/null".to_string(),
+                format: ImageType::Raw,
+                sync_mode: SyncMode::None,
+            },
+            is_disk_read_only: false,
+            direct_io: false,
+        };
+        cfg.block_cfgs.push(blk);
+        let taken = cfg.take_block_cfg();
+        assert_eq!(
+            taken.len(),
+            1,
+            "take_block_cfg should return the pushed block cfg"
+        );
+        assert_eq!(taken[0].block_id, "disk0");
+    }
+
+    #[test]
+    #[cfg(feature = "blk")]
+    fn test_context_config_take_block_cfg_legacy_path() {
+        // When block_cfgs is empty, take_block_cfg uses root+data fields
+        use devices::virtio::block::{ImageType, SyncMode};
+        use devices::virtio::CacheType;
+        use vmm::vmm_config::block::BlockDeviceConfig;
+        let mut cfg = ContextConfig::default();
+        cfg.root_block_cfg = Some(BlockDeviceConfig {
+            block_id: "root".to_string(),
+            cache_type: CacheType::Writeback,
+            disk_type: BlockDeviceType::Image {
+                path: "/dev/null".to_string(),
+                format: ImageType::Raw,
+                sync_mode: SyncMode::None,
+            },
+            is_disk_read_only: true,
+            direct_io: false,
+        });
+        let taken = cfg.take_block_cfg();
+        assert_eq!(taken.len(), 1);
+        assert_eq!(taken[0].block_id, "root");
+    }
+
+    // BalloonHandle arithmetic precision tests
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn test_balloon_actual_with_nonzero_pages() {
+        use devices::virtio::VirtioDevice;
+        let balloon = Arc::new(Mutex::new(devices::virtio::Balloon::new().unwrap()));
+        let condvar = balloon.lock().unwrap().actual_condvar();
+        let handle = BalloonHandle::new(balloon.clone(), condvar);
+
+        // Set actual = 256 pages (1 MB) via write_config (offset 4 = actual field)
+        balloon
+            .lock()
+            .unwrap()
+            .write_config(4, &256u32.to_le_bytes());
+        assert_eq!(handle.actual(), 1, "256 pages should be exactly 1 MB");
+
+        // Set actual = 512 pages (2 MB)
+        balloon
+            .lock()
+            .unwrap()
+            .write_config(4, &512u32.to_le_bytes());
+        assert_eq!(handle.actual(), 2, "512 pages should be exactly 2 MB");
+
+        // Set actual = 1024 pages (4 MB)
+        balloon
+            .lock()
+            .unwrap()
+            .write_config(4, &1024u32.to_le_bytes());
+        assert_eq!(handle.actual(), 4, "1024 pages should be exactly 4 MB");
+    }
+
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn test_balloon_await_target_reached_exact_mb_conversion() {
+        use std::thread;
+        let balloon = Arc::new(Mutex::new(devices::virtio::Balloon::new().unwrap()));
+        let condvar = balloon.lock().unwrap().actual_condvar();
+        let handle = BalloonHandle::new(balloon, condvar);
+        let actual_condvar = handle.actual_condvar.clone();
+
+        let guest_thread = thread::spawn(move || {
+            thread::sleep(std::time::Duration::from_millis(20));
+            let (lock, cvar) = &*actual_condvar;
+            *lock.lock().unwrap() = 512; // 512 pages = 2 MB
+            cvar.notify_all();
+        });
+
+        let result = handle.await_target(
+            1,
+            std::time::Duration::from_millis(200),
+            Some(std::time::Duration::from_secs(2)),
+        );
+        guest_thread.join().unwrap();
+
+        // 512 pages * 4096 / (1024*1024) = 2 MB exactly
+        assert!(
+            matches!(result, Ok(BalloonResult::Reached(2))),
+            "should report exactly 2 MB, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn test_balloon_await_target_stalled_exact_mb_conversion() {
+        let balloon = Arc::new(Mutex::new(devices::virtio::Balloon::new().unwrap()));
+        let condvar = balloon.lock().unwrap().actual_condvar();
+        let handle = BalloonHandle::new(balloon, condvar);
+
+        // Set condvar actual to 256 pages (1 MB)
+        {
+            let (lock, _cvar) = &*handle.actual_condvar;
+            *lock.lock().unwrap() = 256;
+        }
+
+        // Target = 2 MB = 512 pages; actual (256) < 512, so should stall
+        let result = handle.await_target(
+            2,
+            std::time::Duration::from_millis(30),
+            Some(std::time::Duration::from_secs(2)),
+        );
+
+        // Should stall and report actual = 1 MB (256 pages * 4096 / 1048576)
+        assert!(
+            matches!(result, Ok(BalloonResult::Stalled(1))),
+            "should stall and report exactly 1 MB, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn test_balloon_await_target_target_pages_computation() {
+        // Verify target_pages = target_mb * 256 exactly
+        // If we set actual = 300 pages and target_mb = 2 (→ 512 pages), it should NOT reach
+        let balloon = Arc::new(Mutex::new(devices::virtio::Balloon::new().unwrap()));
+        let condvar = balloon.lock().unwrap().actual_condvar();
+        let handle = BalloonHandle::new(balloon, condvar);
+
+        {
+            let (lock, _cvar) = &*handle.actual_condvar;
+            *lock.lock().unwrap() = 300; // 300 pages, less than 512 (2MB in pages)
+        }
+
+        // target_mb=2 requires actual >= 512 pages; actual=300 < 512 → stalls
+        let result = handle.await_target(
+            2,
+            std::time::Duration::from_millis(30),
+            Some(std::time::Duration::from_secs(2)),
+        );
+        assert!(
+            matches!(result, Ok(BalloonResult::Stalled(_))),
+            "300 pages should not reach 2 MB target (512 pages), got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn test_balloon_await_target_timeout_exact_mb_conversion() {
+        // Tests that the Timeout error returns the correct actual MB conversion (line 1584).
+        //
+        // Flow to reach Timeout path (not Stalled):
+        // 1. Enter loop: elapsed ≈ 0 < max_timeout, wait on condvar with large stall_timeout
+        // 2. Thread signals condvar after max_timeout has elapsed (so we wake up, not stall)
+        // 3. timeout_result.timed_out() = false → loop again
+        // 4. Check max_timeout: elapsed > max_timeout → return Timeout
+        use std::thread;
+
+        let balloon = Arc::new(Mutex::new(devices::virtio::Balloon::new().unwrap()));
+        let condvar = balloon.lock().unwrap().actual_condvar();
+        let handle = BalloonHandle::new(balloon, condvar);
+
+        // Set condvar actual = 512 pages (2 MB)
+        {
+            let (lock, _cvar) = &*handle.actual_condvar;
+            *lock.lock().unwrap() = 512;
+        }
+
+        let actual_condvar = handle.actual_condvar.clone();
+        let max_timeout = std::time::Duration::from_millis(50);
+
+        // Signal condvar AFTER max_timeout expires, so await_target loops back and checks timeout
+        thread::spawn(move || {
+            thread::sleep(max_timeout + std::time::Duration::from_millis(20));
+            let (lock, cvar) = &*actual_condvar;
+            // Keep actual at 512 pages (don't change, just signal to wake the waiter)
+            drop(lock.lock().unwrap());
+            cvar.notify_all();
+        });
+
+        let result = handle.await_target(
+            100,                                // large target (won't be reached)
+            std::time::Duration::from_secs(10), // stall_timeout large (won't fire)
+            Some(max_timeout),
+        );
+
+        // Should timeout with actual = 2 MB (512 pages * 4096 / 1048576 = 2)
+        assert!(
+            matches!(result, Err(BalloonError::Timeout { actual: 2 })),
+            "Timeout should report exactly 2 MB from 512 pages, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn test_balloon_resize_exact_boundary_succeeds() {
+        // BalloonHandle::resize(max_mb) should NOT return TargetTooLarge (only > exceeds)
+        let balloon = Arc::new(Mutex::new(devices::virtio::Balloon::new().unwrap()));
+        let condvar = balloon.lock().unwrap().actual_condvar();
+        let handle = BalloonHandle::new(balloon, condvar);
+
+        let max_mb = (u32::MAX as u64) * 4096 / (1024 * 1024);
+        let result = handle.resize(max_mb);
+        // Should be DeviceNotActive (not TargetTooLarge) since exactly at the boundary
+        assert!(
+            matches!(result, Err(BalloonError::DeviceNotActive)),
+            "resize(max_mb) should not trigger TargetTooLarge, got {:?}",
+            result
+        );
+    }
+
+    // Builder::deref tests — verifies Deref/DerefMut impls forward to config
+    #[test]
+    fn test_builder_deref_returns_config() {
+        let mut builder = Builder::new();
+        builder.config.workdir = Some("test".to_string());
+        // Deref should give access to config fields
+        assert_eq!(builder.workdir, Some("test".to_string()));
+    }
+
+    #[test]
+    fn test_builder_deref_mut_allows_config_mutation() {
+        let mut builder = Builder::new();
+        builder.workdir = Some("mutated".to_string());
+        assert_eq!(builder.config.workdir, Some("mutated".to_string()));
+    }
+
+    // add_virtiofs_path field tests (root_dir and allow_root_dir_delete)
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn test_add_virtiofs_path_stores_root_dir() {
+        let mut builder = Builder::new();
+        builder.add_virtiofs_path("tag", "/tmp/mydir", None, false);
+        assert_eq!(builder.config.vmr.fs.len(), 1);
+        // Verify tag is stored
+        assert_eq!(builder.config.vmr.fs[0].tag, "tag");
+    }
+
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn test_set_root_uses_64mb_dax_window() {
+        let mut builder = Builder::new();
+        builder.set_root("/tmp");
+        assert_eq!(builder.config.vmr.fs.len(), 1);
+        assert_eq!(builder.config.vmr.fs[0].tag, "krun_root");
+        // DAX window should be 64 MB = 1 << 26
+        assert_eq!(builder.config.vmr.fs[0].shm_size, Some(1 << 26));
+    }
+
     mod proptest_tests {
         use super::*;
         use proptest::prelude::*;
