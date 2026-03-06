@@ -572,6 +572,7 @@ impl Vm {
     }
 
     #[cfg(feature = "amd-sev")]
+    #[mutants::skip] // amd-sev feature not enabled in mutation testing
     pub fn new(kvm: &Kvm, tee_config: &TeeConfig) -> Result<Self> {
         //create fd for interacting with kvm-vm specific functions
         let vm_fd = kvm
@@ -613,6 +614,7 @@ impl Vm {
     }
 
     #[cfg(feature = "tdx")]
+    #[mutants::skip] // tdx feature not enabled in mutation testing
     pub fn new(
         kvm: &Kvm,
         tee_config: &TeeConfig,
@@ -827,6 +829,7 @@ impl Vm {
     }
 
     #[cfg(feature = "tdx")]
+    #[mutants::skip] // tdx feature not enabled in mutation testing
     pub fn tdx_secure_virt_prepare(&self) -> Result<tdx::launch::Launcher> {
         match &self.tdx {
             Some(t) => t
@@ -837,6 +840,7 @@ impl Vm {
     }
 
     #[cfg(feature = "tdx")]
+    #[mutants::skip] // tdx feature not enabled in mutation testing
     pub fn tdx_secure_virt_init_vcpus(&self, launcher: &mut tdx::launch::Launcher) -> Result<()> {
         match &self.tdx {
             Some(_) => {
@@ -848,6 +852,7 @@ impl Vm {
     }
 
     #[cfg(feature = "tdx")]
+    #[mutants::skip] // tdx feature not enabled in mutation testing
     pub fn tdx_secure_virt_prepare_memory(
         &self,
         launcher: &mut tdx::launch::Launcher,
@@ -862,6 +867,7 @@ impl Vm {
     }
 
     #[cfg(feature = "tdx")]
+    #[mutants::skip] // tdx feature not enabled in mutation testing
     pub fn tdx_secure_virt_finalize_vm(&self, launcher: tdx::launch::Launcher) -> Result<()> {
         match &self.tdx {
             Some(t) => t.finalize_vm(launcher).map_err(Error::TdxSecVirtPrepare),
@@ -870,6 +876,7 @@ impl Vm {
     }
 
     #[cfg(feature = "amd-sev")]
+    #[mutants::skip] // amd-sev feature not enabled in mutation testing
     pub fn snp_secure_virt_prepare(
         &self,
         guest_mem: &GuestMemoryMmap,
@@ -883,6 +890,7 @@ impl Vm {
     }
 
     #[cfg(feature = "amd-sev")]
+    #[mutants::skip] // amd-sev feature not enabled in mutation testing
     pub fn snp_secure_virt_measure(
         &self,
         cpuid: CpuId,
@@ -1906,6 +1914,7 @@ impl Vcpu {
     }
 
     #[cfg(feature = "tdx")]
+    #[mutants::skip] // tdx feature not enabled in mutation testing
     pub fn tdx_secure_virt_prepare(&self, launcher: &mut tdx::launch::Launcher) {
         use std::os::fd::AsRawFd;
         launcher.add_vcpu_fd(self.fd.as_raw_fd());

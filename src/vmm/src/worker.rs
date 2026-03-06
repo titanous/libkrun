@@ -104,6 +104,7 @@ impl super::Vmm {
     }
 
     #[cfg(feature = "tee")]
+    #[mutants::skip] // tee feature not enabled in mutation testing
     fn convert_memory(&self, sender: Sender<bool>, properties: MemoryProperties) {
         let Some((guest_memfd, region_start)) = self.kvm_vm().guest_memfd_get(properties.gpa)
         else {

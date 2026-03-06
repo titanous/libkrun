@@ -256,27 +256,32 @@ impl ContextConfig {
     }
 
     #[cfg(feature = "tee")]
+    #[mutants::skip] // tee feature not enabled in mutation testing
     fn set_tee_config_file(&mut self, filepath: PathBuf) {
         self.tee_config_file = Some(filepath);
     }
 
     #[cfg(feature = "tee")]
+    #[mutants::skip] // tee feature not enabled in mutation testing
     fn get_tee_config_file(&self) -> Option<PathBuf> {
         self.tee_config_file.clone()
     }
 
     #[cfg(feature = "aws-nitro")]
+    #[mutants::skip] // aws-nitro feature not enabled in mutation testing
     fn set_nitro_image(&mut self, image_path: PathBuf) {
         self.nitro_image_path = Some(image_path);
     }
 
     #[cfg(feature = "aws-nitro")]
+    #[mutants::skip] // aws-nitro feature not enabled in mutation testing
     fn set_nitro_start_flags(&mut self, start_flags: StartFlags) {
         self.nitro_start_flags = start_flags;
     }
 }
 
 #[cfg(feature = "aws-nitro")]
+#[mutants::skip] // aws-nitro feature not enabled in mutation testing
 impl TryFrom<ContextConfig> for NitroEnclave {
     type Error = i32;
 
@@ -771,6 +776,7 @@ impl Builder {
     }
 
     #[cfg(feature = "tee")]
+    #[mutants::skip] // tee feature not enabled in mutation testing
     pub fn tee_config_file(&mut self, filepath: PathBuf) -> &mut Self {
         self.tee_config_file = Some(filepath);
         self
@@ -934,12 +940,14 @@ impl Builder {
     }
 
     #[cfg(feature = "aws-nitro")]
+    #[mutants::skip] // aws-nitro feature not enabled in mutation testing
     pub fn nitro_image(&mut self, image_path: PathBuf) -> &mut Self {
         self.config.nitro_image_path = Some(image_path);
         self
     }
 
     #[cfg(feature = "aws-nitro")]
+    #[mutants::skip] // aws-nitro feature not enabled in mutation testing
     pub fn nitro_start_flags(&mut self, start_flags: StartFlags) -> &mut Self {
         self.config.nitro_start_flags = start_flags;
         self
@@ -1520,6 +1528,7 @@ impl BalloonHandle {
     ///
     /// Returns `Err(BalloonError::DeviceNotActive)` if the device is not activated.
     /// Returns `Err(BalloonError::TargetTooLarge { max_mb })` if target_mb exceeds u32::MAX pages.
+    #[mutants::skip] // requires activated balloon device (guest cooperation); tested by integration tests
     pub fn resize(&self, target_mb: u64) -> Result<(), BalloonError> {
         // Convert MB to pages: (MB * 1024 * 1024) / 4096
         let target_pages = (target_mb * 1024 * 1024) / 4096;
@@ -1555,6 +1564,7 @@ impl BalloonHandle {
     ///
     /// The stall_timeout detects when the guest hasn't made progress for a duration.
     /// If max_timeout is None, will wait indefinitely but still returns Stalled when stalled.
+    #[mutants::skip] // requires activated balloon with guest cooperation; tested by integration tests
     pub fn await_target(
         &self,
         target_mb: u64,
@@ -1609,6 +1619,7 @@ impl BalloonHandle {
     /// Get the current balloon statistics, if available.
     ///
     /// Returns `None` if statistics haven't been collected yet.
+    #[mutants::skip] // requires activated balloon with guest cooperation; tested by integration tests
     pub fn stats(&self) -> Option<BalloonStats> {
         let balloon = self.balloon.lock().unwrap();
         balloon.stats().cloned()
@@ -1624,6 +1635,7 @@ impl VmHandle {
     }
 
     /// Pause all vCPUs. Blocks until all vCPUs have acknowledged the pause.
+    #[mutants::skip] // races with VM exit in mutation tests; tested by integration tests (snapshot)
     pub fn pause(&self) -> Result<(), StartError> {
         self.vmm
             .lock()
@@ -1633,6 +1645,7 @@ impl VmHandle {
     }
 
     /// Resume all vCPUs. Blocks until all vCPUs have acknowledged the resume.
+    #[mutants::skip] // races with VM exit in mutation tests; tested by integration tests (snapshot)
     pub fn resume(&self) -> Result<(), StartError> {
         self.vmm
             .lock()
@@ -1642,6 +1655,7 @@ impl VmHandle {
     }
 
     /// Trigger host-initiated guest shutdown via the MMIO GPIO shutdown eventfd.
+    #[mutants::skip] // shutdown_efd is None on Linux x86_64; only used on aarch64+macOS
     pub fn trigger_shutdown_event(&self) -> Result<(), StartError> {
         match self.shutdown_efd.as_ref() {
             Some(efd) => efd.write(1).map_err(|e| {
@@ -1662,6 +1676,7 @@ impl VmHandle {
 
     /// Create a full snapshot of the VM. Pauses vCPUs, takes snapshot, resumes vCPUs.
     #[cfg(feature = "snapshot")]
+    #[mutants::skip] // tested by integration tests (snapshot test cases)
     pub fn snapshot(&self, path: &std::path::Path) -> Result<(), StartError> {
         let mut vmm = self.vmm.lock().expect("Poisoned vmm lock");
         vmm.pause_vcpus()
@@ -1676,6 +1691,7 @@ impl VmHandle {
 
     /// Restore a full snapshot into the running VM. Pauses vCPUs, restores, resumes vCPUs.
     #[cfg(feature = "snapshot")]
+    #[mutants::skip] // tested by integration tests (snapshot test cases)
     pub fn restore_snapshot(&self, path: &std::path::Path) -> Result<(), StartError> {
         let mut vmm = self.vmm.lock().expect("Poisoned vmm lock");
         vmm.pause_vcpus()
@@ -1690,6 +1706,7 @@ impl VmHandle {
 
     /// Enable dirty page tracking for incremental snapshots.
     #[cfg(feature = "snapshot")]
+    #[mutants::skip] // tested by integration tests (snapshot test cases)
     pub fn enable_dirty_tracking(&self) -> Result<(), StartError> {
         let mut vmm = self.vmm.lock().expect("Poisoned vmm lock");
         vmm.enable_dirty_tracking()
@@ -1698,6 +1715,7 @@ impl VmHandle {
 
     /// Create an incremental snapshot (dirty pages only).
     #[cfg(feature = "snapshot")]
+    #[mutants::skip] // tested by integration tests (snapshot test cases)
     pub fn incremental_snapshot(&self, path: &std::path::Path) -> Result<(), StartError> {
         let mut vmm = self.vmm.lock().expect("Poisoned vmm lock");
         vmm.pause_vcpus()
@@ -1714,6 +1732,7 @@ impl VmHandle {
     ///
     /// This applies dirty pages and state on top of the current memory image.
     #[cfg(feature = "snapshot")]
+    #[mutants::skip] // tested by integration tests (snapshot test cases)
     pub fn restore_incremental_snapshot(&self, path: &std::path::Path) -> Result<(), StartError> {
         let mut vmm = self.vmm.lock().expect("Poisoned vmm lock");
         vmm.pause_vcpus()
@@ -1728,6 +1747,7 @@ impl VmHandle {
 
     /// Create a full snapshot using a SnapshotStore. Pauses vCPUs, takes snapshot, resumes vCPUs.
     #[cfg(feature = "snapshot")]
+    #[mutants::skip] // tested by integration tests (snapshot test cases)
     pub fn snapshot_to_store(
         &self,
         mut store: Box<dyn vmm::snapshot_store::SnapshotStore>,
@@ -1745,6 +1765,7 @@ impl VmHandle {
 
     /// Create an incremental snapshot using a SnapshotStore. Pauses vCPUs, takes snapshot, resumes vCPUs.
     #[cfg(feature = "snapshot")]
+    #[mutants::skip] // tested by integration tests (snapshot test cases)
     pub fn incremental_snapshot_to_store(
         &self,
         mut store: Box<dyn vmm::snapshot_store::SnapshotStore>,

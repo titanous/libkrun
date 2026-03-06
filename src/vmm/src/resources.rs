@@ -116,6 +116,7 @@ pub struct TeeConfig {
 }
 
 #[cfg(feature = "tee")]
+#[mutants::skip] // tee feature not enabled in mutation testing
 impl Default for TeeConfig {
     fn default() -> Self {
         Self {
@@ -358,11 +359,13 @@ impl VmResources {
     }
 
     #[cfg(feature = "tee")]
+    #[mutants::skip] // tee feature not enabled in mutation testing
     pub fn qboot_bundle(&self) -> Option<&QbootBundle> {
         self.qboot_bundle.as_ref()
     }
 
     #[cfg(feature = "tee")]
+    #[mutants::skip] // tee feature not enabled in mutation testing
     pub fn set_qboot_bundle(&mut self, qboot_bundle: QbootBundle) -> Result<QbootBundleError> {
         if qboot_bundle.size != 0x10000 {
             return Err(QbootBundleError::InvalidSize);
@@ -373,11 +376,13 @@ impl VmResources {
     }
 
     #[cfg(feature = "tee")]
+    #[mutants::skip] // tee feature not enabled in mutation testing
     pub fn initrd_bundle(&self) -> Option<&InitrdBundle> {
         self.initrd_bundle.as_ref()
     }
 
     #[cfg(feature = "tee")]
+    #[mutants::skip] // tee feature not enabled in mutation testing
     pub fn set_initrd_bundle(&mut self, initrd_bundle: InitrdBundle) -> Result<KernelBundleError> {
         self.initrd_bundle = Some(initrd_bundle);
         Ok(())
@@ -435,11 +440,13 @@ impl VmResources {
     }
 
     #[cfg(feature = "tee")]
+    #[mutants::skip] // tee feature not enabled in mutation testing
     pub fn tee_config(&self) -> &TeeConfig {
         &self.tee_config
     }
 
     #[cfg(feature = "tee")]
+    #[mutants::skip] // tee feature not enabled in mutation testing
     pub fn set_tee_config(&mut self, filepath: PathBuf) -> Result<Error> {
         let file = File::open(filepath.as_path()).map_err(Error::OpenTeeConfig)?;
         let reader = BufReader::new(file);

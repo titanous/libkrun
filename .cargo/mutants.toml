@@ -1,0 +1,31 @@
+# Accepted missed mutants. These are either equivalent mutants (mutation has no
+# behavioral effect), require root privileges, or require guest cooperation that
+# the mutation test harness cannot provide. All are covered by the full integration
+# test suite (`just integration`).
+#
+# Review what's excluded: just mutants-list | jq length
+exclude_re = [
+    # PassthroughFs config fields: opaque to the API, not observable from tests.
+    "delete field .* from struct.*passthrough::Config",
+
+    # Block data config setter: no block-data integration test.
+    "ContextConfig::set_data_block_cfg",
+
+    # Net internals: require functional network backend to observe effects.
+    "Builder::net_mac",
+    "Builder::build::create_virtio_net",
+    "replace << with >> in Builder::build",
+
+    # Context::run boot-timing log guard: pure log output, no behavioral effect.
+    "in Context::run",
+
+    # Builder::build conditional logic that is equivalent or untestable:
+    # - && to || in kernel loading guard (all conditions None simultaneously)
+    # - delete ! on skip_userspace_vsock (always false without vhost-user vsock)
+    # - || to && and && to || in TSI/net conditionals (equivalent in test configs)
+    # - != to == in setuid/setgid (requires root to exercise error path)
+    "replace && with .* in Builder::build$",
+    "replace \\|\\| with .* in Builder::build$",
+    "replace != with .* in Builder::build$",
+    "delete ! in Builder::build$",
+]

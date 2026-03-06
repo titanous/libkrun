@@ -301,13 +301,12 @@ kani-playback name:
     cargo kani -p cpuid --harness {{name}} --concrete-playback=print 2>/dev/null || \
     echo "No harness named '{{name}}' found in any package"
 
-# Features for mutation testing. Excludes embedded_init (requires init/init binary,
-# which is gitignored and not copied to the fresh temp dir by --gitignore true).
-# Unit tests for devices/vmm don't need to boot a real VM, so this is sufficient.
-mutants_features := "snapshot,uffd,blk,vhost-user"
-
-# Features for integration mutation testing (includes embedded_init).
-mutants_integration_features := "embedded_init,snapshot,uffd,blk,vhost-user"
+# Features for mutation testing. Includes embedded_init so that VM-booting
+# integration tests (src/libkrun/tests/vm_boot.rs) can kill mutants in
+# Builder::build, Context::run, and VmExit plumbing. KRUN_INIT_BIN env var
+# provides the absolute path to the init binary so devices/build.rs can copy
+# it into OUT_DIR even when cargo-mutants copies the workspace to a temp dir.
+mutants_features := "embedded_init,net,snapshot,uffd,blk,vhost-user"
 
 # Packages to mutate. Explicit -p flags prevent cargo-mutants from building the full
 # workspace, which avoids bindgen crates (krun_input, krun_display) that require libclang
@@ -320,17 +319,28 @@ mutants_packages := "-p libkrun -p vmm -p devices -p arch -p kernel -p utils -p 
 mutants_excludes := "-e 'src/rutabaga_gfx' -e 'src/hvf' -e 'src/devices/src/virtio/gpu' -e 'src/devices/src/virtio/snd' -e 'src/devices/src/virtio/input' -e 'src/krun_display'"
 
 # Full mutation test suite. Produces mutants.out/outcomes.json.
-mutants timeout="3600" jobs="32":
+# Builds init binary first and sets KRUN_INIT_BIN so embedded_init works in
+# cargo-mutants temp dirs. LD_LIBRARY_PATH provides libkrunfw for VM boot tests.
+# --include-ignored runs the #[ignore] VM boot tests; --test-threads 1 prevents
+# concurrent VMs from causing resource contention.
+mutants timeout="3600" jobs="8":
+    just build-init
+    KRUN_INIT_BIN="$(realpath init/init)" \
+    LD_LIBRARY_PATH="$(realpath test-prefix/lib64/)${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
     cargo mutants \
       {{mutants_packages}} \
       --features {{mutants_features}} \
       {{mutants_excludes}} \
       --gitignore true \
       --timeout {{timeout}} \
-      --jobs {{jobs}}
+      --jobs {{jobs}} \
+      -- -- --include-ignored --test-threads 1
 
 # Run mutation tests scoped to files changed vs origin/main (fast; suitable for CI on PRs).
-mutants-diff timeout="60" jobs="32":
+mutants-diff timeout="60" jobs="8":
+    just build-init
+    KRUN_INIT_BIN="$(realpath init/init)" \
+    LD_LIBRARY_PATH="$(realpath test-prefix/lib64/)${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
     cargo mutants \
       {{mutants_packages}} \
       --features {{mutants_features}} \
@@ -338,36 +348,17 @@ mutants-diff timeout="60" jobs="32":
       --gitignore true \
       --in-diff origin/main..HEAD \
       --timeout {{timeout}} \
-      --jobs {{jobs}}
+      --jobs {{jobs}} \
+      -- -- --include-ignored --test-threads 1
 
 # Preview mutants that will be generated (no tests run). Fast (~10s).
 mutants-list:
+    KRUN_INIT_BIN="$(realpath init/init)" \
     cargo mutants --list \
       {{mutants_packages}} \
       --features {{mutants_features}} \
       {{mutants_excludes}} \
       --json
-
-# Mutation tests that include VM-booting integration tests in tests/vm_boot.rs.
-# These catch mutants in Builder::build, Context::run, and VmExit plumbing that
-# unit tests cannot reach.
-#
-# Strategy: set KRUN_INIT_BIN to the absolute path of the built init binary so
-# devices/build.rs can copy it into OUT_DIR even when cargo-mutants copies the
-# workspace to a temp dir without the gitignored init/init file.
-#
-# Requires: libkrunfw in LD_LIBRARY_PATH (set by the Nix shell).
-mutants-integration timeout="30" jobs="32":
-    just build-init
-    KRUN_INIT_BIN="$(realpath init/init)" \
-    LD_LIBRARY_PATH="$(realpath test-prefix/lib64/)${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-    cargo mutants \
-      -p libkrun \
-      --features {{mutants_integration_features}} \
-      --gitignore true \
-      --timeout {{timeout}} \
-      --jobs {{jobs}} \
-      -- -- --include-ignored --test-threads 1
 
 # Print summary of last mutation run from mutants.out/outcomes.json.
 mutants-summary:

@@ -28,8 +28,8 @@ Last verified: 2026-03-04
 - `just shuttle [iterations]` - Randomized concurrency testing (default 1000 iterations)
 - `just kani` - All Kani bounded model checking proofs
 - `just kani-proof <name>` - Single Kani proof by harness name
-- `just mutants` - Full mutation testing suite
-- `just mutants-diff` - Mutation tests scoped to diff vs origin/main
+- `just mutants` - Full mutation testing suite (unit + VM boot tests; requires /dev/kvm and libkrunfw)
+- `just mutants-diff` - Mutation tests scoped to diff vs origin/main (same requirements as mutants)
 
 ## Project Structure
 - `src/libkrun/` - Public Rust API (`Builder`, `Context`, `VmHandle`) -- crate type `lib` only (no cdylib)
