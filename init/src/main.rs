@@ -3,7 +3,8 @@
 //! Mounts filesystems, configures the environment, and exec's the workload.
 //! All configuration arrives via kernel cmdline environment variables (KRUN_*).
 
-use std::ffi::{CStr, CString};
+use std::ffi::{CStr, CString, OsString};
+use std::os::unix::ffi::OsStringExt;
 use std::{env, ptr};
 
 // ── Pre-main constructor ───────────────────────────────────────────
@@ -534,8 +535,10 @@ fn main() {
     let krun_init = env::var("KRUN_INIT").ok();
     let exec_path = krun_init.as_deref().unwrap_or(DEFAULT_INIT);
 
-    // Build argv from command line args
-    let args: Vec<String> = env::args().collect();
+    // Build argv from command line args.
+    // Use args_os() to avoid panicking on non-UTF-8 arguments — Linux kernel
+    // cmdline arguments are byte strings and may legally contain non-UTF-8 bytes.
+    let args: Vec<OsString> = env::args_os().collect();
     let mut exec_args: Vec<CString> = Vec::new();
 
     // argv[0] is always the exec path
@@ -543,7 +546,7 @@ fn main() {
 
     // Remaining args from the kernel cmdline " -- " separator
     for arg in args.iter().skip(1) {
-        if let Ok(c) = CString::new(arg.as_str()) {
+        if let Ok(c) = CString::new(arg.clone().into_vec()) {
             exec_args.push(c);
         }
     }
