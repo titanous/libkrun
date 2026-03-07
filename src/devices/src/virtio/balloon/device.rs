@@ -315,11 +315,14 @@ impl Balloon {
                 // Iterate through each PFN in the buffer (4 bytes per PFN)
                 for offset in (0..desc.len).step_by(4) {
                     // Read PFN from guest memory
-                    let pfn = match mem.read_obj::<u32>(
-                        desc.addr
-                            .checked_add(offset as u64)
-                            .expect("PFN offset should not overflow"),
-                    ) {
+                    let addr = match desc.addr.checked_add(offset as u64) {
+                        Some(a) => a,
+                        None => {
+                            warn!("balloon: inflate PFN buffer offset overflow");
+                            break;
+                        }
+                    };
+                    let pfn = match mem.read_obj::<u32>(addr) {
                         Ok(pfn) => pfn,
                         Err(e) => {
                             warn!("balloon: failed to read PFN at offset {}: {:?}", offset, e);
@@ -397,11 +400,14 @@ impl Balloon {
                 // Iterate through each PFN in the buffer (4 bytes per PFN)
                 for offset in (0..desc.len).step_by(4) {
                     // Read PFN from guest memory
-                    let pfn = match mem.read_obj::<u32>(
-                        desc.addr
-                            .checked_add(offset as u64)
-                            .expect("PFN offset should not overflow"),
-                    ) {
+                    let addr = match desc.addr.checked_add(offset as u64) {
+                        Some(a) => a,
+                        None => {
+                            warn!("balloon: deflate PFN buffer offset overflow");
+                            break;
+                        }
+                    };
+                    let pfn = match mem.read_obj::<u32>(addr) {
                         Ok(pfn) => pfn,
                         Err(e) => {
                             warn!("balloon: failed to read PFN at offset {}: {:?}", offset, e);
@@ -2431,6 +2437,141 @@ mod tests {
                 500,
             );
         }
+    }
+
+    /// Regression: process_inflate must not panic when a guest-supplied descriptor
+    /// has addr near u64::MAX, causing checked_add(offset) to overflow.
+    /// CVE: guest-triggered DoS via crafted inflate descriptor.
+    #[test]
+    fn test_process_inflate_desc_addr_overflow_no_panic() {
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x50000)])
+            .expect("Failed to create guest memory");
+
+        let irqchip: crate::legacy::IrqChip = DummyIrqChip::new().into();
+        let interrupt = InterruptTransport::new(irqchip, "test-balloon".into())
+            .expect("Failed to create interrupt transport");
+
+        const DESC_TABLE_ADDR: u64 = 0x1000;
+        const AVAIL_RING_ADDR: u64 = 0x2000;
+        const USED_RING_ADDR: u64 = 0x3000;
+
+        let device_queues: Vec<DeviceQueue> = (0..5)
+            .map(|i| DeviceQueue {
+                queue: {
+                    let mut q = Queue::new(256);
+                    q.size = 256;
+                    q.ready = true;
+                    if i == 0 {
+                        q.desc_table = GuestAddress(DESC_TABLE_ADDR);
+                        q.avail_ring = GuestAddress(AVAIL_RING_ADDR);
+                        q.used_ring = GuestAddress(USED_RING_ADDR);
+                    }
+                    q
+                },
+                event: std::sync::Arc::new(
+                    utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK)
+                        .expect("Failed to create eventfd"),
+                ),
+            })
+            .collect();
+
+        let mut balloon = Balloon::new().expect("Failed to create balloon device");
+        balloon
+            .activate(mem.clone(), interrupt, device_queues)
+            .expect("Failed to activate balloon device");
+
+        // Descriptor with addr near u64::MAX: offset 0 succeeds (read_obj fails
+        // gracefully), but offset 4 overflows checked_add and must not panic.
+        let desc = Descriptor {
+            addr: u64::MAX - 3,
+            len: 8,
+            flags: 0,
+            next: 0,
+        };
+        mem.write_obj(desc, GuestAddress(DESC_TABLE_ADDR))
+            .expect("Failed to write descriptor");
+
+        mem.write_obj(0u16, GuestAddress(AVAIL_RING_ADDR))
+            .expect("Failed to write avail flags");
+        mem.write_obj(1u16, GuestAddress(AVAIL_RING_ADDR + 2))
+            .expect("Failed to write avail idx");
+        mem.write_obj(0u16, GuestAddress(AVAIL_RING_ADDR + 4))
+            .expect("Failed to write avail ring[0]");
+        mem.write_obj(0u16, GuestAddress(USED_RING_ADDR))
+            .expect("Failed to write used flags");
+        mem.write_obj(0u16, GuestAddress(USED_RING_ADDR + 2))
+            .expect("Failed to write used idx");
+
+        // Must not panic — gracefully handle the overflow
+        let result = balloon.process_inflate();
+        assert!(result, "descriptor should still be marked as used");
+    }
+
+    /// Regression: process_deflate must not panic when a guest-supplied descriptor
+    /// has addr near u64::MAX, causing checked_add(offset) to overflow.
+    /// CVE: guest-triggered DoS via crafted deflate descriptor.
+    #[test]
+    fn test_process_deflate_desc_addr_overflow_no_panic() {
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x50000)])
+            .expect("Failed to create guest memory");
+
+        let irqchip: crate::legacy::IrqChip = DummyIrqChip::new().into();
+        let interrupt = InterruptTransport::new(irqchip, "test-balloon".into())
+            .expect("Failed to create interrupt transport");
+
+        const DESC_TABLE_ADDR: u64 = 0x1000;
+        const AVAIL_RING_ADDR: u64 = 0x2000;
+        const USED_RING_ADDR: u64 = 0x3000;
+
+        let device_queues: Vec<DeviceQueue> = (0..5)
+            .map(|i| DeviceQueue {
+                queue: {
+                    let mut q = Queue::new(256);
+                    q.size = 256;
+                    q.ready = true;
+                    if i == 1 {
+                        q.desc_table = GuestAddress(DESC_TABLE_ADDR);
+                        q.avail_ring = GuestAddress(AVAIL_RING_ADDR);
+                        q.used_ring = GuestAddress(USED_RING_ADDR);
+                    }
+                    q
+                },
+                event: std::sync::Arc::new(
+                    utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK)
+                        .expect("Failed to create eventfd"),
+                ),
+            })
+            .collect();
+
+        let mut balloon = Balloon::new().expect("Failed to create balloon device");
+        balloon
+            .activate(mem.clone(), interrupt, device_queues)
+            .expect("Failed to activate balloon device");
+
+        // Descriptor with addr near u64::MAX triggers overflow on second PFN read
+        let desc = Descriptor {
+            addr: u64::MAX - 3,
+            len: 8,
+            flags: 0,
+            next: 0,
+        };
+        mem.write_obj(desc, GuestAddress(DESC_TABLE_ADDR))
+            .expect("Failed to write descriptor");
+
+        mem.write_obj(0u16, GuestAddress(AVAIL_RING_ADDR))
+            .expect("Failed to write avail flags");
+        mem.write_obj(1u16, GuestAddress(AVAIL_RING_ADDR + 2))
+            .expect("Failed to write avail idx");
+        mem.write_obj(0u16, GuestAddress(AVAIL_RING_ADDR + 4))
+            .expect("Failed to write avail ring[0]");
+        mem.write_obj(0u16, GuestAddress(USED_RING_ADDR))
+            .expect("Failed to write used flags");
+        mem.write_obj(0u16, GuestAddress(USED_RING_ADDR + 2))
+            .expect("Failed to write used idx");
+
+        // Must not panic — gracefully handle the overflow
+        let result = balloon.process_deflate();
+        assert!(result, "descriptor should still be marked as used");
     }
 }
 
