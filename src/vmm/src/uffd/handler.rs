@@ -43,6 +43,9 @@ pub struct UffdHandler {
     ready_rx: Option<oneshot::Receiver<()>>,
     /// Receiver to signal shutdown (sender dropped = shutdown)
     shutdown_rx: Option<oneshot::Receiver<()>>,
+    /// Test-only: fires when fault loop is entered (before first select!)
+    #[cfg(test)]
+    entered_tx: Option<oneshot::Sender<()>>,
     /// Page tracker for monitoring restore progress (preload vs fault)
     tracker: Arc<PageTracker>,
 }
@@ -215,6 +218,8 @@ impl UffdHandler {
             regions: uffd_regions,
             ready_rx: Some(ready_rx),
             shutdown_rx: Some(shutdown_rx),
+            #[cfg(test)]
+            entered_tx: None,
             tracker,
         })
     }
@@ -293,6 +298,12 @@ impl UffdHandler {
             .shutdown_rx
             .take()
             .unwrap_or_else(|| oneshot::channel().1);
+
+        // Signal test that fault loop is entered
+        #[cfg(test)]
+        if let Some(tx) = self.entered_tx.take() {
+            let _ = tx.send(());
+        }
 
         loop {
             // Wait for UFFD readable OR shutdown signal
@@ -427,7 +438,6 @@ fn signal_error(vm_exit: &SharedVmExit, message: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     #[test]
     fn handler_thread_exits_on_shutdown_signal() {
@@ -458,6 +468,7 @@ mod tests {
             ready_rx: Some(ready_rx),
             tracker,
             shutdown_rx: Some(shutdown_rx),
+            entered_tx: None,
         };
 
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -497,6 +508,7 @@ mod tests {
         let tracker = Arc::new(super::super::page_tracker::PageTracker::new(0));
         let (ready_tx, ready_rx) = oneshot::channel();
         let (_shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let (entered_tx, entered_rx) = oneshot::channel::<()>();
 
         let handler = UffdHandler {
             uffd,
@@ -506,6 +518,7 @@ mod tests {
             ready_rx: Some(ready_rx),
             tracker,
             shutdown_rx: Some(shutdown_rx),
+            entered_tx: Some(entered_tx),
         };
 
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -516,8 +529,10 @@ mod tests {
         let _ = ready_tx.send(());
         let handle = handler.run(rt);
 
-        // Handler should NOT exit within 100ms (it's waiting for faults)
-        std::thread::sleep(Duration::from_millis(100));
+        // Wait for handler to enter fault loop (deterministic, no sleep)
+        entered_rx
+            .blocking_recv()
+            .expect("handler should enter fault loop");
         assert!(
             !handle.is_finished(),
             "handler should still be running without shutdown signal"
