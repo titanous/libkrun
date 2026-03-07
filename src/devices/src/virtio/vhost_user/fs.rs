@@ -121,6 +121,8 @@ impl VirtioDevice for VhostUserFs {
     }
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {
+        // Zero-fill first to prevent info leak of stale MMIO buffer data
+        data.fill(0);
         let config_slice = self.config.as_slice();
         let config_len = config_slice.len() as u64;
         if offset >= config_len {
@@ -549,6 +551,29 @@ mod tests {
             error.kind(),
             io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
         ));
+    }
+
+    // Info leak: out-of-range read must zero buffer, not leave stale data
+    #[test]
+    fn test_read_config_oob_zeroes_buffer() {
+        let config = VirtioFsConfig::default();
+        let device = VhostUserFs::new_for_test(config, None);
+        let mut buf = [0xFFu8; 4];
+        device.read_config(40, &mut buf); // offset 40 = beyond 40-byte config
+        assert_eq!(buf, [0u8; 4], "out-of-range read must zero buffer");
+    }
+
+    // Info leak: partial read must zero untouched tail bytes
+    #[test]
+    fn test_read_config_partial_zeroes_tail() {
+        let mut config = VirtioFsConfig::default();
+        config.num_request_queues = 0x42;
+        let device = VhostUserFs::new_for_test(config, None);
+        let mut buf = [0xFFu8; 8];
+        device.read_config(36, &mut buf); // offset 36, 8-byte buf → only 4 config bytes fit
+                                          // bytes 0..4 should be num_request_queues LE, bytes 4..8 should be zero
+        assert_eq!(buf[..4], 0x42u32.to_le_bytes());
+        assert_eq!(buf[4..], [0u8; 4], "tail bytes must be zero, not stale");
     }
 
     // AC2.3: Queue layout test with 3 request queues (1 HPQ + 3 request = 4 total)
