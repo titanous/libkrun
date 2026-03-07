@@ -2,6 +2,11 @@ use std::cmp;
 use std::convert::TryInto;
 use std::io::Write;
 
+#[cfg(feature = "shuttle")]
+use shuttle::sync::{Arc as SyncArc, Condvar as SyncCondvar, Mutex as SyncMutex};
+#[cfg(not(feature = "shuttle"))]
+use std::sync::{Arc as SyncArc, Condvar as SyncCondvar, Mutex as SyncMutex};
+
 use utils::eventfd::EventFd;
 use vm_memory::{
     Address, ByteValued, Bytes, GuestAddress, GuestMemoryBackend, GuestMemoryMmap,
@@ -148,7 +153,7 @@ pub struct Balloon {
     hinting_guest_cmd: Option<u32>,
     pub(crate) inflated_bitmap: Option<ReclaimedBitmap>,
     pub(crate) reported_free_bitmap: Option<ReclaimedBitmap>,
-    actual_condvar: std::sync::Arc<(std::sync::Mutex<u64>, std::sync::Condvar)>,
+    actual_condvar: SyncArc<(SyncMutex<u64>, SyncCondvar)>,
 }
 
 /// Validates that a balloon FRQ/PHQ descriptor's address range stays within
@@ -196,10 +201,7 @@ impl Balloon {
             hinting_guest_cmd: None,
             inflated_bitmap: None,
             reported_free_bitmap: None,
-            actual_condvar: std::sync::Arc::new((
-                std::sync::Mutex::new(0),
-                std::sync::Condvar::new(),
-            )),
+            actual_condvar: SyncArc::new((SyncMutex::new(0), SyncCondvar::new())),
         })
     }
 
@@ -207,7 +209,7 @@ impl Balloon {
         defs::BALLOON_DEV_ID
     }
 
-    pub fn actual_condvar(&self) -> std::sync::Arc<(std::sync::Mutex<u64>, std::sync::Condvar)> {
+    pub fn actual_condvar(&self) -> SyncArc<(SyncMutex<u64>, SyncCondvar)> {
         self.actual_condvar.clone()
     }
 
@@ -2252,44 +2254,35 @@ mod tests {
 
     #[cfg(feature = "shuttle")]
     mod shuttle_tests {
-        use shuttle::sync::{Arc, Condvar, Mutex};
+        use super::*;
+        use shuttle::sync::{Arc, Mutex};
         use shuttle::thread;
 
-        /// Shuttle test for the balloon actual-pages condvar pattern.
+        /// Shuttle test: real Balloon::write_config + actual_condvar coordination.
         ///
-        /// Models BalloonHandle::await_target + guest config-write handler coordination:
-        ///   - "guest" thread: sets actual_pages and signals condvar
-        ///     (device.rs lines 671-674: *val = actual_pages; cvar.notify_all())
-        ///   - "VMM" thread: waits on condvar until actual >= target
-        ///     (lib.rs await_target: cvar.wait(actual) loop)
-        ///
-        /// Verifies: condvar wait terminates, no deadlock, correct final value.
-        ///
-        /// Note: Uses cvar.wait (not wait_timeout) since shuttle does not respect
-        /// real wall-clock durations. The stall_timeout path is tested separately
-        /// in unit tests (test_balloon_handle_await_target_stalled_no_progress).
+        /// Exercises production code path: guest thread calls write_config(4, &bytes)
+        /// on a real Balloon (behind Arc<Mutex>), which updates config space and notifies
+        /// the actual_condvar. VMM thread waits on actual_condvar until value >= target.
         #[test]
         fn shuttle_balloon_condvar_no_deadlock() {
             shuttle::check_random(
                 || {
-                    // actual_condvar: Arc<(Mutex<u64>, Condvar)>
-                    // Mirrors device.rs actual_condvar structure (line 147)
-                    let actual_condvar: Arc<(Mutex<u64>, Condvar)> =
-                        Arc::new((Mutex::new(0u64), Condvar::new()));
+                    let balloon = Balloon::new().unwrap();
+                    let condvar = balloon.actual_condvar();
+                    let balloon = Arc::new(Mutex::new(balloon));
 
-                    let target_pages: u64 = 64; // arbitrary target
+                    let target_pages: u64 = 64;
 
-                    // "Guest" thread: writes actual and signals (device.rs lines 671-674)
-                    let condvar_guest = Arc::clone(&actual_condvar);
+                    // Guest thread: write actual field via write_config
+                    let balloon_guest = Arc::clone(&balloon);
                     let guest = thread::spawn(move || {
-                        let (lock, cvar) = &*condvar_guest;
-                        let mut val = lock.lock().unwrap();
-                        *val = target_pages;
-                        cvar.notify_all();
+                        let mut b = balloon_guest.lock().unwrap();
+                        let value = target_pages as u32;
+                        b.write_config(4, &value.to_le_bytes());
                     });
 
-                    // "VMM" thread: await_target loop (lib.rs lines 3483-3514, wait path only)
-                    let condvar_vmm = Arc::clone(&actual_condvar);
+                    // VMM thread: await on actual_condvar until actual >= target
+                    let condvar_vmm = condvar.clone();
                     let vmm = thread::spawn(move || {
                         let (lock, cvar) = &*condvar_vmm;
                         let mut actual = lock.lock().unwrap();
@@ -2298,7 +2291,7 @@ mod tests {
                         }
                         assert!(
                             *actual >= target_pages,
-                            "await_target must observe actual >= target after condvar wait, got {}",
+                            "await_target must observe actual >= target, got {}",
                             *actual
                         );
                     });
@@ -2310,32 +2303,29 @@ mod tests {
             );
         }
 
-        /// Shuttle test: multiple guest updates, VMM observes final value.
+        /// Shuttle test: incremental inflation via real write_config calls.
         ///
-        /// Models incremental inflation: guest sends multiple actual updates before
-        /// reaching target. Verifies VMM loop terminates correctly.
+        /// Guest sends three incremental actual updates through write_config.
+        /// VMM waits on actual_condvar until value reaches target.
         #[test]
         fn shuttle_balloon_incremental_updates_no_deadlock() {
             shuttle::check_random(
                 || {
-                    let actual_condvar: Arc<(Mutex<u64>, Condvar)> =
-                        Arc::new((Mutex::new(0u64), Condvar::new()));
+                    let balloon = Balloon::new().unwrap();
+                    let condvar = balloon.actual_condvar();
+                    let balloon = Arc::new(Mutex::new(balloon));
 
                     let target_pages: u64 = 3;
 
-                    // Guest sends three incremental updates
-                    let condvar_guest = Arc::clone(&actual_condvar);
+                    let balloon_guest = Arc::clone(&balloon);
                     let guest = thread::spawn(move || {
-                        for pages in 1u64..=target_pages {
-                            let (lock, cvar) = &*condvar_guest;
-                            let mut val = lock.lock().unwrap();
-                            *val = pages;
-                            cvar.notify_all();
+                        for pages in 1u32..=(target_pages as u32) {
+                            let mut b = balloon_guest.lock().unwrap();
+                            b.write_config(4, &pages.to_le_bytes());
                         }
                     });
 
-                    // VMM waits until actual reaches target
-                    let condvar_vmm = Arc::clone(&actual_condvar);
+                    let condvar_vmm = condvar.clone();
                     let vmm = thread::spawn(move || {
                         let (lock, cvar) = &*condvar_vmm;
                         let mut actual = lock.lock().unwrap();
@@ -2352,34 +2342,34 @@ mod tests {
             );
         }
 
-        /// Shuttle test for deflation: VMM waits for actual to decrease to target.
+        /// Shuttle test: deflation via real write_config.
         ///
-        /// Models BalloonHandle::await_target for deflation:
-        ///   - "guest" thread: decreases actual_pages and signals condvar
-        ///   - "VMM" thread: waits on condvar until actual <= target
-        ///
-        /// Verifies: condvar wait terminates, no deadlock, correct final value.
+        /// Guest writes a lower actual value through write_config.
+        /// VMM waits on actual_condvar until value <= target.
         #[test]
         fn shuttle_balloon_deflation_condvar_no_deadlock() {
             shuttle::check_random(
                 || {
-                    let initial_pages: u64 = 128;
-                    let target_pages: u64 = 32; // deflate from 128 to 32
+                    let balloon = Balloon::new().unwrap();
+                    let condvar = balloon.actual_condvar();
 
-                    let actual_condvar: Arc<(Mutex<u64>, Condvar)> =
-                        Arc::new((Mutex::new(initial_pages), Condvar::new()));
+                    // Set initial inflated state
+                    {
+                        let (lock, _) = &*condvar;
+                        *lock.lock().unwrap() = 128;
+                    }
 
-                    // "Guest" thread: deflates to target
-                    let condvar_guest = Arc::clone(&actual_condvar);
+                    let balloon = Arc::new(Mutex::new(balloon));
+                    let target_pages: u64 = 32;
+
+                    let balloon_guest = Arc::clone(&balloon);
                     let guest = thread::spawn(move || {
-                        let (lock, cvar) = &*condvar_guest;
-                        let mut val = lock.lock().unwrap();
-                        *val = target_pages;
-                        cvar.notify_all();
+                        let mut b = balloon_guest.lock().unwrap();
+                        let value = target_pages as u32;
+                        b.write_config(4, &value.to_le_bytes());
                     });
 
-                    // "VMM" thread: await_target loop for deflation
-                    let condvar_vmm = Arc::clone(&actual_condvar);
+                    let condvar_vmm = condvar.clone();
                     let vmm = thread::spawn(move || {
                         let (lock, cvar) = &*condvar_vmm;
                         let mut actual = lock.lock().unwrap();
@@ -2388,7 +2378,7 @@ mod tests {
                         }
                         assert!(
                             *actual <= target_pages,
-                            "await_target deflation must observe actual <= target, got {}",
+                            "deflation must observe actual <= target, got {}",
                             *actual
                         );
                     });
@@ -2400,30 +2390,32 @@ mod tests {
             );
         }
 
-        /// Shuttle test: incremental deflation, guest sends multiple updates.
+        /// Shuttle test: incremental deflation via real write_config.
         #[test]
         fn shuttle_balloon_incremental_deflation_no_deadlock() {
             shuttle::check_random(
                 || {
-                    let initial_pages: u64 = 128;
+                    let balloon = Balloon::new().unwrap();
+                    let condvar = balloon.actual_condvar();
+
+                    // Set initial inflated state
+                    {
+                        let (lock, _) = &*condvar;
+                        *lock.lock().unwrap() = 128;
+                    }
+
+                    let balloon = Arc::new(Mutex::new(balloon));
                     let target_pages: u64 = 32;
 
-                    let actual_condvar: Arc<(Mutex<u64>, Condvar)> =
-                        Arc::new((Mutex::new(initial_pages), Condvar::new()));
-
-                    // Guest sends decremental updates
-                    let condvar_guest = Arc::clone(&actual_condvar);
+                    let balloon_guest = Arc::clone(&balloon);
                     let guest = thread::spawn(move || {
-                        for pages in (target_pages..initial_pages).rev() {
-                            let (lock, cvar) = &*condvar_guest;
-                            let mut val = lock.lock().unwrap();
-                            *val = pages;
-                            cvar.notify_all();
+                        for pages in (target_pages as u32..128u32).rev() {
+                            let mut b = balloon_guest.lock().unwrap();
+                            b.write_config(4, &pages.to_le_bytes());
                         }
                     });
 
-                    // VMM waits until actual reaches target
-                    let condvar_vmm = Arc::clone(&actual_condvar);
+                    let condvar_vmm = condvar.clone();
                     let vmm = thread::spawn(move || {
                         let (lock, cvar) = &*condvar_vmm;
                         let mut actual = lock.lock().unwrap();

@@ -243,7 +243,7 @@ integration-asan:
         ./run.sh test
 
 # Uses shuttle crate to sample thread interleavings (not exhaustive like loom).
-# Targets: block worker quiesce, balloon condvar, device state transitions.
+# Targets: balloon condvar (real write_config + actual_condvar coordination).
 # Randomized concurrency testing (default 1000 iterations; pass iterations=N to override).
 shuttle iterations="1000":
     SHUTTLE_ITERATIONS={{iterations}} \

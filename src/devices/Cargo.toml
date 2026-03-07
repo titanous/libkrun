@@ -22,7 +22,7 @@ test_utils = []
 # Embed the init binary in the library. Disable this if you provide a custom init.
 embedded_init = []
 vhost-user = ["vhost"]
-shuttle = []
+shuttle = ["dep:shuttle"]
 
 [dependencies]
 bincode = { version = "1.3", optional = true }
@@ -52,6 +52,7 @@ imago = { version = "0.2.1", features = ["sync-wrappers", "vm-memory"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros", "time", "net", "io-util"], optional = true }
 futures = { version = "0.3", optional = true }
 bytes = { version = "1", optional = true }
+shuttle = { version = "0.8", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 hvf = { path = "../hvf" }
@@ -72,7 +73,6 @@ loom = { version = "0.7", features = ["checkpoint"] }
 [dev-dependencies]
 proptest = "1.4"
 proptest-derive = "0.4"
-shuttle = "0.8"
 mutants = "0.0.3"
 
 [lints.rust]
