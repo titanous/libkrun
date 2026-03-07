@@ -243,6 +243,56 @@ mod tests {
         }
         // If Ok, bounds check also passed - either outcome is valid
     }
+
+    #[test]
+    fn test_init_mapping_plan_len_exceeds_binary() {
+        let (data, zero) = super::init_mapping_plan(8192, 4096);
+        assert_eq!(data, 4096);
+        assert_eq!(zero, 4096);
+    }
+
+    #[test]
+    fn test_init_mapping_plan_exact_match() {
+        let (data, zero) = super::init_mapping_plan(4096, 4096);
+        assert_eq!(data, 4096);
+        assert_eq!(zero, 0);
+    }
+
+    #[test]
+    fn test_init_mapping_plan_len_within_binary() {
+        let (data, zero) = super::init_mapping_plan(2048, 4096);
+        assert_eq!(data, 2048);
+        assert_eq!(zero, 0);
+    }
+
+    #[test]
+    fn test_init_mapping_plan_zero_len() {
+        let (data, zero) = super::init_mapping_plan(0, 4096);
+        assert_eq!(data, 0);
+        assert_eq!(zero, 0);
+    }
+
+    #[test]
+    fn test_init_mapping_plan_zero_binary() {
+        let (data, zero) = super::init_mapping_plan(4096, 0);
+        assert_eq!(data, 0);
+        assert_eq!(zero, 4096);
+    }
+}
+
+/// Computes the init binary DAX mapping plan: how many bytes to map with
+/// init data and how many trailing bytes to unmap (PROT_NONE).
+///
+/// The guest may request a DAX mapping `requested_len` larger than the init
+/// binary (due to page-size alignment). The full range must be covered:
+/// init data for `min(requested_len, init_binary_len)` bytes, then the
+/// remainder is unmapped (PROT_NONE) to prevent stale data exposure.
+///
+/// Called by `PassthroughFs::setupmapping` for the init inode.
+pub(crate) fn init_mapping_plan(requested_len: u64, init_binary_len: u64) -> (u64, u64) {
+    let data_bytes = std::cmp::min(requested_len, init_binary_len);
+    let zero_bytes = requested_len - data_bytes;
+    (data_bytes, zero_bytes)
 }
 
 /// GAP-018: dax_mapper MAP_FIXED arithmetic overflow (fixed)
@@ -378,5 +428,79 @@ mod verification {
         );
         kani::cover!(dax_offset > u64::MAX / 2, "large dax_offset exercised");
         kani::cover!(len > 1, "non-trivial len exercised");
+    }
+
+    /// Init inode DAX mapping must cover the full requested range.
+    ///
+    /// When a guest requests a DAX mapping of `len` bytes for the init inode,
+    /// the sum of init-data bytes and zero-filled bytes must equal `len`.
+    /// Otherwise, the tail of the DAX window retains stale content from prior
+    /// mappings, causing an information disclosure vulnerability.
+    ///
+    /// Breaking change: removing `zero_bytes = requested_len - data_bytes`
+    /// from `init_mapping_plan` (e.g. hardcoding `zero_bytes = 0`) would
+    /// cause this proof to fail.
+    ///
+    /// Bound: no loops; no unwind needed.
+    #[kani::proof]
+    fn proof_init_mapping_full_coverage() {
+        let requested_len: u64 = kani::any_where(|&l| l > 0);
+        let init_binary_len: u64 = kani::any_where(|&s| s > 0);
+
+        let (data_bytes, zero_bytes) = init_mapping_plan(requested_len, init_binary_len);
+
+        // Property 1: full coverage — no byte in [0, requested_len) is left unmapped
+        kani::assert(
+            data_bytes + zero_bytes == requested_len,
+            "init mapping must cover the full requested DAX range (info leak if not)",
+        );
+
+        // Property 2: no out-of-bounds read from init binary
+        kani::assert(
+            data_bytes <= init_binary_len,
+            "data_bytes must not exceed init binary length",
+        );
+
+        // Property 3: no excess mapping beyond request
+        kani::assert(
+            data_bytes <= requested_len,
+            "data_bytes must not exceed requested length",
+        );
+
+        // Coverage: verify the bug case is exercised
+        kani::cover!(
+            requested_len > init_binary_len,
+            "guest requests more than init binary (the info leak case)"
+        );
+        kani::cover!(
+            requested_len == init_binary_len,
+            "exact match — no tail needed"
+        );
+        kani::cover!(
+            requested_len < init_binary_len,
+            "partial init binary — no tail needed"
+        );
+    }
+
+    /// Init mapping data_bytes must not overflow when added to zero_bytes.
+    ///
+    /// Ensures the plan never produces a pair where `data_bytes + zero_bytes`
+    /// wraps u64 (which would falsely satisfy the coverage check).
+    ///
+    /// Breaking change: if `init_mapping_plan` returned values whose sum
+    /// overflows u64, this proof would fail.
+    ///
+    /// Bound: no loops; no unwind needed.
+    #[kani::proof]
+    fn proof_init_mapping_no_overflow() {
+        let requested_len: u64 = kani::any_where(|&l| l > 0);
+        let init_binary_len: u64 = kani::any_where(|&s| s > 0);
+
+        let (data_bytes, zero_bytes) = init_mapping_plan(requested_len, init_binary_len);
+
+        kani::assert(
+            data_bytes.checked_add(zero_bytes).is_some(),
+            "data_bytes + zero_bytes must not overflow u64",
+        );
     }
 }

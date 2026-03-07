@@ -2166,8 +2166,13 @@ impl FileSystem for PassthroughFs {
         let writable = (flags & fuse::SetupmappingFlags::WRITE.bits()) != 0;
 
         if inode == self.init_inode {
-            let to_copy = std::cmp::min(len as usize, INIT_BINARY.len());
-            mapper.map_data(moffset, &INIT_BINARY[..to_copy])?;
+            let (data_bytes, zero_bytes) =
+                super::super::dax_mapper::init_mapping_plan(len, INIT_BINARY.len() as u64);
+            mapper.map_data(moffset, &INIT_BINARY[..data_bytes as usize])?;
+            if zero_bytes > 0 {
+                let tail_offset = moffset.checked_add(data_bytes).ok_or_else(einval)?;
+                mapper.unmap(tail_offset, zero_bytes)?;
+            }
             return Ok(());
         }
 
