@@ -41,6 +41,8 @@ pub struct UffdHandler {
     regions: Vec<UffdRegion>,
     /// Receiver to signal that main thread is ready for faults
     ready_rx: Option<oneshot::Receiver<()>>,
+    /// Receiver to signal shutdown (sender dropped = shutdown)
+    shutdown_rx: Option<oneshot::Receiver<()>>,
     /// Page tracker for monitoring restore progress (preload vs fault)
     tracker: Arc<PageTracker>,
 }
@@ -156,6 +158,7 @@ impl UffdHandler {
     /// * `vm_exit` - Shared VM exit state for signaling errors
     /// * `regions` - Memory regions to register (guest_addr, host_addr, size)
     /// * `ready_rx` - Receiver to signal handler when main thread is ready
+    /// * `shutdown_rx` - Receiver for shutdown signal; sender drop triggers fault loop exit
     ///
     /// # Returns
     /// `Ok(handler)` if UFFD creation and registration succeeds.
@@ -165,6 +168,7 @@ impl UffdHandler {
         vm_exit: SharedVmExit,
         regions: Vec<(u64, u64, u64)>,
         ready_rx: oneshot::Receiver<()>,
+        shutdown_rx: oneshot::Receiver<()>,
     ) -> std::io::Result<Self> {
         // Create UFFD fd with non-blocking mode for AsyncFd integration
         let uffd = userfaultfd::UffdBuilder::new()
@@ -210,6 +214,7 @@ impl UffdHandler {
             vm_exit,
             regions: uffd_regions,
             ready_rx: Some(ready_rx),
+            shutdown_rx: Some(shutdown_rx),
             tracker,
         })
     }
@@ -266,6 +271,7 @@ impl UffdHandler {
     /// Main async fault loop.
     ///
     /// Waits for main thread ready signal, then handles UFFD page faults.
+    /// Exits when shutdown_rx fires (sender dropped) or UFFD fd closes.
     async fn fault_loop(mut self) {
         // Wait for main thread to signal ready (device/vCPU states restored)
         if let Some(ready_rx) = self.ready_rx.take() {
@@ -282,11 +288,20 @@ impl UffdHandler {
             Err(_) => return, // Failed to create AsyncFd
         };
 
+        // Take shutdown receiver for use in select!
+        let mut shutdown_rx = self
+            .shutdown_rx
+            .take()
+            .unwrap_or_else(|| oneshot::channel().1);
+
         loop {
-            // Wait for UFFD to be readable
-            let mut guard = match async_uffd.readable().await {
-                Ok(guard) => guard,
-                Err(_) => break, // UFFD fd closed (shutdown)
+            // Wait for UFFD readable OR shutdown signal
+            let mut guard = tokio::select! {
+                result = async_uffd.readable() => match result {
+                    Ok(guard) => guard,
+                    Err(_) => break, // UFFD fd closed
+                },
+                _ = &mut shutdown_rx => break, // Shutdown signaled
             };
 
             // Read event (non-blocking)
@@ -406,6 +421,111 @@ fn signal_error(vm_exit: &SharedVmExit, message: String) {
         if exit.is_none() {
             *exit = Some(crate::vm_exit::VmExit::Error { message });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn handler_thread_exits_on_shutdown_signal() {
+        // Try to create UFFD — skip gracefully if unprivileged
+        let uffd = match userfaultfd::UffdBuilder::new()
+            .close_on_exec(true)
+            .non_blocking(true)
+            .user_mode_only(true)
+            .create()
+        {
+            Ok(uffd) => Arc::new(uffd),
+            Err(_) => {
+                eprintln!("skipping: UFFD not available (unprivileged_userfaultfd=0)");
+                return;
+            }
+        };
+
+        let vm_exit: SharedVmExit = Arc::new(std::sync::Mutex::new(None));
+        let tracker = Arc::new(super::super::page_tracker::PageTracker::new(0));
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+
+        let handler = UffdHandler {
+            uffd,
+            store: Arc::new(crate::snapshot_store::tests::NullSnapshotStore),
+            vm_exit,
+            regions: vec![],
+            ready_rx: Some(ready_rx),
+            tracker,
+            shutdown_rx: Some(shutdown_rx),
+        };
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        // Signal ready so handler enters fault loop
+        let _ = ready_tx.send(());
+        // Signal shutdown so handler exits
+        drop(shutdown_tx);
+
+        let handle = handler.run(rt);
+        let result = handle.join();
+        assert!(
+            result.is_ok(),
+            "handler thread should exit cleanly on shutdown"
+        );
+    }
+
+    #[test]
+    fn handler_thread_does_not_exit_without_shutdown() {
+        let uffd = match userfaultfd::UffdBuilder::new()
+            .close_on_exec(true)
+            .non_blocking(true)
+            .user_mode_only(true)
+            .create()
+        {
+            Ok(uffd) => Arc::new(uffd),
+            Err(_) => {
+                eprintln!("skipping: UFFD not available (unprivileged_userfaultfd=0)");
+                return;
+            }
+        };
+
+        let vm_exit: SharedVmExit = Arc::new(std::sync::Mutex::new(None));
+        let tracker = Arc::new(super::super::page_tracker::PageTracker::new(0));
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let (_shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+
+        let handler = UffdHandler {
+            uffd,
+            store: Arc::new(crate::snapshot_store::tests::NullSnapshotStore),
+            vm_exit,
+            regions: vec![],
+            ready_rx: Some(ready_rx),
+            tracker,
+            shutdown_rx: Some(shutdown_rx),
+        };
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let _ = ready_tx.send(());
+        let handle = handler.run(rt);
+
+        // Handler should NOT exit within 100ms (it's waiting for faults)
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            !handle.is_finished(),
+            "handler should still be running without shutdown signal"
+        );
+
+        // Clean up: drop the shutdown sender to unblock the handler
+        drop(_shutdown_tx);
+        handle.join().ok();
     }
 }
 

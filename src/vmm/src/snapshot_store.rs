@@ -572,8 +572,32 @@ impl SnapshotStoreFactory for FsSnapshotStoreFactory {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// Minimal SnapshotStore for tests that don't need real snapshot data.
+    pub(crate) struct NullSnapshotStore;
+
+    impl SnapshotStore for NullSnapshotStore {
+        fn read_vmstate(&self) -> SendBoxFuture<'_, io::Result<Vec<u8>>> {
+            Box::pin(async { Ok(vec![]) })
+        }
+        fn read_page(&self, _guest_addr: u64) -> SendBoxFuture<'_, io::Result<Option<Vec<u8>>>> {
+            Box::pin(async { Ok(None) })
+        }
+        fn preload(&self, _regions: Vec<(u64, u64)>) -> BoxStream<'_, io::Result<(u64, Vec<u8>)>> {
+            Box::pin(futures::stream::iter(vec![]))
+        }
+        fn write_vmstate(&self, _data: Vec<u8>) -> SendBoxFuture<'_, io::Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn write_pages(&self, _pages: Vec<(u64, Vec<u8>)>) -> SendBoxFuture<'_, io::Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn close(&self) -> SendBoxFuture<'_, io::Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
 
     /// Mock implementation for testing trait object-safety and method signatures.
     struct MockSnapshotStore;

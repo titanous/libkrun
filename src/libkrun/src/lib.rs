@@ -1378,14 +1378,17 @@ impl Context {
                     })
                 })?;
 
-                let handler =
+                let (handler, shutdown_tx) =
                     self.built_vm
                         .restore_from_store_with_uffd(vmstate_bytes, store, rt)?;
-                Some(handler)
+                Some((handler, shutdown_tx))
             };
 
             #[cfg(not(feature = "uffd"))]
-            let uffd_thread: Option<std::thread::JoinHandle<()>> = {
+            let uffd_thread: Option<(
+                std::thread::JoinHandle<()>,
+                tokio::sync::oneshot::Sender<()>,
+            )> = {
                 let vmstate_bytes = rt.block_on(async {
                     store.read_vmstate().await.map_err(|e| {
                         StartError::Microvm(vmm::builder::StartMicrovmError::Internal(
@@ -1406,7 +1409,9 @@ impl Context {
 
                 // Check if the VM has exited
                 if let Some(vm_exit) = self.vm_exit.lock().expect("Poisoned vm_exit lock").take() {
-                    if let Some(handler) = uffd_thread {
+                    if let Some((handler, shutdown_tx)) = uffd_thread {
+                        // Signal shutdown, then join the handler thread
+                        drop(shutdown_tx);
                         handler.join().ok();
                     }
                     return Ok(vm_exit);

@@ -652,14 +652,21 @@ impl Vmm {
     /// The caller must read vmstate from the store before calling this method.
     /// Validation happens before UFFD setup so failures don't leave dangling threads.
     ///
-    /// Returns the UFFD handler thread handle.
+    /// Returns `(handler_thread, shutdown_tx)`. Drop `shutdown_tx` to signal
+    /// the UFFD handler to exit its fault loop.
     #[cfg(all(target_os = "linux", feature = "uffd"))]
     pub fn restore_from_store_with_uffd(
         &mut self,
         vmstate_bytes: Vec<u8>,
         mut store: Box<dyn snapshot_store::SnapshotStore>,
         rt: tokio::runtime::Runtime,
-    ) -> std::result::Result<std::thread::JoinHandle<()>, snapshot::SnapshotError> {
+    ) -> std::result::Result<
+        (
+            std::thread::JoinHandle<()>,
+            tokio::sync::oneshot::Sender<()>,
+        ),
+        snapshot::SnapshotError,
+    > {
         // Deserialize and validate vmstate BEFORE creating UFFD handler or starting threads.
         // If validation fails, no cleanup is needed.
         let vmstate: snapshot::VmSnapshot = bincode::deserialize(&vmstate_bytes)
@@ -707,15 +714,19 @@ impl Vmm {
         let store_arc: Arc<dyn snapshot_store::SnapshotStore> = Arc::from(store);
 
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
 
         // Create and spawn UFFD handler on dedicated thread
-        let handler =
-            uffd::UffdHandler::new(store_arc, self.vm_exit.clone(), uffd_regions, ready_rx)
-                .map_err(|e| {
-                    snapshot::SnapshotError::Deserialize(format!(
-                        "Failed to create UFFD handler: {e}"
-                    ))
-                })?;
+        let handler = uffd::UffdHandler::new(
+            store_arc,
+            self.vm_exit.clone(),
+            uffd_regions,
+            ready_rx,
+            shutdown_rx,
+        )
+        .map_err(|e| {
+            snapshot::SnapshotError::Deserialize(format!("Failed to create UFFD handler: {e}"))
+        })?;
 
         let handler_thread = handler.run(rt);
 
@@ -725,7 +736,7 @@ impl Vmm {
         // Signal handler that main thread is ready; handler will start fault loop
         let _ = ready_tx.send(());
 
-        Ok(handler_thread)
+        Ok((handler_thread, shutdown_tx))
     }
 
     /// Sends a resume command to the vcpus.

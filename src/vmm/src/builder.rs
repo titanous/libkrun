@@ -796,14 +796,20 @@ impl BuiltVm {
     /// Restore from a SnapshotStore using UFFD demand-paging.
     /// vCPUs must not yet be started. Vmstate is validated before starting vCPU threads
     /// or UFFD handler, so validation failures have no cleanup cost.
-    /// Returns the UFFD handler thread handle.
+    /// Returns `(handler_thread, shutdown_tx)`.
     #[cfg(all(target_os = "linux", feature = "uffd"))]
     pub fn restore_from_store_with_uffd(
         &mut self,
         vmstate_bytes: Vec<u8>,
         store: Box<dyn super::snapshot_store::SnapshotStore>,
         rt: tokio::runtime::Runtime,
-    ) -> std::result::Result<std::thread::JoinHandle<()>, StartMicrovmError> {
+    ) -> std::result::Result<
+        (
+            std::thread::JoinHandle<()>,
+            tokio::sync::oneshot::Sender<()>,
+        ),
+        StartMicrovmError,
+    > {
         let mut vmm = self.vmm.lock().expect("Poisoned vmm lock");
 
         let snapshot_err = |e: super::snapshot::SnapshotError| {
@@ -837,7 +843,7 @@ impl BuiltVm {
             .map_err(StartMicrovmError::Internal)?;
 
         // Step 3: Set up UFFD handler, restore device/vCPU states
-        let handler_thread = vmm
+        let (handler_thread, shutdown_tx) = vmm
             .restore_from_store_with_uffd(vmstate_bytes, store, rt)
             .map_err(snapshot_err)?;
 
@@ -845,7 +851,7 @@ impl BuiltVm {
         vmm.resume_vcpus().map_err(StartMicrovmError::Internal)?;
 
         drop(vmm);
-        Ok(handler_thread)
+        Ok((handler_thread, shutdown_tx))
     }
 }
 
