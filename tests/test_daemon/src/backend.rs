@@ -521,7 +521,7 @@ impl FsBackend {
             if let Some((dax_ptr, dax_size)) = self.dax_window {
                 let moffset = setupmapping.moffset as usize;
                 let len = setupmapping.len as usize;
-                if moffset + len <= dax_size {
+                if moffset <= dax_size && len <= dax_size - moffset {
                     unsafe {
                         std::ptr::write_bytes(dax_ptr.add(moffset), fs.dax_pattern, len);
                     }
