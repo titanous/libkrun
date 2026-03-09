@@ -441,7 +441,9 @@ impl IrqChipT for GicV3 {
 
     #[cfg(feature = "snapshot")]
     fn restore_snapshot_state(&mut self, data: &[u8]) {
-        if let Ok(state) = crate::snapshot_serde::deserialize::<GicV3SnapshotState, { MAX_SNAPSHOT_BYTES }>(data) {
+        if let Ok(state) =
+            crate::snapshot_serde::deserialize::<GicV3SnapshotState, { MAX_SNAPSHOT_BYTES }>(data)
+        {
             self.gicd_ctlr = state.gicd_ctlr;
             if state.edge_trigger.len() == self.edge_trigger.len() {
                 self.edge_trigger.copy_from_slice(&state.edge_trigger);
