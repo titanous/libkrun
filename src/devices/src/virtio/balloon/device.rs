@@ -125,7 +125,10 @@ impl BalloonStats {
 #[allow(dead_code)]
 const MAX_SNAPSHOT_BYTES: usize = 128;
 
-#[cfg_attr(feature = "snapshot", derive(bincode_next::Encode, bincode_next::Decode))]
+#[cfg_attr(
+    feature = "snapshot",
+    derive(bincode_next::Encode, bincode_next::Decode)
+)]
 #[derive(Debug, Clone)]
 struct BalloonState {
     /// Config space: num_pages (inflation target set by host)

@@ -658,7 +658,10 @@ impl BusDevice for MmioTransport {
 const MAX_SNAPSHOT_BYTES: usize = 4096;
 
 /// Serializable state for an MmioTransport device.
-#[cfg_attr(feature = "snapshot", derive(bincode_next::Encode, bincode_next::Decode))]
+#[cfg_attr(
+    feature = "snapshot",
+    derive(bincode_next::Encode, bincode_next::Decode)
+)]
 #[derive(Debug, Clone)]
 pub struct MmioTransportState {
     pub features_select: u32,
@@ -679,7 +682,10 @@ pub struct MmioTransportState {
 }
 
 /// Serializable state for a virtio queue.
-#[cfg_attr(feature = "snapshot", derive(bincode_next::Encode, bincode_next::Decode))]
+#[cfg_attr(
+    feature = "snapshot",
+    derive(bincode_next::Encode, bincode_next::Decode)
+)]
 #[derive(Debug, Clone)]
 pub struct QueueState {
     pub size: u16,
