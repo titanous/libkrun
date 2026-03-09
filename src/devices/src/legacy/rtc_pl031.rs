@@ -61,7 +61,10 @@ impl fmt::Display for Error {
 }
 type Result<T> = result::Result<T, Error>;
 
-#[cfg_attr(feature = "snapshot", derive(bincode_next::Encode, bincode_next::Decode))]
+#[cfg_attr(
+    feature = "snapshot",
+    derive(bincode_next::Encode, bincode_next::Decode)
+)]
 #[derive(Debug, Clone)]
 struct RtcState {
     tick_offset: i64,

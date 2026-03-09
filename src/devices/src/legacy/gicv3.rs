@@ -108,6 +108,9 @@ pub struct GicV3 {
     properties: [u64; 4],
 }
 
+#[cfg(feature = "snapshot")]
+const MAX_SNAPSHOT_BYTES: usize = 4096;
+
 impl GicV3 {
     /// Get the address of the GICv3 distributor.
     pub fn get_dist_addr(&self) -> u64 {
@@ -389,7 +392,7 @@ impl GicV3 {
 }
 
 #[cfg(feature = "snapshot")]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(bincode_next::Encode, bincode_next::Decode)]
 struct GicV3SnapshotState {
     gicd_ctlr: u32,
     edge_trigger: Vec<u32>,
@@ -433,12 +436,12 @@ impl IrqChipT for GicV3 {
             gicr_waker: self.gicr_waker,
             gicd_irouter: self.gicd_irouter.to_vec(),
         };
-        bincode::serialize(&state).ok()
+        crate::snapshot_serde::serialize(&state).ok()
     }
 
     #[cfg(feature = "snapshot")]
     fn restore_snapshot_state(&mut self, data: &[u8]) {
-        if let Ok(state) = bincode::deserialize::<GicV3SnapshotState>(data) {
+        if let Ok(state) = crate::snapshot_serde::deserialize::<GicV3SnapshotState, { MAX_SNAPSHOT_BYTES }>(data) {
             self.gicd_ctlr = state.gicd_ctlr;
             if state.edge_trigger.len() == self.edge_trigger.len() {
                 self.edge_trigger.copy_from_slice(&state.edge_trigger);

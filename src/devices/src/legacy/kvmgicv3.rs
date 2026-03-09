@@ -16,6 +16,9 @@ const KVM_VGIC_V3_BASE_SIZE: u64 = 0x0001_0000;
 // Device trees specific constants
 const ARCH_GIC_V3_MAINT_IRQ: u32 = 9;
 
+#[cfg(feature = "snapshot")]
+const MAX_SNAPSHOT_BYTES: usize = 4096;
+
 // GIC distributor register offsets
 #[cfg(feature = "snapshot")]
 const GICD_CTLR: u64 = 0x0000;
@@ -73,7 +76,7 @@ pub struct KvmGicV3 {
 }
 
 #[cfg(feature = "snapshot")]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(bincode_next::Encode, bincode_next::Decode)]
 struct GicV3State {
     /// Distributor registers: (offset, value)
     dist_regs: Vec<(u64, u32)>,
@@ -379,10 +382,10 @@ impl IrqChipT for KvmGicV3 {
     #[cfg(feature = "snapshot")]
     fn save_snapshot_state(&self) -> Option<Vec<u8>> {
         match self.save_gic_state() {
-            Ok(state) => match bincode::serialize(&state) {
+            Ok(state) => match crate::snapshot_serde::serialize(&state) {
                 Ok(data) => Some(data),
                 Err(e) => {
-                    error!("Failed to serialize GIC state: {e}");
+                    error!("Failed to serialize GIC state: {e:?}");
                     None
                 }
             },
@@ -395,14 +398,14 @@ impl IrqChipT for KvmGicV3 {
 
     #[cfg(feature = "snapshot")]
     fn restore_snapshot_state(&mut self, data: &[u8]) {
-        match bincode::deserialize::<GicV3State>(data) {
+        match crate::snapshot_serde::deserialize::<GicV3State, { MAX_SNAPSHOT_BYTES }>(data) {
             Ok(state) => {
                 if let Err(e) = self.restore_gic_state(&state) {
                     error!("Failed to restore GIC state: {e}");
                 }
             }
             Err(e) => {
-                error!("Failed to deserialize GIC state: {e}");
+                error!("Failed to deserialize GIC state: {e:?}");
             }
         }
     }

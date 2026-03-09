@@ -85,7 +85,10 @@ pub struct Gpio {
     shutdown_efd: EventFd,
 }
 
-#[cfg_attr(feature = "snapshot", derive(bincode_next::Encode, bincode_next::Decode))]
+#[cfg_attr(
+    feature = "snapshot",
+    derive(bincode_next::Encode, bincode_next::Decode)
+)]
 #[derive(Debug, Clone)]
 struct GpioState {
     data: u32,
