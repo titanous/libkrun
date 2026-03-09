@@ -20,11 +20,14 @@ use crate::virtio::{ActivateResult, Queue};
 use super::VhostUserDevice;
 
 #[cfg(feature = "snapshot")]
+use crate::snapshot_serde;
+#[cfg(feature = "snapshot")]
 use vhost::VhostBackend;
 
 const VIRTIO_ID_VSOCK: u32 = 19;
 const NUM_QUEUES: usize = 3; // RX, TX, Event
 const QUEUE_SIZE: u16 = 256;
+const MAX_SNAPSHOT_BYTES: usize = 8192;
 
 #[derive(Debug)]
 pub struct VhostUserVsock {
@@ -42,7 +45,7 @@ pub struct VhostUserVsock {
 
 /// Snapshot state for VhostUserVsock device.
 #[cfg(feature = "snapshot")]
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, bincode_next::Encode, bincode_next::Decode)]
 pub(crate) struct VhostUserVsockState {
     pub guest_cid: u64,
     pub acked_features: u64,
@@ -248,8 +251,8 @@ impl VirtioDevice for VhostUserVsock {
             socket_path: self.socket_path.clone(),
         };
 
-        // 4. Serialize with bincode
-        bincode::serialize(&state)
+        // 4. Serialize with bincode-next
+        snapshot_serde::serialize(&state)
             .map_err(|e| log::error!("serialize VhostUserVsockState: {e}"))
             .ok()
     }
@@ -257,7 +260,11 @@ impl VirtioDevice for VhostUserVsock {
     #[cfg(feature = "snapshot")]
     fn restore_backend_state(&mut self, data: &[u8]) {
         // 1. Deserialize state
-        let state: VhostUserVsockState = match bincode::deserialize(data) {
+        let state: VhostUserVsockState = match snapshot_serde::deserialize::<
+            VhostUserVsockState,
+            { MAX_SNAPSHOT_BYTES },
+        >(data)
+        {
             Ok(s) => s,
             Err(e) => {
                 log::error!("deserialize VhostUserVsockState: {e}");
@@ -447,9 +454,10 @@ mod tests {
             socket_path: Some("/tmp/test.sock".to_string()),
         };
 
-        let serialized = bincode::serialize(&state).expect("serialize failed");
+        let serialized = snapshot_serde::serialize(&state).expect("serialize failed");
         let deserialized: VhostUserVsockState =
-            bincode::deserialize(&serialized).expect("deserialize failed");
+            snapshot_serde::deserialize::<VhostUserVsockState, { MAX_SNAPSHOT_BYTES }>(&serialized)
+                .expect("deserialize failed");
 
         assert_eq!(deserialized.guest_cid, 42);
         assert_eq!(deserialized.acked_features, 0x1234_5678);
@@ -474,7 +482,7 @@ mod tests {
             socket_path: Some("/tmp/restore.sock".to_string()),
         };
 
-        let serialized = bincode::serialize(&state).expect("serialize");
+        let serialized = snapshot_serde::serialize(&state).expect("serialize");
         device.restore_backend_state(&serialized);
 
         assert!(device.pending_restore_state.is_some());
