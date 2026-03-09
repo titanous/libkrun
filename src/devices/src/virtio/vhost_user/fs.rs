@@ -23,10 +23,15 @@ use vhost::VhostUserMemoryRegionInfo;
 
 use super::VhostUserDevice;
 
+#[cfg(feature = "snapshot")]
+use crate::snapshot_serde;
+
+const MAX_SNAPSHOT_BYTES: usize = 8192;
+
 /// Snapshot state for VhostUserFs device.
 /// Captures all information needed to restore the device to its saved state.
 #[cfg(feature = "snapshot")]
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, bincode_next::Encode, bincode_next::Decode)]
 struct VhostUserFsState {
     /// Filesystem tag (for identification on restore)
     tag: String,
@@ -257,8 +262,8 @@ impl VirtioDevice for VhostUserFs {
             config_num_request_queues: self.config.num_request_queues,
         };
 
-        // 4. Serialize with bincode
-        bincode::serialize(&state)
+        // 4. Serialize with bincode-next
+        snapshot_serde::serialize(&state)
             .map_err(|e| log::error!("serialize VhostUserFsState: {e}"))
             .ok()
     }
@@ -266,13 +271,14 @@ impl VirtioDevice for VhostUserFs {
     #[cfg(feature = "snapshot")]
     fn restore_backend_state(&mut self, data: &[u8]) {
         // 1. Deserialize state
-        let state: VhostUserFsState = match bincode::deserialize(data) {
-            Ok(s) => s,
-            Err(e) => {
-                log::error!("deserialize VhostUserFsState: {e}");
-                return;
-            }
-        };
+        let state: VhostUserFsState =
+            match snapshot_serde::deserialize::<VhostUserFsState, { MAX_SNAPSHOT_BYTES }>(data) {
+                Ok(s) => s,
+                Err(e) => {
+                    log::error!("deserialize VhostUserFsState: {e}");
+                    return;
+                }
+            };
 
         // 2. Restore local device fields from saved state
         self.tag = state.tag.clone();
@@ -647,12 +653,13 @@ mod tests {
             config_num_request_queues: 4,
         };
 
-        // Serialize with bincode
-        let serialized = bincode::serialize(&state).expect("serialize failed");
+        // Serialize with bincode-next
+        let serialized = snapshot_serde::serialize(&state).expect("serialize failed");
 
         // Deserialize
         let deserialized: VhostUserFsState =
-            bincode::deserialize(&serialized).expect("deserialize failed");
+            snapshot_serde::deserialize::<VhostUserFsState, { MAX_SNAPSHOT_BYTES }>(&serialized)
+                .expect("deserialize failed");
 
         // Verify all fields match
         assert_eq!(deserialized.tag, state.tag);
@@ -693,7 +700,7 @@ mod tests {
         };
 
         // Serialize it
-        let serialized = bincode::serialize(&state).expect("serialize failed");
+        let serialized = snapshot_serde::serialize(&state).expect("serialize failed");
 
         // Call restore_backend_state
         device.restore_backend_state(&serialized);
