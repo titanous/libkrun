@@ -94,45 +94,83 @@ mod tests {
     /// AC2.3: Crafted payload with Vec length prefix is rejected by with_limit()
     #[test]
     fn test_crafted_payload_rejection() {
-        // Strategy: Create a serialized TestState with a small Vec (~30 bytes of data),
-        // making the total serialized size ~40 bytes. Then deserialize with MAX_BYTES=32
-        // that allows the struct fields to be read but not the full Vec data.
-        // The with_limit() guard tracks cumulative bytes and rejects when
-        // attempting to read the Vec data would exceed 32 bytes.
+        // Strategy: Serialize a valid TestState, then create a "crafted" version
+        // where the Vec length varint is tampered with to claim a huge size (e.g., 4GB).
+        // This bypasses the upfront check (data.len() <= MAX_BYTES still holds)
+        // but triggers with_limit() during decode when the decoder attempts to
+        // allocate 4GB of Vec data.
         //
-        // This exercises the with_limit() code path that gets bypassed in AC2.2
-        // (where data.len() > MAX_BYTES fires immediately at the upfront check).
-        // Here, data.len() <= MAX_BYTES passes, but with_limit() rejects during decode.
+        // To find the Vec length varint position:
+        // 1. Serialize TestState { a: 1, b: "", c: vec![] } — baseline
+        // 2. Serialize TestState { a: 1, b: "", c: vec![0u8; 1] } — with 1 byte
+        // 3. Compare: the difference shows where the Vec length is encoded
+        // 4. Build tampered payload: replace Vec length with a huge varint
 
-        let state = TestState {
-            a: 42,
-            b: "x".to_string(), // Small string to keep serialized size low
-            c: vec![0u8; 30],   // 30-byte Vec
+        // First, create baseline serializations to find Vec length position
+        let baseline = TestState {
+            a: 1,
+            b: "".to_string(),
+            c: vec![],
         };
+        let baseline_ser = serialize(&baseline).expect("serialize baseline failed");
 
-        let serialized = serialize(&state).expect("serialize failed");
+        let with_one_byte = TestState {
+            a: 1,
+            b: "".to_string(),
+            c: vec![0u8; 1],
+        };
+        let one_byte_ser = serialize(&with_one_byte).expect("serialize one_byte failed");
 
-        // Serialized format: u32(4) + varint(1) + "x"(1) + varint(1) + 30 bytes = ~38 bytes
-        // Set MAX_BYTES = 32 (allows reading through Vec length prefix but not all Vec data)
-        const TIGHT_LIMIT: usize = 32;
+        // The serialized format is:
+        // - a: u32 = [0x01, 0x00, 0x00, 0x00] (little-endian)
+        // - b: String length as varint (0x00 for empty) + string data
+        // - c: Vec length as varint + vec data
+        // baseline: [0x01, 0x00, 0x00, 0x00, 0x00, 0x00] = a + string_len(0) + vec_len(0)
+        // one_byte: [0x01, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00] = a + string_len(0) + vec_len(1) + vec_data(0x00)
 
+        // Find Vec length position by comparing baseline and one_byte
+        let mut vec_length_pos = 0;
+        for i in 0..baseline_ser.len() {
+            if i >= one_byte_ser.len() || baseline_ser[i] != one_byte_ser[i] {
+                vec_length_pos = i;
+                break;
+            }
+        }
+
+        // Create payload with huge Vec length varint
+        // Varint encoding for 0xFFFFFFFF (4GB-1):
+        // 0xFFFFFFFF in little-endian varint is: [0xFF, 0xFF, 0xFF, 0xFF, 0x0F]
+        let huge_varint = [0xFF, 0xFF, 0xFF, 0xFF, 0x0F];
+
+        // Build crafted payload: baseline up to vec_length_pos + huge varint
+        let mut crafted = baseline_ser.clone();
+        crafted.truncate(vec_length_pos);
+        crafted.extend_from_slice(&huge_varint);
+
+        const MAX_BYTES: usize = 128; // Allow the crafted payload to pass upfront check
+
+        // Verify upfront check passes (crafted.len() <= MAX_BYTES)
         assert!(
-            serialized.len() > TIGHT_LIMIT,
-            "Serialized data must be > {} bytes to test with_limit()",
-            TIGHT_LIMIT
+            crafted.len() <= MAX_BYTES,
+            "Crafted payload ({} bytes) must be <= MAX_BYTES ({}) to test with_limit()",
+            crafted.len(),
+            MAX_BYTES
         );
 
-        // Now try to deserialize with the tight limit.
-        // The upfront check (data.len() > MAX_BYTES) will NOT fire because
-        // the serialized data should be close to the limit.
-        // But with_limit::<32>() during decode will reject when cumulative
-        // bytes exceed 32.
-        let result: Result<TestState, _> = deserialize::<TestState, TIGHT_LIMIT>(&serialized);
+        // Now deserialize the crafted payload
+        let result: Result<TestState, _> = deserialize::<TestState, MAX_BYTES>(&crafted);
 
         assert!(result.is_err(), "Expected deserialization to fail due to with_limit()");
         match result {
-            Err(SnapshotError::Deserialize(_msg)) => {
-                // Expected: with_limit() rejected mid-decode
+            Err(SnapshotError::Deserialize(msg)) => {
+                // Verify the error comes from with_limit(), not the upfront check
+                // The upfront check message contains "exceeds limit"
+                // The with_limit() error should NOT contain that message
+                assert!(
+                    !msg.contains("exceeds limit"),
+                    "Error should NOT come from upfront check, should come from with_limit(). Got: {}",
+                    msg
+                );
             }
             _ => panic!("Expected Deserialize error"),
         }
