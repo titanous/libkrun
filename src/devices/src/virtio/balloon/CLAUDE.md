@@ -1,6 +1,6 @@
 # Virtio Balloon Device
 
-Last verified: 2026-03-03
+Last verified: 2026-03-09
 
 ## Purpose
 Virtio memory balloon device. Allows host to reclaim guest memory (inflate) and return it (deflate). Supports stats reporting, free page hinting, and snapshot integration.
@@ -19,7 +19,7 @@ Virtio memory balloon device. Allows host to reclaim guest memory (inflate) and 
   - `actual_condvar()` returns `Arc<(Mutex<u64>, Condvar)>` for external await on actual field changes
   - `signal_config_change()` on `DeviceState` sends config change interrupt when device is activated; warns if inactive
   - Feature negotiation: `VIRTIO_F_VERSION_1`, `MUST_TELL_HOST`, `STATS_VQ`, `DEFLATE_ON_OOM`, `FREE_PAGE_HINT`, `PAGE_POISON`, `REPORTING`
-  - Snapshot save/restore: serializes `BalloonState` (num_pages, actual, cmd_id, poison_val, hinting counter, hinting_active) via bincode behind `snapshot` feature
+  - Snapshot save/restore: serializes `BalloonState` (num_pages, actual, cmd_id, poison_val, hinting counter, hinting_active) via `snapshot_serde` module (bincode-next with byte limit) behind `snapshot` feature
 - **Expects**: `GuestMemoryMmap` available at activation; event manager drives queue notifications
 
 ## Dependencies

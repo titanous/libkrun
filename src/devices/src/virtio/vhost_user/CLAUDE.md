@@ -1,6 +1,6 @@
 # Vhost-User Devices
 
-Last verified: 2026-03-01
+Last verified: 2026-03-09
 
 ## Purpose
 Vhost-user frontend support for libkrun. Delegates virtio device I/O to external daemon processes over the vhost-user protocol, enabling device isolation and flexibility. Provides VhostUserFs (virtio-fs with optional DAX window) and VhostUserVsock (vsock via vhost-user backend).
@@ -21,13 +21,13 @@ Vhost-user frontend support for libkrun. Delegates virtio device I/O to external
   - `VhostUserVsock::from_stream(stream)` accepts pre-connected `UnixStream`; `socket_path` is None (restore not supported for fd-based connections)
   - VhostUserVsock queue layout: 3 queues (RX, TX, Event), each size 256; device type 19
   - VhostUserVsock config space: 8-byte LE `guest_cid`; `write_config` is a no-op (read-only)
-  - Snapshot (both Fs and Vsock): `save_backend_state` stops vrings via `get_vring_base`, saves daemon state via DEVICE_STATE, serializes state struct with bincode
+  - Snapshot (both Fs and Vsock): `save_backend_state` stops vrings via `get_vring_base`, saves daemon state via DEVICE_STATE, serializes state struct via `snapshot_serde` module (bincode-next with byte limit)
   - Restore (both Fs and Vsock): `restore_backend_state` stores pending state; `activate()` detects it and runs `activate_restore` (reconnect, re-negotiate, load daemon state)
   - Restore fails with `ActivateError::BadActivate` if daemon is unavailable at restore time
 - **Expects**: Running vhost-user daemon at socket path (or pre-connected stream); guest memory with file backing (memfd) for `set_mem_table`
 
 ## Dependencies
-- **Uses**: `vhost` crate (vendored, patched 0.15.0 with DEVICE_STATE protocol), `vm-memory`, `nix` (pipe), `bincode` (snapshot serialization)
+- **Uses**: `vhost` crate (vendored, patched 0.15.0 with DEVICE_STATE protocol), `vm-memory`, `nix` (pipe), `snapshot_serde` (bincode-next, snapshot serialization)
 - **Used by**: `vmm::builder` (attaches to MMIO bus), `libkrun` (configures via Builder API)
 - **Boundary**: `vhost-user` feature flag gates this entire module; `snapshot` feature gates save/restore
 

@@ -1,6 +1,6 @@
 # VMM Crate
 
-Last verified: 2026-03-04
+Last verified: 2026-03-09
 
 ## Purpose
 Core virtual machine manager. Orchestrates VM lifecycle: build, run, snapshot/restore, dirty page tracking.
@@ -33,8 +33,9 @@ Core virtual machine manager. Orchestrates VM lifecycle: build, run, snapshot/re
   - `Vmm::get_balloon()` returns `Option<&Arc<Mutex<Balloon>>>` for API access to balloon device (behind `not(tee)` feature)
   - `VmResources::balloon_enabled` flag controls whether balloon device is attached during VM build
   - `build_microvm` attaches balloon device and stores `Arc<Mutex<Balloon>>` on `Vmm` when `balloon_enabled` is true
-  - `VmSnapshot` has `excluded_pages: Vec<u64>` field (`#[serde(default)]` for backward compat); balloon-inflated pages excluded from full snapshots
-  - `IncrementalSnapshot` has `reclaimed_pages: Vec<u64>` field (`#[serde(default)]` for backward compat); reclaimed pages zero-filled on restore
+  - `VmSnapshot` has `excluded_pages: Vec<u64>` field; balloon-inflated pages excluded from full snapshots
+  - `IncrementalSnapshot` has `reclaimed_pages: Vec<u64>` field; reclaimed pages zero-filled on restore
+  - `VmSnapshot`, `IncrementalSnapshot`, `SnapshotHeader` derive `bincode_next::Encode`/`bincode_next::Decode` (no serde)
   - `apply_reclaimed_pages(mem, pages)` zero-fills reclaimed page addresses in guest memory during incremental restore
   - `SnapshotStore::read_page` returns `io::Result<Option<Vec<u8>>>` -- `None` means page was excluded (balloon-reclaimed); callers must handle absent pages
   - `SnapshotStore` trait has default no-op methods: `set_excluded_pages(Vec<u64>)` and `set_ram_regions(Vec<(u64, u64)>)` for balloon snapshot integration
@@ -58,7 +59,7 @@ Core virtual machine manager. Orchestrates VM lifecycle: build, run, snapshot/re
 - **Expects**: Valid `VmResources` from libkrun crate; KVM/HVF available at runtime
 
 ## Dependencies
-- **Uses**: `devices` (mmio device manager, virtio devices, Balloon, VhostUserFs, VhostUserVsock), `arch`, `kernel`, `vm-memory`, `userfaultfd` (behind `uffd` feature), `tokio` + `futures` (behind `snapshot` feature)
+- **Uses**: `devices` (mmio device manager, virtio devices, Balloon, VhostUserFs, VhostUserVsock), `arch`, `kernel`, `vm-memory`, `bincode-next` (snapshot serialization, with `serde` feature for VcpuState/VmState compat), `userfaultfd` (behind `uffd` feature), `tokio` + `futures` (behind `snapshot` feature)
 - **Used by**: `libkrun` (public API crate)
 - **Boundary**: Does not know about C API; only receives structured `VmResources`
 
@@ -73,6 +74,7 @@ Core virtual machine manager. Orchestrates VM lifecycle: build, run, snapshot/re
 - `VcpuHandle` has a production `Drop` impl (`#[cfg(not(test))]`) that signals and joins threads
 - `resolve_vm_exit()` centralizes exit code to `VmExit` variant dispatch logic
 - PortIO and MMIO device states share the `device_states` vec; both managers skip unknown IDs silently
+- x86_64 `VcpuState` and `VmState` use `serde::Serialize`/`serde::Deserialize` with `bincode_next::serde` compat bridge (KVM binding structs derive serde, not bincode-next Encode/Decode)
 - x86_64 `VcpuState` includes `tsc_khz: Option<u32>` with `#[serde(default)]` for backward compat
 - `VMSTATE_MAX_SIZE` (10MB) caps deserialization to prevent OOM from corrupted files
 - Snapshot save/restore refactored to use `SnapshotStore` trait internally; `create_full_snapshot`/`restore_from_snapshot` delegate to store-based methods
@@ -82,7 +84,7 @@ Core virtual machine manager. Orchestrates VM lifecycle: build, run, snapshot/re
 - `Vmm` stores `Option<Arc<Mutex<Balloon>>>` for balloon device access; populated by `build_microvm` when `balloon_enabled`
 - `SnapshotStore::read_page` returns `Option` to support excluded (balloon-reclaimed) pages without sentinel values
 - `SnapshotStore::set_excluded_pages` and `set_ram_regions` have default no-op implementations so existing custom stores are unaffected
-- `VmSnapshot::excluded_pages` and `IncrementalSnapshot::reclaimed_pages` use `#[serde(default)]` for backward-compatible deserialization
+- `VmSnapshot` and `IncrementalSnapshot` use bincode-next Encode/Decode (no serde attributes); backward compat is handled by bincode-next's wire format
 - `LoadSource::Zero` variant distinguishes zero-filled pages from store-loaded pages in `PageTracker` stats
 
 ## Invariants
