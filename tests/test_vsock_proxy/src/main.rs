@@ -4,7 +4,7 @@ use std::sync::{Arc, RwLock};
 
 use clap::Parser;
 use log::debug;
-use serde::{Deserialize, Serialize};
+use bincode_next::{Decode, Encode};
 use vhost::vhost_user::message::{
     VhostTransferStateDirection, VhostTransferStatePhase, VhostUserProtocolFeatures,
 };
@@ -83,7 +83,7 @@ impl VsockHdr {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Encode, Decode, Debug, Clone)]
 struct ProxyState {
     bytes_echoed: u64,
 }
@@ -201,7 +201,7 @@ impl VhostUserBackendMut for VsockProxyBackend {
             let mut buf = Vec::new();
             let mut file = fd.try_clone()?;
             file.read_to_end(&mut buf)?;
-            let result: Result<ProxyState, _> = bincode::deserialize(&buf);
+            let result: Result<ProxyState, _> = bincode_next::decode_from_slice(&buf, bincode_next::config::standard()).map(|v| v.0);
             match result {
                 Ok(state) => {
                     *self.state.borrow_mut() = state;
@@ -226,7 +226,7 @@ impl VsockProxyBackend {
     fn save_state_to_fd(&mut self, fd: &File) -> std::io::Result<()> {
         use std::io::Write;
         let state = self.state.get_mut();
-        let buf = bincode::serialize(state)
+        let buf = bincode_next::encode_to_vec(&*state, bincode_next::config::standard())
             .map_err(|e| std::io::Error::other(format!("serialize error: {}", e)))?;
         let mut file = fd.try_clone()?;
         file.write_all(&buf)?;

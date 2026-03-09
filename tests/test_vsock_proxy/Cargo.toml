@@ -11,8 +11,7 @@ path = "src/main.rs"
 clap = { version = "4", features = ["derive"] }
 log = "0.4"
 env_logger = "0.10"
-bincode = "1"
-serde = { version = "1", features = ["derive"] }
+bincode-next = "3.0.0-rc.5"
 vhost = { version = "0.15", features = ["vhost-user"] }
 vhost-user-backend = "0.21"
 virtio-queue = "0.17"
