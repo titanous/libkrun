@@ -78,7 +78,7 @@ const MAX_SNAPSHOT_BYTES: usize = 128;
     derive(bincode_next::Encode, bincode_next::Decode)
 )]
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Fields read via serde deserialization
+#[allow(dead_code)] // Fields read via snapshot deserialization
 struct I8042State {
     status: u8,
     control: u8,

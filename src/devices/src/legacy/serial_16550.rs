@@ -62,7 +62,7 @@ const MAX_SNAPSHOT_BYTES: usize = 128;
     derive(bincode_next::Encode, bincode_next::Decode)
 )]
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Fields read via serde deserialization
+#[allow(dead_code)] // Fields read via snapshot deserialization
 struct Serial16550State {
     interrupt_enable: u8,
     interrupt_identification: u8,

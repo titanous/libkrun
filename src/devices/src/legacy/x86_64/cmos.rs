@@ -14,8 +14,8 @@ const DATA_LEN: usize = 128;
 #[cfg(feature = "snapshot")]
 const MAX_SNAPSHOT_BYTES: usize = 512;
 
-// Fields are only read by serde's generated code (behind the snapshot feature).
-// Without --features snapshot, serde derives are absent and fields appear unread.
+// Fields are only read by bincode-next's generated code (behind the snapshot feature).
+// Without --features snapshot, bincode-next derives are absent and fields appear unread.
 #[allow(dead_code)]
 #[cfg_attr(
     feature = "snapshot",
