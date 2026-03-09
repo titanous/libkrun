@@ -760,75 +760,78 @@ impl Snapshottable for MmioTransport {
     fn restore_state(&mut self, data: &[u8]) -> Result<(), SnapshotError> {
         self.begin_restore_resync(SNAPSHOT_RESYNC_TIMEOUT)?;
 
-        let restore_result = (|| {
+        let restore_result = {
             #[cfg(feature = "snapshot")]
             {
-                let state: MmioTransportState =
-                    snapshot_serde::deserialize::<_, { MAX_SNAPSHOT_BYTES }>(data)?;
+                let r: Result<(), SnapshotError> = (|| {
+                    let state: MmioTransportState =
+                        snapshot_serde::deserialize::<_, { MAX_SNAPSHOT_BYTES }>(data)?;
 
-                self.features_select = state.features_select;
-                self.acked_features_select = state.acked_features_select;
-                self.queue_select = state.queue_select;
-                self.device_status = state.device_status;
-                self.config_generation = state.config_generation;
-                self.interrupt
-                    .0
-                    .status
-                    .store(state.interrupt_status as usize, Ordering::SeqCst);
-                let should_reactivate = (state.device_status & device_status::DRIVER_OK) != 0;
+                    self.features_select = state.features_select;
+                    self.acked_features_select = state.acked_features_select;
+                    self.queue_select = state.queue_select;
+                    self.device_status = state.device_status;
+                    self.config_generation = state.config_generation;
+                    self.interrupt
+                        .0
+                        .status
+                        .store(state.interrupt_status as usize, Ordering::SeqCst);
+                    let should_reactivate = (state.device_status & device_status::DRIVER_OK) != 0;
 
-                let mut device = self.locked_device();
+                    let mut device = self.locked_device();
 
-                // Restore acked_features BEFORE activate() so the device sees
-                // the correct feature set (especially EVENT_IDX).
-                device.set_acked_features(state.acked_features);
+                    // Restore acked_features BEFORE activate() so the device sees
+                    // the correct feature set (especially EVENT_IDX).
+                    device.set_acked_features(state.acked_features);
 
-                for (i, qs) in state.queue_states.iter().enumerate() {
-                    if let Some(queue) = device.queues_mut().get_mut(i) {
-                        queue.size = qs.size;
-                        queue.ready = qs.ready;
-                        queue.desc_table = GuestAddress(qs.desc_table);
-                        queue.avail_ring = GuestAddress(qs.avail_ring);
-                        queue.used_ring = GuestAddress(qs.used_ring);
-                        queue.set_next_avail(qs.next_avail);
-                        queue.set_next_used(qs.next_used);
+                    for (i, qs) in state.queue_states.iter().enumerate() {
+                        if let Some(queue) = device.queues_mut().get_mut(i) {
+                            queue.size = qs.size;
+                            queue.ready = qs.ready;
+                            queue.desc_table = GuestAddress(qs.desc_table);
+                            queue.avail_ring = GuestAddress(qs.avail_ring);
+                            queue.used_ring = GuestAddress(qs.used_ring);
+                            queue.set_next_avail(qs.next_avail);
+                            queue.set_next_used(qs.next_used);
+                        }
                     }
-                }
 
-                let device_name = device.device_name().to_string();
-                let force_reactivate = matches!(device_name.as_str(), "console");
-                if force_reactivate {
-                    let _ = device.reset();
-                }
+                    let device_name = device.device_name().to_string();
+                    let force_reactivate = matches!(device_name.as_str(), "console");
+                    if force_reactivate {
+                        let _ = device.reset();
+                    }
 
-                if let Some(ref backend_data) = state.backend_state {
-                    device.restore_backend_state(backend_data);
-                }
+                    if let Some(ref backend_data) = state.backend_state {
+                        device.restore_backend_state(backend_data);
+                    }
 
-                device.post_snapshot_restore();
+                    device.post_snapshot_restore();
 
-                // Compute whether activation is needed AFTER restore callbacks,
-                // since restore_backend_state() may mark the device inactive
-                // (e.g., vhost-user devices need re-activation to reconnect).
-                let needs_activate =
-                    should_reactivate && (!device.is_activated() || force_reactivate);
+                    // Compute whether activation is needed AFTER restore callbacks,
+                    // since restore_backend_state() may mark the device inactive
+                    // (e.g., vhost-user devices need re-activation to reconnect).
+                    let needs_activate =
+                        should_reactivate && (!device.is_activated() || force_reactivate);
 
-                debug!(
-                    "mmio: restore_state '{}': should_reactivate={} is_activated={} force_reactivate={} needs_activate={}",
-                    device_name, should_reactivate, device.is_activated(), force_reactivate, needs_activate
-                );
+                    debug!(
+                        "mmio: restore_state '{}': should_reactivate={} is_activated={} force_reactivate={} needs_activate={}",
+                        device_name, should_reactivate, device.is_activated(), force_reactivate, needs_activate
+                    );
 
-                // Drop device lock before writing to self.
-                drop(device);
+                    // Drop device lock before writing to self.
+                    drop(device);
 
-                // Defer activation to complete_restore(). This ensures all
-                // snapshot state (memory, interrupts, all device states) is
-                // fully loaded before any device threads are spawned. Without
-                // this, threads spawned by activate() can fire IRQs that race
-                // with later restore steps.
-                self.needs_post_restore_activate = needs_activate;
+                    // Defer activation to complete_restore(). This ensures all
+                    // snapshot state (memory, interrupts, all device states) is
+                    // fully loaded before any device threads are spawned. Without
+                    // this, threads spawned by activate() can fire IRQs that race
+                    // with later restore steps.
+                    self.needs_post_restore_activate = needs_activate;
 
-                Ok(())
+                    Ok(())
+                })();
+                r
             }
             #[cfg(not(feature = "snapshot"))]
             {
@@ -837,7 +840,7 @@ impl Snapshottable for MmioTransport {
                     "snapshot feature not enabled".to_string(),
                 ))
             }
-        })();
+        };
 
         self.end_restore_resync();
         restore_result
