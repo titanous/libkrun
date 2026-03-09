@@ -111,48 +111,59 @@ impl Console {
 impl Subscriber for Console {
     fn process(&mut self, event: &EpollEvent, event_manager: &mut EventManager) {
         let source = event.fd();
+        let activate_evt = self.activate_evt.as_raw_fd();
+        let sigwinch_evt = self.sigwinch_evt.as_raw_fd();
+
+        if !self.is_activated() {
+            warn!("console: The device is not yet activated. Spurious event received: {source:?}");
+            return;
+        }
+
+        if source == activate_evt {
+            self.handle_activate_event(event_manager);
+            return;
+        }
+
+        if source == sigwinch_evt {
+            self.handle_sigwinch_event(event);
+            return;
+        }
+
+        if self.queue_events.is_empty() {
+            warn!("console: queues not available. Unexpected event: {source:?}");
+            return;
+        }
 
         let control_rxq = self.queue_events[CONTROL_RXQ_INDEX].as_raw_fd();
         let control_txq = self.queue_events[CONTROL_TXQ_INDEX].as_raw_fd();
         let control_rxq_control = self.control.queue_evt().as_raw_fd();
 
-        let activate_evt = self.activate_evt.as_raw_fd();
-        let sigwinch_evt = self.sigwinch_evt.as_raw_fd();
+        let mut raise_irq = false;
 
-        if self.is_activated() {
-            let mut raise_irq = false;
-
-            if source == control_txq {
-                raise_irq |=
-                    self.read_queue_event(CONTROL_TXQ_INDEX, event) && self.process_control_tx()
-            } else if source == control_rxq_control {
-                self.read_control_queue_event(event);
-                raise_irq |= self.process_control_rx();
-            } else if source == control_rxq {
-                // Guest provided new buffers to control RX queue - try to deliver pending messages
-                raise_irq |=
-                    self.read_queue_event(CONTROL_RXQ_INDEX, event) && self.process_control_rx()
-            }
-            /* Guest signaled input/output on port */
-            else if let Some(queue_index) = self
-                .queue_events
-                .iter()
-                .position(|fd| fd.as_raw_fd() == source)
-            {
-                raise_irq |= self.read_queue_event(queue_index, event);
-                self.notify_port_queue_event(queue_index);
-            } else if source == activate_evt {
-                self.handle_activate_event(event_manager);
-            } else if source == sigwinch_evt {
-                self.handle_sigwinch_event(event);
-            } else {
-                log::warn!("Unexpected console event received: {source:?}")
-            }
-            if raise_irq {
-                self.device_state.signal_used_queue();
-            }
+        if source == control_txq {
+            raise_irq |=
+                self.read_queue_event(CONTROL_TXQ_INDEX, event) && self.process_control_tx()
+        } else if source == control_rxq_control {
+            self.read_control_queue_event(event);
+            raise_irq |= self.process_control_rx();
+        } else if source == control_rxq {
+            // Guest provided new buffers to control RX queue - try to deliver pending messages
+            raise_irq |=
+                self.read_queue_event(CONTROL_RXQ_INDEX, event) && self.process_control_rx()
+        }
+        /* Guest signaled input/output on port */
+        else if let Some(queue_index) = self
+            .queue_events
+            .iter()
+            .position(|fd| fd.as_raw_fd() == source)
+        {
+            raise_irq |= self.read_queue_event(queue_index, event);
+            self.notify_port_queue_event(queue_index);
         } else {
-            warn!("console: The device is not yet activated. Spurious event received: {source:?}");
+            log::warn!("Unexpected console event received: {source:?}")
+        }
+        if raise_irq {
+            self.device_state.signal_used_queue();
         }
     }
 

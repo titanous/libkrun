@@ -59,19 +59,21 @@ impl Rtc {
 impl Subscriber for Rtc {
     fn process(&mut self, event: &EpollEvent, event_manager: &mut EventManager) {
         let source = event.fd();
-        let req = self.queue_events[REQ_INDEX].as_raw_fd();
         let activate_evt = self.activate_evt.as_raw_fd();
 
-        if self.is_activated() {
-            match source {
-                _ if source == req => self.handle_req_event(event),
-                _ if source == activate_evt => {
-                    self.handle_activate_event(event_manager);
-                }
-                _ => warn!("Unexpected rtc event received: {source:?}"),
-            }
-        } else {
+        if !self.is_activated() {
             warn!("rtc: The device is not yet activated. Spurious event received: {source:?}");
+            return;
+        }
+
+        if source == activate_evt {
+            self.handle_activate_event(event_manager);
+        } else if !self.queue_events.is_empty()
+            && source == self.queue_events[REQ_INDEX].as_raw_fd()
+        {
+            self.handle_req_event(event);
+        } else {
+            warn!("Unexpected rtc event received: {source:?}");
         }
     }
 

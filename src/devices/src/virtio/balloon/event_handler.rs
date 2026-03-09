@@ -164,27 +164,36 @@ impl Balloon {
 impl Subscriber for Balloon {
     fn process(&mut self, event: &EpollEvent, event_manager: &mut EventManager) {
         let source = event.fd();
-        let ifq = self.queue_event(IFQ_INDEX).as_raw_fd();
-        let dfq = self.queue_event(DFQ_INDEX).as_raw_fd();
-        let stq = self.queue_event(STQ_INDEX).as_raw_fd();
-        let phq = self.queue_event(PHQ_INDEX).as_raw_fd();
-        let frq = self.queue_event(FRQ_INDEX).as_raw_fd();
         let activate_evt = self.activate_evt.as_raw_fd();
 
-        if self.is_activated() {
-            match source {
-                _ if source == ifq => self.handle_ifq_event(event),
-                _ if source == dfq => self.handle_dfq_event(event),
-                _ if source == stq => self.handle_stq_event(event),
-                _ if source == phq => self.handle_phq_event(event),
-                _ if source == frq => self.handle_frq_event(event),
-                _ if source == activate_evt => {
-                    self.handle_activate_event(event_manager);
-                }
-                _ => warn!("Unexpected balloon event received: {source:?}"),
-            }
-        } else {
+        if !self.is_activated() {
             warn!("balloon: The device is not yet activated. Spurious event received: {source:?}");
+            return;
+        }
+
+        if source == activate_evt {
+            self.handle_activate_event(event_manager);
+            return;
+        }
+
+        let Some(queues) = self.queues.as_ref() else {
+            warn!("balloon: queues not available. Unexpected event: {source:?}");
+            return;
+        };
+
+        let ifq = queues[IFQ_INDEX].event.as_raw_fd();
+        let dfq = queues[DFQ_INDEX].event.as_raw_fd();
+        let stq = queues[STQ_INDEX].event.as_raw_fd();
+        let phq = queues[PHQ_INDEX].event.as_raw_fd();
+        let frq = queues[FRQ_INDEX].event.as_raw_fd();
+
+        match source {
+            _ if source == ifq => self.handle_ifq_event(event),
+            _ if source == dfq => self.handle_dfq_event(event),
+            _ if source == stq => self.handle_stq_event(event),
+            _ if source == phq => self.handle_phq_event(event),
+            _ if source == frq => self.handle_frq_event(event),
+            _ => warn!("Unexpected balloon event received: {source:?}"),
         }
     }
 
