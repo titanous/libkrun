@@ -73,6 +73,10 @@ impl Server {
         }
     }
 
+    pub fn into_fs(self) -> Box<dyn FileSystem + Send + Sync> {
+        self.fs
+    }
+
     #[allow(clippy::cognitive_complexity)]
     pub fn handle_message(
         &self,

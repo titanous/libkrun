@@ -43,7 +43,7 @@ pub struct Fs {
     config: VirtioFsConfig,
     shm_region: Option<VirtioShmRegion>,
     fs_backend: Option<Box<dyn FileSystem + Send + Sync>>,
-    worker_thread: Option<JoinHandle<()>>,
+    worker_thread: Option<JoinHandle<Box<dyn FileSystem + Send + Sync>>>,
     worker_stopfd: EventFd,
     exit_code: Arc<AtomicI32>,
 }
@@ -184,11 +184,88 @@ impl VirtioDevice for Fs {
     fn reset(&mut self) -> bool {
         if let Some(worker) = self.worker_thread.take() {
             let _ = self.worker_stopfd.write(1);
-            if let Err(e) = worker.join() {
-                error!("error waiting for worker thread: {e:?}");
+            match worker.join() {
+                Ok(fs_backend) => {
+                    self.fs_backend = Some(fs_backend);
+                }
+                Err(e) => {
+                    error!("error waiting for worker thread: {e:?}");
+                }
             }
         }
         self.device_state = DeviceState::Inactive;
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::AtomicI32;
+    use std::sync::Arc;
+
+    use vm_memory::{GuestAddress, GuestMemoryMmap};
+
+    use super::*;
+    use utils::eventfd::{EventFd, EFD_NONBLOCK};
+
+    use crate::legacy::DummyIrqChip;
+    use crate::virtio::mmio::InterruptTransport;
+    use crate::virtio::queue::tests::VirtQueue;
+
+    /// A minimal FileSystem backend for testing.
+    struct NullFs;
+
+    impl FileSystem for NullFs {}
+
+    fn make_test_fs() -> Fs {
+        Fs::new(
+            "test".to_string(),
+            Box::new(NullFs),
+            Arc::new(AtomicI32::new(0)),
+        )
+        .unwrap()
+    }
+
+    fn make_activate_args(
+        mem: &GuestMemoryMmap,
+    ) -> (InterruptTransport, Vec<DeviceQueue>) {
+        let irqchip = DummyIrqChip::new().into();
+        let interrupt = InterruptTransport::new(irqchip, "test".into()).unwrap();
+
+        // Fs needs 2 queues (HPQ + REQ), each with valid descriptor table layout.
+        let vq0 = VirtQueue::new(GuestAddress(0), mem, 16);
+        // Align vq1 start to 16 bytes (descriptor table alignment requirement).
+        let vq1_start = GuestAddress((vq0.end().0 + 0xf) & !0xf);
+        let vq1 = VirtQueue::new(vq1_start, mem, 16);
+
+        let queues = vec![
+            DeviceQueue::new(vq0.create_queue(), Arc::new(EventFd::new(EFD_NONBLOCK).unwrap())),
+            DeviceQueue::new(vq1.create_queue(), Arc::new(EventFd::new(EFD_NONBLOCK).unwrap())),
+        ];
+
+        (interrupt, queues)
+    }
+
+    #[test]
+    fn test_reactivate_after_reset_restores_backend() {
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let mut fs = make_test_fs();
+
+        // First activation.
+        let (interrupt, queues) = make_activate_args(&mem);
+        fs.activate(mem.clone(), interrupt, queues).unwrap();
+        assert!(fs.is_activated());
+
+        // Reset (simulates guest writing status=0).
+        assert!(fs.reset());
+        assert!(!fs.is_activated());
+
+        // Second activation must not panic.
+        let (interrupt2, queues2) = make_activate_args(&mem);
+        fs.activate(mem.clone(), interrupt2, queues2).unwrap();
+        assert!(fs.is_activated());
+
+        // Clean up worker thread.
+        fs.reset();
     }
 }

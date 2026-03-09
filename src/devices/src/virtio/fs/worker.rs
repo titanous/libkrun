@@ -49,14 +49,14 @@ impl FsWorker {
         }
     }
 
-    pub fn run(self) -> thread::JoinHandle<()> {
+    pub fn run(self) -> thread::JoinHandle<Box<dyn FileSystem + Send + Sync>> {
         thread::Builder::new()
             .name("fs worker".into())
             .spawn(|| self.work())
             .unwrap()
     }
 
-    fn work(mut self) {
+    fn work(mut self) -> Box<dyn FileSystem + Send + Sync> {
         let virtq_hpq_ev_fd = self.queue_evts[HPQ_INDEX].as_raw_fd();
         let virtq_req_ev_fd = self.queue_evts[REQ_INDEX].as_raw_fd();
         let stop_ev_fd = self.stop_fd.as_raw_fd();
@@ -96,7 +96,7 @@ impl FsWorker {
                             EventSet::IN if source == stop_ev_fd => {
                                 debug!("stopping worker thread");
                                 let _ = self.stop_fd.read();
-                                return;
+                                return self.server.into_fs();
                             }
                             _ => {
                                 log::warn!(
