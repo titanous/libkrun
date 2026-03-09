@@ -18,6 +18,7 @@ use super::super::{
     VirtioDevice,
 };
 use super::{defs, defs::uapi, reclaimed_bitmap::ReclaimedBitmap};
+use crate::snapshot_serde;
 use crate::virtio::InterruptTransport;
 
 // Inflate queue.
@@ -122,7 +123,9 @@ impl BalloonStats {
 // written in save_backend_state() and read in restore_backend_state(). The compiler
 // sees them as unread in builds without --features snapshot.
 #[allow(dead_code)]
-#[cfg_attr(feature = "snapshot", derive(serde::Serialize, serde::Deserialize))]
+const MAX_SNAPSHOT_BYTES: usize = 128;
+
+#[cfg_attr(feature = "snapshot", derive(bincode_next::Encode, bincode_next::Decode))]
 #[derive(Debug, Clone)]
 struct BalloonState {
     /// Config space: num_pages (inflation target set by host)
@@ -832,7 +835,7 @@ impl VirtioDevice for Balloon {
 
         #[cfg(feature = "snapshot")]
         {
-            match bincode::serialize(&state) {
+            match snapshot_serde::serialize(&state) {
                 Ok(data) => Some(data),
                 Err(e) => {
                     log::error!("balloon: failed to serialize backend state: {e}");
@@ -850,7 +853,7 @@ impl VirtioDevice for Balloon {
     fn restore_backend_state(&mut self, data: &[u8]) {
         #[cfg(feature = "snapshot")]
         {
-            match bincode::deserialize::<BalloonState>(data) {
+            match snapshot_serde::deserialize::<BalloonState, { MAX_SNAPSHOT_BYTES }>(data) {
                 Ok(state) => {
                     self.config.num_pages = state.num_pages;
                     self.config.actual = state.actual;
