@@ -9,7 +9,7 @@ build = "build.rs"
 tee = []
 amd-sev = ["blk", "tee"]
 tdx = ["blk", "tee"]
-snapshot = ["serde", "bincode"]
+snapshot = ["serde", "bincode", "bincode-next"]
 net = ["tokio", "bytes"]
 blk = ["tokio", "futures"]
 efi = ["blk", "net"]
@@ -26,6 +26,7 @@ shuttle = ["dep:shuttle"]
 
 [dependencies]
 bincode = { version = "1.3", optional = true }
+bincode-next = { version = "3.0.0-rc.5", optional = true }
 bitflags = "1.2.0"
 capng = "0.2.3"
 crossbeam-channel = ">=0.5.15"
