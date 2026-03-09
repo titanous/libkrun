@@ -9,6 +9,7 @@
 use std::fs::File;
 use std::io::{self, ErrorKind, Read as IoRead, Result as IoResult, Write as IoWrite};
 use std::os::unix::net::UnixStream;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -41,6 +42,23 @@ fn gpa_to_vmm_va(mem: &GuestMemoryMmap, gpa: u64) -> IoResult<u64> {
         ErrorKind::InvalidInput,
         format!("GPA 0x{:x} not found in any memory region", gpa),
     ))
+}
+
+/// Handle for a running interrupt monitor thread.
+/// Allows deterministic shutdown: set the stop flag, write to the eventfd
+/// to unblock the thread, then join.
+struct InterruptMonitor {
+    stop: Arc<AtomicBool>,
+    wake: EventFd,
+    thread: thread::JoinHandle<()>,
+}
+
+impl InterruptMonitor {
+    fn stop(self) {
+        self.stop.store(true, Ordering::Release);
+        let _ = self.wake.write(1);
+        let _ = self.thread.join();
+    }
 }
 
 /// Generic vhost-user device wrapper.
@@ -77,6 +95,9 @@ pub struct VhostUserDevice {
 
     /// Device state
     device_state: DeviceState,
+
+    /// Interrupt monitor thread, cleaned up on reset/re-activate.
+    interrupt_monitor: Option<InterruptMonitor>,
 }
 
 impl std::fmt::Debug for VhostUserDevice {
@@ -258,6 +279,7 @@ impl VhostUserDevice {
             acked_protocol_features,
             device_state_supported,
             device_state: DeviceState::Inactive,
+            interrupt_monitor: None,
         })
     }
 
@@ -271,6 +293,9 @@ impl VhostUserDevice {
         queues: &[DeviceQueue],
         vring_bases: Option<&[u16]>,
     ) -> IoResult<()> {
+        // Clean up any previous interrupt monitor thread before spawning a new one
+        self.stop_interrupt_monitor();
+
         let mut frontend = self.frontend.lock().unwrap();
 
         debug!("{}: activating vhost-user device", self.device_name);
@@ -391,27 +416,30 @@ impl VhostUserDevice {
             }
         }
 
-        // Spawn single interrupt monitoring thread
-        // All queues share the same vring_call_event, so we only need one thread
-        // to monitor it and forward interrupts to the guest
-        let vring_call_event = vring_call_event
+        // Release frontend lock before storing thread handle (which borrows &mut self)
+        drop(frontend);
+
+        // Spawn single interrupt monitoring thread.
+        // All queues share the same vring_call_event, so we only need one thread.
+        // The stop flag + eventfd write allow reset() to deterministically join the thread.
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let stop_flag_clone = Arc::clone(&stop_flag);
+        let thread_evt = vring_call_event
             .try_clone()
             .map_err(|e| io::Error::other(format!("Failed to clone vring_call_event: {}", e)))?;
         let interrupt_clone = interrupt.clone();
         let device_name = self.device_name.clone();
 
-        thread::Builder::new()
+        let handle = thread::Builder::new()
             .name(format!("{}_interrupt_monitor", self.device_name))
             .spawn(move || {
                 debug!("{}: interrupt monitor thread started", device_name);
                 loop {
-                    // Wait for backend to signal interrupt from any queue
-                    match vring_call_event.read() {
+                    match thread_evt.read() {
                         Ok(_) => {
-                            debug!(
-                                "{}: interrupt received from backend, signaling guest",
-                                device_name
-                            );
+                            if stop_flag_clone.load(Ordering::Acquire) {
+                                break;
+                            }
                             interrupt_clone.signal_used_queue();
                         }
                         Err(e) => {
@@ -425,6 +453,12 @@ impl VhostUserDevice {
             .map_err(|e| {
                 io::Error::other(format!("Failed to spawn interrupt monitor thread: {}", e))
             })?;
+
+        self.interrupt_monitor = Some(InterruptMonitor {
+            stop: stop_flag,
+            wake: vring_call_event,
+            thread: handle,
+        });
 
         debug!(
             "{}: vhost-user device activated successfully",
@@ -584,6 +618,13 @@ impl VhostUserDevice {
         Ok(())
     }
 
+    /// Stop the interrupt monitor thread if one is running.
+    fn stop_interrupt_monitor(&mut self) {
+        if let Some(monitor) = self.interrupt_monitor.take() {
+            monitor.stop();
+        }
+    }
+
     /// Mark device as inactive. Used during snapshot restore to force
     /// re-activation via complete_restore() → activate() → activate_restore().
     // Called from VhostUserFs and VhostUserVsock restore paths (feature-gated by snapshot).
@@ -686,7 +727,14 @@ impl VhostUserDevice {
             acked_protocol_features: VhostUserProtocolFeatures::empty(),
             device_state_supported: false,
             device_state: DeviceState::Inactive,
+            interrupt_monitor: None,
         }
+    }
+}
+
+impl Drop for VhostUserDevice {
+    fn drop(&mut self) {
+        self.stop_interrupt_monitor();
     }
 }
 
@@ -760,6 +808,9 @@ impl VirtioDevice for VhostUserDevice {
     fn reset(&mut self) -> bool {
         debug!("{}: resetting vhost-user device", self.device_name);
 
+        // Stop interrupt monitor thread before disabling vrings
+        self.stop_interrupt_monitor();
+
         // Disable all vrings
         if let Ok(mut frontend) = self.frontend.lock() {
             for queue_index in 0..self.queue_configs.len() {
@@ -801,5 +852,51 @@ mod tests {
         let result = device.load_device_state(b"test data");
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().kind(), ErrorKind::InvalidInput);
+    }
+
+    fn spawn_fake_monitor() -> InterruptMonitor {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = Arc::clone(&stop);
+        let wake = EventFd::new(0).unwrap();
+        let wake_clone = wake.try_clone().unwrap();
+
+        let thread = thread::Builder::new()
+            .name("test_interrupt_monitor".into())
+            .spawn(move || loop {
+                match wake_clone.read() {
+                    Ok(_) => {
+                        if stop_clone.load(Ordering::Acquire) {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            })
+            .unwrap();
+
+        InterruptMonitor { stop, wake, thread }
+    }
+
+    /// Test that reset() joins the interrupt monitor thread and cleans up.
+    /// A malicious guest could reset+activate repeatedly to leak threads/fds without this.
+    #[test]
+    fn test_reset_stops_interrupt_monitor() {
+        let mut device = VhostUserDevice::new_for_test_unconnected();
+        device.interrupt_monitor = Some(spawn_fake_monitor());
+
+        assert!(device.reset());
+        assert!(device.interrupt_monitor.is_none());
+    }
+
+    /// Test that multiple activate/reset cycles don't leak threads.
+    #[test]
+    fn test_repeated_reset_no_thread_leak() {
+        let mut device = VhostUserDevice::new_for_test_unconnected();
+
+        for _ in 0..10 {
+            device.interrupt_monitor = Some(spawn_fake_monitor());
+            assert!(device.reset());
+            assert!(device.interrupt_monitor.is_none());
+        }
     }
 }
