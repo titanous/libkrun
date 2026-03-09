@@ -820,7 +820,9 @@ impl BuiltVm {
         // Use vcpus.len() since vcpus_handles isn't populated until start_vcpus_paused.
         let vcpu_count = self.vcpus.as_ref().map(|v| v.len()).unwrap_or(0);
         let vmstate: super::snapshot::VmSnapshot =
-            bincode::deserialize(&vmstate_bytes).map_err(|e| {
+            bincode_next::decode_from_slice(&vmstate_bytes, bincode_next::config::standard().with_limit::<{ super::snapshot::VMSTATE_MAX_SIZE as usize }>())
+                .map(|(val, _)| val)
+                .map_err(|e| {
                 snapshot_err(super::snapshot::SnapshotError::Deserialize(e.to_string()))
             })?;
         super::snapshot::validate_header_for_vm(
