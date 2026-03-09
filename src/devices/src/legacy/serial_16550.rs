@@ -467,6 +467,119 @@ mod snapshot_tests {
         let result = serial.restore_state(&[0xFF, 0xFF, 0xFF]);
         assert!(matches!(result, Err(SnapshotError::Deserialize(_))));
     }
+
+    #[test]
+    fn test_serial_snapshot_rejects_oversized_buffer() {
+        let intr_evt = EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap();
+        let mut serial = Serial::new_sink(intr_evt);
+
+        // Create a state with buffer longer than LOOP_SIZE (64 bytes)
+        let invalid_state = Serial16550State {
+            interrupt_enable: 0,
+            interrupt_identification: DEFAULT_INTERRUPT_IDENTIFICATION,
+            line_control: DEFAULT_LINE_CONTROL,
+            line_status: DEFAULT_LINE_STATUS,
+            modem_control: DEFAULT_MODEM_CONTROL,
+            modem_status: DEFAULT_MODEM_STATUS,
+            scratch: 0,
+            baud_divisor: DEFAULT_BAUD_DIVISOR,
+            in_buffer: vec![0u8; LOOP_SIZE + 1], // Exceed LOOP_SIZE
+        };
+        let invalid_bytes = crate::snapshot_serde::serialize(&invalid_state).unwrap();
+
+        // Try to restore with oversized buffer
+        let result = serial.restore_state(&invalid_bytes);
+        assert!(
+            matches!(result, Err(SnapshotError::Deserialize(msg)) if msg.contains("in_buffer length") && msg.contains("exceeds LOOP_SIZE"))
+        );
+    }
+
+    #[test]
+    fn test_serial_snapshot_rejects_huge_length_prefix() {
+        let intr_evt = EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap();
+        let mut serial = Serial::new_sink(intr_evt);
+
+        // Strategy: Serialize a valid state with empty in_buffer, then craft a version
+        // where the in_buffer Vec length varint is tampered with to claim a huge size (e.g., 4GB).
+        // This bypasses the upfront MAX_SNAPSHOT_BYTES check but triggers with_limit()
+        // during decode when the decoder attempts to allocate 4GB of Vec data.
+
+        // Create a baseline state with minimal fields to find the Vec position
+        let baseline = Serial16550State {
+            interrupt_enable: 0,
+            interrupt_identification: DEFAULT_INTERRUPT_IDENTIFICATION,
+            line_control: DEFAULT_LINE_CONTROL,
+            line_status: DEFAULT_LINE_STATUS,
+            modem_control: DEFAULT_MODEM_CONTROL,
+            modem_status: DEFAULT_MODEM_STATUS,
+            scratch: 0,
+            baud_divisor: DEFAULT_BAUD_DIVISOR,
+            in_buffer: vec![],
+        };
+        let baseline_ser = crate::snapshot_serde::serialize(&baseline).unwrap();
+
+        // Create a version with one byte in the buffer
+        let with_one_byte = Serial16550State {
+            interrupt_enable: 0,
+            interrupt_identification: DEFAULT_INTERRUPT_IDENTIFICATION,
+            line_control: DEFAULT_LINE_CONTROL,
+            line_status: DEFAULT_LINE_STATUS,
+            modem_control: DEFAULT_MODEM_CONTROL,
+            modem_status: DEFAULT_MODEM_STATUS,
+            scratch: 0,
+            baud_divisor: DEFAULT_BAUD_DIVISOR,
+            in_buffer: vec![0u8; 1],
+        };
+        let one_byte_ser = crate::snapshot_serde::serialize(&with_one_byte).unwrap();
+
+        // Find in_buffer Vec length position by comparing baseline and one_byte
+        let mut vec_length_pos = 0;
+        for i in 0..baseline_ser.len() {
+            if i >= one_byte_ser.len() || baseline_ser[i] != one_byte_ser[i] {
+                vec_length_pos = i;
+                break;
+            }
+        }
+
+        // Create payload with huge Vec length varint
+        // Varint encoding for 0xFFFFFFFF (4GB-1):
+        // 0xFFFFFFFF in little-endian varint is: [0xFF, 0xFF, 0xFF, 0xFF, 0x0F]
+        let huge_varint = [0xFF, 0xFF, 0xFF, 0xFF, 0x0F];
+
+        // Build crafted payload: baseline up to vec_length_pos + huge varint
+        let mut crafted = baseline_ser.clone();
+        crafted.truncate(vec_length_pos);
+        crafted.extend_from_slice(&huge_varint);
+
+        // Verify upfront check passes (crafted.len() <= MAX_SNAPSHOT_BYTES)
+        assert!(
+            crafted.len() <= MAX_SNAPSHOT_BYTES,
+            "Crafted payload ({} bytes) must be <= MAX_SNAPSHOT_BYTES ({}) to test with_limit()",
+            crafted.len(),
+            MAX_SNAPSHOT_BYTES
+        );
+
+        // Now deserialize the crafted payload
+        let result = serial.restore_state(&crafted);
+
+        assert!(
+            result.is_err(),
+            "Expected deserialization to fail due to with_limit()"
+        );
+        match result {
+            Err(SnapshotError::Deserialize(msg)) => {
+                // Verify the error comes from with_limit(), not the upfront check
+                // The upfront check message contains "exceeds limit"
+                // The with_limit() error should NOT contain that message
+                assert!(
+                    !msg.contains("exceeds limit"),
+                    "Error should NOT come from upfront check, should come from with_limit(). Got: {}",
+                    msg
+                );
+            }
+            _ => panic!("Expected Deserialize error"),
+        }
+    }
 }
 
 #[cfg(test)]
