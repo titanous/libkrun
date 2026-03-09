@@ -19,6 +19,7 @@ use super::*;
 use crate::bus::BusDevice;
 use crate::legacy::IrqChip;
 use crate::snapshot::{SnapshotError, Snapshottable};
+use crate::snapshot_serde;
 use utils::{byte_order, eventfd::EventFd};
 use vm_memory::{Address, GuestAddress, GuestMemoryMmap};
 
@@ -654,8 +655,10 @@ impl BusDevice for MmioTransport {
     }
 }
 
+const MAX_SNAPSHOT_BYTES: usize = 4096;
+
 /// Serializable state for an MmioTransport device.
-#[cfg_attr(feature = "snapshot", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "snapshot", derive(bincode_next::Encode, bincode_next::Decode))]
 #[derive(Debug, Clone)]
 pub struct MmioTransportState {
     pub features_select: u32,
@@ -668,17 +671,15 @@ pub struct MmioTransportState {
     /// The inner device's negotiated features. Without this, after restore
     /// the device has acked_features=0, so event_idx is false while the guest
     /// still uses EVENT_IDX — breaking kick suppression and causing hangs.
-    #[cfg_attr(feature = "snapshot", serde(default))]
     pub acked_features: u64,
     /// Opaque backend state blob. Backends that implement
     /// `save_snapshot_state` / `restore_snapshot_state` use this to preserve
     /// connection state (e.g., TCP sockets, NAT mappings) across snapshots.
-    #[cfg_attr(feature = "snapshot", serde(default))]
     pub backend_state: Option<Vec<u8>>,
 }
 
 /// Serializable state for a virtio queue.
-#[cfg_attr(feature = "snapshot", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "snapshot", derive(bincode_next::Encode, bincode_next::Decode))]
 #[derive(Debug, Clone)]
 pub struct QueueState {
     pub size: u16,
@@ -733,7 +734,7 @@ impl Snapshottable for MmioTransport {
 
             #[cfg(feature = "snapshot")]
             {
-                bincode::serialize(&state).map_err(|e| SnapshotError::Serialize(e.to_string()))
+                snapshot_serde::serialize(&state)
             }
             #[cfg(not(feature = "snapshot"))]
             {
@@ -754,8 +755,8 @@ impl Snapshottable for MmioTransport {
         let restore_result = (|| {
             #[cfg(feature = "snapshot")]
             {
-                let state: MmioTransportState = bincode::deserialize(data)
-                    .map_err(|e| SnapshotError::Deserialize(e.to_string()))?;
+                let state: MmioTransportState =
+                    snapshot_serde::deserialize::<_, { MAX_SNAPSHOT_BYTES }>(data)?;
 
                 self.features_select = state.features_select;
                 self.acked_features_select = state.acked_features_select;
