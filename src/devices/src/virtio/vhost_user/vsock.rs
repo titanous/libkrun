@@ -273,8 +273,10 @@ impl VirtioDevice for VhostUserVsock {
         };
 
         // 2. Restore local fields
+        // NOTE: socket_path is intentionally NOT restored from snapshot state.
+        // The device uses the socket_path provided at construction time to prevent
+        // a tampered snapshot from redirecting the vhost-user connection.
         self.guest_cid = state.guest_cid;
-        self.socket_path = state.socket_path.clone();
 
         // 3. Mark as inactive so complete_restore() → activate() runs
         self.vhost_user.mark_inactive();
@@ -297,10 +299,12 @@ impl VhostUserVsock {
     ) -> ActivateResult {
         use crate::virtio::ActivateError;
 
-        // Reconnect to fresh backend at the saved socket path.
+        // Reconnect to fresh backend at the configured socket path.
+        // Uses self.socket_path (set at construction), NOT the snapshot's socket_path,
+        // to prevent snapshot tampering from redirecting the connection.
         // For fd-based devices (socket_path is None), the orchestrator must
         // provide a new connection before restore — not yet supported.
-        if let Some(ref path) = state.socket_path {
+        if let Some(ref path) = self.socket_path {
             let stream = std::os::unix::net::UnixStream::connect(path)
                 .map_err(|_| ActivateError::BadActivate)?;
             self.vhost_user
@@ -492,8 +496,8 @@ mod tests {
         assert_eq!(restored.socket_path, Some("/tmp/restore.sock".to_string()));
         // guest_cid on device should also be updated
         assert_eq!(device.guest_cid(), 99);
-        // socket_path on device should also be updated
-        assert_eq!(device.socket_path, Some("/tmp/restore.sock".to_string()));
+        // socket_path on device must NOT be overwritten from snapshot (security)
+        assert_eq!(device.socket_path, None);
     }
 
     // Info leak: partial read must zero untouched tail bytes

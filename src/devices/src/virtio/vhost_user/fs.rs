@@ -281,8 +281,10 @@ impl VirtioDevice for VhostUserFs {
             };
 
         // 2. Restore local device fields from saved state
+        // NOTE: socket_path is intentionally NOT restored from snapshot state.
+        // The device uses the socket_path provided at construction time to prevent
+        // a tampered snapshot from redirecting the vhost-user connection.
         self.tag = state.tag.clone();
-        self.socket_path = state.socket_path.clone();
         // Copy tag back from Vec<u8> to [u8; 36]
         self.config.tag.fill(0);
         if state.config_tag.len() <= 36 {
