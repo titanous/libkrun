@@ -27,6 +27,7 @@ const VMSTATE_MAX_SIZE: u64 = 10 * 1024 * 1024;
 /// Timeout for quiescing async device workers during snapshot operations.
 pub const SNAPSHOT_QUIESCE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 
+
 #[derive(Debug)]
 pub enum SnapshotError {
     Io(io::Error),
@@ -188,7 +189,7 @@ pub fn validate_header_for_vm(
 }
 
 /// Header for the snapshot file.
-#[cfg_attr(feature = "snapshot", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "snapshot", derive(bincode_next::Encode, bincode_next::Decode))]
 #[derive(Debug, Clone)]
 pub struct SnapshotHeader {
     pub magic: u32,
@@ -200,7 +201,7 @@ pub struct SnapshotHeader {
 }
 
 /// Complete VM snapshot (metadata, excluding raw memory).
-#[cfg_attr(feature = "snapshot", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "snapshot", derive(bincode_next::Encode, bincode_next::Decode))]
 #[derive(Debug, Clone)]
 pub struct VmSnapshot {
     pub header: SnapshotHeader,
@@ -208,13 +209,10 @@ pub struct VmSnapshot {
     pub vcpu_states: Vec<Vec<u8>>,
     /// Device states as (device_id, serialized_bytes) pairs.
     pub device_states: Vec<(String, Vec<u8>)>,
-    #[cfg_attr(feature = "snapshot", serde(default))]
     pub gic_state: Option<Vec<u8>>,
     /// VM-level state (x86_64: PIT/PIC/IOAPIC/clock) as opaque serialized bytes.
-    #[cfg_attr(feature = "snapshot", serde(default))]
     pub vm_state: Option<Vec<u8>>,
     /// Guest addresses of pages excluded from snapshot (balloon-reclaimed).
-    #[cfg_attr(feature = "snapshot", serde(default))]
     pub excluded_pages: Vec<u64>,
 }
 
@@ -322,7 +320,7 @@ pub fn apply_reclaimed_pages(mem: &GuestMemoryMmap, pages: &[u64]) -> Result<(),
 /// Save VM snapshot metadata to a file (vmstate).
 #[cfg(feature = "snapshot")]
 pub fn save_vmstate(snapshot: &VmSnapshot, path: &Path) -> Result<(), SnapshotError> {
-    let data = bincode::serialize(snapshot).map_err(|e| SnapshotError::Serialize(e.to_string()))?;
+    let data = bincode_next::encode_to_vec(snapshot, bincode_next::config::standard()).map_err(|e| SnapshotError::Serialize(e.to_string()))?;
     let mut file = File::create(path)?;
     file.write_all(&data)?;
     file.sync_all()?;
@@ -343,7 +341,9 @@ pub fn load_vmstate(path: &Path) -> Result<VmSnapshot, SnapshotError> {
     let mut data = Vec::new();
     file.read_to_end(&mut data)?;
     let snapshot: VmSnapshot =
-        bincode::deserialize(&data).map_err(|e| SnapshotError::Deserialize(e.to_string()))?;
+        bincode_next::decode_from_slice(&data, bincode_next::config::standard().with_limit::<{ VMSTATE_MAX_SIZE as usize }>())
+            .map(|(val, _)| val)
+            .map_err(|e| SnapshotError::Deserialize(e.to_string()))?;
     validate_magic_and_version(&snapshot.header)?;
     if snapshot.vcpu_states.len() != snapshot.header.vcpu_count as usize {
         return Err(SnapshotError::VcpuCountMismatch {
@@ -396,7 +396,7 @@ pub fn create_full_snapshot(
 pub const PAGE_SIZE: u64 = 16384;
 
 /// An incremental memory diff entry.
-#[cfg_attr(feature = "snapshot", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "snapshot", derive(bincode_next::Encode, bincode_next::Decode))]
 #[derive(Debug, Clone)]
 pub struct DirtyPage {
     pub guest_addr: u64,
@@ -404,7 +404,7 @@ pub struct DirtyPage {
 }
 
 /// Incremental snapshot: vm state + dirty pages only.
-#[cfg_attr(feature = "snapshot", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "snapshot", derive(bincode_next::Encode, bincode_next::Decode))]
 #[derive(Debug, Clone)]
 pub struct IncrementalSnapshot {
     pub header: SnapshotHeader,
@@ -412,19 +412,16 @@ pub struct IncrementalSnapshot {
     pub vcpu_states: Vec<Vec<u8>>,
     pub device_states: Vec<(String, Vec<u8>)>,
     pub dirty_pages: Vec<DirtyPage>,
-    #[cfg_attr(feature = "snapshot", serde(default))]
     pub gic_state: Option<Vec<u8>>,
     /// VM-level state (x86_64: PIT/PIC/IOAPIC/clock) as opaque serialized bytes.
-    #[cfg_attr(feature = "snapshot", serde(default))]
     pub vm_state: Option<Vec<u8>>,
     /// Guest addresses that should be zero-filled on restore.
-    #[cfg_attr(feature = "snapshot", serde(default))]
     pub reclaimed_pages: Vec<u64>,
 }
 
 /// Combined interrupt controller snapshot: pending IRQs + GIC register state.
 #[cfg(feature = "snapshot")]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(bincode_next::Encode, bincode_next::Decode)]
 pub struct InterruptControllerSnapshot {
     pub pending_irqs: Vec<Vec<u32>>,
     pub gic_registers: Option<Vec<u8>>,
@@ -436,7 +433,7 @@ pub fn save_incremental_snapshot(
     snapshot: &IncrementalSnapshot,
     path: &Path,
 ) -> Result<(), SnapshotError> {
-    let data = bincode::serialize(snapshot).map_err(|e| SnapshotError::Serialize(e.to_string()))?;
+    let data = bincode_next::encode_to_vec(snapshot, bincode_next::config::standard()).map_err(|e| SnapshotError::Serialize(e.to_string()))?;
     let mut file = File::create(path)?;
     file.write_all(&data)?;
     file.sync_all()?;
@@ -457,7 +454,9 @@ pub fn load_incremental_snapshot(path: &Path) -> Result<IncrementalSnapshot, Sna
     let mut data = Vec::new();
     file.read_to_end(&mut data)?;
     let snapshot: IncrementalSnapshot =
-        bincode::deserialize(&data).map_err(|e| SnapshotError::Deserialize(e.to_string()))?;
+        bincode_next::decode_from_slice(&data, bincode_next::config::standard().with_limit::<{ VMSTATE_MAX_SIZE as usize }>())
+            .map(|(val, _)| val)
+            .map_err(|e| SnapshotError::Deserialize(e.to_string()))?;
     validate_magic_and_version(&snapshot.header)?;
     if snapshot.vcpu_states.len() != snapshot.header.vcpu_count as usize {
         return Err(SnapshotError::VcpuCountMismatch {
@@ -517,8 +516,8 @@ mod tests {
         let mem = make_memory(&[(0x1000, 0x2000), (0x4000, 0x3000)]);
         let header = valid_header(&mem, 4, false);
 
-        let data = bincode::serialize(&header).unwrap();
-        let decoded: SnapshotHeader = bincode::deserialize(&data).unwrap();
+        let data = bincode_next::encode_to_vec(&header, bincode_next::config::standard()).unwrap();
+        let decoded: SnapshotHeader = bincode_next::decode_from_slice(&data, bincode_next::config::standard()).unwrap().0;
 
         assert_eq!(decoded.magic, header.magic);
         assert_eq!(decoded.version, header.version);
@@ -1059,10 +1058,10 @@ mod tests {
             /// VmSnapshot serializes and deserializes with identity (bincode round-trip).
             #[test]
             fn prop_vm_snapshot_bincode_roundtrip(snapshot in arb_vm_snapshot()) {
-                let serialized = bincode::serialize(&snapshot)
+                let serialized = bincode_next::encode_to_vec(&snapshot, bincode_next::config::standard())
                     .expect("serialization failed");
-                let deserialized: VmSnapshot = bincode::deserialize(&serialized)
-                    .expect("deserialization failed");
+                let deserialized: VmSnapshot = bincode_next::decode_from_slice(&serialized, bincode_next::config::standard())
+                    .expect("deserialization failed").0;
 
                 prop_assert_eq!(snapshot.header.magic, deserialized.header.magic);
                 prop_assert_eq!(snapshot.header.version, deserialized.header.version);
@@ -1079,8 +1078,8 @@ mod tests {
             /// SnapshotHeader round-trip preserves all fields.
             #[test]
             fn prop_snapshot_header_roundtrip(header in arb_snapshot_header()) {
-                let serialized = bincode::serialize(&header).expect("serialize");
-                let recovered: SnapshotHeader = bincode::deserialize(&serialized).expect("deserialize");
+                let serialized = bincode_next::encode_to_vec(&header, bincode_next::config::standard()).expect("serialize");
+                let recovered: SnapshotHeader = bincode_next::decode_from_slice(&serialized, bincode_next::config::standard()).expect("deserialize").0;
                 prop_assert_eq!(header.magic, recovered.magic);
                 prop_assert_eq!(header.version, recovered.version);
                 prop_assert_eq!(header.vcpu_count, recovered.vcpu_count);

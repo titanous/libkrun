@@ -1830,10 +1830,22 @@ impl Vcpu {
             #[cfg(feature = "snapshot")]
             Ok(VcpuEvent::SaveState) => {
                 let response = match self.save_state() {
-                    Ok(state) => match bincode::serialize(&state) {
-                        Ok(data) => VcpuResponse::StateSaved(data),
-                        Err(e) => VcpuResponse::StateError(format!("Serialize error: {e}")),
-                    },
+                    Ok(state) => {
+                        #[cfg(target_arch = "x86_64")]
+                        {
+                            match bincode::serialize(&state) {
+                                Ok(data) => VcpuResponse::StateSaved(data),
+                                Err(e) => VcpuResponse::StateError(format!("Serialize error: {e}")),
+                            }
+                        }
+                        #[cfg(target_arch = "aarch64")]
+                        {
+                            match bincode_next::encode_to_vec(&state, bincode_next::config::standard()) {
+                                Ok(data) => VcpuResponse::StateSaved(data),
+                                Err(e) => VcpuResponse::StateError(format!("Serialize error: {e}")),
+                            }
+                        }
+                    }
                     Err(e) => VcpuResponse::StateError(format!("Save error: {e}")),
                 };
                 self.response_sender
@@ -1846,8 +1858,8 @@ impl Vcpu {
                 let response = {
                     #[cfg(target_arch = "aarch64")]
                     {
-                        match bincode::deserialize::<Aarch64VcpuState>(&data) {
-                            Ok(state) => match self.restore_state(&state) {
+                        match bincode_next::decode_from_slice::<Aarch64VcpuState, _>(&data, bincode_next::config::standard().with_limit::<{ 10 * 1024 * 1024 }>()) {
+                            Ok((state, _)) => match self.restore_state(&state) {
                                 Ok(()) => VcpuResponse::StateRestored,
                                 Err(e) => VcpuResponse::StateError(format!("Restore error: {e}")),
                             },
@@ -1956,7 +1968,7 @@ pub struct VcpuState {
 
 /// aarch64 vCPU state for snapshot/restore.
 #[cfg(all(target_arch = "aarch64", feature = "snapshot"))]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(bincode_next::Encode, bincode_next::Decode)]
 pub struct Aarch64VcpuState {
     pub mp_state: u32,
     /// (reg_id, value) pairs from KVM_GET_REG_LIST + KVM_GET_ONE_REG
