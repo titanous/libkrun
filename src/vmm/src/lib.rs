@@ -1310,9 +1310,12 @@ impl Vmm {
 
         #[cfg(target_arch = "x86_64")]
         let vm_state = Some(
-            bincode::serialize(&self.vm.save_state().map_err(|e| {
-                snapshot::SnapshotError::Serialize(format!("Failed to save VM state: {e}"))
-            })?)
+            bincode_next::serde::encode_to_vec(
+                &self.vm.save_state().map_err(|e| {
+                    snapshot::SnapshotError::Serialize(format!("Failed to save VM state: {e}"))
+                })?,
+                bincode_next::config::standard(),
+            )
             .map_err(|e| snapshot::SnapshotError::Serialize(e.to_string()))?,
         );
         #[cfg(not(target_arch = "x86_64"))]
@@ -1507,9 +1510,12 @@ impl Vmm {
 
         #[cfg(target_arch = "x86_64")]
         let vm_state = Some(
-            bincode::serialize(&self.vm.save_state().map_err(|e| {
-                snapshot::SnapshotError::Serialize(format!("Failed to save VM state: {e}"))
-            })?)
+            bincode_next::serde::encode_to_vec(
+                &self.vm.save_state().map_err(|e| {
+                    snapshot::SnapshotError::Serialize(format!("Failed to save VM state: {e}"))
+                })?,
+                bincode_next::config::standard(),
+            )
             .map_err(|e| snapshot::SnapshotError::Serialize(e.to_string()))?,
         );
         #[cfg(not(target_arch = "x86_64"))]

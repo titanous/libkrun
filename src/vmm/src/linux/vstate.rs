@@ -1833,7 +1833,10 @@ impl Vcpu {
                     Ok(state) => {
                         #[cfg(target_arch = "x86_64")]
                         {
-                            match bincode::serialize(&state) {
+                            match bincode_next::serde::encode_to_vec(
+                                &state,
+                                bincode_next::config::standard(),
+                            ) {
                                 Ok(data) => VcpuResponse::StateSaved(data),
                                 Err(e) => VcpuResponse::StateError(format!("Serialize error: {e}")),
                             }
@@ -1863,7 +1866,8 @@ impl Vcpu {
                     {
                         match bincode_next::decode_from_slice::<Aarch64VcpuState, _>(
                             &data,
-                            bincode_next::config::standard().with_limit::<{ 10 * 1024 * 1024 }>(),
+                            bincode_next::config::standard()
+                                .with_limit::<{ crate::snapshot::VMSTATE_MAX_SIZE as usize }>(),
                         ) {
                             Ok((state, _)) => match self.restore_state(&state) {
                                 Ok(()) => VcpuResponse::StateRestored,
@@ -1874,8 +1878,12 @@ impl Vcpu {
                     }
                     #[cfg(target_arch = "x86_64")]
                     {
-                        match bincode::deserialize::<VcpuState>(&data) {
-                            Ok(state) => match self.restore_state(state) {
+                        match bincode_next::serde::decode_from_slice::<VcpuState, _>(
+                            &data,
+                            bincode_next::config::standard()
+                                .with_limit::<{ crate::snapshot::VMSTATE_MAX_SIZE as usize }>(),
+                        ) {
+                            Ok((state, _)) => match self.restore_state(state) {
                                 Ok(()) => VcpuResponse::StateRestored,
                                 Err(e) => VcpuResponse::StateError(format!("Restore error: {e}")),
                             },
