@@ -57,7 +57,10 @@ const DEFAULT_BAUD_DIVISOR: u16 = 12; // 9600 bps
 #[cfg(feature = "snapshot")]
 const MAX_SNAPSHOT_BYTES: usize = 128;
 
-#[cfg_attr(feature = "snapshot", derive(bincode_next::Encode, bincode_next::Decode))]
+#[cfg_attr(
+    feature = "snapshot",
+    derive(bincode_next::Encode, bincode_next::Decode)
+)]
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // Fields read via serde deserialization
 struct Serial16550State {
@@ -319,7 +322,8 @@ impl Snapshottable for Serial {
     fn restore_state(&mut self, data: &[u8]) -> std::result::Result<(), SnapshotError> {
         #[cfg(feature = "snapshot")]
         {
-            let state: Serial16550State = crate::snapshot_serde::deserialize::<_, { MAX_SNAPSHOT_BYTES }>(data)?;
+            let state: Serial16550State =
+                crate::snapshot_serde::deserialize::<_, { MAX_SNAPSHOT_BYTES }>(data)?;
             if state.in_buffer.len() > LOOP_SIZE {
                 return Err(SnapshotError::Deserialize(format!(
                     "serial 16550 in_buffer length {} exceeds LOOP_SIZE {}",

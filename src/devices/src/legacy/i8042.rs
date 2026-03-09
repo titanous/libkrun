@@ -70,7 +70,13 @@ const KEY_DEL: u16 = 0xE071;
 /// Internal i8042 buffer size, in bytes
 const BUF_SIZE: usize = 16;
 
-#[cfg_attr(feature = "snapshot", derive(serde::Serialize, serde::Deserialize))]
+#[cfg(feature = "snapshot")]
+const MAX_SNAPSHOT_BYTES: usize = 128;
+
+#[cfg_attr(
+    feature = "snapshot",
+    derive(bincode_next::Encode, bincode_next::Decode)
+)]
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // Fields read via serde deserialization
 struct I8042State {
@@ -348,7 +354,7 @@ impl Snapshottable for I8042Device {
 
         #[cfg(feature = "snapshot")]
         {
-            bincode::serialize(&state).map_err(|e| SnapshotError::Serialize(e.to_string()))
+            crate::snapshot_serde::serialize(&state)
         }
         #[cfg(not(feature = "snapshot"))]
         {
@@ -362,8 +368,8 @@ impl Snapshottable for I8042Device {
     fn restore_state(&mut self, data: &[u8]) -> std::result::Result<(), SnapshotError> {
         #[cfg(feature = "snapshot")]
         {
-            let state: I8042State = bincode::deserialize(data)
-                .map_err(|e| SnapshotError::Deserialize(e.to_string()))?;
+            let state: I8042State =
+                crate::snapshot_serde::deserialize::<_, { MAX_SNAPSHOT_BYTES }>(data)?;
             if state.buf.len() != BUF_SIZE {
                 return Err(SnapshotError::Deserialize(format!(
                     "i8042 buf length mismatch: expected {BUF_SIZE}, got {}",
@@ -487,7 +493,7 @@ mod snapshot_tests {
             bhead: 0,
             btail: 1,
         };
-        let invalid_bytes = bincode::serialize(&invalid_state).unwrap();
+        let invalid_bytes = crate::snapshot_serde::serialize(&invalid_state).unwrap();
 
         // Try to restore with wrong buffer length
         let result = i8042.restore_state(&invalid_bytes);

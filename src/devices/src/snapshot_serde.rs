@@ -160,7 +160,10 @@ mod tests {
         // Now deserialize the crafted payload
         let result: Result<TestState, _> = deserialize::<TestState, MAX_BYTES>(&crafted);
 
-        assert!(result.is_err(), "Expected deserialization to fail due to with_limit()");
+        assert!(
+            result.is_err(),
+            "Expected deserialization to fail due to with_limit()"
+        );
         match result {
             Err(SnapshotError::Deserialize(msg)) => {
                 // Verify the error comes from with_limit(), not the upfront check
