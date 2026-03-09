@@ -19,6 +19,7 @@ use super::*;
 use crate::bus::BusDevice;
 use crate::legacy::IrqChip;
 use crate::snapshot::{SnapshotError, Snapshottable};
+#[cfg(feature = "snapshot")]
 use crate::snapshot_serde;
 use utils::{byte_order, eventfd::EventFd};
 use vm_memory::{Address, GuestAddress, GuestMemoryMmap};
@@ -655,6 +656,7 @@ impl BusDevice for MmioTransport {
     }
 }
 
+#[cfg(feature = "snapshot")]
 const MAX_SNAPSHOT_BYTES: usize = 4096;
 
 /// Serializable state for an MmioTransport device.

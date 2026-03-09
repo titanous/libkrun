@@ -18,6 +18,7 @@ use super::super::{
     VirtioDevice,
 };
 use super::{defs, defs::uapi, reclaimed_bitmap::ReclaimedBitmap};
+#[cfg(feature = "snapshot")]
 use crate::snapshot_serde;
 use crate::virtio::InterruptTransport;
 
@@ -121,8 +122,7 @@ impl BalloonStats {
 /// that starts empty after restore.
 // Fields are only read by bincode-next's generated code (behind the snapshot feature) or
 // written in save_backend_state() and read in restore_backend_state(). The compiler
-// sees them as unread in builds without --features snapshot.
-#[allow(dead_code)]
+#[cfg(feature = "snapshot")]
 const MAX_SNAPSHOT_BYTES: usize = 128;
 
 #[cfg_attr(
@@ -130,6 +130,7 @@ const MAX_SNAPSHOT_BYTES: usize = 128;
     derive(bincode_next::Encode, bincode_next::Decode)
 )]
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct BalloonState {
     /// Config space: num_pages (inflation target set by host)
     num_pages: u32,
