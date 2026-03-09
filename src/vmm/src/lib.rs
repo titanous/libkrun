@@ -462,8 +462,12 @@ impl Vmm {
 
         #[cfg(target_arch = "x86_64")]
         if let Some(data) = &vmstate.vm_state {
-            let state: vstate::VmState = bincode::deserialize(data)
-                .map_err(|e| snapshot::SnapshotError::Deserialize(e.to_string()))?;
+            let (state, _): (vstate::VmState, _) = bincode_next::serde::decode_from_slice(
+                data,
+                bincode_next::config::standard()
+                    .with_limit::<{ snapshot::VMSTATE_MAX_SIZE as usize }>(),
+            )
+            .map_err(|e| snapshot::SnapshotError::Deserialize(e.to_string()))?;
             self.vm.restore_state(&state).map_err(|e| {
                 snapshot::SnapshotError::Deserialize(format!("Failed to restore VM state: {e}"))
             })?;
