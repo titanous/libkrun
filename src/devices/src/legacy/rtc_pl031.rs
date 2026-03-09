@@ -16,6 +16,9 @@ use crate::snapshot::{SnapshotError, Snapshottable};
 use crate::BusDevice;
 use utils::byte_order;
 use utils::eventfd::EventFd;
+
+#[cfg(feature = "snapshot")]
+use crate::snapshot_serde;
 //use bus::Error;
 
 // As you can see in https://static.docs.arm.com/ddi0224/c/real_time_clock_pl031_r1p3_technical_reference_manual_DDI0224C.pdf
@@ -39,6 +42,9 @@ const PL031_ID: [u8; 8] = [0x31, 0x10, 0x14, 0x00, 0x0d, 0xf0, 0x05, 0xb1];
 const AMBA_ID_LOW: u64 = 0xFE0;
 const AMBA_ID_HIGH: u64 = 0x1000;
 
+// Snapshot serialization constants
+const MAX_SNAPSHOT_BYTES: usize = 128;
+
 #[derive(Debug)]
 pub enum Error {
     BadWriteOffset(u64),
@@ -55,7 +61,7 @@ impl fmt::Display for Error {
 }
 type Result<T> = result::Result<T, Error>;
 
-#[cfg_attr(feature = "snapshot", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "snapshot", derive(bincode_next::Encode, bincode_next::Decode))]
 #[derive(Debug, Clone)]
 struct RtcState {
     tick_offset: i64,
@@ -218,7 +224,7 @@ impl Snapshottable for RTC {
 
         #[cfg(feature = "snapshot")]
         {
-            bincode::serialize(&state).map_err(|e| SnapshotError::Serialize(e.to_string()))
+            snapshot_serde::serialize(&state)
         }
         #[cfg(not(feature = "snapshot"))]
         {
@@ -232,8 +238,7 @@ impl Snapshottable for RTC {
     fn restore_state(&mut self, data: &[u8]) -> std::result::Result<(), SnapshotError> {
         #[cfg(feature = "snapshot")]
         {
-            let state: RtcState = bincode::deserialize(data)
-                .map_err(|e| SnapshotError::Deserialize(e.to_string()))?;
+            let state: RtcState = snapshot_serde::deserialize::<_, { MAX_SNAPSHOT_BYTES }>(data)?;
             self.previous_now =
                 Instant::now() - Duration::from_nanos(state.previous_now_elapsed_nanos);
             self.tick_offset = state.tick_offset;
@@ -314,7 +319,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "snapshot")]
-    fn test_rtc_snapshot_preserves_registers() {
+    fn test_rtc_snapshot_preserves_registers_serde() {
         let mut rtc = RTC::new(EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap());
         let mut data = [0; 4];
 

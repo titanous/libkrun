@@ -20,6 +20,9 @@ use crate::bus::BusDevice;
 use crate::legacy::IrqChip;
 use crate::snapshot::{SnapshotError, Snapshottable};
 
+#[cfg(feature = "snapshot")]
+use crate::snapshot_serde;
+
 const OFS_DATA: u64 = 0x400; // Data Register
 const GPIODIR: u64 = 0x400; // Direction Register
 const GPIOIS: u64 = 0x404; // Interrupt Sense Register
@@ -38,6 +41,9 @@ const GPIO_ID: [u8; 8] = [0x61, 0x10, 0x14, 0x00, 0x0d, 0xf0, 0x05, 0xb1];
 // ID Margins
 const GPIO_ID_LOW: u64 = 0xfe0;
 const GPIO_ID_HIGH: u64 = 0x1000;
+
+// Snapshot serialization constants
+const MAX_SNAPSHOT_BYTES: usize = 128;
 
 #[derive(Debug)]
 pub enum Error {
@@ -79,7 +85,7 @@ pub struct Gpio {
     shutdown_efd: EventFd,
 }
 
-#[cfg_attr(feature = "snapshot", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "snapshot", derive(bincode_next::Encode, bincode_next::Decode))]
 #[derive(Debug, Clone)]
 struct GpioState {
     data: u32,
@@ -276,7 +282,7 @@ impl Snapshottable for Gpio {
 
         #[cfg(feature = "snapshot")]
         {
-            bincode::serialize(&state).map_err(|e| SnapshotError::Serialize(e.to_string()))
+            snapshot_serde::serialize(&state)
         }
         #[cfg(not(feature = "snapshot"))]
         {
@@ -290,8 +296,7 @@ impl Snapshottable for Gpio {
     fn restore_state(&mut self, data: &[u8]) -> std::result::Result<(), SnapshotError> {
         #[cfg(feature = "snapshot")]
         {
-            let state: GpioState = bincode::deserialize(data)
-                .map_err(|e| SnapshotError::Deserialize(e.to_string()))?;
+            let state: GpioState = snapshot_serde::deserialize::<_, { MAX_SNAPSHOT_BYTES }>(data)?;
             self.data = state.data;
             self.dir = state.dir;
             self.isense = state.isense;
