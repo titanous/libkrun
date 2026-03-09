@@ -1840,7 +1840,10 @@ impl Vcpu {
                         }
                         #[cfg(target_arch = "aarch64")]
                         {
-                            match bincode_next::encode_to_vec(&state, bincode_next::config::standard()) {
+                            match bincode_next::encode_to_vec(
+                                &state,
+                                bincode_next::config::standard(),
+                            ) {
                                 Ok(data) => VcpuResponse::StateSaved(data),
                                 Err(e) => VcpuResponse::StateError(format!("Serialize error: {e}")),
                             }
@@ -1858,7 +1861,10 @@ impl Vcpu {
                 let response = {
                     #[cfg(target_arch = "aarch64")]
                     {
-                        match bincode_next::decode_from_slice::<Aarch64VcpuState, _>(&data, bincode_next::config::standard().with_limit::<{ 10 * 1024 * 1024 }>()) {
+                        match bincode_next::decode_from_slice::<Aarch64VcpuState, _>(
+                            &data,
+                            bincode_next::config::standard().with_limit::<{ 10 * 1024 * 1024 }>(),
+                        ) {
                             Ok((state, _)) => match self.restore_state(&state) {
                                 Ok(()) => VcpuResponse::StateRestored,
                                 Err(e) => VcpuResponse::StateError(format!("Restore error: {e}")),

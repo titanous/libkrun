@@ -377,9 +377,13 @@ impl Vmm {
         &self,
         data: &[u8],
     ) -> std::result::Result<(), snapshot::SnapshotError> {
-        let ic_snapshot: snapshot::InterruptControllerSnapshot = bincode_next::decode_from_slice(data, bincode_next::config::standard().with_limit::<{ snapshot::VMSTATE_MAX_SIZE as usize }>())
-            .map(|(val, _)| val)
-            .map_err(|e| snapshot::SnapshotError::Deserialize(e.to_string()))?;
+        let ic_snapshot: snapshot::InterruptControllerSnapshot = bincode_next::decode_from_slice(
+            data,
+            bincode_next::config::standard()
+                .with_limit::<{ snapshot::VMSTATE_MAX_SIZE as usize }>(),
+        )
+        .map(|(val, _)| val)
+        .map_err(|e| snapshot::SnapshotError::Deserialize(e.to_string()))?;
 
         self.vcpu_list
             .restore_interrupt_state(&ic_snapshot.pending_irqs);
@@ -584,9 +588,13 @@ impl Vmm {
         rt: &tokio::runtime::Runtime,
     ) -> std::result::Result<(), snapshot::SnapshotError> {
         // Deserialize vmstate
-        let vmstate: snapshot::VmSnapshot = bincode_next::decode_from_slice(&vmstate_bytes, bincode_next::config::standard().with_limit::<{ snapshot::VMSTATE_MAX_SIZE as usize }>())
-            .map(|(val, _)| val)
-            .map_err(|e| snapshot::SnapshotError::Deserialize(e.to_string()))?;
+        let vmstate: snapshot::VmSnapshot = bincode_next::decode_from_slice(
+            &vmstate_bytes,
+            bincode_next::config::standard()
+                .with_limit::<{ snapshot::VMSTATE_MAX_SIZE as usize }>(),
+        )
+        .map(|(val, _)| val)
+        .map_err(|e| snapshot::SnapshotError::Deserialize(e.to_string()))?;
 
         snapshot::validate_header_for_vm(
             &vmstate.header,
@@ -671,9 +679,13 @@ impl Vmm {
     > {
         // Deserialize and validate vmstate BEFORE creating UFFD handler or starting threads.
         // If validation fails, no cleanup is needed.
-        let vmstate: snapshot::VmSnapshot = bincode_next::decode_from_slice(&vmstate_bytes, bincode_next::config::standard().with_limit::<{ snapshot::VMSTATE_MAX_SIZE as usize }>())
-            .map(|(val, _)| val)
-            .map_err(|e| snapshot::SnapshotError::Deserialize(e.to_string()))?;
+        let vmstate: snapshot::VmSnapshot = bincode_next::decode_from_slice(
+            &vmstate_bytes,
+            bincode_next::config::standard()
+                .with_limit::<{ snapshot::VMSTATE_MAX_SIZE as usize }>(),
+        )
+        .map(|(val, _)| val)
+        .map_err(|e| snapshot::SnapshotError::Deserialize(e.to_string()))?;
 
         snapshot::validate_header_for_vm(
             &vmstate.header,
@@ -910,9 +922,13 @@ impl Vmm {
             .vcpu_states
             .iter()
             .map(|data| {
-                bincode_next::decode_from_slice::<hvf::Aarch64VcpuState, _>(data, bincode_next::config::standard().with_limit::<{ snapshot::VMSTATE_MAX_SIZE as usize }>())
-                    .map(|(val, _)| val)
-                    .map_err(|e| snapshot::SnapshotError::Deserialize(e.to_string()))
+                bincode_next::decode_from_slice::<hvf::Aarch64VcpuState, _>(
+                    data,
+                    bincode_next::config::standard()
+                        .with_limit::<{ snapshot::VMSTATE_MAX_SIZE as usize }>(),
+                )
+                .map(|(val, _)| val)
+                .map_err(|e| snapshot::SnapshotError::Deserialize(e.to_string()))
             })
             .collect::<std::result::Result<_, _>>()?;
 
@@ -1052,9 +1068,13 @@ impl Vmm {
             .vcpu_states
             .iter()
             .map(|data| {
-                bincode_next::decode_from_slice::<hvf::Aarch64VcpuState, _>(data, bincode_next::config::standard().with_limit::<{ snapshot::VMSTATE_MAX_SIZE as usize }>())
-                    .map(|(val, _)| val)
-                    .map_err(|e| snapshot::SnapshotError::Deserialize(e.to_string()))
+                bincode_next::decode_from_slice::<hvf::Aarch64VcpuState, _>(
+                    data,
+                    bincode_next::config::standard()
+                        .with_limit::<{ snapshot::VMSTATE_MAX_SIZE as usize }>(),
+                )
+                .map(|(val, _)| val)
+                .map_err(|e| snapshot::SnapshotError::Deserialize(e.to_string()))
             })
             .collect::<std::result::Result<_, _>>()?;
 
@@ -1382,8 +1402,9 @@ impl Vmm {
         };
 
         // Serialize vmstate
-        let vmstate_data = bincode_next::encode_to_vec(&vm_snapshot, bincode_next::config::standard())
-            .map_err(|e| snapshot::SnapshotError::Serialize(e.to_string()))?;
+        let vmstate_data =
+            bincode_next::encode_to_vec(&vm_snapshot, bincode_next::config::standard())
+                .map_err(|e| snapshot::SnapshotError::Serialize(e.to_string()))?;
 
         // Use helper to dump memory and write to store
         self.dump_memory_to_store(store, vmstate_data, &excluded_pages)
@@ -1410,7 +1431,8 @@ impl Vmm {
         let serialized_vcpu_states: Vec<Vec<u8>> = vcpu_states
             .iter()
             .map(|s| {
-                bincode_next::encode_to_vec(s, bincode_next::config::standard()).map_err(|e| snapshot::SnapshotError::Serialize(e.to_string()))
+                bincode_next::encode_to_vec(s, bincode_next::config::standard())
+                    .map_err(|e| snapshot::SnapshotError::Serialize(e.to_string()))
             })
             .collect::<std::result::Result<_, _>>()?;
 
@@ -1434,8 +1456,9 @@ impl Vmm {
         };
 
         // Serialize vmstate
-        let vmstate_data = bincode_next::encode_to_vec(&vm_snapshot, bincode_next::config::standard())
-            .map_err(|e| snapshot::SnapshotError::Serialize(e.to_string()))?;
+        let vmstate_data =
+            bincode_next::encode_to_vec(&vm_snapshot, bincode_next::config::standard())
+                .map_err(|e| snapshot::SnapshotError::Serialize(e.to_string()))?;
 
         // Use helper to dump memory and write to store
         // macOS has no balloon support, so excluded_pages is always empty
@@ -1608,8 +1631,9 @@ impl Vmm {
         };
 
         // Serialize incremental snapshot
-        let vmstate_data = bincode_next::encode_to_vec(&incremental, bincode_next::config::standard())
-            .map_err(|e| snapshot::SnapshotError::Serialize(e.to_string()))?;
+        let vmstate_data =
+            bincode_next::encode_to_vec(&incremental, bincode_next::config::standard())
+                .map_err(|e| snapshot::SnapshotError::Serialize(e.to_string()))?;
 
         // Write vmstate via store (blocking on async)
         futures::executor::block_on(store.write_vmstate(vmstate_data))
@@ -1653,7 +1677,8 @@ impl Vmm {
         let serialized_vcpu_states: Vec<Vec<u8>> = vcpu_states
             .iter()
             .map(|s| {
-                bincode_next::encode_to_vec(s, bincode_next::config::standard()).map_err(|e| snapshot::SnapshotError::Serialize(e.to_string()))
+                bincode_next::encode_to_vec(s, bincode_next::config::standard())
+                    .map_err(|e| snapshot::SnapshotError::Serialize(e.to_string()))
             })
             .collect::<std::result::Result<_, _>>()?;
 
@@ -1718,8 +1743,9 @@ impl Vmm {
         };
 
         // Serialize incremental snapshot
-        let vmstate_data = bincode_next::encode_to_vec(&incremental, bincode_next::config::standard())
-            .map_err(|e| snapshot::SnapshotError::Serialize(e.to_string()))?;
+        let vmstate_data =
+            bincode_next::encode_to_vec(&incremental, bincode_next::config::standard())
+                .map_err(|e| snapshot::SnapshotError::Serialize(e.to_string()))?;
 
         // Write vmstate via store (blocking on async)
         futures::executor::block_on(store.write_vmstate(vmstate_data))
@@ -2369,13 +2395,17 @@ mod tests {
         };
 
         // Serialize
-        let serialized = bincode_next::encode_to_vec(&original, bincode_next::config::standard()).expect("serialization should succeed");
+        let serialized = bincode_next::encode_to_vec(&original, bincode_next::config::standard())
+            .expect("serialization should succeed");
 
         // Deserialize
-        let deserialized: VmSnapshot =
-            bincode_next::decode_from_slice(&serialized, bincode_next::config::standard().with_limit::<{ snapshot::VMSTATE_MAX_SIZE as usize }>())
-                .map(|(val, _)| val)
-                .expect("deserialization should succeed");
+        let deserialized: VmSnapshot = bincode_next::decode_from_slice(
+            &serialized,
+            bincode_next::config::standard()
+                .with_limit::<{ snapshot::VMSTATE_MAX_SIZE as usize }>(),
+        )
+        .map(|(val, _)| val)
+        .expect("deserialization should succeed");
 
         // Verify the excluded_pages field round-tripped correctly
         assert_eq!(
@@ -2422,13 +2452,17 @@ mod tests {
         };
 
         // Serialize
-        let serialized = bincode_next::encode_to_vec(&original, bincode_next::config::standard()).expect("serialization should succeed");
+        let serialized = bincode_next::encode_to_vec(&original, bincode_next::config::standard())
+            .expect("serialization should succeed");
 
         // Deserialize
-        let deserialized: IncrementalSnapshot =
-            bincode_next::decode_from_slice(&serialized, bincode_next::config::standard().with_limit::<{ snapshot::VMSTATE_MAX_SIZE as usize }>())
-                .map(|(val, _)| val)
-                .expect("deserialization should succeed");
+        let deserialized: IncrementalSnapshot = bincode_next::decode_from_slice(
+            &serialized,
+            bincode_next::config::standard()
+                .with_limit::<{ snapshot::VMSTATE_MAX_SIZE as usize }>(),
+        )
+        .map(|(val, _)| val)
+        .expect("deserialization should succeed");
 
         // Verify the reclaimed_pages field round-tripped correctly
         assert_eq!(

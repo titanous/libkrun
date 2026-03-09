@@ -27,7 +27,6 @@ pub const VMSTATE_MAX_SIZE: u64 = 10 * 1024 * 1024;
 /// Timeout for quiescing async device workers during snapshot operations.
 pub const SNAPSHOT_QUIESCE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 
-
 #[derive(Debug)]
 pub enum SnapshotError {
     Io(io::Error),
@@ -189,7 +188,10 @@ pub fn validate_header_for_vm(
 }
 
 /// Header for the snapshot file.
-#[cfg_attr(feature = "snapshot", derive(bincode_next::Encode, bincode_next::Decode))]
+#[cfg_attr(
+    feature = "snapshot",
+    derive(bincode_next::Encode, bincode_next::Decode)
+)]
 #[derive(Debug, Clone)]
 pub struct SnapshotHeader {
     pub magic: u32,
@@ -201,7 +203,10 @@ pub struct SnapshotHeader {
 }
 
 /// Complete VM snapshot (metadata, excluding raw memory).
-#[cfg_attr(feature = "snapshot", derive(bincode_next::Encode, bincode_next::Decode))]
+#[cfg_attr(
+    feature = "snapshot",
+    derive(bincode_next::Encode, bincode_next::Decode)
+)]
 #[derive(Debug, Clone)]
 pub struct VmSnapshot {
     pub header: SnapshotHeader,
@@ -320,7 +325,8 @@ pub fn apply_reclaimed_pages(mem: &GuestMemoryMmap, pages: &[u64]) -> Result<(),
 /// Save VM snapshot metadata to a file (vmstate).
 #[cfg(feature = "snapshot")]
 pub fn save_vmstate(snapshot: &VmSnapshot, path: &Path) -> Result<(), SnapshotError> {
-    let data = bincode_next::encode_to_vec(snapshot, bincode_next::config::standard()).map_err(|e| SnapshotError::Serialize(e.to_string()))?;
+    let data = bincode_next::encode_to_vec(snapshot, bincode_next::config::standard())
+        .map_err(|e| SnapshotError::Serialize(e.to_string()))?;
     let mut file = File::create(path)?;
     file.write_all(&data)?;
     file.sync_all()?;
@@ -340,10 +346,12 @@ pub fn load_vmstate(path: &Path) -> Result<VmSnapshot, SnapshotError> {
     }
     let mut data = Vec::new();
     file.read_to_end(&mut data)?;
-    let snapshot: VmSnapshot =
-        bincode_next::decode_from_slice(&data, bincode_next::config::standard().with_limit::<{ VMSTATE_MAX_SIZE as usize }>())
-            .map(|(val, _)| val)
-            .map_err(|e| SnapshotError::Deserialize(e.to_string()))?;
+    let snapshot: VmSnapshot = bincode_next::decode_from_slice(
+        &data,
+        bincode_next::config::standard().with_limit::<{ VMSTATE_MAX_SIZE as usize }>(),
+    )
+    .map(|(val, _)| val)
+    .map_err(|e| SnapshotError::Deserialize(e.to_string()))?;
     validate_magic_and_version(&snapshot.header)?;
     if snapshot.vcpu_states.len() != snapshot.header.vcpu_count as usize {
         return Err(SnapshotError::VcpuCountMismatch {
@@ -396,7 +404,10 @@ pub fn create_full_snapshot(
 pub const PAGE_SIZE: u64 = 16384;
 
 /// An incremental memory diff entry.
-#[cfg_attr(feature = "snapshot", derive(bincode_next::Encode, bincode_next::Decode))]
+#[cfg_attr(
+    feature = "snapshot",
+    derive(bincode_next::Encode, bincode_next::Decode)
+)]
 #[derive(Debug, Clone)]
 pub struct DirtyPage {
     pub guest_addr: u64,
@@ -404,7 +415,10 @@ pub struct DirtyPage {
 }
 
 /// Incremental snapshot: vm state + dirty pages only.
-#[cfg_attr(feature = "snapshot", derive(bincode_next::Encode, bincode_next::Decode))]
+#[cfg_attr(
+    feature = "snapshot",
+    derive(bincode_next::Encode, bincode_next::Decode)
+)]
 #[derive(Debug, Clone)]
 pub struct IncrementalSnapshot {
     pub header: SnapshotHeader,
@@ -433,7 +447,8 @@ pub fn save_incremental_snapshot(
     snapshot: &IncrementalSnapshot,
     path: &Path,
 ) -> Result<(), SnapshotError> {
-    let data = bincode_next::encode_to_vec(snapshot, bincode_next::config::standard()).map_err(|e| SnapshotError::Serialize(e.to_string()))?;
+    let data = bincode_next::encode_to_vec(snapshot, bincode_next::config::standard())
+        .map_err(|e| SnapshotError::Serialize(e.to_string()))?;
     let mut file = File::create(path)?;
     file.write_all(&data)?;
     file.sync_all()?;
@@ -453,10 +468,12 @@ pub fn load_incremental_snapshot(path: &Path) -> Result<IncrementalSnapshot, Sna
     }
     let mut data = Vec::new();
     file.read_to_end(&mut data)?;
-    let snapshot: IncrementalSnapshot =
-        bincode_next::decode_from_slice(&data, bincode_next::config::standard().with_limit::<{ VMSTATE_MAX_SIZE as usize }>())
-            .map(|(val, _)| val)
-            .map_err(|e| SnapshotError::Deserialize(e.to_string()))?;
+    let snapshot: IncrementalSnapshot = bincode_next::decode_from_slice(
+        &data,
+        bincode_next::config::standard().with_limit::<{ VMSTATE_MAX_SIZE as usize }>(),
+    )
+    .map(|(val, _)| val)
+    .map_err(|e| SnapshotError::Deserialize(e.to_string()))?;
     validate_magic_and_version(&snapshot.header)?;
     if snapshot.vcpu_states.len() != snapshot.header.vcpu_count as usize {
         return Err(SnapshotError::VcpuCountMismatch {
@@ -517,7 +534,10 @@ mod tests {
         let header = valid_header(&mem, 4, false);
 
         let data = bincode_next::encode_to_vec(&header, bincode_next::config::standard()).unwrap();
-        let decoded: SnapshotHeader = bincode_next::decode_from_slice(&data, bincode_next::config::standard()).unwrap().0;
+        let decoded: SnapshotHeader =
+            bincode_next::decode_from_slice(&data, bincode_next::config::standard())
+                .unwrap()
+                .0;
 
         assert_eq!(decoded.magic, header.magic);
         assert_eq!(decoded.version, header.version);

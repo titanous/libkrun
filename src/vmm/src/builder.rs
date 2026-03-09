@@ -819,12 +819,13 @@ impl BuiltVm {
         // Step 1: Pre-validate vmstate before starting any threads or UFFD.
         // Use vcpus.len() since vcpus_handles isn't populated until start_vcpus_paused.
         let vcpu_count = self.vcpus.as_ref().map(|v| v.len()).unwrap_or(0);
-        let vmstate: super::snapshot::VmSnapshot =
-            bincode_next::decode_from_slice(&vmstate_bytes, bincode_next::config::standard().with_limit::<{ super::snapshot::VMSTATE_MAX_SIZE as usize }>())
-                .map(|(val, _)| val)
-                .map_err(|e| {
-                snapshot_err(super::snapshot::SnapshotError::Deserialize(e.to_string()))
-            })?;
+        let vmstate: super::snapshot::VmSnapshot = bincode_next::decode_from_slice(
+            &vmstate_bytes,
+            bincode_next::config::standard()
+                .with_limit::<{ super::snapshot::VMSTATE_MAX_SIZE as usize }>(),
+        )
+        .map(|(val, _)| val)
+        .map_err(|e| snapshot_err(super::snapshot::SnapshotError::Deserialize(e.to_string())))?;
         super::snapshot::validate_header_for_vm(
             &vmstate.header,
             &vmm.guest_memory,

@@ -449,8 +449,11 @@ impl SnapshotStore for FsSnapshotStore {
                     let mut excluded_vec: Vec<u64> = set.iter().copied().collect();
                     excluded_vec.sort_unstable();
 
-                    let page_index_data = bincode_next::encode_to_vec(&excluded_vec, bincode_next::config::standard())
-                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+                    let page_index_data = bincode_next::encode_to_vec(
+                        &excluded_vec,
+                        bincode_next::config::standard(),
+                    )
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
                     let page_index_path = path.join("page_index");
                     let mut index_file = fs::File::create(page_index_path)?;
@@ -549,7 +552,13 @@ impl SnapshotStoreFactory for FsSnapshotStoreFactory {
             if page_index_path.exists() {
                 match std::fs::read(&page_index_path) {
                     Ok(data) => {
-                        match bincode_next::decode_from_slice::<Vec<u64>, _>(&data, bincode_next::config::standard().with_limit::<{ crate::snapshot::VMSTATE_MAX_SIZE as usize }>()).map(|(val, _)| val) {
+                        match bincode_next::decode_from_slice::<Vec<u64>, _>(
+                            &data,
+                            bincode_next::config::standard()
+                                .with_limit::<{ crate::snapshot::VMSTATE_MAX_SIZE as usize }>(),
+                        )
+                        .map(|(val, _)| val)
+                        {
                             Ok(excluded_pages) => {
                                 store.set_excluded_pages(excluded_pages);
                             }
@@ -793,7 +802,8 @@ pub(crate) mod tests {
             excluded_pages: Vec::new(),
         };
 
-        let base_vmstate_bytes = bincode_next::encode_to_vec(&base_vmstate, bincode_next::config::standard()).unwrap();
+        let base_vmstate_bytes =
+            bincode_next::encode_to_vec(&base_vmstate, bincode_next::config::standard()).unwrap();
         fs::write(base_subdir.join("vmstate"), &base_vmstate_bytes).unwrap();
 
         // Base memory: 0x1000-0x4000 filled with 0xAA
@@ -821,7 +831,8 @@ pub(crate) mod tests {
             vm_state: None,
             reclaimed_pages: Vec::new(),
         };
-        let inc1_bytes = bincode_next::encode_to_vec(&inc1, bincode_next::config::standard()).unwrap();
+        let inc1_bytes =
+            bincode_next::encode_to_vec(&inc1, bincode_next::config::standard()).unwrap();
         fs::write(inc1_path.join("vmstate"), &inc1_bytes).unwrap();
 
         // Create second incremental (as directory with vmstate file)
@@ -845,7 +856,8 @@ pub(crate) mod tests {
             vm_state: None,
             reclaimed_pages: Vec::new(),
         };
-        let inc2_bytes = bincode_next::encode_to_vec(&inc2, bincode_next::config::standard()).unwrap();
+        let inc2_bytes =
+            bincode_next::encode_to_vec(&inc2, bincode_next::config::standard()).unwrap();
         fs::write(inc2_path.join("vmstate"), &inc2_bytes).unwrap();
 
         // Create factory and store
@@ -922,7 +934,8 @@ pub(crate) mod tests {
             excluded_pages: Vec::new(),
         };
 
-        let base_vmstate_bytes = bincode_next::encode_to_vec(&base_vmstate, bincode_next::config::standard()).unwrap();
+        let base_vmstate_bytes =
+            bincode_next::encode_to_vec(&base_vmstate, bincode_next::config::standard()).unwrap();
         fs::write(base_subdir.join("vmstate"), &base_vmstate_bytes).unwrap();
 
         // Base memory: filled with 0xAA
@@ -944,7 +957,8 @@ pub(crate) mod tests {
             vm_state: None,
             reclaimed_pages: Vec::new(),
         };
-        let inc_bytes = bincode_next::encode_to_vec(&inc, bincode_next::config::standard()).unwrap();
+        let inc_bytes =
+            bincode_next::encode_to_vec(&inc, bincode_next::config::standard()).unwrap();
         fs::write(inc_path.join("vmstate"), &inc_bytes).unwrap();
 
         // Create factory and store
@@ -1030,7 +1044,8 @@ pub(crate) mod tests {
             excluded_pages: Vec::new(),
         };
 
-        let base_vmstate_bytes = bincode_next::encode_to_vec(&base_vmstate, bincode_next::config::standard()).unwrap();
+        let base_vmstate_bytes =
+            bincode_next::encode_to_vec(&base_vmstate, bincode_next::config::standard()).unwrap();
         fs::write(base_subdir.join("vmstate"), &base_vmstate_bytes).unwrap();
 
         // Base memory
@@ -1052,7 +1067,8 @@ pub(crate) mod tests {
             vm_state: None,
             reclaimed_pages: Vec::new(),
         };
-        let inc1_bytes = bincode_next::encode_to_vec(&inc1, bincode_next::config::standard()).unwrap();
+        let inc1_bytes =
+            bincode_next::encode_to_vec(&inc1, bincode_next::config::standard()).unwrap();
         fs::write(inc1_path.join("vmstate"), &inc1_bytes).unwrap();
 
         let inc2_path = test_dir.join("inc2");
@@ -1069,7 +1085,8 @@ pub(crate) mod tests {
             vm_state: None,
             reclaimed_pages: Vec::new(),
         };
-        let inc2_bytes = bincode_next::encode_to_vec(&inc2, bincode_next::config::standard()).unwrap();
+        let inc2_bytes =
+            bincode_next::encode_to_vec(&inc2, bincode_next::config::standard()).unwrap();
         fs::write(inc2_path.join("vmstate"), &inc2_bytes).unwrap();
 
         // Create factory with both incrementals
@@ -1082,8 +1099,13 @@ pub(crate) mod tests {
         let merged_vmstate_bytes =
             futures::executor::block_on(store.read_vmstate()).expect("read_vmstate should succeed");
 
-        let merged_vmstate: VmSnapshot =
-            bincode_next::decode_from_slice(&merged_vmstate_bytes, bincode_next::config::standard().with_limit::<{ crate::snapshot::VMSTATE_MAX_SIZE as usize }>()).map(|(val, _)| val).expect("deserialization should succeed");
+        let merged_vmstate: VmSnapshot = bincode_next::decode_from_slice(
+            &merged_vmstate_bytes,
+            bincode_next::config::standard()
+                .with_limit::<{ crate::snapshot::VMSTATE_MAX_SIZE as usize }>(),
+        )
+        .map(|(val, _)| val)
+        .expect("deserialization should succeed");
 
         // Verify header comes from base
         assert_eq!(
@@ -1137,7 +1159,8 @@ pub(crate) mod tests {
             excluded_pages: Vec::new(),
         };
 
-        let base_vmstate_bytes = bincode_next::encode_to_vec(&base_vmstate, bincode_next::config::standard()).unwrap();
+        let base_vmstate_bytes =
+            bincode_next::encode_to_vec(&base_vmstate, bincode_next::config::standard()).unwrap();
         fs::write(base_subdir.join("vmstate"), &base_vmstate_bytes).unwrap();
 
         // Base memory
@@ -1155,8 +1178,13 @@ pub(crate) mod tests {
         let read_vmstate_bytes =
             futures::executor::block_on(store.read_vmstate()).expect("read_vmstate should succeed");
 
-        let read_vmstate: VmSnapshot =
-            bincode_next::decode_from_slice(&read_vmstate_bytes, bincode_next::config::standard().with_limit::<{ crate::snapshot::VMSTATE_MAX_SIZE as usize }>()).map(|(val, _)| val).expect("deserialization should succeed");
+        let read_vmstate: VmSnapshot = bincode_next::decode_from_slice(
+            &read_vmstate_bytes,
+            bincode_next::config::standard()
+                .with_limit::<{ crate::snapshot::VMSTATE_MAX_SIZE as usize }>(),
+        )
+        .map(|(val, _)| val)
+        .expect("deserialization should succeed");
 
         // Verify it matches the base vmstate
         assert_eq!(
