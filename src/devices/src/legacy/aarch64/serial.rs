@@ -20,6 +20,9 @@ use crate::legacy::{IrqChip, ReadableFd};
 use crate::snapshot::{SnapshotError, Snapshottable};
 use crate::Error as DeviceError;
 
+#[cfg(feature = "snapshot")]
+use crate::snapshot_serde;
+
 /* Registers */
 const UARTDR: u64 = 0;
 const UARTRSR_UARTECR: u64 = 1;
@@ -47,6 +50,10 @@ const PL011_ID: [u8; 8] = [0x11, 0x10, 0x14, 0x00, 0x0d, 0xf0, 0x05, 0xb1];
 // We are only interested in the margins.
 const AMBA_ID_LOW: u64 = 0x3f8;
 const AMBA_ID_HIGH: u64 = 0x401;
+
+// Snapshot serialization constants
+const MAX_SNAPSHOT_BYTES: usize = 512;
+const PL011_FIFO_SIZE: usize = 16;
 
 #[derive(Debug)]
 pub enum Error {
@@ -95,7 +102,7 @@ pub struct Serial {
     irq_line: Option<u32>,
 }
 
-#[cfg_attr(feature = "snapshot", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "snapshot", derive(bincode_next::Encode, bincode_next::Decode))]
 #[derive(Debug, Clone)]
 struct SerialState {
     flags: u32,
@@ -443,7 +450,7 @@ impl Snapshottable for Serial {
 
         #[cfg(feature = "snapshot")]
         {
-            bincode::serialize(&state).map_err(|e| SnapshotError::Serialize(e.to_string()))
+            snapshot_serde::serialize(&state)
         }
         #[cfg(not(feature = "snapshot"))]
         {
@@ -457,8 +464,17 @@ impl Snapshottable for Serial {
     fn restore_state(&mut self, data: &[u8]) -> std::result::Result<(), SnapshotError> {
         #[cfg(feature = "snapshot")]
         {
-            let state: SerialState = bincode::deserialize(data)
-                .map_err(|e| SnapshotError::Deserialize(e.to_string()))?;
+            let state: SerialState = snapshot_serde::deserialize::<_, { MAX_SNAPSHOT_BYTES }>(data)?;
+
+            // Validate read_fifo length
+            if state.read_fifo.len() > PL011_FIFO_SIZE {
+                return Err(SnapshotError::Deserialize(format!(
+                    "PL011 read_fifo length {} exceeds FIFO size {}",
+                    state.read_fifo.len(),
+                    PL011_FIFO_SIZE,
+                )));
+            }
+
             self.flags = state.flags;
             self.lcr = state.lcr;
             self.rsr = state.rsr;
@@ -523,5 +539,136 @@ impl Subscriber for Serial {
             Some(input) => vec![EpollEvent::new(EventSet::IN, input.as_raw_fd() as u64)],
             None => vec![],
         }
+    }
+}
+
+#[cfg(all(test, feature = "snapshot"))]
+mod snapshot_tests {
+    use super::*;
+
+    /// AC3.2: Round-trip serialization preserves register state
+    #[test]
+    fn test_pl011_snapshot_register_roundtrip() {
+        let mut device = Serial::new_sink(
+            utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
+        );
+
+        // Set non-default register values
+        device.flags = 0x42;
+        device.lcr = 0x50;
+        device.rsr = 0x11;
+        device.cr = 0x301;
+        device.dmacr = 0x02;
+        device.debug = 0x03;
+        device.int_enabled = 0x04;
+        device.int_level = 0x05;
+        device.ilpr = 0x06;
+        device.ibrd = 0x07;
+        device.fbrd = 0x08;
+        device.ifl = 0x09;
+        device.read_count = 0x0a;
+        device.read_trigger = 0x0b;
+
+        let saved = device.save_state().expect("save_state failed");
+        let mut restored = Serial::new_sink(
+            utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
+        );
+        restored.restore_state(&saved).expect("restore_state failed");
+
+        assert_eq!(restored.flags, 0x42);
+        assert_eq!(restored.lcr, 0x50);
+        assert_eq!(restored.rsr, 0x11);
+        assert_eq!(restored.cr, 0x301);
+        assert_eq!(restored.dmacr, 0x02);
+        assert_eq!(restored.debug, 0x03);
+        assert_eq!(restored.int_enabled, 0x04);
+        assert_eq!(restored.int_level, 0x05);
+        assert_eq!(restored.ilpr, 0x06);
+        assert_eq!(restored.ibrd, 0x07);
+        assert_eq!(restored.fbrd, 0x08);
+        assert_eq!(restored.ifl, 0x09);
+        assert_eq!(restored.read_count, 0x0a);
+        assert_eq!(restored.read_trigger, 0x0b);
+    }
+
+    /// AC3.2: Round-trip serialization preserves FIFO content
+    #[test]
+    fn test_pl011_snapshot_fifo_roundtrip() {
+        let mut device = Serial::new_sink(
+            utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
+        );
+
+        // Queue some input data
+        let test_data = vec![0x41, 0x42, 0x43];
+        device.read_fifo = test_data.iter().copied().collect();
+
+        let saved = device.save_state().expect("save_state failed");
+        let mut restored = Serial::new_sink(
+            utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
+        );
+        restored.restore_state(&saved).expect("restore_state failed");
+
+        let restored_data: Vec<u8> = restored.read_fifo.iter().copied().collect();
+        assert_eq!(restored_data, test_data);
+    }
+
+    /// AC3.2: Deserialization rejects read_fifo exceeding FIFO size limit
+    #[test]
+    fn test_pl011_snapshot_fifo_overflow() {
+        let mut device = Serial::new_sink(
+            utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
+        );
+
+        // Create FIFO with valid data, save it, then manually craft oversized payload
+        device.read_fifo = vec![1, 2, 3].into_iter().collect();
+        let saved = device.save_state().expect("save_state failed");
+
+        // Deserialize once to confirm baseline works
+        let mut restored = Serial::new_sink(
+            utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
+        );
+        restored.restore_state(&saved).expect("restore_state should succeed for valid data");
+
+        // Now create a device with oversized FIFO (beyond PL011_FIFO_SIZE=16)
+        let mut oversized_device = Serial::new_sink(
+            utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
+        );
+        oversized_device.read_fifo = (0..20).map(|i| i as u8).collect::<std::collections::VecDeque<u8>>();
+        let oversized_saved = oversized_device.save_state().expect("save_state failed");
+
+        // Try to restore the oversized FIFO
+        let mut restore_target = Serial::new_sink(
+            utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
+        );
+        let result = restore_target.restore_state(&oversized_saved);
+        assert!(result.is_err());
+        match result {
+            Err(SnapshotError::Deserialize(msg)) => {
+                assert!(msg.contains("exceeds FIFO size"));
+            }
+            _ => panic!("Expected Deserialize error with FIFO size message"),
+        }
+    }
+
+    /// Round-trip with maximum valid FIFO size
+    #[test]
+    fn test_pl011_snapshot_fifo_max_valid() {
+        let mut device = Serial::new_sink(
+            utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
+        );
+
+        // Fill FIFO to maximum valid size (16 bytes)
+        let max_data: Vec<u8> = (0..PL011_FIFO_SIZE).map(|i| i as u8).collect();
+        device.read_fifo = max_data.iter().copied().collect();
+
+        let saved = device.save_state().expect("save_state failed");
+        let mut restored = Serial::new_sink(
+            utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
+        );
+        restored.restore_state(&saved).expect("restore_state should succeed for max valid FIFO");
+
+        let restored_data: Vec<u8> = restored.read_fifo.iter().copied().collect();
+        assert_eq!(restored_data.len(), PL011_FIFO_SIZE);
+        assert_eq!(restored_data, max_data);
     }
 }
