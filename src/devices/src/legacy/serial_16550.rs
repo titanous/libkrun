@@ -54,7 +54,10 @@ const DEFAULT_MODEM_CONTROL: u8 = 0x8; // Auxiliary output 2
 const DEFAULT_MODEM_STATUS: u8 = 0x20 | 0x10 | 0x80; // data ready, clear to send, carrier detect
 const DEFAULT_BAUD_DIVISOR: u16 = 12; // 9600 bps
 
-#[cfg_attr(feature = "snapshot", derive(serde::Serialize, serde::Deserialize))]
+#[cfg(feature = "snapshot")]
+const MAX_SNAPSHOT_BYTES: usize = 128;
+
+#[cfg_attr(feature = "snapshot", derive(bincode_next::Encode, bincode_next::Decode))]
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // Fields read via serde deserialization
 struct Serial16550State {
@@ -302,7 +305,7 @@ impl Snapshottable for Serial {
 
         #[cfg(feature = "snapshot")]
         {
-            bincode::serialize(&state).map_err(|e| SnapshotError::Serialize(e.to_string()))
+            crate::snapshot_serde::serialize(&state)
         }
         #[cfg(not(feature = "snapshot"))]
         {
@@ -316,8 +319,14 @@ impl Snapshottable for Serial {
     fn restore_state(&mut self, data: &[u8]) -> std::result::Result<(), SnapshotError> {
         #[cfg(feature = "snapshot")]
         {
-            let state: Serial16550State = bincode::deserialize(data)
-                .map_err(|e| SnapshotError::Deserialize(e.to_string()))?;
+            let state: Serial16550State = crate::snapshot_serde::deserialize::<_, { MAX_SNAPSHOT_BYTES }>(data)?;
+            if state.in_buffer.len() > LOOP_SIZE {
+                return Err(SnapshotError::Deserialize(format!(
+                    "serial 16550 in_buffer length {} exceeds LOOP_SIZE {}",
+                    state.in_buffer.len(),
+                    LOOP_SIZE,
+                )));
+            }
             self.interrupt_enable = state.interrupt_enable;
             self.interrupt_identification = state.interrupt_identification;
             self.line_control = state.line_control;
