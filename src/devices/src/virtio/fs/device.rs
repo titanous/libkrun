@@ -226,9 +226,7 @@ mod tests {
         .unwrap()
     }
 
-    fn make_activate_args(
-        mem: &GuestMemoryMmap,
-    ) -> (InterruptTransport, Vec<DeviceQueue>) {
+    fn make_activate_args(mem: &GuestMemoryMmap) -> (InterruptTransport, Vec<DeviceQueue>) {
         let irqchip = DummyIrqChip::new().into();
         let interrupt = InterruptTransport::new(irqchip, "test".into()).unwrap();
 
@@ -239,8 +237,14 @@ mod tests {
         let vq1 = VirtQueue::new(vq1_start, mem, 16);
 
         let queues = vec![
-            DeviceQueue::new(vq0.create_queue(), Arc::new(EventFd::new(EFD_NONBLOCK).unwrap())),
-            DeviceQueue::new(vq1.create_queue(), Arc::new(EventFd::new(EFD_NONBLOCK).unwrap())),
+            DeviceQueue::new(
+                vq0.create_queue(),
+                Arc::new(EventFd::new(EFD_NONBLOCK).unwrap()),
+            ),
+            DeviceQueue::new(
+                vq1.create_queue(),
+                Arc::new(EventFd::new(EFD_NONBLOCK).unwrap()),
+            ),
         ];
 
         (interrupt, queues)
