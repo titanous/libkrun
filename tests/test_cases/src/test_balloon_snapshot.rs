@@ -79,7 +79,7 @@ mod host_snap {
                 .resize(192)
                 .map_err(|e| anyhow::anyhow!("resize failed: {e:?}"))?;
             balloon
-                .await_target(192, Duration::from_secs(5), Some(Duration::from_secs(60)))
+                .await_target(192, Duration::from_secs(5), Some(Duration::from_secs(30)))
                 .map_err(|e| anyhow::anyhow!("await_target failed: {e:?}"))?;
 
             // AC2.3: inflated snapshot should use significantly less disk space.
@@ -124,12 +124,9 @@ mod host_snap {
             balloon
                 .resize(0)
                 .map_err(|e| anyhow::anyhow!("deflate resize failed: {e:?}"))?;
-            for _ in 0..60 {
-                if balloon.actual() < 4 {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(500));
-            }
+            balloon
+                .await_target(0, Duration::from_secs(5), Some(Duration::from_secs(30)))
+                .map_err(|e| anyhow::anyhow!("deflate await_target failed: {e:?}"))?;
             handle.snapshot(&snap_deflated)?;
             let deflated_blocks = std::fs::metadata(snap_deflated.join("memory"))
                 .map(|m| m.blocks())

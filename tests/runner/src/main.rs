@@ -7,12 +7,14 @@ use std::io::Write;
 use std::panic::catch_unwind;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 use tempdir::TempDir;
 use test_cases::{test_cases, Test, TestCase, TestSetup};
 
 struct TestResult {
     name: String,
     passed: bool,
+    duration: Duration,
     log_path: PathBuf,
 }
 
@@ -69,25 +71,28 @@ fn run_single_test(
         .spawn()
         .context("Failed to start subprocess for test")?;
 
+    let start = Instant::now();
     let _ = get_test(test_case)?;
     let result = catch_unwind(|| {
         let test = get_test(test_case).unwrap();
         test.check(child);
     });
+    let duration = start.elapsed();
 
     let passed = result.is_ok();
     if passed {
-        eprintln!("OK");
+        eprintln!("OK ({:.1}s)", duration.as_secs_f64());
         if !keep_all {
             let _ = fs::remove_dir_all(&test_dir);
         }
     } else {
-        eprintln!("FAIL");
+        eprintln!("FAIL ({:.1}s)", duration.as_secs_f64());
     }
 
     Ok(TestResult {
         name: test_case.to_string(),
         passed,
+        duration,
         log_path,
     })
 }
@@ -180,6 +185,21 @@ fn run_tests(
     if github_summary {
         write_github_summary(&results, num_ok, num_tests)?;
     }
+
+    // Print timing summary sorted slowest-first.
+    let total: Duration = results.iter().map(|r| r.duration).sum();
+    let mut by_time: Vec<_> = results.iter().collect();
+    by_time.sort_by(|a, b| b.duration.cmp(&a.duration));
+    eprintln!("\n--- timing (slowest first) ---");
+    for r in &by_time {
+        let tag = if r.passed { " " } else { "!" };
+        eprintln!(
+            "{tag} {:.1}s  {}",
+            r.duration.as_secs_f64(),
+            r.name
+        );
+    }
+    eprintln!("  {:.1}s  total (sequential)", total.as_secs_f64());
 
     let num_failures = num_tests - num_ok;
     if num_failures > 0 {
