@@ -86,8 +86,7 @@ mod host {
 
                 let context = builder.build()?;
 
-                let factory =
-                    EmptyPreloadStoreFactory::new(&snap_dir, &[] as &[&std::path::Path]);
+                let factory = EmptyPreloadStoreFactory::new(&snap_dir, &[] as &[&std::path::Path]);
 
                 let listener_thread = thread::spawn(move || {
                     if let Ok((mut stream, _)) = listener.accept() {
@@ -121,8 +120,7 @@ mod guest {
         fn in_guest(self: Box<Self>) {
             // Static values that must survive cold restore via UFFD (AC3.3: present pages
             // are loaded from store correctly, not confused with zero-filled absent pages)
-            static COUNTER: std::sync::atomic::AtomicI32 =
-                std::sync::atomic::AtomicI32::new(0);
+            static COUNTER: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
             static PATTERN: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
             // Phase 1: set known values and signal ready

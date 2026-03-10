@@ -2,9 +2,9 @@ use std::cell::RefCell;
 use std::fs::File;
 use std::sync::{Arc, RwLock};
 
+use bincode_next::{Decode, Encode};
 use clap::Parser;
 use log::debug;
-use bincode_next::{Decode, Encode};
 use vhost::vhost_user::message::{
     VhostTransferStateDirection, VhostTransferStatePhase, VhostUserProtocolFeatures,
 };
@@ -139,7 +139,12 @@ impl VhostUserBackendMut for VsockProxyBackend {
     }
 
     fn get_config(&self, offset: u32, size: u32) -> Vec<u8> {
-        log::debug!("get_config: offset={}, size={}, guest_cid={}", offset, size, self.guest_cid);
+        log::debug!(
+            "get_config: offset={}, size={}, guest_cid={}",
+            offset,
+            size,
+            self.guest_cid
+        );
         // Return guest_cid as little-endian u64 (virtio_vsock_config)
         let mut config = [0u8; 8];
         config.copy_from_slice(&self.guest_cid.to_le_bytes());
@@ -160,7 +165,11 @@ impl VhostUserBackendMut for VsockProxyBackend {
         vrings: &[Self::Vring],
         _thread_id: usize,
     ) -> std::io::Result<()> {
-        log::debug!("handle_event: device_event={}, vrings.len()={}", device_event, vrings.len());
+        log::debug!(
+            "handle_event: device_event={}, vrings.len()={}",
+            device_event,
+            vrings.len()
+        );
         // device_event = queue index (0 = RX, 1 = TX, 2 = Event)
         if (device_event as usize) >= vrings.len() {
             return Ok(());
@@ -201,7 +210,9 @@ impl VhostUserBackendMut for VsockProxyBackend {
             let mut buf = Vec::new();
             let mut file = fd.try_clone()?;
             file.read_to_end(&mut buf)?;
-            let result: Result<ProxyState, _> = bincode_next::decode_from_slice(&buf, bincode_next::config::standard()).map(|v| v.0);
+            let result: Result<ProxyState, _> =
+                bincode_next::decode_from_slice(&buf, bincode_next::config::standard())
+                    .map(|v| v.0);
             match result {
                 Ok(state) => {
                     *self.state.borrow_mut() = state;
@@ -260,7 +271,10 @@ impl VsockProxyBackend {
             }
         }
 
-        log::debug!("process_tx_queue: found {} chains to process", chains_to_process.len());
+        log::debug!(
+            "process_tx_queue: found {} chains to process",
+            chains_to_process.len()
+        );
 
         // Process each descriptor chain from TX queue
         for desc_chain in chains_to_process {
@@ -300,7 +314,11 @@ impl VsockProxyBackend {
 
                 log::debug!(
                     "TX packet: op={}, src_cid={}, src_port={}, dst_cid={}, dst_port={}",
-                    op, src_cid, src_port, dst_cid, dst_port
+                    op,
+                    src_cid,
+                    src_port,
+                    dst_cid,
+                    dst_port
                 );
 
                 // Handle different operation types and write responses to RX queue
@@ -321,7 +339,11 @@ impl VsockProxyBackend {
                         };
                         debug!("Responding to VSOCK_OP_REQUEST");
                         let resp_bytes = resp_hdr.to_bytes();
-                        self.write_response_to_rx(&mut rx_vring_lock, guest_mem_deref, &resp_bytes)?;
+                        self.write_response_to_rx(
+                            &mut rx_vring_lock,
+                            guest_mem_deref,
+                            &resp_bytes,
+                        )?;
                     }
                     VSOCK_OP_RW => {
                         // Check if this is a counter query request
@@ -348,7 +370,11 @@ impl VsockProxyBackend {
                             // Write header + counter to RX queue
                             let mut counter_packet = counter_hdr.to_bytes();
                             counter_packet.extend_from_slice(&counter_bytes);
-                            self.write_response_to_rx(&mut rx_vring_lock, guest_mem_deref, &counter_packet)?;
+                            self.write_response_to_rx(
+                                &mut rx_vring_lock,
+                                guest_mem_deref,
+                                &counter_packet,
+                            )?;
                         } else {
                             // Normal echo: copy data, increment counter
                             let data = &packet_bytes[VSOCK_HDR_SIZE..];
@@ -380,7 +406,11 @@ impl VsockProxyBackend {
                             // Write header + echo data to RX queue
                             let mut echo_packet = echo_hdr.to_bytes();
                             echo_packet.extend_from_slice(&data[..bytes_to_echo]);
-                            self.write_response_to_rx(&mut rx_vring_lock, guest_mem_deref, &echo_packet)?;
+                            self.write_response_to_rx(
+                                &mut rx_vring_lock,
+                                guest_mem_deref,
+                                &echo_packet,
+                            )?;
                         }
                     }
                     VSOCK_OP_SHUTDOWN => {
@@ -455,15 +485,15 @@ impl VsockProxyBackend {
                 let write_len = std::cmp::min(len, packet_bytes.len() - offset);
                 guest_mem_deref
                     .write_slice(&packet_bytes[offset..offset + write_len], addr)
-                    .map_err(|e| {
-                        std::io::Error::other(format!("failed to write to RX: {}", e))
-                    })?;
+                    .map_err(|e| std::io::Error::other(format!("failed to write to RX: {}", e)))?;
                 offset += write_len;
             }
         }
 
         // Mark RX descriptor as used with the number of bytes written
-        rx_queue.add_used(guest_mem_deref, rx_head_index, offset as u32).ok();
+        rx_queue
+            .add_used(guest_mem_deref, rx_head_index, offset as u32)
+            .ok();
 
         Ok(())
     }

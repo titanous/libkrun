@@ -50,6 +50,8 @@ use vmm::builder::StartMicrovmError;
 pub use vmm::resources::VirtioConsoleConfigMode;
 use vmm::resources::{TsiFlags, VmResources, VsockConfig};
 #[cfg(feature = "snapshot")]
+pub use vmm::snapshot::{save_vmstate, SnapshotHeader, VmSnapshot};
+#[cfg(feature = "snapshot")]
 pub use vmm::snapshot_store;
 pub use vmm::vm_exit::VmExit;
 #[cfg(feature = "blk")]

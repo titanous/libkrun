@@ -56,9 +56,9 @@ mod host {
 mod guest {
     use super::*;
     use crate::Test;
-    use std::os::unix::fs::OpenOptionsExt;
     use std::fs::OpenOptions;
     use std::io::{Read, Seek, SeekFrom};
+    use std::os::unix::fs::OpenOptionsExt;
 
     // O_DIRECT requires 512-byte aligned buffers.
     #[repr(align(512))]
@@ -77,7 +77,8 @@ mod guest {
 
             // Sector 0: good sector — read should succeed and return 0xAA bytes
             let mut buf = AlignedSector([0u8; 512]);
-            f.read_exact(&mut buf.0).expect("sector 0 read should succeed");
+            f.read_exact(&mut buf.0)
+                .expect("sector 0 read should succeed");
             assert!(
                 buf.0.iter().all(|&b| b == 0xAA),
                 "sector 0 should be all 0xAA, got {:?}",

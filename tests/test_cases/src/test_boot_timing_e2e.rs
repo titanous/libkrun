@@ -49,8 +49,12 @@ mod host {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    const MILESTONE_LABELS: &[&str] =
-        &["in_guest start", "virtiofs mounted", "token read", "pre-send"];
+    const MILESTONE_LABELS: &[&str] = &[
+        "in_guest start",
+        "virtiofs mounted",
+        "token read",
+        "pre-send",
+    ];
 
     impl Test for TestBootTimingE2e {
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
@@ -182,9 +186,7 @@ mod host {
             println!("    T+{t_recv_ms}ms\ttoken received (e2e total)");
 
             // Print guest CLOCK_BOOTTIME milestones aligned to host clock.
-            println!(
-                "  guest CLOCK_BOOTTIME (kernel start ≈ T+{kernel_start_ms}ms estimated):"
-            );
+            println!("  guest CLOCK_BOOTTIME (kernel start ≈ T+{kernel_start_ms}ms estimated):");
             for (i, &g_ms) in milestones.iter().enumerate() {
                 let label = MILESTONE_LABELS.get(i).copied().unwrap_or("?");
                 let t_ms = kernel_start_ms + g_ms;
@@ -233,7 +235,7 @@ mod host {
 
         /// Forward the timing output to runner's stderr for terminal visibility.
         fn check(self: Box<Self>, child: Child) {
-            let output = child.wait_with_output().unwrap();
+            let output = crate::wait_with_timeout(child, crate::TEST_TIMEOUT);
             let stdout = String::from_utf8(output.stdout).unwrap();
 
             // Print full timeline to stderr (visible in terminal; bench-boot only
@@ -363,9 +365,7 @@ mod guest {
 
             // [kmsg_len: u16 LE] [kmsg_text]
             let kmsg_len = kmsg_bytes.len().min(u16::MAX as usize);
-            stream
-                .write_all(&(kmsg_len as u16).to_le_bytes())
-                .unwrap();
+            stream.write_all(&(kmsg_len as u16).to_le_bytes()).unwrap();
             if kmsg_len > 0 {
                 stream.write_all(&kmsg_bytes[..kmsg_len]).unwrap();
             }

@@ -34,7 +34,9 @@ mod host {
             let mut builder = krun::Builder::new();
             let mut port_mapping = HashMap::new();
             port_mapping.insert(PORT, PORT);
-            builder.port_map(port_mapping).map_err(|_| anyhow::anyhow!("port_map failed"))?;
+            builder
+                .port_map(port_mapping)
+                .map_err(|_| anyhow::anyhow!("port_map failed"))?;
             builder.vm_config(1, 512)?;
             setup_fs_builder(&mut builder, &test_setup)?;
             let context = builder.build()?;

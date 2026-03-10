@@ -26,7 +26,9 @@ use super::VhostUserDevice;
 #[cfg(feature = "snapshot")]
 use crate::snapshot_serde;
 
-const MAX_SNAPSHOT_BYTES: usize = 8192;
+// 16KB: daemon_state blob (DEVICE_STATE transfer) can reach ~8KB; bumped from
+// 8192 when bincode-next encoding grew the VhostUserFsState beyond the old limit.
+const MAX_SNAPSHOT_BYTES: usize = 16384;
 
 /// Snapshot state for VhostUserFs device.
 /// Captures all information needed to restore the device to its saved state.

@@ -75,7 +75,8 @@ mod guest {
             f.flush().expect("flush");
 
             // Read back and verify
-            f.seek(SeekFrom::Start(0)).expect("seek to sector 0 for read");
+            f.seek(SeekFrom::Start(0))
+                .expect("seek to sector 0 for read");
             let mut read_back = vec![0u8; 512];
             f.read_exact(&mut read_back).expect("read sector 0");
 

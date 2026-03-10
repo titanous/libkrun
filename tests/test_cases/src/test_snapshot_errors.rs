@@ -9,63 +9,29 @@ mod host {
     use super::*;
     use crate::{Test, TestSetup};
     use std::fs;
-    use std::io::Write;
     use std::path::Path;
 
     /// Write a minimal snapshot directory for error-path testing.
-    /// Produces a valid bincode-encoded VmSnapshot at `dir/vmstate` with the
-    /// given header fields, and an empty `dir/memory` file.
-    ///
-    /// RAM regions are intentionally left empty — validation checks magic,
-    /// version, vCPU count, and nested_enabled before RAM layout, so these
-    /// error-path tests never reach the RAM layout check.
+    /// Uses the real VmSnapshot/SnapshotHeader types and save_vmstate to
+    /// produce correctly-encoded bincode-next data.
     fn write_vmstate(dir: &Path, magic: u32, version: u32, vcpu_count: u32, nested: bool) {
-        write_vmstate_with_regions(dir, magic, version, vcpu_count, nested, vec![]);
-    }
-
-    /// Helper to encode snapshot with explicit RAM regions (for testing purposes).
-    fn write_vmstate_with_regions(
-        dir: &Path,
-        magic: u32,
-        version: u32,
-        vcpu_count: u32,
-        nested: bool,
-        ram_regions: Vec<(u64, u64)>,
-    ) {
         fs::create_dir_all(dir).unwrap();
 
-        // Hand-encode a minimal VmSnapshot in bincode 1.3 format (little-endian,
-        // u64 length prefix for collections).
-        let mut data = Vec::new();
-
-        // SnapshotHeader
-        data.extend_from_slice(&magic.to_le_bytes()); // magic: u32
-        data.extend_from_slice(&version.to_le_bytes()); // version: u32
-        data.extend_from_slice(&vcpu_count.to_le_bytes()); // vcpu_count: u32
-                                                           // ram_regions: Vec<(u64,u64)>
-        data.extend_from_slice(&(ram_regions.len() as u64).to_le_bytes()); // Vec length
-        for (base, size) in &ram_regions {
-            data.extend_from_slice(&base.to_le_bytes());
-            data.extend_from_slice(&size.to_le_bytes());
-        }
-        data.push(nested as u8); // nested_enabled: bool
-
-        // vcpu_states: Vec<Vec<u8>> with vcpu_count entries (each empty)
-        data.extend_from_slice(&(vcpu_count as u64).to_le_bytes()); // Vec length = vcpu_count
-        for _ in 0..vcpu_count {
-            data.extend_from_slice(&0u64.to_le_bytes()); // each vCPU state is empty Vec<u8>
-        }
-        // device_states: empty Vec<(String,Vec<u8>)> = length 0
-        data.extend_from_slice(&0u64.to_le_bytes());
-        // gic_state: None = 0x00 (bincode Option::None discriminant)
-        data.push(0u8);
-        // vm_state: None = 0x00
-        data.push(0u8);
-        // excluded_pages: empty Vec<u64> = length 0
-        data.extend_from_slice(&0u64.to_le_bytes());
-
-        let mut f = fs::File::create(dir.join("vmstate")).unwrap();
-        f.write_all(&data).unwrap();
+        let snapshot = krun::VmSnapshot {
+            header: krun::SnapshotHeader {
+                magic,
+                version,
+                vcpu_count,
+                ram_regions: vec![],
+                nested_enabled: nested,
+            },
+            vcpu_states: vec![vec![]; vcpu_count as usize],
+            device_states: vec![],
+            gic_state: None,
+            vm_state: None,
+            excluded_pages: vec![],
+        };
+        krun::save_vmstate(&snapshot, &dir.join("vmstate")).unwrap();
 
         // Empty memory file — error occurs before memory is read
         fs::File::create(dir.join("memory")).unwrap();

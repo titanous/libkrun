@@ -65,7 +65,9 @@ mod host {
                 let vm_thread = thread::spawn(move || context.run());
 
                 let (mut stream, _) = listener.accept().unwrap();
-                stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(15)))
+                    .unwrap();
 
                 // Wait for guest to write pattern to block device
                 let mut buf = vec![0u8; 7];
@@ -186,7 +188,8 @@ mod guest {
             // Read back sector 0 and verify pattern (data persisted in backend)
             f.seek(SeekFrom::Start(0)).expect("seek to sector 0");
             let mut read_back = vec![0u8; 512];
-            f.read_exact(&mut read_back).expect("read sector 0 after restore");
+            f.read_exact(&mut read_back)
+                .expect("read sector 0 after restore");
 
             assert_eq!(
                 &read_back[..WRITE_PATTERN.len()],

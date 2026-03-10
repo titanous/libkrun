@@ -67,8 +67,7 @@ mod guest_helpers {
     /// Echo roundtrip: connect, send data, read response.
     pub fn echo_roundtrip(port: u32, data: &[u8]) -> Vec<u8> {
         let mut sock = crate::vsock_helpers::vsock_connect(port);
-        sock.write_all(data)
-            .expect("failed to write echo data");
+        sock.write_all(data).expect("failed to write echo data");
         let mut response = vec![0u8; data.len()];
         sock.read_exact(&mut response)
             .expect("failed to read echo response");

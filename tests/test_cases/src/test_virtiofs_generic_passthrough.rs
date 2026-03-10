@@ -18,20 +18,21 @@ mod host_impl {
             // Copy guest-agent into root
             let agent_path = std::env::var_os("KRUN_TEST_GUEST_AGENT_PATH")
                 .context("KRUN_TEST_GUEST_AGENT_PATH not set")?;
-            fs::copy(&agent_path, root_dir.join("guest-agent"))
-                .context("copy guest-agent")?;
+            fs::copy(&agent_path, root_dir.join("guest-agent")).context("copy guest-agent")?;
 
             // Create a test data file that the guest will read
-            fs::write(root_dir.join("test-data.txt"), b"hello from generic virtiofs")
-                .context("write test-data.txt")?;
+            fs::write(
+                root_dir.join("test-data.txt"),
+                b"hello from generic virtiofs",
+            )
+            .context("write test-data.txt")?;
 
             // Construct PassthroughFs manually and pass via the generic API
             let cfg = krun::passthrough::Config {
                 root_dir: root_dir.to_str().unwrap().to_string(),
                 ..Default::default()
             };
-            let pt = krun::passthrough::PassthroughFs::new(cfg)
-                .context("PassthroughFs::new")?;
+            let pt = krun::passthrough::PassthroughFs::new(cfg).context("PassthroughFs::new")?;
 
             let mut builder = krun::Builder::new();
             builder.vm_config(1, 256)?;

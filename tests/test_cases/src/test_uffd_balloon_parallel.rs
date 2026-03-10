@@ -46,7 +46,9 @@ mod host {
                 let vm_thread = thread::spawn(move || context.run());
 
                 let (mut stream, _) = listener.accept().unwrap();
-                stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(15)))
+                    .unwrap();
 
                 // Wait for guest to signal ready
                 let mut buf = vec![0u8; 5];
@@ -81,8 +83,7 @@ mod host {
 
                 let context = builder.build()?;
 
-                let factory =
-                    EmptyPreloadStoreFactory::new(&snap_dir, &[] as &[&std::path::Path]);
+                let factory = EmptyPreloadStoreFactory::new(&snap_dir, &[] as &[&std::path::Path]);
 
                 let listener_thread = thread::spawn(move || {
                     if let Ok((mut stream, _)) = listener.accept() {
@@ -109,9 +110,9 @@ mod guest {
     use crate::vsock_helpers::vsock_connect;
     use crate::Test;
     use std::io::Write;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::thread;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     impl Test for TestUffdBalloonParallel {
         fn in_guest(self: Box<Self>) {

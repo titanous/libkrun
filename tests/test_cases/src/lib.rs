@@ -271,6 +271,36 @@ pub struct TestSetup {
 }
 
 #[host]
+/// Default per-test timeout (2 minutes).
+pub const TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+#[host]
+/// Wait for a child process with a timeout. Kills the child and panics if the
+/// timeout expires.
+pub fn wait_with_timeout(child: Child, timeout: std::time::Duration) -> std::process::Output {
+    use std::sync::mpsc;
+    use std::thread;
+
+    let child_id = child.id();
+
+    let (tx, rx) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        // wait_with_output reads stdout and stderr concurrently (no pipe deadlock).
+        let output = child.wait_with_output().unwrap();
+        let _ = tx.send(());
+        output
+    });
+
+    match rx.recv_timeout(timeout) {
+        Ok(()) => handle.join().unwrap(),
+        Err(_) => {
+            unsafe { libc::kill(child_id as i32, libc::SIGKILL) };
+            panic!("test timed out after {}s", timeout.as_secs());
+        }
+    }
+}
+
+#[host]
 pub trait Test {
     /// Start the VM
     fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()>;
@@ -281,7 +311,7 @@ pub trait Test {
     /// before the test output, and kernel shutdown/warning messages may
     /// appear after it — both are tolerated.
     fn check(self: Box<Self>, child: Child) {
-        let output = child.wait_with_output().unwrap();
+        let output = wait_with_timeout(child, TEST_TIMEOUT);
         let stdout = String::from_utf8(output.stdout).unwrap();
         assert!(
             stdout.contains("OK\n"),

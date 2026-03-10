@@ -91,14 +91,12 @@ mod host {
             // --- Restore cycle 1 ---
             handle.restore_snapshot(&snap_dir)?;
             stream.write_all(b"READ").unwrap();
-            let first_entropy =
-                wait_for_file(&entropy_path, 32, Duration::from_secs(10));
+            let first_entropy = wait_for_file(&entropy_path, 32, Duration::from_secs(10));
 
             // --- Restore cycle 2 ---
             handle.restore_snapshot(&snap_dir)?;
             stream.write_all(b"READ").unwrap();
-            let second_entropy =
-                wait_for_file(&entropy_path, 32, Duration::from_secs(10));
+            let second_entropy = wait_for_file(&entropy_path, 32, Duration::from_secs(10));
 
             // Verify that VMGENID caused entropy divergence between clones.
             assert_ne!(

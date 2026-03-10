@@ -161,8 +161,7 @@ mod guest_snap {
     impl Test for TestBalloonSnapshotExcludes {
         fn in_guest(self: Box<Self>) {
             // Static counter survives snapshot/restore — used to verify AC4.5
-            static COUNTER: std::sync::atomic::AtomicI32 =
-                std::sync::atomic::AtomicI32::new(0);
+            static COUNTER: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
             COUNTER.store(77, std::sync::atomic::Ordering::SeqCst);
 
             let mut stream = vsock_connect(VSOCK_PORT_SNAP);
@@ -275,8 +274,7 @@ mod guest_incr {
     impl Test for TestBalloonIncrementalReclaimed {
         fn in_guest(self: Box<Self>) {
             // Static data: must survive across the incremental snapshot/restore cycle
-            static COUNTER: std::sync::atomic::AtomicI32 =
-                std::sync::atomic::AtomicI32::new(0);
+            static COUNTER: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
             COUNTER.store(42, std::sync::atomic::Ordering::SeqCst);
 
             let mut stream = vsock_connect(VSOCK_PORT_INCR);

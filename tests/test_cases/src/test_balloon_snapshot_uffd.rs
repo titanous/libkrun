@@ -47,7 +47,9 @@ mod host {
                 let vm_thread = thread::spawn(move || context.run());
 
                 let (mut stream, _) = listener.accept().unwrap();
-                stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(15)))
+                    .unwrap();
 
                 // Wait for guest to signal ready with known static values set
                 let mut buf = vec![0u8; 5];
@@ -84,8 +86,7 @@ mod host {
 
                 let context = builder.build()?;
 
-                let factory =
-                    EmptyPreloadStoreFactory::new(&snap_dir, &[] as &[&std::path::Path]);
+                let factory = EmptyPreloadStoreFactory::new(&snap_dir, &[] as &[&std::path::Path]);
 
                 let listener_thread = thread::spawn(move || {
                     if let Ok((mut stream, _)) = listener.accept() {
@@ -116,10 +117,8 @@ mod guest {
     impl Test for TestBalloonSnapshotUffd {
         fn in_guest(self: Box<Self>) {
             // Static values that must survive UFFD cold restore (present-page path)
-            static COUNTER: std::sync::atomic::AtomicI32 =
-                std::sync::atomic::AtomicI32::new(0);
-            static PATTERN: std::sync::atomic::AtomicU8 =
-                std::sync::atomic::AtomicU8::new(0);
+            static COUNTER: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+            static PATTERN: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
             // Phase 1: set values and signal ready
             COUNTER.store(99, std::sync::atomic::Ordering::SeqCst);

@@ -7,11 +7,11 @@ mod host {
     use super::*;
     use crate::krun_rust::setup_fs_builder;
     use crate::{Test, TestSetup};
+    use krun::ConsoleDeviceInfo;
     use std::io::{BufRead, BufReader, Write};
     use std::os::fd::AsRawFd;
     use std::os::unix::net::UnixStream;
     use std::{mem, thread};
-    use krun::ConsoleDeviceInfo;
 
     fn spawn_ping_pong_responder(stream: UnixStream) {
         thread::spawn(move || {

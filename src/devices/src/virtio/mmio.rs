@@ -657,7 +657,10 @@ impl BusDevice for MmioTransport {
 }
 
 #[cfg(feature = "snapshot")]
-const MAX_SNAPSHOT_BYTES: usize = 4096;
+// 16KB: MmioTransportState wraps inner device state in backend_state (e.g.
+// VhostUserFsState daemon blob can reach ~8.5KB), so the outer limit must
+// exceed the largest inner device limit.
+const MAX_SNAPSHOT_BYTES: usize = 16384;
 
 /// Serializable state for an MmioTransport device.
 #[cfg_attr(
