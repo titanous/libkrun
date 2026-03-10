@@ -7,10 +7,12 @@ use std::io::Write;
 use std::panic::catch_unwind;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tempdir::TempDir;
-use test_cases::{test_cases, Test, TestCase, TestSetup};
+use test_cases::{test_cases, Test, TestSetup};
 
+#[derive(Debug)]
 struct TestResult {
     name: String,
     passed: bool,
@@ -45,6 +47,7 @@ fn run_single_test(
     base_dir: &Path,
     keep_all: bool,
     max_name_len: usize,
+    print_lock: Option<&Mutex<()>>,
 ) -> anyhow::Result<TestResult> {
     let executable = env::current_exe().context("Failed to detect current executable")?;
     let test_dir = base_dir.join(test_case);
@@ -52,12 +55,6 @@ fn run_single_test(
 
     let log_path = test_dir.join("log.txt");
     let log_file = File::create(&log_path).context("Failed to create log file")?;
-
-    eprint!(
-        "[{test_case}] {:.<width$} ",
-        "",
-        width = max_name_len - test_case.len() + 3
-    );
 
     let child = Command::new(&executable)
         .arg("start-vm")
@@ -80,13 +77,18 @@ fn run_single_test(
     let duration = start.elapsed();
 
     let passed = result.is_ok();
-    if passed {
-        eprintln!("OK ({:.1}s)", duration.as_secs_f64());
-        if !keep_all {
-            let _ = fs::remove_dir_all(&test_dir);
-        }
-    } else {
-        eprintln!("FAIL ({:.1}s)", duration.as_secs_f64());
+    let status = if passed { "OK" } else { "FAIL" };
+    {
+        let _guard = print_lock.map(|m| m.lock().unwrap());
+        eprintln!(
+            "[{test_case}] {:.<width$} {status} ({:.1}s)",
+            "",
+            duration.as_secs_f64(),
+            width = max_name_len - test_case.len() + 3
+        );
+    }
+    if passed && !keep_all {
+        let _ = fs::remove_dir_all(&test_dir);
     }
 
     Ok(TestResult {
@@ -149,6 +151,7 @@ fn run_tests(
     base_dir: Option<PathBuf>,
     keep_all: bool,
     github_summary: bool,
+    jobs: usize,
 ) -> anyhow::Result<()> {
     // Create the base directory - either use provided path or create a temp one
     let base_dir = match base_dir {
@@ -161,23 +164,84 @@ fn run_tests(
             .into_path(),
     };
 
-    let mut results: Vec<TestResult> = Vec::new();
+    let wall_start = Instant::now();
+    let results: Vec<TestResult>;
 
     if test_case == "all" {
         let all_tests = test_cases();
         let max_name_len = all_tests.iter().map(|t| t.name.len()).max().unwrap_or(0);
+        let test_names: Vec<&'static str> = all_tests.into_iter().map(|t| t.name).collect();
 
-        for TestCase { name, test: _ } in all_tests {
-            results.push(run_single_test(name, &base_dir, keep_all, max_name_len).context(name)?);
+        if jobs <= 1 {
+            // Sequential (original behavior)
+            let mut seq_results = Vec::new();
+            for name in test_names {
+                seq_results.push(
+                    run_single_test(name, &base_dir, keep_all, max_name_len, None)
+                        .context(name)?,
+                );
+            }
+            results = seq_results;
+        } else {
+            // Parallel execution with thread pool
+            let base_dir = Arc::new(base_dir.clone());
+            let print_lock = Arc::new(Mutex::new(()));
+            let work: Arc<Mutex<std::vec::IntoIter<&'static str>>> =
+                Arc::new(Mutex::new(test_names.into_iter()));
+            let collected: Arc<Mutex<Vec<TestResult>>> = Arc::new(Mutex::new(Vec::new()));
+
+            std::thread::scope(|s| {
+                let mut handles = Vec::new();
+                for _ in 0..jobs {
+                    let work = Arc::clone(&work);
+                    let collected = Arc::clone(&collected);
+                    let base_dir = Arc::clone(&base_dir);
+                    let print_lock = Arc::clone(&print_lock);
+                    handles.push(s.spawn(move || {
+                        loop {
+                            let name = {
+                                let mut iter = work.lock().unwrap();
+                                iter.next()
+                            };
+                            let Some(name) = name else { break };
+                            match run_single_test(
+                                name,
+                                &base_dir,
+                                keep_all,
+                                max_name_len,
+                                Some(&print_lock),
+                            ) {
+                                Ok(r) => collected.lock().unwrap().push(r),
+                                Err(e) => {
+                                    let _guard = print_lock.lock().unwrap();
+                                    eprintln!("[{name}] ERROR: {e:#}");
+                                    collected.lock().unwrap().push(TestResult {
+                                        name: name.to_string(),
+                                        passed: false,
+                                        duration: Duration::ZERO,
+                                        log_path: base_dir.join(name).join("log.txt"),
+                                    });
+                                }
+                            }
+                        }
+                    }));
+                }
+                for h in handles {
+                    h.join().unwrap();
+                }
+            });
+
+            results = Arc::try_unwrap(collected).unwrap().into_inner().unwrap();
         }
     } else {
         let max_name_len = test_case.len();
-        results.push(
-            run_single_test(test_case, &base_dir, keep_all, max_name_len)
+        results = vec![
+            run_single_test(test_case, &base_dir, keep_all, max_name_len, None)
                 .context(test_case.to_string())?,
-        );
+        ];
     }
 
+    let wall_time = wall_start.elapsed();
     let num_tests = results.len();
     let num_ok = results.iter().filter(|r| r.passed).count();
 
@@ -199,7 +263,14 @@ fn run_tests(
             r.name
         );
     }
-    eprintln!("  {:.1}s  total (sequential)", total.as_secs_f64());
+    eprintln!("  {:.1}s  sum of test times", total.as_secs_f64());
+    if jobs > 1 {
+        eprintln!(
+            "  {:.1}s  wall time ({jobs} jobs, {:.1}x speedup)",
+            wall_time.as_secs_f64(),
+            total.as_secs_f64() / wall_time.as_secs_f64(),
+        );
+    }
 
     let num_failures = num_tests - num_ok;
     if num_failures > 0 {
@@ -231,6 +302,9 @@ enum CliCommand {
         /// Write test results to GitHub Actions job summary ($GITHUB_STEP_SUMMARY)
         #[arg(long)]
         github_summary: bool,
+        /// Number of tests to run in parallel (default: 1 = sequential)
+        #[arg(short = 'j', long = "jobs", default_value = "1")]
+        jobs: usize,
     },
     StartVm {
         #[arg(long)]
@@ -247,6 +321,7 @@ impl Default for CliCommand {
             base_dir: None,
             keep_all: false,
             github_summary: false,
+            jobs: 1,
         }
     }
 }
@@ -269,6 +344,7 @@ fn main() -> anyhow::Result<()> {
             base_dir,
             keep_all,
             github_summary,
-        } => run_tests(&test_case, base_dir, keep_all, github_summary),
+            jobs,
+        } => run_tests(&test_case, base_dir, keep_all, github_summary, jobs),
     }
 }

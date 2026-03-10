@@ -332,8 +332,10 @@ fn setup_redirects_sysfs() {
 fn reopen_fd(fd: i32, path: &str, flags: i32) {
     let c_path = CString::new(path).unwrap();
     unsafe {
-        // Retry for up to ~2s to handle devtmpfs race: kdevtmpfs may not have
+        // Retry for up to ~5s to handle devtmpfs race: kdevtmpfs may not have
         // created the device node yet when we get here after a fast boot.
+        // Under parallel VM startup (e.g. integration tests with -j 50),
+        // kdevtmpfs can take >2s to create device nodes.
         let mut attempts = 0u32;
         let newfd = loop {
             let newfd = libc::open(c_path.as_ptr(), flags);
@@ -341,11 +343,11 @@ fn reopen_fd(fd: i32, path: &str, flags: i32) {
                 break newfd;
             }
             let err = *libc::__errno_location();
-            if err != libc::ENOENT || attempts >= 20 {
+            if err != libc::ENOENT || attempts >= 100 {
                 eprintln!("Failed to open '{}': errno {}", path, err);
                 return;
             }
-            libc::usleep(100_000); // 100ms
+            libc::usleep(50_000); // 50ms
             attempts += 1;
         };
         if libc::dup2(newfd, fd) < 0 {

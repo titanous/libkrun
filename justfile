@@ -29,11 +29,11 @@ test:
     cargo test -p vmm --features uffd,snapshot
 
 # Requires libkrunfw.so in test-prefix/lib64/ (nix shellHook creates this symlink).
-# Usage: just integration [<name>]
+# Usage: just integration [<name>] [jobs]
 # Run integration tests (all by default, or single by name).
-integration test="all":
+integration test="all" jobs="8":
     mkdir -p test-prefix/lib64
-    cd tests && RUST_LOG=trace LD_LIBRARY_PATH="$(realpath ../test-prefix/lib64/)" ./run.sh test --test-case "{{test}}"
+    cd tests && RUST_LOG=trace LD_LIBRARY_PATH="$(realpath ../test-prefix/lib64/)" ./run.sh test --test-case "{{test}}" -j "{{jobs}}"
 
 # Benchmark boot-timing-e2e with release builds; prints min/p50/p95/mean/max/stddev.
 # Runs one warmup iteration then N timed samples.
@@ -229,7 +229,7 @@ asan:
 # The workaround is to build guest-agent before entering ASan mode, or to
 # modify run.sh to skip the RUSTFLAGS env when building for the musl target.
 # Integration tests under AddressSanitizer (host binaries only; musl guest-agent built separately).
-integration-asan:
+integration-asan jobs="8":
     mkdir -p test-prefix/lib64
     cd tests && \
         GUEST_TARGET_ARCH="$(uname -m)-unknown-linux-musl" \
@@ -240,7 +240,7 @@ integration-asan:
         KRUN_NO_RUN_SH_GUEST_AGENT=1 \
         FEATURE_FLAGS="--features embedded_init" \
         LD_LIBRARY_PATH="$(realpath ../test-prefix/lib64/)" \
-        ./run.sh test
+        ./run.sh test -j "{{jobs}}"
 
 # Uses shuttle crate to sample thread interleavings (not exhaustive like loom).
 # Targets: balloon condvar (real write_config + actual_condvar coordination).
