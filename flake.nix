@@ -312,9 +312,22 @@ KCONFIG_EOF
           # The NixOS clang wrapper uses a different include strategy that works correctly.
           CXX_x86_64_unknown_linux_gnu = "${cxxWrapper}/bin/clang++";
 
-          # Linker for the x86_64-unknown-linux-musl target (guest-agent)
+          # Linker and C compiler for the x86_64-unknown-linux-musl target (guest-agent).
+          # CC must also be musl: the cc crate uses CC to compile C deps (zstd-sys,
+          # capng, bzip2-sys) which must use musl headers, not glibc (otherwise
+          # they reference __memcpy_chk and other glibc-only symbols).
+          CC_x86_64_unknown_linux_musl = "${pkgs.pkgsMusl.stdenv.cc}/bin/cc";
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER =
             "${pkgs.pkgsMusl.stdenv.cc}/bin/cc";
+
+          # Static musl libcap-ng path for the guest-agent musl target.
+          # The capng crate needs LIBCAPNG_LINK_TYPE=static and LIBCAPNG_LIB_PATH
+          # for musl builds, but these env vars are not target-specific — setting
+          # them globally breaks glibc builds. The justfile sets them only when
+          # building the musl guest-agent target.
+          LIBCAPNG_STATIC_LIB_PATH = "${pkgs.pkgsStatic.libcap_ng}/lib";
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS =
+            "-L ${pkgs.pkgsStatic.libcap_ng}/lib";
 
           shellHook = ''
             # The rust-overlay toolchain's setup hook re-adds its bin to PATH after

@@ -48,7 +48,8 @@ bench-boot n="20" vcpus="1" extra_cmdline="":
     cd tests
     GUEST_TARGET_ARCH="$(uname -m)-unknown-linux-musl"
     HOST_TARGET_ARCH="$(uname -m)-unknown-linux-gnu"
-    cargo build --release --target="$GUEST_TARGET_ARCH" -p guest-agent
+    LIBCAPNG_LINK_TYPE=static LIBCAPNG_LIB_PATH="$LIBCAPNG_STATIC_LIB_PATH" \
+        cargo build --release --target="$GUEST_TARGET_ARCH" -p guest-agent
     cargo build --release -p runner
     cargo build -p test-daemon
     cargo build -p test-vsock-proxy
@@ -233,6 +234,7 @@ integration-asan jobs="8":
     mkdir -p test-prefix/lib64
     cd tests && \
         GUEST_TARGET_ARCH="$(uname -m)-unknown-linux-musl" \
+        LIBCAPNG_LINK_TYPE=static LIBCAPNG_LIB_PATH="$LIBCAPNG_STATIC_LIB_PATH" \
         cargo build --target="$(uname -m)-unknown-linux-musl" -p guest-agent && \
         RUSTFLAGS="-Zsanitizer=address" \
         RUSTUP_TOOLCHAIN=nightly \
