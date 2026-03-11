@@ -975,6 +975,13 @@ impl Builder {
         self
     }
 
+    /// Enables nested virtualization support, exposing VMX (Intel) or SVM (AMD)
+    /// capabilities to the guest so it can act as a hypervisor.
+    pub fn enable_nested_virt(&mut self) -> &mut Self {
+        self.config.vmr.nested_enabled = true;
+        self
+    }
+
     pub fn build(self) -> Result<Context, StartError> {
         // Helper constants and functions for legacy network configuration
         #[cfg(feature = "net")]
@@ -1996,6 +2003,21 @@ mod tests {
         assert_eq!(
             builder.config.vmr.balloon_enabled, true,
             "balloon_enabled should be true after enable_balloon()"
+        );
+    }
+
+    #[test]
+    fn test_enable_nested_virt_sets_flag() {
+        let mut builder = Builder::new();
+        assert_eq!(
+            builder.config.vmr.nested_enabled, false,
+            "nested_enabled should be false by default"
+        );
+
+        builder.enable_nested_virt();
+        assert_eq!(
+            builder.config.vmr.nested_enabled, true,
+            "nested_enabled should be true after enable_nested_virt()"
         );
     }
 
