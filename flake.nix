@@ -215,9 +215,24 @@ CONFIG_SLABINFO=n
 KCONFIG_EOF
           '';
         });
+
+        # libkrunfw variant with KVM support for nested virtualization.
+        # The L1 guest kernel needs CONFIG_KVM to expose /dev/kvm so it can
+        # act as a hypervisor and run L2 VMs.
+        libkrunfw-nested = libkrunfw-vmgenid.overrideAttrs (old: {
+          postPatch = (old.postPatch or "") + ''
+            cat >> config-libkrunfw_x86_64 <<'KCONFIG_EOF'
+# KVM support for nested virtualization (L1 guest acts as hypervisor)
+CONFIG_KVM=y
+CONFIG_KVM_INTEL=y
+CONFIG_KVM_AMD=y
+KCONFIG_EOF
+          '';
+        });
       in
       {
         packages.libkrunfw-vmgenid = libkrunfw-vmgenid;
+        packages.libkrunfw-nested = libkrunfw-nested;
 
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
@@ -313,6 +328,10 @@ KCONFIG_EOF
             for lib in ${libkrunfw-vmgenid}/lib/libkrunfw*; do
               ln -sf "$lib" "$(pwd)/test-prefix/lib64/$(basename "$lib")"
             done
+
+            # Symlink libkrunfw-nested for nested virt integration tests.
+            # Direct symlink avoids fragile sed-based renaming of versioned .so names.
+            ln -sf ${libkrunfw-nested}/lib/libkrunfw.so "$(pwd)/test-prefix/lib64/libkrunfw-nested.so"
 
             # Add libclang to LD_LIBRARY_PATH so clang-sys can load it at build time
             export LD_LIBRARY_PATH="${pkgs.llvmPackages.libclang.lib}/lib:$LD_LIBRARY_PATH"
