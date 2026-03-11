@@ -25,6 +25,7 @@ pub fn update_feature_info_entry(
     }
 
     entry.ecx.write_bit(ecx::TSC_DEADLINE_TIMER_BITINDEX, true);
+    entry.ecx.write_bit(ecx::VMX_BITINDEX, vm_spec.nested_enabled());
 
     Ok(())
 }
@@ -417,5 +418,45 @@ mod tests {
             2,
             LEVEL_TYPE_CORE,
         );
+    }
+
+    #[test]
+    fn test_nested_virt_vmx_enabled() {
+        use crate::cpu_leaf::leaf_0x1::*;
+
+        let vm_spec = VmSpec::new(0, 1, false, true).expect("Error creating vm_spec");
+        let mut entry = kvm_cpuid_entry2 {
+            function: leaf_0x1::LEAF_NUM,
+            index: 0,
+            flags: 0,
+            eax: 0,
+            ebx: 0,
+            ecx: 0,
+            edx: 0,
+            padding: [0, 0, 0],
+        };
+
+        assert!(update_feature_info_entry(&mut entry, &vm_spec).is_ok());
+        assert!(entry.ecx.read_bit(ecx::VMX_BITINDEX));
+    }
+
+    #[test]
+    fn test_nested_virt_vmx_disabled() {
+        use crate::cpu_leaf::leaf_0x1::*;
+
+        let vm_spec = VmSpec::new(0, 1, false, false).expect("Error creating vm_spec");
+        let mut entry = kvm_cpuid_entry2 {
+            function: leaf_0x1::LEAF_NUM,
+            index: 0,
+            flags: 0,
+            eax: 0,
+            ebx: 0,
+            ecx: 0,
+            edx: 0,
+            padding: [0, 0, 0],
+        };
+
+        assert!(update_feature_info_entry(&mut entry, &vm_spec).is_ok());
+        assert!(!entry.ecx.read_bit(ecx::VMX_BITINDEX));
     }
 }

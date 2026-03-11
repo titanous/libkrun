@@ -34,7 +34,8 @@ pub mod leaf_0x1 {
         pub const MONITOR_BITINDEX: u32 = 3;
         // CPL Qualified Debug Store
         pub const DS_CPL_SHIFT: u32 = 4;
-        // 5 = VMX (Virtual Machine Extensions)
+        // VMX = Virtual Machine Extensions (nested virtualization)
+        pub const VMX_BITINDEX: u32 = 5;
         // 6 = SMX (Safer Mode Extensions)
         // 7 = EIST (Enhanced Intel SpeedStep® technology)
         // TM2 = Thermal Monitor 2
