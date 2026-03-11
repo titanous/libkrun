@@ -1,6 +1,6 @@
 # Integration Tests
 
-Last verified: 2026-03-03
+Last verified: 2026-03-10
 
 ## Purpose
 Host/guest integration test workspace. Tests run inside real microVMs to verify end-to-end behavior.
@@ -11,7 +11,7 @@ Host/guest integration test workspace. Tests run inside real microVMs to verify 
 - **Expects**: `embedded_init` feature enabled; libkrunfw available at runtime (symlinked in test-prefix)
 
 ## Dependencies
-- **Uses**: `libkrun` crate (Rust API, with features: embedded_init, net, blk, snapshot, vhost-user, uffd)
+- **Uses**: `libkrun` crate (Rust API, with features: embedded_init, net, blk, snapshot, vhost-user, uffd); `nested` feature flag enables libkrun dependency in test_cases for L1 guest code
 - **Boundary**: Test daemons (test_daemon, test_vsock_proxy) use `vm-memory` 0.18 with vendored `virtio-queue` 0.17 and `vhost-user-backend` 0.21
 
 ## Running Tests
@@ -27,7 +27,7 @@ Tests are inherently flaky (VM + network timing). Some failures under load are e
 - Test cases use `krun_rust.rs` helpers for Rust API tests (Builder pattern)
 - `mem_block_backend.rs` provides in-memory AsyncBlockBackend for block tests (host-only)
 
-## Test Cases (49 total)
+## Test Cases (50 total)
 - `configure-vm-*` - VM configuration tests (1cpu-256MiB, 2cpu-1GiB)
 - `vsock-guest-connect` - Guest-initiated vsock connection
 - `tsi-tcp-guest-connect`, `tsi-tcp-guest-listen` - TSI TCP connectivity tests
@@ -59,9 +59,10 @@ Tests are inherently flaky (VM + network timing). Some failures under load are e
 - `block-backend-errors` - Block backend error handling (FailingBlockBackend)
 - `block-backend-slow` - Block backend latency tolerance (SlowBlockBackend)
 - `block-snapshot-uffd` - Block device snapshot with UFFD restore
+- `nested-virt` - Nested virtualization (host->L1->L2); requires host KVM nested support, skips if unavailable; uses `nested` feature flag
 
 ## Key Files
-- `test_cases/src/lib.rs` - Test case registry (49 test cases)
+- `test_cases/src/lib.rs` - Test case registry (50 test cases)
 - `test_cases/src/krun_rust.rs` - Rust API test helpers (Builder pattern)
 - `test_cases/src/common.rs` - Shared test constants and utilities
 - `test_cases/src/mem_block_backend.rs` - In-memory AsyncBlockBackend for block tests (host-only)

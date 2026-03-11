@@ -1,12 +1,12 @@
 # libkrun Crate
 
-Last verified: 2026-03-03
+Last verified: 2026-03-10
 
 ## Purpose
 Public Rust API crate providing `Builder`, `Context`, and `VmHandle` for configuring and starting microVMs. C API removed.
 
 ## Contracts
-- **Exposes**: Rust `Builder` struct, `Context` struct, `StartError` enum, `VmExit` enum (re-exported from vmm), `Builder::add_virtiofs_vhost_user()` (behind `vhost-user` feature), `Builder::add_vsock_vhost_user()` and `Builder::add_vsock_vhost_user_fd()` (behind `vhost-user` feature), `vmm::snapshot_store` re-export (behind `snapshot` feature), `VmHandle::snapshot_to_store()`, `VmHandle::incremental_snapshot_to_store()` (behind `snapshot` feature), re-exports of `devices::virtio::fs::{FileSystem, passthrough, dax_mapper}` (behind `not(tee)` feature), `Builder::enable_balloon()`, `BalloonHandle`, `BalloonResult`, `BalloonError`, `VmHandle::balloon()` (behind `not(tee)` feature)
+- **Exposes**: Rust `Builder` struct, `Context` struct, `StartError` enum, `VmExit` enum (re-exported from vmm), `Builder::add_virtiofs_vhost_user()` (behind `vhost-user` feature), `Builder::add_vsock_vhost_user()` and `Builder::add_vsock_vhost_user_fd()` (behind `vhost-user` feature), `vmm::snapshot_store` re-export (behind `snapshot` feature), `VmHandle::snapshot_to_store()`, `VmHandle::incremental_snapshot_to_store()` (behind `snapshot` feature), re-exports of `devices::virtio::fs::{FileSystem, passthrough, dax_mapper}` (behind `not(tee)` feature), `Builder::enable_balloon()`, `BalloonHandle`, `BalloonResult`, `BalloonError`, `VmHandle::balloon()` (behind `not(tee)` feature), `Builder::enable_nested_virt()` (exposes VMX/SVM/NPT CPUID bits to guest)
 - **Guarantees**:
   - `Builder::vm_config()` returns `Result<&mut Self, StartError>` and validates num_vcpus > 0
   - `StartError::ZeroVcpus` variant for 0-vCPU validation
@@ -29,7 +29,7 @@ Public Rust API crate providing `Builder`, `Context`, and `VmHandle` for configu
   - `BalloonHandle::await_target(target_mb, stall_timeout, max_timeout)` blocks on condvar until guest reaches target; returns `BalloonResult::Reached(actual_mb)`, `BalloonResult::Stalled(actual_mb)`, or `Err(BalloonError::Timeout { actual })`
   - `BalloonHandle::actual()` returns current inflation in MB
   - `BalloonHandle` is `Clone` (wraps `Arc`)
-- **Expects**: Callers set vm_config before start; valid feature flags at compile time; `enable_balloon()` must be called before `start()` for balloon to be available
+- **Expects**: Callers set vm_config before start; valid feature flags at compile time; `enable_balloon()` must be called before `start()` for balloon to be available; `enable_nested_virt()` must be called before `build()` and requires host KVM nested support
 
 ## Dependencies
 - **Uses**: `vmm` (build_microvm, Vmm lifecycle, VmExit), `devices` (VirtioNetBackend, console, block, Balloon, VhostUserFs, VhostUserVsock, FileSystem, passthrough, dax_mapper)

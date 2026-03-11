@@ -1,6 +1,6 @@
 # VMM Crate
 
-Last verified: 2026-03-09
+Last verified: 2026-03-10
 
 ## Purpose
 Core virtual machine manager. Orchestrates VM lifecycle: build, run, snapshot/restore, dirty page tracking.
@@ -64,7 +64,7 @@ Core virtual machine manager. Orchestrates VM lifecycle: build, run, snapshot/re
 - **Boundary**: Does not know about C API; only receives structured `VmResources`
 
 ## Key Decisions
-- `nested_enabled` tracked on `Vmm` struct and validated on restore (was previously hardcoded to false)
+- `nested_enabled` threaded through `VmResources` -> `VcpuConfig` -> `VmSpec` -> CPUID transformers; tracked on `Vmm` struct and validated on snapshot restore
 - `dirty_tracking_enabled` is an explicit flag on `Vmm`; set to true when dirty tracking starts
 - `DirtyBitmap::mark_dirty` uses silent bounds check instead of `debug_assert!` (safe for vCPU fault handlers)
 - Snapshot format version 1, magic `0x4B52_534E` ("KRSN")
@@ -124,7 +124,7 @@ Core virtual machine manager. Orchestrates VM lifecycle: build, run, snapshot/re
 - `vmm_config/vhost_user_vsock.rs` - `VhostUserVsockConfig`, `VhostUserVsockConnection` (SocketPath or Stream)
 
 ## Gotchas
-- `create_full_snapshot` still hardcodes `nested_enabled: false` (pre-existing TODO)
+- `create_full_snapshot` now uses `self.nested_enabled` (previously hardcoded to `false`; fixed in nested-virt implementation)
 - Vsock timesync quiesce is macOS-only; on Linux the timesync thread is not started
 - `VcpuHandle::Drop` is `#[cfg(not(test))]` -- tests do not get automatic thread cleanup
 - UFFD handler receives its tokio runtime from the caller (`Context` creates it, passes through `BuiltVm` to `Vmm` to `UffdHandler::run`)
