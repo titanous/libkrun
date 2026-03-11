@@ -189,7 +189,7 @@ mod guest {
         let context = builder.build().expect("L1: builder.build() failed");
 
         // Run the L2 VM
-        context.run();
+        let _ = context.run();
 
         // AC4.3: If we get here, L2 completed. The framework checks for "OK" in stdout.
         // L2 prints "OK" which propagates through the console chain.
