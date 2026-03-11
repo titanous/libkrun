@@ -1,3 +1,7 @@
+// Re-export krun (required for nested-virt test's L1 guest code that builds L2 VMs)
+// The crate is named libkrun but the library is named krun
+pub use krun;
+
 mod test_vm_config;
 use test_vm_config::TestVmConfig;
 

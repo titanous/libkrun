@@ -1,3 +1,8 @@
+//! NOTE: The L1 guest code requires libkrun to be available. This is provided
+//! when guest-agent is built with libkrun dependency.
+//! For normal test_cases compilation (with "guest" feature only), the L1 code
+//! cannot be compiled. It will panic at runtime with a helpful error message.
+
 use macros::{guest, host};
 
 pub struct TestNestedVirt;
