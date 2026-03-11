@@ -993,6 +993,8 @@ pub struct VcpuConfig {
     pub ht_enabled: bool,
     /// CPUID template to use.
     pub cpu_template: Option<CpuFeaturesTemplate>,
+    /// Whether nested virtualization is enabled.
+    pub nested_enabled: bool,
 }
 
 // Using this for easier explicit type-casting to help IDEs interpret the code.
@@ -1268,7 +1270,7 @@ impl Vcpu {
         vcpu_config: &VcpuConfig,
         kernel_boot: bool,
     ) -> Result<()> {
-        let cpuid_vm_spec = VmSpec::new(self.id, vcpu_config.vcpu_count, vcpu_config.ht_enabled)
+        let cpuid_vm_spec = VmSpec::new(self.id, vcpu_config.vcpu_count, vcpu_config.ht_enabled, vcpu_config.nested_enabled)
             .map_err(Error::CpuId)?;
 
         filter_cpuid(&mut self.cpuid, &cpuid_vm_spec).map_err(|e| {
@@ -2254,6 +2256,7 @@ mod tests {
             vcpu_count: 1,
             ht_enabled: false,
             cpu_template: None,
+            nested_enabled: false,
         };
 
         assert!(vcpu
