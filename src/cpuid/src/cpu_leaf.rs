@@ -272,6 +272,7 @@ pub mod leaf_0x80000001 {
         pub const TOPOEXT_INDEX: u32 = 22;
         pub const PREFETCH_BITINDEX: u32 = 8; // 3DNow! PREFETCH/PREFETCHW instructions
         pub const LZCNT_BITINDEX: u32 = 5; // advanced bit manipulation
+        pub const SVM_BITINDEX: u32 = 2; // Secure Virtual Machine
     }
 
     pub mod edx {
@@ -294,6 +295,15 @@ pub mod leaf_0x80000008 {
         pub const THREAD_ID_SIZE_BITRANGE: BitRange = bit_range!(15, 12);
         // The number of threads in the package - 1
         pub const NUM_THREADS_BITRANGE: BitRange = bit_range!(7, 0);
+    }
+}
+
+// SVM Features Leaf
+pub mod leaf_0x8000000a {
+    pub const LEAF_NUM: u32 = 0x8000_000a;
+
+    pub mod edx {
+        pub const NPT_BITINDEX: u32 = 0; // Nested Page Tables
     }
 }
 

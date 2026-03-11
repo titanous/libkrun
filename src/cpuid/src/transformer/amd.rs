@@ -51,12 +51,15 @@ pub fn update_largest_extended_fn_entry(
 
 pub fn update_extended_feature_info_entry(
     entry: &mut kvm_cpuid_entry2,
-    _vm_spec: &VmSpec,
+    vm_spec: &VmSpec,
 ) -> Result<(), Error> {
     use crate::cpu_leaf::leaf_0x80000001::*;
 
     // set the Topology Extension bit since we use the Extended Cache Topology leaf
     entry.ecx.write_bit(ecx::TOPOEXT_INDEX, true);
+
+    // set the SVM bit when nested virtualization is enabled
+    entry.ecx.write_bit(ecx::SVM_BITINDEX, vm_spec.nested_enabled());
 
     Ok(())
 }
@@ -126,6 +129,18 @@ pub fn update_extended_apic_id_entry(
     Ok(())
 }
 
+pub fn update_svm_features_entry(
+    entry: &mut kvm_cpuid_entry2,
+    vm_spec: &VmSpec,
+) -> Result<(), Error> {
+    use crate::cpu_leaf::leaf_0x8000000a::*;
+
+    // set the NPT (Nested Page Tables) bit when nested virtualization is enabled
+    entry.edx.write_bit(edx::NPT_BITINDEX, vm_spec.nested_enabled());
+
+    Ok(())
+}
+
 pub struct AmdCpuidTransformer {}
 
 impl CpuidTransformer for AmdCpuidTransformer {
@@ -142,6 +157,7 @@ impl CpuidTransformer for AmdCpuidTransformer {
             leaf_0x80000000::LEAF_NUM => Some(amd::update_largest_extended_fn_entry),
             leaf_0x80000001::LEAF_NUM => Some(amd::update_extended_feature_info_entry),
             leaf_0x80000008::LEAF_NUM => Some(amd::update_amd_features_entry),
+            leaf_0x8000000a::LEAF_NUM => Some(amd::update_svm_features_entry),
             leaf_0x8000001d::LEAF_NUM => Some(amd::update_extended_cache_topology_entry),
             leaf_0x8000001e::LEAF_NUM => Some(amd::update_extended_apic_id_entry),
             0x8000_0002..=0x8000_0004 => Some(common::update_brand_string_entry),
@@ -351,5 +367,87 @@ mod tests {
 
         check_update_extended_apic_id_entry(0, 2, true, 0, 1);
         check_update_extended_apic_id_entry(1, 2, true, 0, 1);
+    }
+
+    #[test]
+    fn test_nested_virt_svm_enabled() {
+        use crate::cpu_leaf::leaf_0x80000001::*;
+
+        let vm_spec = VmSpec::new(0, 1, false, true).expect("Error creating vm_spec");
+        let mut entry = kvm_cpuid_entry2 {
+            function: LEAF_NUM,
+            index: 0,
+            flags: 0,
+            eax: 0,
+            ebx: 0,
+            ecx: 0,
+            edx: 0,
+            padding: [0, 0, 0],
+        };
+
+        assert!(update_extended_feature_info_entry(&mut entry, &vm_spec).is_ok());
+        assert!(entry.ecx.read_bit(ecx::SVM_BITINDEX));
+        assert!(entry.ecx.read_bit(ecx::TOPOEXT_INDEX));
+    }
+
+    #[test]
+    fn test_nested_virt_svm_disabled() {
+        use crate::cpu_leaf::leaf_0x80000001::*;
+
+        let vm_spec = VmSpec::new(0, 1, false, false).expect("Error creating vm_spec");
+        let mut entry = kvm_cpuid_entry2 {
+            function: LEAF_NUM,
+            index: 0,
+            flags: 0,
+            eax: 0,
+            ebx: 0,
+            ecx: 0,
+            edx: 0,
+            padding: [0, 0, 0],
+        };
+
+        assert!(update_extended_feature_info_entry(&mut entry, &vm_spec).is_ok());
+        assert!(!entry.ecx.read_bit(ecx::SVM_BITINDEX));
+        assert!(entry.ecx.read_bit(ecx::TOPOEXT_INDEX));
+    }
+
+    #[test]
+    fn test_nested_virt_npt_enabled() {
+        use crate::cpu_leaf::leaf_0x8000000a::*;
+
+        let vm_spec = VmSpec::new(0, 1, false, true).expect("Error creating vm_spec");
+        let mut entry = kvm_cpuid_entry2 {
+            function: LEAF_NUM,
+            index: 0,
+            flags: 0,
+            eax: 0,
+            ebx: 0,
+            ecx: 0,
+            edx: 0,
+            padding: [0, 0, 0],
+        };
+
+        assert!(update_svm_features_entry(&mut entry, &vm_spec).is_ok());
+        assert!(entry.edx.read_bit(edx::NPT_BITINDEX));
+    }
+
+    #[test]
+    fn test_nested_virt_npt_disabled() {
+        use crate::cpu_leaf::leaf_0x8000000a::*;
+
+        let vm_spec = VmSpec::new(0, 1, false, false).expect("Error creating vm_spec");
+        let mut entry = kvm_cpuid_entry2 {
+            function: LEAF_NUM,
+            index: 0,
+            flags: 0,
+            eax: 0,
+            ebx: 0,
+            ecx: 0,
+            edx: 0,
+            padding: [0, 0, 0],
+        };
+
+        assert!(update_svm_features_entry(&mut entry, &vm_spec).is_ok());
+        assert!(!entry.edx.read_bit(edx::NPT_BITINDEX));
     }
 }
