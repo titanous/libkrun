@@ -3,16 +3,17 @@ name = "test_cases"
 edition = "2021"
 
 [features]
-host = ["dep:futures"]  # libkrun is now always included
+host = ["dep:futures", "dep:libkrun"]
 guest = []
+# Enable nested virtualization support in test_cases (requires libkrun)
+nested = ["dep:libkrun"]
 
 [lib]
 name = "test_cases"
 
 [dependencies]
 # libkrun is needed for nested-virt test where L1 guest builds L2 VM
-# Always include it so nested-virt L1 code can use the Builder API
-libkrun = { path = "../../src/libkrun", features = ["embedded_init", "net", "blk", "snapshot", "vhost-user", "uffd"] }
+libkrun = { path = "../../src/libkrun", features = ["embedded_init", "net", "blk", "snapshot", "vhost-user", "uffd"], optional = true }
 macros = { path = "../macros" }
 nix = { version = "0.29.0", features = ["socket"] }
 libc = "0.2"
