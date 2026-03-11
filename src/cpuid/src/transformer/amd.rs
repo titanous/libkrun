@@ -59,7 +59,9 @@ pub fn update_extended_feature_info_entry(
     entry.ecx.write_bit(ecx::TOPOEXT_INDEX, true);
 
     // set the SVM bit when nested virtualization is enabled
-    entry.ecx.write_bit(ecx::SVM_BITINDEX, vm_spec.nested_enabled());
+    entry
+        .ecx
+        .write_bit(ecx::SVM_BITINDEX, vm_spec.nested_enabled());
 
     Ok(())
 }
@@ -136,7 +138,9 @@ pub fn update_svm_features_entry(
     use crate::cpu_leaf::leaf_0x8000000a::*;
 
     // set the NPT (Nested Page Tables) bit when nested virtualization is enabled
-    entry.edx.write_bit(edx::NPT_BITINDEX, vm_spec.nested_enabled());
+    entry
+        .edx
+        .write_bit(edx::NPT_BITINDEX, vm_spec.nested_enabled());
 
     Ok(())
 }
@@ -279,7 +283,8 @@ mod tests {
     ) {
         use crate::cpu_leaf::leaf_0x8000001e::*;
 
-        let vm_spec = VmSpec::new(cpu_id, cpu_count, ht_enabled, false).expect("Error creating vm_spec");
+        let vm_spec =
+            VmSpec::new(cpu_id, cpu_count, ht_enabled, false).expect("Error creating vm_spec");
         let mut entry = kvm_cpuid_entry2 {
             function: LEAF_NUM,
             index: 0,

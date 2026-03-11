@@ -25,7 +25,9 @@ pub fn update_feature_info_entry(
     }
 
     entry.ecx.write_bit(ecx::TSC_DEADLINE_TIMER_BITINDEX, true);
-    entry.ecx.write_bit(ecx::VMX_BITINDEX, vm_spec.nested_enabled());
+    entry
+        .ecx
+        .write_bit(ecx::VMX_BITINDEX, vm_spec.nested_enabled());
 
     Ok(())
 }

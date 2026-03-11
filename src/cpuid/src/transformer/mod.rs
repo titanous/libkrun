@@ -30,7 +30,12 @@ pub struct VmSpec {
 impl VmSpec {
     /// Creates a new instance of VmSpec with the specified parameters
     /// The brand string is deduced from the vendor_id
-    pub fn new(cpu_id: u8, cpu_count: u8, ht_enabled: bool, nested_enabled: bool) -> Result<VmSpec, Error> {
+    pub fn new(
+        cpu_id: u8,
+        cpu_count: u8,
+        ht_enabled: bool,
+        nested_enabled: bool,
+    ) -> Result<VmSpec, Error> {
         let cpu_vendor_id = get_vendor_id().map_err(Error::InternalError)?;
 
         Ok(VmSpec {
