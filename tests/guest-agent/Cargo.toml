@@ -4,5 +4,5 @@ edition = "2021"
 
 [dependencies]
 # test_cases includes libkrun for nested-virt test support
-test_cases = { path = "../test_cases", features = ["guest"] }
+test_cases = { path = "../test_cases", features = ["guest", "nested"] }
 anyhow = "1.0.95"
