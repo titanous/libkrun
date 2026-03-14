@@ -322,7 +322,7 @@ KCONFIG_EOF
           # building the musl guest-agent target.
           LIBCAPNG_STATIC_LIB_PATH = "${pkgs.pkgsStatic.libcap_ng}/lib";
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS =
-            "-L ${pkgs.pkgsStatic.libcap_ng}/lib -L ${libkrunfw-vmgenid}/lib";
+            "-L ${pkgs.pkgsStatic.libcap_ng}/lib";
 
           # Static libkrunfw archive path for the static-firmware feature.
           # Used by libkrun's build.rs to find libkrunfw.a when linking statically.

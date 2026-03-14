@@ -44,9 +44,9 @@ use std::num::NonZeroU64;
 #[cfg(feature = "net")]
 use std::os::fd::RawFd;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 #[cfg(not(feature = "static-firmware"))]
 use std::sync::LazyLock;
+use std::sync::{Arc, Mutex};
 use utils::eventfd::EventFd;
 use vmm::builder::StartMicrovmError;
 pub use vmm::resources::VirtioConsoleConfigMode;
@@ -80,9 +80,17 @@ use devices::virtio::display::{DisplayInfoEdid, PhysicalSize, MAX_DISPLAYS};
 use krun_input::{InputConfigBackend, InputEventProviderBackend};
 
 // krunfw library name for each context (dynamic loading)
-#[cfg(all(target_os = "linux", not(feature = "tee"), not(feature = "static-firmware")))]
+#[cfg(all(
+    target_os = "linux",
+    not(feature = "tee"),
+    not(feature = "static-firmware")
+))]
 const KRUNFW_NAME: &str = "libkrunfw.so.5";
-#[cfg(all(target_os = "linux", feature = "amd-sev", not(feature = "static-firmware")))]
+#[cfg(all(
+    target_os = "linux",
+    feature = "amd-sev",
+    not(feature = "static-firmware")
+))]
 const KRUNFW_NAME: &str = "libkrunfw-sev.so.5";
 #[cfg(all(target_os = "linux", feature = "tdx", not(feature = "static-firmware")))]
 const KRUNFW_NAME: &str = "libkrunfw-tdx.so.5";
@@ -399,8 +407,12 @@ impl TryFrom<ContextConfig> for NitroEnclave {
 
 // Helper function to load kernel payload from krunfw library
 // Used by Builder::build() to load firmware when no external kernel is configured
+#[cfg_attr(
+    all(feature = "static-firmware", not(feature = "tee")),
+    allow(unused_variables)
+)]
 unsafe fn load_krunfw_payload(
-    _krunfw: &KrunfwBindings,
+    krunfw: &KrunfwBindings,
     vmr: &mut VmResources,
 ) -> Result<(), StartError> {
     let mut kernel_guest_addr: u64 = 0;
@@ -409,7 +421,7 @@ unsafe fn load_krunfw_payload(
 
     #[cfg(not(feature = "static-firmware"))]
     let kernel_host_addr = unsafe {
-        (_krunfw.get_kernel)(
+        (krunfw.get_kernel)(
             &mut kernel_guest_addr as *mut u64,
             &mut kernel_entry_addr as *mut u64,
             &mut kernel_size as *mut usize,
