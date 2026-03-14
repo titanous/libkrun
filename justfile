@@ -48,8 +48,14 @@ bench-boot n="20" vcpus="1" extra_cmdline="":
     cd tests
     GUEST_TARGET_ARCH="$(uname -m)-unknown-linux-musl"
     HOST_TARGET_ARCH="$(uname -m)-unknown-linux-gnu"
-    LIBCAPNG_LINK_TYPE=static LIBCAPNG_LIB_PATH="$LIBCAPNG_STATIC_LIB_PATH" \
-        cargo build --release --target="$GUEST_TARGET_ARCH" -p guest-agent
+    _CAPNG_ENV="LIBCAPNG_LINK_TYPE=static"
+    if [ -n "${LIBCAPNG_STATIC_LIB_PATH:-}" ]; then
+        _CAPNG_ENV="$_CAPNG_ENV LIBCAPNG_LIB_PATH=$LIBCAPNG_STATIC_LIB_PATH"
+    fi
+    if [ -z "${LIBKRUNFW_LIB_PATH:-}" ]; then
+        export LIBKRUNFW_LIB_PATH="$(realpath test-prefix/lib64)"
+    fi
+    env $_CAPNG_ENV cargo build --release --target="$GUEST_TARGET_ARCH" -p guest-agent
     cargo build --release -p runner
     cargo build -p test-daemon
     cargo build -p test-vsock-proxy
@@ -64,7 +70,11 @@ bench-boot n="20" vcpus="1" extra_cmdline="":
     export KRUN_TEST_VSOCK_PROXY_PATH="$_DAEMON_DIR/test-vsock-proxy"
     export KRUN_BENCH_VCPUS="{{vcpus}}"
     export KRUN_BENCH_EXTRA_CMDLINE="{{extra_cmdline}}"
-    RUNNER="target/$HOST_TARGET_ARCH/release/runner"
+    if [ -f "target/$HOST_TARGET_ARCH/release/runner" ]; then
+        RUNNER="target/$HOST_TARGET_ARCH/release/runner"
+    else
+        RUNNER="target/release/runner"
+    fi
 
     run_once() {
         # Capture output first (avoids fd-leak issue where orphaned start-vm

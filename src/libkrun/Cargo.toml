@@ -6,6 +6,8 @@ edition = "2021"
 build = "build.rs"
 
 [features]
+default = ["dynamic-firmware"]
+dynamic-firmware = ["dep:libloading"]
 tee = ["vmm/tee"]
 amd-sev = [ "blk", "tee", "vmm/amd-sev" ]
 tdx = [ "blk", "tee", "vmm/tdx" ]
@@ -22,11 +24,14 @@ aws-nitro = [ "dep:aws-nitro", "dep:nitro-enclaves" ]
 embedded_init = ["devices/embedded_init"]
 vhost-user = ["vmm/vhost-user", "devices/vhost-user"]
 uffd = ["vmm/uffd"]
+# Link libkrunfw statically instead of dlopen. Used for static musl binaries
+# (e.g. guest-agent in nested virt tests) that cannot use dlopen.
+static-firmware = []
 
 [dependencies]
 crossbeam-channel = ">=0.5.15"
 libc = ">=0.2.39"
-libloading = "0.8"
+libloading = { version = "0.8", optional = true }
 log = "0.4.0"
 krun_display = { path = "../krun_display", optional = true, features = ["bindgen_clang_runtime"] }
 krun_input = { path = "../krun_input", optional = true, features = ["bindgen_clang_runtime"] }

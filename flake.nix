@@ -159,10 +159,10 @@
           exec ${pkgs.pkg-config}/bin/pkg-config "$@"
         '';
 
-        # Rebuild libkrunfw 5.2.1 / Linux 6.12.74 with VMGENID support via the
-        # SETUP_VMGENID setup_data boot protocol (no ACPI required).
-        # The kernel patch adds SETUP_VMGENID type 10 and a platform device
-        # initcall; the vmgenid driver probes the platform device directly.
+        # Rebuild libkrunfw 5.2.1 / Linux 6.12.74 with custom kernel config:
+        # - VMGENID via SETUP_VMGENID setup_data boot protocol (no ACPI)
+        # - KVM support for nested virtualization (CONFIG_KVM=y)
+        # - Boot time optimizations (jitterentropy removal, unused fs/driver removal)
         libkrunfw-vmgenid = pkgs.libkrunfw.overrideAttrs (old: {
           version = "5.2.1";
           src = pkgs.fetchFromGitHub {
@@ -212,27 +212,22 @@ CONFIG_SECURITY_SELINUX=n
 CONFIG_AUDIT=n
 # Slab allocator sysfs stats not needed in microVM; saves ~3ms from slab_sysfs_init
 CONFIG_SLABINFO=n
-KCONFIG_EOF
-          '';
-        });
-
-        # libkrunfw variant with KVM support for nested virtualization.
-        # The L1 guest kernel needs CONFIG_KVM to expose /dev/kvm so it can
-        # act as a hypervisor and run L2 VMs.
-        libkrunfw-nested = libkrunfw-vmgenid.overrideAttrs (old: {
-          postPatch = (old.postPatch or "") + ''
-            cat >> config-libkrunfw_x86_64 <<'KCONFIG_EOF'
 # KVM support for nested virtualization (L1 guest acts as hypervisor)
 CONFIG_KVM=y
 CONFIG_KVM_INTEL=y
 CONFIG_KVM_AMD=y
 KCONFIG_EOF
           '';
+          # Also produce a static archive (libkrunfw.a) for static-firmware linking.
+          postInstall = (old.postInstall or "") + ''
+            $CC -fPIC -DABI_VERSION=5 -c kernel.c -o kernel.o
+            $AR rcs libkrunfw.a kernel.o
+            install -m 644 libkrunfw.a $out/lib64/
+          '';
         });
       in
       {
-        packages.libkrunfw-vmgenid = libkrunfw-vmgenid;
-        packages.libkrunfw-nested = libkrunfw-nested;
+        packages.libkrunfw = libkrunfw-vmgenid;
 
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
@@ -260,7 +255,7 @@ KCONFIG_EOF
             # ifconfig: used by tests/run.sh to configure loopback in network namespace
             nettools
 
-            # VM firmware with VMGENID support via SETUP_VMGENID boot protocol
+            # VM firmware (custom kernel with VMGENID, KVM, boot optimizations)
             libkrunfw-vmgenid
 
             # for --features snd (virtio-snd pipewire backend)
@@ -327,7 +322,11 @@ KCONFIG_EOF
           # building the musl guest-agent target.
           LIBCAPNG_STATIC_LIB_PATH = "${pkgs.pkgsStatic.libcap_ng}/lib";
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS =
-            "-L ${pkgs.pkgsStatic.libcap_ng}/lib";
+            "-L ${pkgs.pkgsStatic.libcap_ng}/lib -L ${libkrunfw-vmgenid}/lib";
+
+          # Static libkrunfw archive path for the static-firmware feature.
+          # Used by libkrun's build.rs to find libkrunfw.a when linking statically.
+          LIBKRUNFW_LIB_PATH = "${libkrunfw-vmgenid}/lib";
 
           shellHook = ''
             # The rust-overlay toolchain's setup hook re-adds its bin to PATH after
@@ -336,15 +335,11 @@ KCONFIG_EOF
             export PATH="${cargoWrapper}/bin:$PATH"
 
             # `make test` hardcodes LD_LIBRARY_PATH to test-prefix/lib64 only.
-            # Symlink libkrunfw there so the test runner can find it alongside libkrun.
+            # Symlink libkrunfw into test-prefix so the test runner can find it.
             mkdir -p test-prefix/lib64
             for lib in ${libkrunfw-vmgenid}/lib/libkrunfw*; do
               ln -sf "$lib" "$(pwd)/test-prefix/lib64/$(basename "$lib")"
             done
-
-            # Symlink libkrunfw-nested for nested virt integration tests.
-            # Direct symlink avoids fragile sed-based renaming of versioned .so names.
-            ln -sf ${libkrunfw-nested}/lib/libkrunfw.so "$(pwd)/test-prefix/lib64/libkrunfw-nested.so"
 
             # Add libclang to LD_LIBRARY_PATH so clang-sys can load it at build time
             export LD_LIBRARY_PATH="${pkgs.llvmPackages.libclang.lib}/lib:$LD_LIBRARY_PATH"

@@ -5,4 +5,7 @@ edition = "2021"
 [dependencies]
 # test_cases includes libkrun for nested-virt test support
 test_cases = { path = "../test_cases", features = ["guest", "nested"] }
+# Static-firmware: guest-agent is static musl, can't dlopen libkrunfw.so.
+# This statically links the kernel blob into the binary (~18MB).
+libkrun = { path = "../../src/libkrun", features = ["embedded_init", "static-firmware"] }
 anyhow = "1.0.95"

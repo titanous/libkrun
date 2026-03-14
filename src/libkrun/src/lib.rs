@@ -44,7 +44,9 @@ use std::num::NonZeroU64;
 #[cfg(feature = "net")]
 use std::os::fd::RawFd;
 use std::path::PathBuf;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, Mutex};
+#[cfg(not(feature = "static-firmware"))]
+use std::sync::LazyLock;
 use utils::eventfd::EventFd;
 use vmm::builder::StartMicrovmError;
 pub use vmm::resources::VirtioConsoleConfigMode;
@@ -77,14 +79,14 @@ use devices::virtio::display::{DisplayInfoEdid, PhysicalSize, MAX_DISPLAYS};
 #[cfg(feature = "input")]
 use krun_input::{InputConfigBackend, InputEventProviderBackend};
 
-// krunfw library name for each context
-#[cfg(all(target_os = "linux", not(feature = "tee")))]
+// krunfw library name for each context (dynamic loading)
+#[cfg(all(target_os = "linux", not(feature = "tee"), not(feature = "static-firmware")))]
 const KRUNFW_NAME: &str = "libkrunfw.so.5";
-#[cfg(all(target_os = "linux", feature = "amd-sev"))]
+#[cfg(all(target_os = "linux", feature = "amd-sev", not(feature = "static-firmware")))]
 const KRUNFW_NAME: &str = "libkrunfw-sev.so.5";
-#[cfg(all(target_os = "linux", feature = "tdx"))]
+#[cfg(all(target_os = "linux", feature = "tdx", not(feature = "static-firmware")))]
 const KRUNFW_NAME: &str = "libkrunfw-tdx.so.5";
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(feature = "static-firmware")))]
 const KRUNFW_NAME: &str = "libkrunfw.5.dylib";
 
 #[cfg(feature = "aws-nitro")]
@@ -93,9 +95,12 @@ static KRUN_NITRO_DEBUG: Mutex<bool> = Mutex::new(false);
 // Path to the init binary to be executed inside the VM.
 const INIT_PATH: &str = "/init.krun";
 
+// --- Dynamic firmware loading (default) ---
+#[cfg(not(feature = "static-firmware"))]
 static KRUNFW: LazyLock<Option<libloading::Library>> =
     LazyLock::new(|| unsafe { libloading::Library::new(KRUNFW_NAME).ok() });
 
+#[cfg(not(feature = "static-firmware"))]
 pub struct KrunfwBindings {
     get_kernel: libloading::Symbol<
         'static,
@@ -107,6 +112,7 @@ pub struct KrunfwBindings {
     get_qboot: libloading::Symbol<'static, unsafe extern "C" fn(*mut size_t) -> *mut c_char>,
 }
 
+#[cfg(not(feature = "static-firmware"))]
 impl KrunfwBindings {
     fn load_bindings() -> Result<KrunfwBindings, libloading::Error> {
         let krunfw = match KRUNFW.as_ref() {
@@ -126,6 +132,26 @@ impl KrunfwBindings {
 
     pub fn new() -> Option<Self> {
         Self::load_bindings().ok()
+    }
+}
+
+// --- Static firmware linking ---
+#[cfg(feature = "static-firmware")]
+unsafe extern "C" {
+    fn krunfw_get_kernel(
+        guest_addr: *mut u64,
+        entry_addr: *mut u64,
+        size: *mut size_t,
+    ) -> *mut c_char;
+}
+
+#[cfg(feature = "static-firmware")]
+pub struct KrunfwBindings;
+
+#[cfg(feature = "static-firmware")]
+impl KrunfwBindings {
+    pub fn new() -> Option<Self> {
+        Some(KrunfwBindings)
     }
 }
 
@@ -374,14 +400,25 @@ impl TryFrom<ContextConfig> for NitroEnclave {
 // Helper function to load kernel payload from krunfw library
 // Used by Builder::build() to load firmware when no external kernel is configured
 unsafe fn load_krunfw_payload(
-    krunfw: &KrunfwBindings,
+    _krunfw: &KrunfwBindings,
     vmr: &mut VmResources,
 ) -> Result<(), StartError> {
     let mut kernel_guest_addr: u64 = 0;
     let mut kernel_entry_addr: u64 = 0;
     let mut kernel_size: usize = 0;
+
+    #[cfg(not(feature = "static-firmware"))]
     let kernel_host_addr = unsafe {
-        (krunfw.get_kernel)(
+        (_krunfw.get_kernel)(
+            &mut kernel_guest_addr as *mut u64,
+            &mut kernel_entry_addr as *mut u64,
+            &mut kernel_size as *mut usize,
+        )
+    };
+
+    #[cfg(feature = "static-firmware")]
+    let kernel_host_addr = unsafe {
+        krunfw_get_kernel(
             &mut kernel_guest_addr as *mut u64,
             &mut kernel_entry_addr as *mut u64,
             &mut kernel_size as *mut usize,
@@ -1238,9 +1275,10 @@ pub struct Context {
 pub enum StartError {
     #[error("could not setup event manager: {0:?}")]
     EventManager(polly::event_manager::Error),
+    #[cfg(not(feature = "static-firmware"))]
     #[error(transparent)]
     FirmwareLoad(#[from] libloading::Error),
-    #[error("could not find or load firmware {KRUNFW_NAME}")]
+    #[error("could not find or load firmware")]
     MissingFirmware,
     #[cfg(feature = "blk")]
     #[error(transparent)]

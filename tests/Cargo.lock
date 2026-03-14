@@ -615,6 +615,7 @@ name = "guest-agent"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "libkrun",
  "test_cases",
 ]
 

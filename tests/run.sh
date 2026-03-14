@@ -12,7 +12,19 @@ cargo test -p test_cases --features guest
 GUEST_TARGET_ARCH="$(uname -m)-unknown-linux-musl"
 
 if [ -z "${KRUN_NO_RUN_SH_GUEST_AGENT}" ]; then
-    cargo build --target=$GUEST_TARGET_ARCH -p guest-agent
+    # Static musl libcap-ng: the capng crate links dynamically by default,
+    # but guest-agent is static-pie musl. LIBCAPNG_STATIC_LIB_PATH is set
+    # by the Nix devShell (flake.nix).
+    _CAPNG_ENV="LIBCAPNG_LINK_TYPE=static"
+    if [ -n "${LIBCAPNG_STATIC_LIB_PATH}" ]; then
+        _CAPNG_ENV="${_CAPNG_ENV} LIBCAPNG_LIB_PATH=${LIBCAPNG_STATIC_LIB_PATH}"
+    fi
+    # LIBKRUNFW_LIB_PATH: guest-agent links libkrunfw statically (static-firmware feature).
+    # Falls back to test-prefix/lib64/ relative to the repo root if not set by Nix.
+    if [ -z "${LIBKRUNFW_LIB_PATH}" ]; then
+        export LIBKRUNFW_LIB_PATH="$(realpath ../test-prefix/lib64)"
+    fi
+    env ${_CAPNG_ENV} cargo build --target=$GUEST_TARGET_ARCH -p guest-agent
 fi
 cargo build -p runner
 cargo build -p test-daemon

@@ -29,11 +29,11 @@ A proof that passes regardless of the implementation is worthless. Every proof m
 
 ## Proof Structure Convention
 
-All proofs live inline as `#[cfg(kani)] mod verification` at the bottom of the source file they verify:
+All proofs live inline as `#[cfg(kani)] mod kani_proofs` at the bottom of the source file they verify:
 
 ```rust
 #[cfg(kani)]
-mod verification {
+mod kani_proofs {
     use super::*;
 
     /// [One-line property statement]
@@ -43,6 +43,7 @@ mod verification {
     ///
     /// Bound: [unwind rationale]
     #[kani::proof]
+    #[kani::solver(winner)]
     #[kani::unwind(N)]
     fn proof_descriptive_name() {
         // 1. Symbolic inputs
@@ -307,16 +308,24 @@ Always document unwind rationale in the proof's doc comment.
 
 ## Solver Sweep
 
-Different solvers have wildly different performance on different proofs (10x+ differences are common). After a proof passes, sweep all solvers on that specific harness and tag it with the fastest:
+Different solvers have wildly different performance on different proofs (10x+ differences are common). After proofs pass, use the sweep tool to race solvers and tag each proof:
 
 ```bash
-for solver in cadical kissat minisat z3; do
-  echo "=== $solver ==="
-  time cargo kani --harness proof_name -- --solver $solver
-done
+# Race all proofs (uses 2-minute timeout per solver per proof):
+./tools/kani-solver-sweep.sh
+
+# Single proof:
+./tools/kani-solver-sweep.sh proof_name
 ```
 
-Then add `#[kani::solver(winner)]` to the proof. Omit the attribute only if cadical (the default) wins.
+Always tag every proof with `#[kani::solver(winner)]` for explicitness, even if cadical (the default) wins. Place it immediately after `#[kani::proof]`:
+
+```rust
+#[kani::proof]
+#[kani::solver(minisat)]
+#[kani::unwind(7)]
+fn proof_example() { ... }
+```
 
 ## Advanced Proof Techniques
 
@@ -363,7 +372,7 @@ impl kani::Arbitrary for TokenBucket {
 
 ### Simplified Abstraction Layers
 
-When production types have loops (e.g. multi-region memory with binary search), create a single-element variant that eliminates the loop. This can reduce unwind from N+1 to 0, a 10-100x solver speedup:
+When production types use collections (BTreeMap, HashMap, Vec) or loops (e.g. multi-region memory with binary search), create a simplified variant. For collection-based types, use flat-array models (see "BTreeMap, HashMap, and Vec are CBMC-intractable" above). For loop-based types, create a single-element variant that eliminates the loop. This can reduce unwind from N+1 to 0, a 10-100x solver speedup:
 
 ```rust
 /// Single-region memory model — eliminates find_region loop.
@@ -385,6 +394,28 @@ fn proof_add_used() {
     // ...
 }
 ```
+
+### Equivalence Tests for Simplified Models
+
+Every `#[cfg(kani)]` model must have a `#[cfg(test)]` equivalence test comparing it side-by-side with the production type. **The test must call the actual Kani model, not a copy of it.** Duplicating the model in the test module defeats the purpose — the copy can drift from the original.
+
+Gate models under `#[cfg(any(kani, test))]` so tests import the same code Kani uses. If the model uses `kani::assume`, replace with a shim:
+
+```rust
+// At module level — compiles under both kani and test:
+#[cfg(kani)]
+macro_rules! model_assume {
+    ($cond:expr) => { kani::assume($cond) };
+}
+#[cfg(not(kani))]
+macro_rules! model_assume {
+    ($cond:expr) => { assert!($cond) };
+}
+```
+
+Then use `model_assume!(self.len < CAP)` instead of `kani::assume(...)` in model code. Under test, violations panic (catching bugs in test inputs). Under Kani, they constrain the solver.
+
+Without this, the model can silently drift from production semantics and Kani proofs become tautological against a wrong model.
 
 ### Semantic Stubs with State
 
@@ -452,6 +483,55 @@ if result == BucketReduction::Failure {
 
 ## Kani Limitations to Work Around
 
+### BTreeMap, HashMap, and Vec are CBMC-intractable
+
+CBMC models BTreeMap's node splitting, pointer manipulation, and tree balancing as a GOTO program. Even a single concrete `insert` + `get` produces multi-GB SAT formulas. HashMap has the same problem (hash internals, bucket arrays, rehashing). Vec is tractable only at small sizes.
+
+If a proof takes >60 seconds or >1 GB memory, trace the call path for collection operations. The proof may look simple but collection internals dominate.
+
+**Replace collection-based types with flat-array models** under `#[cfg(kani)]`:
+
+```rust
+// Production (intractable):
+pub struct PinState {
+    pins: HashMap<VmId, HashMap<u32, u16>>,
+}
+
+// Kani model (tractable):
+#[cfg(kani)]
+struct KaniPinState {
+    vm: [VmId; 8],
+    slot: [u32; 8],
+    count: [u16; 8],
+    len: usize,
+}
+```
+
+Flat-array model rules:
+- Same observable API with identical semantics
+- Stack-allocated, fixed-size — no heap, no dynamic resizing
+- Linear scans (`while i < self.len`) instead of tree/hash lookups
+- `model_assume!(self.len < CAP)` to bound capacity (see equivalence test section for shim)
+- Gate under `#[cfg(any(kani, test))]` so equivalence tests import the real model
+
+When a function takes a collection-based type as a parameter, add a `#[cfg(kani)]` alternative that accepts a flat representation (e.g., `&[bool]` instead of `&PinState`).
+
+### Symbolic fields through bit-manipulation stubs
+
+When a stub processes data with bit-level operations (XOR, shift, polynomial division), each symbolic bit creates branch points. A `u64` bounded to `0xFFFF` still has 16 symbolic bits × 8 bit-manipulation rounds = enormous SAT formula.
+
+**Make everything concrete except the property being verified.** Pure functions like CRC are deterministic — roundtrip correctness for concrete fields implies correctness for all fields. Only the input exercising the property (e.g., payload bytes) needs to be symbolic.
+
+```rust
+// BAD: symbolic fields through CRC stub
+let seq: u64 = kani::any();
+kani::assume(seq <= 0xFFFF);  // 16 symbolic bits through bit-manipulation
+
+// GOOD: concrete fields, symbolic payload
+let seq: u64 = 0x1234;
+let payload: [u8; 2] = kani::any();  // only this exercises the roundtrip
+```
+
 ### Cannot model OS syscalls
 
 Functions that call `mmap`, `sysconf`, `ioctl`, etc. are not modelable. Extract the pure logic into a separate function and verify that:
@@ -482,11 +562,13 @@ let region: MmapRegion<()> = unsafe { std::mem::transmute(stub) };
 
 ### Vec/collection bounds
 
-Kani models heap allocation but with performance limits. Constrain collection sizes:
+Kani models heap allocation but with severe performance limits. BTreeMap and HashMap are fundamentally intractable — see "BTreeMap, HashMap, and Vec are CBMC-intractable" above. For Vec, constrain sizes tightly:
 
 ```rust
 let num_pages: usize = kani::any_where(|&n| n > 0 && n <= 256);  // Keep bounded
 ```
+
+Prefer flat arrays over Vec when the size is known at proof time.
 
 ### Custom Arbitrary for complex types
 
@@ -516,6 +598,10 @@ Work through this for every proof:
 - [ ] **Not tautological**: "wrong implementation" mental test passes
 - [ ] **Has meaningful coverage**: `kani::cover!()` on specific conditions, not just `true`
 - [ ] **Documents unwind bound**: explains why N is sufficient
+- [ ] **No BTreeMap/HashMap in proof path**: uses flat-array models for collection-based types
+- [ ] **Simplified models have equivalence tests**: test imports the actual `#[cfg(any(kani, test))]` model — never a test-local copy
+- [ ] **Symbolic inputs are minimal**: only the property-under-test is symbolic; everything else is concrete
+- [ ] **Solver tagged**: `#[kani::solver(winner)]` from sweep tool
 - [ ] **Boundary cases**: word boundaries, zero, max values, off-by-one
 - [ ] **Negative cases**: invalid inputs produce correct errors
 - [ ] **Uses strongest coupling**: contracts > round-trips > direct calls > reimplementation
