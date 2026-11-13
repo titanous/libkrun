@@ -1,6 +1,11 @@
 //! Host-side protocol primitives for the Nitro Sandbox hypervisor.
 //! This is distinct from running a workload inside a confidential enclave.
 
+#[cfg(target_os = "linux")]
+pub mod host;
+#[cfg(all(target_os = "linux", feature = "devices"))]
+pub mod transport;
+
 use std::time::Duration;
 
 pub const INFO_PAGE_SIZE: usize = 2 * 1024 * 1024;
