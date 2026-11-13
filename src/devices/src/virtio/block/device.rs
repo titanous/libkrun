@@ -12,8 +12,6 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 #[cfg(target_os = "linux")]
 use std::os::linux::fs::MetadataExt;
-#[cfg(target_os = "macos")]
-use std::os::macos::fs::MetadataExt;
 use std::path::PathBuf;
 use std::result;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -61,12 +59,7 @@ pub enum CacheType {
 
 impl CacheType {
     /// Picks the appropriate cache type based on disk image or device path.
-    /// Special files like `/dev/rdisk*` on macOS do not support flush/sync.
     pub fn auto(_path: &str) -> CacheType {
-        #[cfg(target_os = "macos")]
-        if _path.starts_with("/dev/rdisk") {
-            return CacheType::Unsafe;
-        }
         CacheType::Writeback
     }
 }
@@ -396,8 +389,6 @@ impl Block {
                     .filename(path)
                     .direct(direct_io);
 
-                #[cfg(target_os = "macos")]
-                let file_opts = file_opts.relaxed_sync(sync_mode == SyncMode::Relaxed);
                 let file = ImagoFile::open_sync(file_opts)?;
                 let discard_alignment = file.discard_align() as u32 / 512;
 

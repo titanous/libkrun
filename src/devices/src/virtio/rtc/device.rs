@@ -7,9 +7,6 @@ use super::super::{ActivateError, ActivateResult, DeviceState, Queue as VirtQueu
 use super::{defs, defs::uapi, RtcError};
 use crate::virtio::{DeviceQueue, InterruptTransport, QueueConfig};
 
-#[cfg(target_os = "macos")]
-use hvf::Vcpus;
-
 // Request queue index
 pub(crate) const REQ_INDEX: usize = 0;
 
@@ -227,10 +224,6 @@ pub struct Rtc {
     pub(crate) acked_features: u64,
     pub(crate) activate_evt: EventFd,
     pub(crate) device_state: DeviceState,
-    /// Reference to vCPU state for cross-timestamping (macOS only).
-    /// Used to check if cross-timestamping is supported.
-    #[cfg(target_os = "macos")]
-    vcpus: Option<Arc<dyn Vcpus + Send + Sync>>,
 }
 
 impl Rtc {
@@ -248,8 +241,6 @@ impl Rtc {
             acked_features: 0,
             activate_evt: EventFd::new(utils::eventfd::EFD_NONBLOCK).map_err(RtcError::EventFd)?,
             device_state: DeviceState::Inactive,
-            #[cfg(target_os = "macos")]
-            vcpus: None,
         })
     }
 
@@ -259,12 +250,6 @@ impl Rtc {
             .map(|&max_size| VirtQueue::new(max_size))
             .collect();
         Self::with_queues(queues)
-    }
-
-    /// Set the vCPU reference for cross-timestamping support (macOS only)
-    #[cfg(target_os = "macos")]
-    pub fn set_vcpus(&mut self, vcpus: Arc<dyn Vcpus + Send + Sync>) {
-        self.vcpus = Some(vcpus);
     }
 
     pub fn id(&self) -> &str {

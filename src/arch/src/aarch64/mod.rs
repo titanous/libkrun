@@ -10,10 +10,6 @@ pub mod layout;
 pub mod linux;
 #[cfg(target_os = "linux")]
 pub use self::linux::*;
-#[cfg(target_os = "macos")]
-pub mod macos;
-#[cfg(target_os = "macos")]
-pub use self::macos::*;
 
 use std::fmt::Debug;
 

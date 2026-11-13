@@ -16,7 +16,3 @@ pub mod shm;
 pub mod kvm;
 #[cfg(target_os = "linux")]
 pub use self::kvm::mmio;
-#[cfg(target_os = "macos")]
-pub mod hvf;
-#[cfg(target_os = "macos")]
-pub use self::hvf::mmio;

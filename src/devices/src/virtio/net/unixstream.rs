@@ -78,8 +78,6 @@ impl Unixstream {
         let mut bytes_read = 0;
         #[cfg(target_os = "linux")]
         let flags = MsgFlags::MSG_DONTWAIT | MsgFlags::MSG_NOSIGNAL;
-        #[cfg(target_os = "macos")]
-        let flags = MsgFlags::MSG_DONTWAIT;
 
         if !block_until_has_data {
             match recv(self.fd.as_raw_fd(), buf, flags) {
@@ -94,8 +92,6 @@ impl Unixstream {
 
         #[cfg(target_os = "linux")]
         let flags = MsgFlags::MSG_WAITALL | MsgFlags::MSG_NOSIGNAL;
-        #[cfg(target_os = "macos")]
-        let flags = MsgFlags::MSG_WAITALL;
 
         while bytes_read < buf.len() {
             match recv(self.fd.as_raw_fd(), &mut buf[bytes_read..], flags) {
@@ -120,8 +116,6 @@ impl Unixstream {
 
         #[cfg(target_os = "linux")]
         let flags = MsgFlags::MSG_DONTWAIT | MsgFlags::MSG_NOSIGNAL;
-        #[cfg(target_os = "macos")]
-        let flags = MsgFlags::MSG_DONTWAIT;
 
         while bytes_send < buf.len() {
             match send(self.fd.as_raw_fd(), &buf[bytes_send..], flags) {

@@ -3,12 +3,8 @@
 
 //! Enables pre-boot setup, instantiation and booting of a Firecracker VMM.
 
-#[cfg(target_os = "macos")]
-use crossbeam_channel::unbounded;
 use crossbeam_channel::Sender;
 use kernel::cmdline::Cmdline;
-#[cfg(target_os = "macos")]
-use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::fs::File;
 use std::io::{self, IsTerminal, Read};
@@ -39,10 +35,6 @@ use devices::legacy::KvmAia;
 #[cfg(target_arch = "x86_64")]
 use devices::legacy::KvmIoapic;
 use devices::legacy::Serial;
-#[cfg(target_os = "macos")]
-use devices::legacy::VcpuList;
-#[cfg(target_os = "macos")]
-use devices::legacy::{GicV3, HvfGicV3};
 #[cfg(target_arch = "x86_64")]
 use devices::legacy::{IoApic, IrqChipT};
 use devices::legacy::{IrqChip, IrqChipDevice};
@@ -119,9 +111,6 @@ static EDK2_BINARY: &[u8] = include_bytes!("../../../edk2/KRUN_EFI.silent.fd");
 pub enum StartMicrovmError {
     /// Unable to attach block device to Vmm.
     AttachBlockDevice(io::Error),
-    #[cfg(target_os = "macos")]
-    /// Failed to create HVF in-kernel IrqChip.
-    CreateHvfIrqChip(hvf::Error),
     #[cfg(target_os = "linux")]
     /// Failed to create KVM in-kernel IrqChip.
     CreateKvmIrqChip(kvm_ioctls::Error),
@@ -275,10 +264,6 @@ impl Display for StartMicrovmError {
         match *self {
             AttachBlockDevice(ref err) => {
                 write!(f, "Unable to attach block device to Vmm. Error: {err}")
-            }
-            #[cfg(target_os = "macos")]
-            CreateHvfIrqChip(ref err) => {
-                write!(f, "Cannot create HVF in-kernel IrqChip: {err}")
             }
             #[cfg(target_os = "linux")]
             CreateKvmIrqChip(ref err) => {
@@ -645,12 +630,6 @@ pub struct BuiltVm {
     pub device_info: VmDeviceInfo,
     /// Shared VM exit state.
     vm_exit: crate::vm_exit::SharedVmExit,
-    /// Boot senders for secondary vCPUs. Used to unblock them during cold
-    /// restore (they wait on boot_receiver for a PSCI CPU_ON that never comes
-    /// when we skip the kernel boot).
-    #[cfg(target_os = "macos")]
-    #[cfg_attr(not(feature = "snapshot"), allow(dead_code))]
-    boot_senders: Vec<Sender<u64>>,
     /// Whether the balloon device should be exposed via BalloonHandle.
     #[cfg(not(feature = "tee"))]
     pub balloon_enabled: bool,
@@ -715,16 +694,6 @@ impl BuiltVm {
         // waiting for Resume or RestoreState.
         vmm.start_vcpus_paused(&mut vcpus)
             .map_err(StartMicrovmError::Internal)?;
-
-        // Step 2 (macOS only): Unblock secondary vCPUs. On HVF they block on
-        // boot_receiver.recv() waiting for PSCI CPU_ON from the kernel. Since
-        // we're skipping boot, send a dummy entry address to unblock them.
-        // On KVM, secondary vCPUs are powered off via KVM_ARM_VCPU_POWER_OFF
-        // and don't need unblocking — they go straight to the paused state.
-        #[cfg(target_os = "macos")]
-        for sender in self.boot_senders.drain(..) {
-            let _ = sender.send(0);
-        }
 
         let snapshot_err = |e: super::snapshot::SnapshotError| {
             StartMicrovmError::Internal(super::Error::Snapshot(e.to_string()))
@@ -1152,24 +1121,11 @@ pub fn build_microvm(
         (arch::IRQ_BASE, arch::IRQ_MAX),
     );
 
-    #[cfg(target_os = "macos")]
-    let vcpu_list = {
-        let cpu_count = vm_resources.vm_config().vcpu_count.unwrap();
-        Arc::new(VcpuList::new(cpu_count as u64))
-    };
-
     let vcpus;
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    let boot_senders: Vec<Sender<u64>>;
-    #[cfg(all(target_os = "macos", not(target_arch = "aarch64")))]
-    let mut boot_senders: Vec<Sender<u64>> = Vec::new();
     let intc: IrqChip;
 
-    // Create shared exit flag for vCPUs (Linux/KVM only; macOS HVF handles exits differently)
-    #[cfg(target_os = "linux")]
+    // Create shared exit flag for vCPUs.
     let vcpu_exit_flag = Arc::new(AtomicBool::new(false));
-    #[cfg(target_os = "macos")]
-    let vcpu_exit_flag = Arc::new(AtomicBool::new(false)); // macOS HVF vCPUs exit naturally; flag exists to satisfy Vmm struct but is not polled on this platform.
 
     // For x86_64 we need to create the interrupt controller before calling `KVM_CREATE_VCPUS`
     // while on aarch64 we need to do it the other way around.
@@ -1259,42 +1215,6 @@ pub fn build_microvm(
         )?;
     }
 
-    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
-    {
-        intc = {
-            // If the system supports the in-kernel GIC, use it. Otherwise, fall back to the
-            // userspace implementation.
-            let gic = match HvfGicV3::new(vm_resources.vm_config().vcpu_count.unwrap() as u64) {
-                Ok(hvfgic) => IrqChipDevice::new(Box::new(hvfgic)),
-                Err(_) => IrqChipDevice::new(Box::new(GicV3::new(vcpu_list.clone()))),
-            };
-            Arc::new(Mutex::new(gic))
-        };
-
-        let created;
-        (created, boot_senders) = create_vcpus_aarch64(
-            &vm,
-            &vcpu_config,
-            &arch_memory_info,
-            payload_config.entry_addr,
-            &exit_evt,
-            vcpu_list.clone(),
-            vm_resources.nested_enabled,
-        )
-        .map_err(StartMicrovmError::Internal)?;
-        vcpus = created;
-
-        attach_legacy_devices(
-            &vm,
-            &mut mmio_device_manager,
-            &mut kernel_cmdline,
-            intc.clone(),
-            serial_devices,
-            event_manager,
-            _shutdown_efd,
-        )?;
-    }
-
     #[cfg(all(target_arch = "riscv64", target_os = "linux"))]
     {
         vcpus = create_vcpus_riscv64(
@@ -1339,14 +1259,8 @@ pub fn build_microvm(
         mmio_device_manager,
         #[cfg(target_arch = "x86_64")]
         pio_device_manager,
-        #[cfg(target_os = "macos")]
-        dirty_bitmaps: std::sync::Arc::new(Vec::new()),
         nested_enabled: vm_resources.nested_enabled,
         dirty_tracking_enabled: false,
-        #[cfg(target_os = "macos")]
-        vcpu_list: vcpu_list.clone(),
-        #[cfg(target_os = "macos")]
-        intc: intc.clone(),
         #[cfg(all(target_os = "linux", target_arch = "aarch64", feature = "snapshot"))]
         intc: intc.clone(),
         #[cfg(not(feature = "tee"))]
@@ -1428,13 +1342,7 @@ pub fn build_microvm(
         intc.clone(),
         vm_resources.rng_backend.take(),
     )?;
-    attach_rtc_device(
-        &mut vmm,
-        event_manager,
-        intc.clone(),
-        #[cfg(target_os = "macos")]
-        vcpu_list.clone(),
-    )?;
+    attach_rtc_device(&mut vmm, event_manager, intc.clone())?;
     let mut console_id = 0;
     if !vm_resources.disable_implicit_console {
         attach_console_devices(
@@ -1509,8 +1417,6 @@ pub fn build_microvm(
             virgl_flags,
             Box::from(&vm_resources.displays[..]),
             display_backend,
-            #[cfg(target_os = "macos")]
-            _sender.clone(),
         )?;
     }
 
@@ -1641,8 +1547,6 @@ pub fn build_microvm(
         vcpus: Some(vcpus),
         device_info,
         vm_exit,
-        #[cfg(target_os = "macos")]
-        boot_senders,
         #[cfg(not(feature = "tee"))]
         balloon_enabled: vm_resources.balloon_enabled,
     })
@@ -2255,19 +2159,6 @@ pub(crate) fn setup_vm(
         .map_err(StartMicrovmError::Internal)?;
     Ok(vm)
 }
-#[cfg(target_os = "macos")]
-pub(crate) fn setup_vm(
-    guest_memory: &GuestMemoryMmap,
-    nested_enabled: bool,
-) -> std::result::Result<Vm, StartMicrovmError> {
-    let mut vm = Vm::new(nested_enabled)
-        .map_err(Error::Vm)
-        .map_err(StartMicrovmError::Internal)?;
-    vm.memory_init(guest_memory)
-        .map_err(Error::Vm)
-        .map_err(StartMicrovmError::Internal)?;
-    Ok(vm)
-}
 
 /// Sets up the serial device.
 pub fn setup_serial_device(
@@ -2361,43 +2252,6 @@ fn attach_legacy_devices(
     Ok(())
 }
 
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
-fn attach_legacy_devices(
-    vm: &Vm,
-    mmio_device_manager: &mut MMIODeviceManager,
-    kernel_cmdline: &mut kernel::cmdline::Cmdline,
-    intc: IrqChip,
-    serial: Vec<Arc<Mutex<Serial>>>,
-    event_manager: &mut EventManager,
-    shutdown_efd: Option<EventFd>,
-) -> Result<(), StartMicrovmError> {
-    for s in serial {
-        mmio_device_manager
-            .register_mmio_serial(vm, kernel_cmdline, intc.clone(), s)
-            .map_err(Error::RegisterMMIODevice)
-            .map_err(StartMicrovmError::Internal)?;
-    }
-
-    mmio_device_manager
-        .register_mmio_rtc(vm, intc.clone())
-        .map_err(Error::RegisterMMIODevice)
-        .map_err(StartMicrovmError::Internal)?;
-
-    mmio_device_manager
-        .register_mmio_gic(vm, intc.clone())
-        .map_err(Error::RegisterMMIODevice)
-        .map_err(StartMicrovmError::Internal)?;
-
-    if let Some(shutdown_efd) = shutdown_efd {
-        mmio_device_manager
-            .register_mmio_gpio(vm, intc.clone(), event_manager, shutdown_efd)
-            .map_err(Error::RegisterMMIODevice)
-            .map_err(StartMicrovmError::Internal)?;
-    }
-
-    Ok(())
-}
-
 #[cfg(target_arch = "x86_64")]
 #[allow(clippy::too_many_arguments)]
 fn create_vcpus_x86_64(
@@ -2461,59 +2315,6 @@ fn create_vcpus_aarch64(
     Ok(vcpus)
 }
 
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
-/// Returns (vcpus, boot_senders_for_cold_restore).
-///
-/// `boot_senders_for_cold_restore` contains one sender per secondary vCPU.
-/// During normal boot, vCPU 0 sends entry addresses via PSCI CPU_ON.
-/// During cold restore, we send dummy values to unblock secondary vCPUs
-/// before injecting the snapshot state.
-fn create_vcpus_aarch64(
-    _vm: &Vm,
-    vcpu_config: &VcpuConfig,
-    mem_info: &ArchMemoryInfo,
-    entry_addr: GuestAddress,
-    exit_evt: &EventFd,
-    vcpu_list: Arc<VcpuList>,
-    nested_enabled: bool,
-) -> super::Result<(Vec<Vcpu>, Vec<Sender<u64>>)> {
-    let mut vcpus = Vec::with_capacity(vcpu_config.vcpu_count as usize);
-    let mut boot_senders: HashMap<u64, Sender<u64>> = HashMap::new();
-    let mut cold_restore_senders: Vec<Sender<u64>> = Vec::new();
-
-    for cpu_index in 0..vcpu_config.vcpu_count {
-        let (boot_sender, boot_receiver) = if cpu_index != 0 {
-            let (boot_sender, boot_receiver) = unbounded();
-            (Some(boot_sender), Some(boot_receiver))
-        } else {
-            (None, None)
-        };
-
-        let mut vcpu = Vcpu::new_aarch64(
-            cpu_index,
-            entry_addr,
-            boot_receiver,
-            exit_evt.try_clone().map_err(Error::EventFd)?,
-            vcpu_list.clone(),
-            nested_enabled,
-        )
-        .map_err(Error::Vcpu)?;
-
-        vcpu.configure_aarch64(mem_info).map_err(Error::Vcpu)?;
-
-        if let Some(boot_sender) = boot_sender {
-            cold_restore_senders.push(boot_sender.clone());
-            boot_senders.insert(vcpu.get_mpidr(), boot_sender);
-        }
-
-        vcpus.push(vcpu);
-    }
-
-    vcpus[0].set_boot_senders(boot_senders);
-
-    Ok((vcpus, cold_restore_senders))
-}
-
 #[cfg(all(target_arch = "riscv64", target_os = "linux"))]
 fn create_vcpus_riscv64(
     vm: &Vm,
@@ -2557,10 +2358,6 @@ fn attach_mmio_device(
     let (_mmio_base, _irq) =
         vmm.mmio_device_manager
             .register_mmio_device(vmm.vm.fd(), mmio_device, type_id, id)?;
-    #[cfg(target_os = "macos")]
-    let (_mmio_base, _irq) =
-        vmm.mmio_device_manager
-            .register_mmio_device(mmio_device, type_id, id)?;
 
     #[cfg(target_arch = "x86_64")]
     vmm.mmio_device_manager
@@ -3113,15 +2910,10 @@ fn attach_rtc_device(
     vmm: &mut Vmm,
     event_manager: &mut EventManager,
     intc: IrqChip,
-    #[cfg(target_os = "macos")] vcpu_list: Arc<VcpuList>,
 ) -> std::result::Result<(), StartMicrovmError> {
     use self::StartMicrovmError::*;
 
     let rtc = Arc::new(Mutex::new(devices::virtio::Rtc::new().unwrap()));
-
-    // Set vcpus reference for cross-timestamping support (macOS only)
-    #[cfg(target_os = "macos")]
-    rtc.lock().unwrap().set_vcpus(vcpu_list);
 
     event_manager
         .add_subscriber(rtc.clone())
@@ -3145,19 +2937,11 @@ fn attach_gpu_device(
     virgl_flags: u32,
     displays: Box<[DisplayInfo]>,
     display_backend: DisplayBackend<'static>,
-    #[cfg(target_os = "macos")] map_sender: Sender<WorkerMessage>,
 ) -> std::result::Result<(), StartMicrovmError> {
     use self::StartMicrovmError::*;
 
     let gpu = Arc::new(Mutex::new(
-        devices::virtio::Gpu::new(
-            virgl_flags,
-            displays,
-            display_backend,
-            #[cfg(target_os = "macos")]
-            map_sender,
-        )
-        .unwrap(),
+        devices::virtio::Gpu::new(virgl_flags, displays, display_backend).unwrap(),
     ));
 
     let id = String::from(gpu.lock().unwrap().id());

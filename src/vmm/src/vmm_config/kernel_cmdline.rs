@@ -6,9 +6,6 @@ use std::fmt::{Display, Formatter, Result};
 #[cfg(target_os = "linux")]
 pub const DEFAULT_KERNEL_CMDLINE: &str =
     "reboot=k panic=-1 panic_print=31 nomodule 8250.nr_uarts=0 console=hvc0 root=krun_root rootfstype=virtiofs rw no-kvmapf quiet";
-#[cfg(target_os = "macos")]
-pub const DEFAULT_KERNEL_CMDLINE: &str =
-    "reboot=k panic=-1 panic_print=31 nomodule console=hvc0 rootfstype=virtiofs rw no-kvmapf";
 
 /// Strongly typed data structure used to configure the boot source of the
 /// microvm.

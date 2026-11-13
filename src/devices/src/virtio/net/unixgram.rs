@@ -32,21 +32,6 @@ impl Unixgram {
             Err(e) => error!("couldn't obtain fd flags id={fd:?}, err={e}"),
         };
 
-        #[cfg(target_os = "macos")]
-        {
-            // nix doesn't provide an abstraction for SO_NOSIGPIPE, fall back to libc.
-            let option_value: libc::c_int = 1;
-            unsafe {
-                libc::setsockopt(
-                    fd.as_raw_fd(),
-                    libc::SOL_SOCKET,
-                    libc::SO_NOSIGPIPE,
-                    &option_value as *const _ as *const libc::c_void,
-                    std::mem::size_of_val(&option_value) as libc::socklen_t,
-                )
-            };
-        }
-
         Self { fd }
     }
 

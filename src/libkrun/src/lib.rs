@@ -94,8 +94,6 @@ const KRUNFW_NAME: &str = "libkrunfw.so.5";
 const KRUNFW_NAME: &str = "libkrunfw-sev.so.5";
 #[cfg(all(target_os = "linux", feature = "tdx", not(feature = "static-firmware")))]
 const KRUNFW_NAME: &str = "libkrunfw-tdx.so.5";
-#[cfg(all(target_os = "macos", not(feature = "static-firmware")))]
-const KRUNFW_NAME: &str = "libkrunfw.5.dylib";
 
 #[cfg(feature = "aws-nitro")]
 static KRUN_NITRO_DEBUG: Mutex<bool> = Mutex::new(false);
@@ -510,11 +508,7 @@ impl DerefMut for Builder {
 
 impl Builder {
     pub fn new() -> Self {
-        let shutdown_efd = if cfg!(target_arch = "aarch64") && cfg!(target_os = "macos") {
-            Some(EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap())
-        } else {
-            None
-        };
+        let shutdown_efd = None;
 
         Self {
             config: ContextConfig {

@@ -10,12 +10,6 @@ pub mod byte_order;
 pub mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::epoll;
-#[cfg(target_os = "macos")]
-pub mod macos;
-#[cfg(target_os = "macos")]
-pub use macos::epoll;
-#[cfg(target_os = "macos")]
-pub use macos::eventfd;
 pub mod pollable_channel;
 #[cfg(target_arch = "x86_64")]
 pub mod rand;

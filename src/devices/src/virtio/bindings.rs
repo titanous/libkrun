@@ -28,23 +28,15 @@ pub const LINUX_RENAME_WHITEOUT: libc::c_int = 1 << 2;
 pub const LINUX_XATTR_CREATE: libc::c_int = 1;
 pub const LINUX_XATTR_REPLACE: libc::c_int = 2;
 
-#[cfg(target_os = "macos")]
-pub type stat64 = libc::stat;
 #[cfg(target_os = "linux")]
 pub use libc::stat64;
 
-#[cfg(target_os = "macos")]
-pub type off64_t = libc::off_t;
 #[cfg(target_os = "linux")]
 pub use libc::off64_t;
 
-#[cfg(target_os = "macos")]
-pub type statvfs64 = libc::statvfs;
 #[cfg(target_os = "linux")]
 pub use libc::statvfs64;
 
-#[cfg(target_os = "macos")]
-pub type ino64_t = libc::ino_t;
 #[cfg(target_os = "linux")]
 pub use libc::ino64_t;
 
@@ -60,18 +52,6 @@ pub unsafe fn pread64(
 ) -> libc::ssize_t {
     libc::pread64(fd, buf, count, offset)
 }
-/// # Safety
-/// - `fd` must be a valid open file descriptor.
-/// - `buf` must be a valid pointer to at least `count` bytes of writable memory.
-#[cfg(target_os = "macos")]
-pub unsafe fn pread64(
-    fd: libc::c_int,
-    buf: *mut libc::c_void,
-    count: libc::size_t,
-    offset: off64_t,
-) -> libc::ssize_t {
-    libc::pread(fd, buf, count, offset)
-}
 
 /// # Safety
 /// - `fd` must be a valid open file descriptor.
@@ -84,18 +64,6 @@ pub unsafe fn preadv64(
     offset: off64_t,
 ) -> libc::ssize_t {
     libc::preadv64(fd, iov, iovcnt, offset)
-}
-/// # Safety
-/// - `fd` must be a valid open file descriptor.
-/// - `iov` must be a valid pointer to `iovcnt` initialized `iovec` structures, each with valid buffer pointers.
-#[cfg(target_os = "macos")]
-pub unsafe fn preadv64(
-    fd: libc::c_int,
-    iov: *const libc::iovec,
-    iovcnt: libc::c_int,
-    offset: off64_t,
-) -> libc::ssize_t {
-    libc::preadv(fd, iov, iovcnt, offset)
 }
 
 /// # Safety
@@ -110,18 +78,6 @@ pub unsafe fn pwrite64(
 ) -> libc::ssize_t {
     libc::pwrite64(fd, buf, count, offset)
 }
-/// # Safety
-/// - `fd` must be a valid open file descriptor.
-/// - `buf` must be a valid pointer to at least `count` bytes of readable memory.
-#[cfg(target_os = "macos")]
-pub unsafe fn pwrite64(
-    fd: libc::c_int,
-    buf: *const libc::c_void,
-    count: libc::size_t,
-    offset: off64_t,
-) -> libc::ssize_t {
-    libc::pwrite(fd, buf, count, offset)
-}
 
 /// # Safety
 /// - `fd` must be a valid open file descriptor.
@@ -134,18 +90,6 @@ pub unsafe fn pwritev64(
     offset: off64_t,
 ) -> libc::ssize_t {
     libc::pwritev64(fd, iov, iovcnt, offset)
-}
-/// # Safety
-/// - `fd` must be a valid open file descriptor.
-/// - `iov` must be a valid pointer to `iovcnt` initialized `iovec` structures, each with valid buffer pointers.
-#[cfg(target_os = "macos")]
-pub unsafe fn pwritev64(
-    fd: libc::c_int,
-    iov: *const libc::iovec,
-    iovcnt: libc::c_int,
-    offset: off64_t,
-) -> libc::ssize_t {
-    libc::pwritev(fd, iov, iovcnt, offset)
 }
 
 /// # Safety
@@ -161,19 +105,6 @@ pub unsafe fn fstatat64(
 ) -> libc::c_int {
     libc::fstatat64(dirfd, pathname, buf, flags)
 }
-/// # Safety
-/// - `dirfd` must be a valid open directory file descriptor, or `AT_FDCWD`.
-/// - `pathname` must be a valid null-terminated C string.
-/// - `buf` must be a valid pointer to a writable `stat64` structure.
-#[cfg(target_os = "macos")]
-pub unsafe fn fstatat64(
-    dirfd: libc::c_int,
-    pathname: *const libc::c_char,
-    buf: *mut stat64,
-    flags: libc::c_int,
-) -> libc::c_int {
-    libc::fstatat(dirfd, pathname, buf, flags)
-}
 
 /// # Safety
 /// - `fd` must be a valid open file descriptor.
@@ -187,18 +118,6 @@ pub unsafe fn fallocate64(
 ) -> libc::c_int {
     libc::fallocate64(fd, mode, offset, len)
 }
-/// # Safety
-/// - `fd` must be a valid open file descriptor.
-/// - `offset` and `len` must describe a valid byte range within the file.
-#[cfg(target_os = "macos")]
-pub unsafe fn fallocate64(
-    _fd: libc::c_int,
-    _mode: libc::c_int,
-    _offset: off64_t,
-    _len: off64_t,
-) -> libc::c_int {
-    -LINUX_ENOSYS
-}
 
 /// # Safety
 /// - `fd` must be a valid open file descriptor.
@@ -206,13 +125,6 @@ pub unsafe fn fallocate64(
 #[cfg(target_os = "linux")]
 pub unsafe fn ftruncate64(fd: libc::c_int, length: off64_t) -> libc::c_int {
     libc::ftruncate64(fd, length)
-}
-/// # Safety
-/// - `fd` must be a valid open file descriptor.
-/// - `length` must be a valid non-negative file size.
-#[cfg(target_os = "macos")]
-pub unsafe fn ftruncate64(fd: libc::c_int, length: off64_t) -> libc::c_int {
-    libc::ftruncate(fd, length)
 }
 
 /// # Safety
@@ -222,21 +134,6 @@ pub unsafe fn ftruncate64(fd: libc::c_int, length: off64_t) -> libc::c_int {
 pub unsafe fn lseek64(fd: libc::c_int, offset: off64_t, whence: libc::c_int) -> off64_t {
     libc::lseek64(fd, offset, whence)
 }
-/// # Safety
-/// - `fd` must be a valid open file descriptor.
-/// - `whence` must be a valid seek directive (`SEEK_SET`, `SEEK_CUR`, or `SEEK_END`).
-#[cfg(target_os = "macos")]
-pub unsafe fn lseek64(fd: libc::c_int, offset: off64_t, whence: libc::c_int) -> off64_t {
-    libc::lseek(fd, offset, whence)
-}
-
-/// # Safety
-/// - `path` must be a valid null-terminated C string pointing to an accessible filesystem path.
-/// - `buf` must be a valid pointer to a writable `statvfs64` struct.
-#[cfg(target_os = "macos")]
-pub unsafe fn statvfs64(path: *const libc::c_char, buf: *mut statvfs64) -> libc::c_int {
-    libc::statvfs(path, buf)
-}
 
 /// # Safety
 /// - `fd` must be a valid open file descriptor.
@@ -244,13 +141,6 @@ pub unsafe fn statvfs64(path: *const libc::c_char, buf: *mut statvfs64) -> libc:
 #[cfg(target_os = "linux")]
 pub unsafe fn fstatvfs64(fd: libc::c_int, buf: *mut statvfs64) -> libc::c_int {
     libc::fstatvfs64(fd, buf)
-}
-/// # Safety
-/// - `fd` must be a valid open file descriptor.
-/// - `buf` must be a valid pointer to a writable `statvfs64` struct.
-#[cfg(target_os = "macos")]
-pub unsafe fn fstatvfs64(fd: libc::c_int, buf: *mut statvfs64) -> libc::c_int {
-    libc::fstatvfs(fd, buf)
 }
 
 /// # Safety
@@ -264,16 +154,4 @@ pub unsafe fn mknodat(
     dev: libc::dev_t,
 ) -> libc::c_int {
     libc::mknodat(dirfd, pathname, mode, dev)
-}
-/// # Safety
-/// - `dirfd` must be a valid open directory file descriptor, or `AT_FDCWD`.
-/// - `pathname` must be a valid null-terminated C string.
-#[cfg(target_os = "macos")]
-pub unsafe fn mknodat(
-    _dirfd: libc::c_int,
-    _pathname: *const libc::c_char,
-    _mode: libc::mode_t,
-    _dev: u64,
-) -> libc::c_int {
-    -LINUX_ENOSYS
 }

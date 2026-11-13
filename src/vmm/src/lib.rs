@@ -40,13 +40,8 @@ pub mod vmm_config;
 mod linux;
 #[cfg(target_os = "linux")]
 use crate::linux::vstate;
-#[cfg(target_os = "macos")]
-mod macos;
 mod terminal;
 pub mod worker;
-
-#[cfg(target_os = "macos")]
-use macos::vstate;
 
 use std::fmt::{Display, Formatter};
 use std::io;
@@ -62,8 +57,6 @@ use crate::vstate::VcpuEvent;
 use crate::vstate::{Vcpu, VcpuHandle, VcpuResponse, Vm};
 
 use arch::{ArchMemoryInfo, InitrdConfig};
-#[cfg(target_os = "macos")]
-use crossbeam_channel::Sender;
 #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 use devices::fdt;
 use devices::legacy::IrqChip;
@@ -73,8 +66,6 @@ use kernel::cmdline::Cmdline as KernelCmdline;
 use polly::event_manager::{self, EventManager, Subscriber};
 use utils::epoll::{EpollEvent, EventSet};
 use utils::eventfd::EventFd;
-#[cfg(target_os = "macos")]
-use vm_memory::Address;
 use vm_memory::GuestMemoryMmap;
 
 /// Success exit code.
@@ -231,8 +222,6 @@ pub struct Vmm {
     mmio_device_manager: MMIODeviceManager,
     #[cfg(target_arch = "x86_64")]
     pio_device_manager: PortIODeviceManager,
-    #[cfg(target_os = "macos")]
-    dirty_bitmaps: Arc<Vec<dirty_bitmap::DirtyBitmap>>,
 
     // Snapshot and dirty tracking state.
     #[cfg_attr(not(feature = "snapshot"), allow(dead_code))]
@@ -241,12 +230,6 @@ pub struct Vmm {
     dirty_tracking_enabled: bool,
 
     // Interrupt controller state needed for snapshots.
-    #[cfg(target_os = "macos")]
-    #[cfg_attr(not(feature = "snapshot"), allow(dead_code))]
-    vcpu_list: Arc<devices::legacy::VcpuList>,
-    #[cfg(target_os = "macos")]
-    #[cfg_attr(not(feature = "snapshot"), allow(dead_code))]
-    intc: IrqChip,
     #[cfg(all(target_os = "linux", target_arch = "aarch64", feature = "snapshot"))]
     intc: IrqChip,
 
@@ -324,74 +307,6 @@ impl Vmm {
                 _ => return Err(Error::VcpuPause),
             }
         }
-        Ok(())
-    }
-
-    /// Save all vCPU states. vCPUs must already be paused.
-    #[cfg(target_os = "macos")]
-    pub fn save_vcpu_states(&self) -> Result<Vec<hvf::Aarch64VcpuState>> {
-        let mut states = Vec::with_capacity(self.vcpus_handles.len());
-        for handle in self.vcpus_handles.iter() {
-            states.push(handle.save_state().map_err(Error::Vcpu)?);
-        }
-        Ok(states)
-    }
-
-    /// Restore all vCPU states. vCPUs must already be paused.
-    #[cfg(target_os = "macos")]
-    pub fn restore_vcpu_states(&self, states: Vec<hvf::Aarch64VcpuState>) -> Result<()> {
-        if states.len() != self.vcpus_handles.len() {
-            return Err(Error::VcpuPause);
-        }
-        // Read host counter once so all vCPUs get the same reference point
-        // (avoids inter-vCPU skew from restore loop timing).
-        let host_now = hvf::host_counter_now();
-        for (handle, mut state) in self.vcpus_handles.iter().zip(states.into_iter()) {
-            state.host_counter_at_restore = Some(host_now);
-            handle.restore_state(state).map_err(Error::Vcpu)?;
-        }
-        Ok(())
-    }
-
-    /// Save interrupt controller state (pending IRQs + GIC registers) for snapshot.
-    #[cfg(all(target_os = "macos", feature = "snapshot"))]
-    fn save_interrupt_controller_state(
-        &self,
-    ) -> std::result::Result<Option<Vec<u8>>, snapshot::SnapshotError> {
-        let pending_irqs = self.vcpu_list.save_interrupt_state();
-        let gic_registers = self.intc.lock().unwrap().save_snapshot_state();
-
-        let ic_snapshot = snapshot::InterruptControllerSnapshot {
-            pending_irqs,
-            gic_registers,
-        };
-
-        let data = bincode_next::encode_to_vec(&ic_snapshot, bincode_next::config::standard())
-            .map_err(|e| snapshot::SnapshotError::Serialize(e.to_string()))?;
-        Ok(Some(data))
-    }
-
-    /// Restore interrupt controller state (pending IRQs + GIC registers) from snapshot.
-    #[cfg(all(target_os = "macos", feature = "snapshot"))]
-    fn restore_interrupt_controller_state(
-        &self,
-        data: &[u8],
-    ) -> std::result::Result<(), snapshot::SnapshotError> {
-        let ic_snapshot: snapshot::InterruptControllerSnapshot = bincode_next::decode_from_slice(
-            data,
-            bincode_next::config::standard()
-                .with_limit::<{ snapshot::VMSTATE_MAX_SIZE as usize }>(),
-        )
-        .map(|(val, _)| val)
-        .map_err(|e| snapshot::SnapshotError::Deserialize(e.to_string()))?;
-
-        self.vcpu_list
-            .restore_interrupt_state(&ic_snapshot.pending_irqs);
-
-        if let Some(gic_data) = &ic_snapshot.gic_registers {
-            self.intc.lock().unwrap().restore_snapshot_state(gic_data);
-        }
-
         Ok(())
     }
 
@@ -1809,23 +1724,6 @@ impl Vmm {
     /// Returns a reference to the inner KVM Vm object.
     pub fn kvm_vm(&self) -> &Vm {
         &self.vm
-    }
-
-    #[cfg(target_os = "macos")]
-    pub fn add_mapping(
-        &self,
-        reply_sender: Sender<bool>,
-        host_addr: u64,
-        guest_addr: u64,
-        len: u64,
-    ) {
-        self.vm
-            .add_mapping(reply_sender, host_addr, guest_addr, len);
-    }
-
-    #[cfg(target_os = "macos")]
-    pub fn remove_mapping(&self, reply_sender: Sender<bool>, guest_addr: u64, len: u64) {
-        self.vm.remove_mapping(reply_sender, guest_addr, len);
     }
 }
 

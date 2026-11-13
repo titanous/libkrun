@@ -7,10 +7,6 @@
 
 pub mod aia;
 pub mod gic;
-#[cfg(target_os = "macos")]
-mod gicv3;
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-mod hvfgicv3;
 mod i8042;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod ioapic;
@@ -27,8 +23,6 @@ mod kvmioapic;
 mod rtc_pl031;
 #[cfg(any(target_arch = "x86_64", target_arch = "riscv64"))]
 mod serial_16550;
-#[cfg(target_os = "macos")]
-mod vcpu;
 #[cfg(target_arch = "x86_64")]
 mod x86_64;
 #[cfg(target_arch = "x86_64")]
@@ -48,12 +42,8 @@ use riscv64::serial;
 
 #[cfg(target_arch = "x86_64")]
 pub use self::cmos::Cmos;
-#[cfg(target_os = "macos")]
-pub use self::gicv3::GicV3;
 #[cfg(target_arch = "aarch64")]
 pub use self::gpio::Gpio;
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-pub use self::hvfgicv3::HvfGicV3;
 pub use self::i8042::Error as I8042DeviceError;
 pub use self::i8042::I8042Device;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -72,8 +62,6 @@ pub use self::kvmioapic::KvmIoapic;
 #[cfg(target_arch = "aarch64")]
 pub use self::rtc_pl031::RTC;
 pub use self::serial::Serial;
-#[cfg(target_os = "macos")]
-pub use self::vcpu::VcpuList;
 
 // Cannot use multiple types as bounds for a trait object, so we define our own trait
 // which is a composition of the desired bounds. In this case, io::Read and AsRawFd.

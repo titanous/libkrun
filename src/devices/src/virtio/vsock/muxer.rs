@@ -11,8 +11,6 @@ use super::muxer_thread::MuxerThread;
 use super::packet::{TsiConnectReq, TsiGetnameRsp, VsockPacket};
 use super::proxy::{Proxy, ProxyRemoval, ProxyUpdate};
 use super::reaper::ReaperThread;
-#[cfg(target_os = "macos")]
-use super::timesync::TimesyncThread;
 use super::tsi_dgram::TsiDgramProxy;
 use super::tsi_stream::TsiStreamProxy;
 use super::unix::UnixProxy;
@@ -160,20 +158,6 @@ impl VsockMuxer {
         // Wire up the rxq notification so the EventManager drains pushed
         // packets even when they come from the muxer thread.
         self.rxq.lock().unwrap().set_kick_fd(rxq_kick);
-
-        #[cfg(target_os = "macos")]
-        {
-            let timesync = TimesyncThread::new(
-                self.cid,
-                mem.clone(),
-                queue.clone(),
-                interrupt.clone(),
-                timesync_quiesce_fd,
-                timesync_resume_fd,
-                timesync_quiesce_ack,
-            );
-            timesync.run();
-        }
 
         let (sender, receiver) = unbounded();
 
