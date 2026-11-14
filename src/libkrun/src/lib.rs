@@ -802,11 +802,18 @@ impl Builder {
     /// before any template is chosen. Configure the shape and the same device
     /// list, in the same order, that the template's source used; backends stay
     /// idle until release. Take the handle with
-    /// `Context::take_template_assignment` and give it a template later. `wait`
-    /// counts from start and bounds assignment and release; on expiry `run`
-    /// tears the VM down under the configured lifecycle lock and returns a
-    /// `TimedOut` error carrying `ParkedReceiverError::Expired`. Dropping the
-    /// handle unassigned ends it the same way with `Abandoned`.
+    /// `Context::take_template_assignment` and give it a template later.
+    ///
+    /// The receiver starts during `build()` and runs in its own thread, so its
+    /// life is bounded from build whether or not `run` is called: `wait`
+    /// counts from build and bounds assignment and release. On expiry the VM
+    /// is torn down under the configured lifecycle lock (slot and pool memory
+    /// released) and `run` returns a `TimedOut` error carrying
+    /// `ParkedReceiverError::Expired`. Dropping the handle unassigned ends it
+    /// the same way with `Abandoned`; dropping the context stops it and waits
+    /// for its teardown. `run` waits for the end. Hand the VM descriptor to a
+    /// daemon with `nitro_descriptor_handoff` (duplicating after build is
+    /// refused, because the VM is already running).
     #[cfg(all(
         target_os = "linux",
         target_arch = "aarch64",
@@ -1832,6 +1839,21 @@ impl Builder {
                 request.refuse_restored_copy();
                 context.built_vm.nitro_capture = Some(request);
             }
+            if park.is_some() {
+                // A parked receiver starts now and runs in its own thread, so
+                // its park wait bounds its life from build even if `run` is
+                // never called: the start releases the creation lock, and
+                // expiry, a dropped handle or a dropped context tear it down
+                // under the lifecycle lock.
+                let runtime = context.built_vm.nitro.take().expect("Nitro runtime");
+                let observers = runtime.exit_observer_registry();
+                let heartbeat = runtime.heartbeat_control();
+                context.built_vm.nitro_parked = Some(NitroParked {
+                    run: runtime.start_parked().map_err(StartError::Nitro)?,
+                    observers,
+                    heartbeat,
+                });
+            }
             context.built_vm.nitro_park = park;
             context
         };
@@ -2236,10 +2258,21 @@ pub enum BuilderError {
     ConsoleAlreadyAdded,
 }
 
+/// A parked Nitro receiver's runtime, running in its own thread since build.
+#[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+struct NitroParked {
+    run: nitro_sandbox::runtime::ParkedRun,
+    observers: nitro_sandbox::runtime::ExitObserverRegistry,
+    heartbeat: Option<nitro_sandbox::heartbeat::DeadlineControl>,
+}
+
 struct ContextVm {
     kvm: Option<vmm::builder::BuiltVm>,
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     nitro: Option<nitro_sandbox::runtime::Runtime>,
+    /// Set instead of `nitro` for a parked receiver (started at build).
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    nitro_parked: Option<NitroParked>,
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     nitro_device_info: vmm::resources::VmDeviceInfo,
     #[cfg(all(
@@ -2276,6 +2309,8 @@ impl From<vmm::builder::BuiltVm> for ContextVm {
             kvm: Some(vm),
             #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
             nitro: None,
+            #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+            nitro_parked: None,
             #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
             nitro_device_info: Default::default(),
             #[cfg(all(
@@ -2382,8 +2417,16 @@ impl Context {
     /// host daemon with SCM_RIGHTS before permitting this process to start.
     /// The VM remains alive until the last duplicate is closed; after reaping the
     /// VMM the daemon closes its duplicate under the same lifecycle lock.
+    /// Not available for a parked receiver, which starts at build: give it
+    /// `Builder::nitro_descriptor_handoff` instead.
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     pub fn duplicate_nitro_vm_descriptor(&self) -> std::io::Result<std::os::fd::OwnedFd> {
+        if self.built_vm.nitro_parked.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "a parked receiver starts at build; use Builder::nitro_descriptor_handoff",
+            ));
+        }
         self.built_vm
             .nitro
             .as_ref()
@@ -2400,6 +2443,7 @@ impl Context {
             built_vm: ContextVm {
                 kvm: None,
                 nitro: Some(runtime),
+                nitro_parked: None,
                 nitro_device_info: device_info,
                 #[cfg(all(target_arch = "aarch64", feature = "nitro-sandbox"))]
                 nitro_capture: None,
@@ -2426,7 +2470,7 @@ impl Context {
     /// This returns the actual device paths from the built VM.
     pub fn device_info(&self) -> &vmm::resources::VmDeviceInfo {
         #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
-        if self.built_vm.nitro.is_some() {
+        if self.built_vm.nitro.is_some() || self.built_vm.nitro_parked.is_some() {
             return &self.built_vm.nitro_device_info;
         }
         &self.built_vm.device_info
@@ -2436,16 +2480,20 @@ impl Context {
     /// Must be called before `run()`, since `run()` consumes `self`.
     pub fn vm_handle(&self) -> VmHandle {
         #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
-        if self.built_vm.nitro.is_some() {
-            return VmHandle {
-                vmm: None,
-                #[cfg(target_arch = "aarch64")]
-                nitro_capture: self.built_vm.nitro_capture.clone(),
-                heartbeat_control: self
+        if self.built_vm.nitro.is_some() || self.built_vm.nitro_parked.is_some() {
+            let heartbeat_control = match &self.built_vm.nitro_parked {
+                Some(parked) => parked.heartbeat.clone(),
+                None => self
                     .built_vm
                     .nitro
                     .as_ref()
                     .and_then(|runtime| runtime.heartbeat_control()),
+            };
+            return VmHandle {
+                vmm: None,
+                #[cfg(target_arch = "aarch64")]
+                nitro_capture: self.built_vm.nitro_capture.clone(),
+                heartbeat_control,
                 shutdown_efd: self.shutdown_efd.clone(),
                 #[cfg(not(feature = "tee"))]
                 balloon: None,
@@ -2489,6 +2537,11 @@ impl Context {
             runtime.register_exit_observer(observer);
             return;
         }
+        #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+        if let Some(parked) = &self.built_vm.nitro_parked {
+            parked.observers.register(observer);
+            return;
+        }
         self.built_vm
             .vmm()
             .lock()
@@ -2499,9 +2552,18 @@ impl Context {
     /// Start the VM and run the event loop. This blocks until the VM exits.
     pub fn run(mut self) -> Result<vmm::vm_exit::VmExit, StartError> {
         #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
-        if let Some(runtime) = self.built_vm.nitro.take() {
-            return runtime
-                .run()
+        let nitro_result = match (
+            self.built_vm.nitro.take(),
+            self.built_vm.nitro_parked.take(),
+        ) {
+            (Some(runtime), _) => Some(runtime.run()),
+            // Already running since build; wait for its end.
+            (None, Some(parked)) => Some(parked.run.wait()),
+            (None, None) => None,
+        };
+        #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+        if let Some(result) = nitro_result {
+            return result
                 .map(|exit| match exit {
                     nitro_sandbox::runtime::Exit::PowerOff => {
                         vmm::vm_exit::VmExit::Shutdown { exit_code: 0 }

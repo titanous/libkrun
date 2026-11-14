@@ -123,6 +123,11 @@ pub struct Mapping {
     address: NonNull<u8>,
     pub len: usize,
 }
+// SAFETY: a Mapping exclusively owns its shared mmap region; nothing in it is
+// tied to the creating thread (any thread may access or munmap the region),
+// and all accesses go through `&self`/`&mut self` of its single owner. This
+// lets a parked receiver's runtime run in its own thread from build.
+unsafe impl Send for Mapping {}
 impl Mapping {
     fn new(fd: &File, len: usize) -> io::Result<Self> {
         let started = Instant::now();

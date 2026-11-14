@@ -83,31 +83,79 @@ pub enum Exit {
     },
 }
 
+type Observer = Arc<Mutex<dyn VmmExitObserver>>;
+/// Registered observers and whether the guest has already exited. An observer
+/// registered after the exit is notified at once.
 #[derive(Default)]
-struct ExitObservers(Mutex<Vec<Arc<Mutex<dyn VmmExitObserver>>>>);
+struct ExitObservers(Mutex<(Vec<Observer>, bool)>);
 impl ExitObservers {
     fn register(&self, observer: Arc<Mutex<dyn VmmExitObserver>>) {
-        self.0.lock().unwrap().push(observer);
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if !state.1 {
+            state.0.push(observer);
+            return;
+        }
+        drop(state);
+        Self::call(&observer);
     }
-    fn notify(&mut self) {
-        for observer in self
-            .0
-            .get_mut()
-            .unwrap_or_else(|e| e.into_inner())
-            .drain(..)
-        {
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                observer
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .on_vmm_exit();
-            }));
+    fn call(observer: &Arc<Mutex<dyn VmmExitObserver>>) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            observer
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .on_vmm_exit();
+        }));
+    }
+    fn notify(&self) {
+        let observers = {
+            let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+            state.1 = true;
+            std::mem::take(&mut state.0)
+        };
+        for observer in &observers {
+            Self::call(observer);
         }
     }
 }
 impl Drop for ExitObservers {
     fn drop(&mut self) {
         self.notify();
+    }
+}
+
+/// Registers exit observers on a runtime that another thread owns (a parked
+/// receiver runs from build). Registration after the exit notifies at once.
+#[derive(Clone)]
+pub struct ExitObserverRegistry(Arc<ExitObservers>);
+impl ExitObserverRegistry {
+    pub fn register(&self, observer: Arc<Mutex<dyn VmmExitObserver>>) {
+        self.0.register(observer);
+    }
+}
+
+/// A parked receiver that is already running in its own thread. It started
+/// at `Runtime::start_parked`, so its park wait, abandonment and stop are
+/// enforced whether or not anyone waits for it. Dropping it unwaited stops
+/// the receiver and waits for its teardown (under the configured lock).
+pub struct ParkedRun {
+    thread: Option<std::thread::JoinHandle<io::Result<Exit>>>,
+    stop: Arc<utils::eventfd::EventFd>,
+}
+impl ParkedRun {
+    /// Wait for the receiver to end; the same result `Runtime::run` returns.
+    pub fn wait(mut self) -> io::Result<Exit> {
+        let thread = self.thread.take().expect("parked runtime thread");
+        thread
+            .join()
+            .unwrap_or_else(|_| Err(io::Error::other("parked receiver runtime panicked")))
+    }
+}
+impl Drop for ParkedRun {
+    fn drop(&mut self) {
+        if let Some(thread) = self.thread.take() {
+            let _ = self.stop.write(1);
+            let _ = thread.join();
+        }
     }
 }
 
@@ -119,7 +167,9 @@ pub struct Runtime {
     sandbox: Sandbox,
     timeout: Duration,
     cid: u64,
-    observers: ExitObservers,
+    observers: Arc<ExitObservers>,
+    /// Set when the VM was started before `run` (parked receivers start at build).
+    started: Option<Instant>,
     stop: Arc<utils::eventfd::EventFd>,
     console: crate::console::Console,
     heartbeat: Option<crate::heartbeat::Heartbeat>,
@@ -175,7 +225,8 @@ impl Runtime {
             sandbox,
             timeout,
             cid,
-            observers: ExitObservers::default(),
+            observers: Default::default(),
+            started: None,
             stop: Arc::new(utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK)?),
             console: Default::default(),
             heartbeat: None,
@@ -217,10 +268,13 @@ impl Runtime {
         self.restore = Some(handler);
         Ok(())
     }
-    /// Start as a parked receiver with no template chosen. `wait`, counted from
-    /// start, bounds both assignment and release; on expiry `run` returns
-    /// `ParkedReceiverError::Expired` (TimedOut) after the normal teardown.
-    /// The boot watchdog is suspended while parked and restarts at release.
+    /// Prepare a parked receiver with no template chosen. `wait`, counted from
+    /// the VM start, bounds both assignment and release; on expiry the runtime
+    /// returns `ParkedReceiverError::Expired` (TimedOut) after the normal
+    /// teardown. The boot watchdog is suspended while parked and restarts at
+    /// release. Start it with `start_parked` straight away: until it starts,
+    /// the VM holds its slot and pool memory (and, with start-and-teardown
+    /// serialization, the host-wide lock) and no deadline runs.
     pub fn park_for_restore(&mut self, wait: Duration) -> io::Result<RestoreAssignment> {
         if self.memory_size < 1 << 30 || self.restore.is_some() || self.park.is_some() {
             return Err(io::Error::new(
@@ -241,6 +295,33 @@ impl Runtime {
         });
         self.park = Some((slot.clone(), wait));
         Ok(RestoreAssignment(slot))
+    }
+    /// Start a parked receiver now and keep running it in its own thread, so
+    /// that it has a bounded life from this moment whatever its owner does:
+    /// the VM start releases the creation lock, the park wait counts from
+    /// here, and expiry, abandonment of every assignment handle or a stop
+    /// request end it with teardown under the configured lock (releasing the
+    /// slot and pool memory). A start failure tears the VM down here.
+    pub fn start_parked(mut self) -> io::Result<ParkedRun> {
+        if self.park.is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "only a parked receiver starts before run",
+            ));
+        }
+        self.sandbox.start(self.cid)?;
+        self.started = Some(Instant::now());
+        let stop = self.stop.clone();
+        let thread = std::thread::Builder::new()
+            .name(format!("nitro-parked-{}", self.cid))
+            .spawn(move || self.run())?;
+        Ok(ParkedRun {
+            thread: Some(thread),
+            stop,
+        })
+    }
+    pub fn exit_observer_registry(&self) -> ExitObserverRegistry {
+        ExitObserverRegistry(self.observers.clone())
     }
     pub fn set_capture_handler(&mut self, handler: Box<dyn crate::capture::CaptureHandler>) {
         self.capture = Some(handler);
@@ -468,14 +549,19 @@ impl Runtime {
         }
     }
     fn run_inner(&mut self) -> io::Result<Exit> {
-        match self.stop.read() {
-            Ok(_) => return Ok(Exit::Stopped),
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-            Err(error) => return Err(error),
-        }
-        let receiver_start = Instant::now();
-        self.sandbox.start(self.cid)?;
-        let start = Instant::now();
+        let (receiver_start, start) = match self.started {
+            Some(started) => (started, started),
+            None => {
+                match self.stop.read() {
+                    Ok(_) => return Ok(Exit::Stopped),
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                    Err(error) => return Err(error),
+                }
+                let receiver_start = Instant::now();
+                self.sandbox.start(self.cid)?;
+                (receiver_start, Instant::now())
+            }
+        };
         if let Some(heartbeat) = &mut self.heartbeat {
             heartbeat.start(start);
         }
@@ -721,13 +807,39 @@ mod tests {
     fn panicking_observer_does_not_skip_later_observers_or_double_panic() {
         let calls = Arc::new(AtomicUsize::new(0));
         let counted = calls.clone();
-        let mut observers = ExitObservers::default();
+        let observers = ExitObservers::default();
         observers.register(Arc::new(Mutex::new(|| panic!("observer failure"))));
         observers.register(Arc::new(Mutex::new(move || {
             counted.fetch_add(1, Ordering::SeqCst);
         })));
         observers.notify();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+    #[test]
+    fn observer_registered_after_exit_is_notified_once_at_once() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let registry = ExitObserverRegistry(Arc::new(ExitObservers::default()));
+        let early = calls.clone();
+        registry.register(Arc::new(Mutex::new(move || {
+            early.fetch_add(1, Ordering::SeqCst);
+        })));
+        registry.0.notify();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let late = calls.clone();
+        registry.register(Arc::new(Mutex::new(move || {
+            late.fetch_add(1, Ordering::SeqCst);
+        })));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        // A second exit notification (Drop after shutdown) calls nobody again.
+        registry.0.notify();
+        drop(registry);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+    #[test]
+    fn runtime_can_move_to_a_parked_thread() {
+        fn is_send<T: Send>() {}
+        is_send::<Runtime>();
+        is_send::<ParkedRun>();
     }
     #[test]
     fn observers_notify_exactly_once_for_all_exit_results() {

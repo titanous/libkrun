@@ -79,8 +79,10 @@ Two ways to start a receiving VM:
 
 - `Builder::start_from_template(source, ...)` chooses the template before the
   VM exists. The VM boots, parks, and is released immediately.
-- `Builder::park_for_template(wait)` builds the VM with no template. After
-  `build()`, `Context::take_template_assignment()` returns a one-shot
+- `Builder::park_for_template(wait)` builds the VM with no template and
+  starts it during `build()`; from then on the receiver runs in its own
+  thread, whether or not `Context::run` is called (`run` waits for its end).
+  After `build()`, `Context::take_template_assignment()` returns a one-shot
   `TemplateAssignment`. `receiver_ready()` reports that the stub has
   published READY. `assign(source)` checks the template against the
   receiver's CPU count, memory and device list, then hands it over; the
@@ -89,13 +91,21 @@ Two ways to start a receiving VM:
 
 Parked receiver contract:
 
-- `wait` counts from start and bounds both assignment and release. On expiry
-  `run` tears the VM down through the normal path (under the configured
-  lifecycle lock) and returns a `TimedOut` error carrying
-  `ParkedReceiverError::Expired`.
+- `wait` counts from `build()` (the VM start) and bounds both assignment and
+  release. On expiry the receiver is torn down through the normal path
+  (under the configured lifecycle lock), releasing its slot and pool memory,
+  and `run` returns a `TimedOut` error carrying
+  `ParkedReceiverError::Expired`, even if `run` is first called after the
+  expiry.
 - Dropping every `TemplateAssignment` while the receiver waits ends it the
   same way with `ConnectionAborted` / `ParkedReceiverError::Abandoned`. A
-  stop request ends it with `VmExit` stopped.
+  stop request ends it with `VmExit` stopped. Dropping the `Context` without
+  running it stops the receiver and waits for its teardown.
+- The start during `build()` releases the creation lock (start-and-teardown
+  serialization), so a built receiver never holds the host-wide lock while
+  it waits. Because the VM is already running after `build()`,
+  `Context::duplicate_nitro_vm_descriptor` is refused for a parked receiver;
+  give a daemon the descriptor with `Builder::nitro_descriptor_handoff`.
 - A second `assign`, or an `assign` after expiry or end, fails with
   `ParkedReceiverError::Closed`.
 - The boot watchdog and heartbeat are suspended while parked and restart at
@@ -103,9 +113,6 @@ Parked receiver contract:
   with the park deadline can still end with `Expired`. A kernel mismatch ends
   and consumes the receiver with the typed `vmm::nitro_restore::RestoreMismatch::KernelIdentity`
   error (available through the VMM crate; not re-exported by `libkrun`).
-- Until pre-run expiry is implemented, a built but unrun parked context holds
-  its slot, pool memory, and (with start-and-teardown serialization) the lock
-  without a deadline. Run it immediately; never retain an unrun parked context.
 - Configure the parked VM with the same device list, in the same order, as
   the template's source. Backends may receive their contents (for example a
   disk snapshot written in place into the already-open file) at any time

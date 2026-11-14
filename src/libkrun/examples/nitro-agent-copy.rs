@@ -159,9 +159,15 @@ mod probe {
             cid,
             watchdog: Duration::from_secs(20),
         });
+        // NITRO_SERIALIZATION=teardown serializes only teardowns (used to show a
+        // retained resource without holding the host lock across a long wait).
+        let serialization = match std::env::var("NITRO_SERIALIZATION").as_deref() {
+            Ok("teardown") => NitroSerialization::Teardown,
+            _ => NitroSerialization::StartAndTeardown,
+        };
         builder.nitro_lifecycle_lock(
             nitro_sandbox::lifecycle::LIFECYCLE_LOCK_PATH.into(),
-            NitroSerialization::StartAndTeardown,
+            serialization,
         );
         if let Some(path) = std::env::var_os("AGENT_DESCRIPTOR_HANDOFF") {
             let stream = UnixStream::connect(path)?;
@@ -277,6 +283,192 @@ mod probe {
         }
         Ok(())
     }
+    /// Guest resources this process itself holds: the Nitro device handle, the
+    /// VM descriptor (an anonymous inode other than the event/poll/timer kinds),
+    /// the guest info page and the lock file descriptor, and mappings of the
+    /// Nitro device (the guest's pool memory) or the info page. Global counters
+    /// are shared with other lanes; these are not.
+    fn own_nitro_resources() -> io::Result<(usize, usize, Vec<String>)> {
+        let mut targets = Vec::new();
+        for entry in std::fs::read_dir("/proc/self/fd")? {
+            let Ok(target) = std::fs::read_link(entry?.path()) else {
+                continue;
+            };
+            let target = target.to_string_lossy().into_owned();
+            let ordinary_anon = [
+                "[eventfd]",
+                "[eventpoll]",
+                "[timerfd]",
+                "[signalfd]",
+                "[pidfd]",
+            ]
+            .iter()
+            .any(|kind| target.ends_with(kind));
+            if target == "/dev/nitro_enclaves"
+                || target.contains("libkrun-nitro-info")
+                || target == nitro_sandbox::lifecycle::LIFECYCLE_LOCK_PATH
+                || (target.starts_with("anon_inode:") && !ordinary_anon)
+            {
+                targets.push(target);
+            }
+        }
+        let mappings = std::fs::read_to_string("/proc/self/maps")?
+            .lines()
+            .filter(|line| {
+                line.contains("/dev/nitro_enclaves") || line.contains("libkrun-nitro-info")
+            })
+            .count();
+        Ok((targets.len(), mappings, targets))
+    }
+    /// Try the host-wide lock without waiting, from a separate open file
+    /// description (so a holder in this same process also counts), and release
+    /// it at once. Counts how many of `samples` attempts found it free.
+    fn lock_free_samples(samples: u32) -> io::Result<u32> {
+        use std::os::fd::AsRawFd;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(nitro_sandbox::lifecycle::LIFECYCLE_LOCK_PATH)?;
+        let mut free = 0;
+        for _ in 0..samples {
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                free += 1;
+                unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        Ok(free)
+    }
+    fn pool_counters() -> String {
+        let read = |name: &str| {
+            std::fs::read_to_string(format!("/sys/class/misc/nitro_enclaves/{name}"))
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|_| "?".into())
+        };
+        format!(
+            "slots={} pool_in_use={}",
+            read("pcie_slots_in_use"),
+            read("mem_pool/in_use")
+        )
+    }
+    /// A parked receiver that is built but never run (PARK_MODE=unrun), whose
+    /// handle is dropped while unrun (unrun-drop), or whose context is dropped
+    /// unrun (unrun-ctxdrop). It must not hold the host lock after build, and
+    /// must give back its VM descriptor, device handle and pool memory within
+    /// its park wait (or at once when dropped), with the typed reason from
+    /// `run`.
+    fn unrun_child(
+        receiver: Builder,
+        mode: &str,
+        wait: Duration,
+        cid: u64,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let before = own_nitro_resources()?;
+        println!(
+            "UNRUN_BEFORE cid={cid} own={:?} {}",
+            (before.0, before.1),
+            pool_counters()
+        );
+        let built = Instant::now();
+        let mut context = receiver.build()?;
+        let build_ms = built.elapsed().as_millis();
+        let assignment = context
+            .take_template_assignment()
+            .ok_or("parked context has no assignment handle")?;
+        let after_build = own_nitro_resources()?;
+        let lock_free = lock_free_samples(10)?;
+        println!(
+            "UNRUN_BUILT cid={cid} build_ms={build_ms} own={:?} targets={:?} lock_free={lock_free}/10 {}",
+            (after_build.0, after_build.1),
+            after_build.2,
+            pool_counters()
+        );
+        let mut failures = Vec::new();
+        if after_build.0 == 0 || after_build.1 == 0 {
+            failures.push("no Nitro resources observed after build".to_string());
+        }
+        // Another lane may hold the lock for one start or teardown at a time;
+        // a lock held by this unrun receiver is held in every sample.
+        if lock_free == 0 {
+            failures.push("host lock held throughout after build".to_string());
+        }
+        let expected = match mode {
+            "unrun" => Some((io::ErrorKind::TimedOut, krun::ParkedReceiverError::Expired)),
+            "unrun-drop" => Some((
+                io::ErrorKind::ConnectionAborted,
+                krun::ParkedReceiverError::Abandoned,
+            )),
+            "unrun-ctxdrop" => None,
+            _ => return Err(format!("unknown PARK_MODE {mode}").into()),
+        };
+        let observe_at = match mode {
+            "unrun" => wait + Duration::from_secs(6),
+            _ => Duration::from_secs(3),
+        };
+        let mut context = Some(context);
+        let mut assignment = Some(assignment);
+        match mode {
+            "unrun-drop" => drop(assignment.take()),
+            "unrun-ctxdrop" => {
+                let dropped = Instant::now();
+                drop(context.take());
+                println!(
+                    "UNRUN_CONTEXT_DROPPED cid={cid} drop_ms={}",
+                    dropped.elapsed().as_millis()
+                );
+            }
+            _ => {}
+        }
+        while built.elapsed() < observe_at {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let later = own_nitro_resources()?;
+        println!(
+            "UNRUN_OBSERVED cid={cid} after_ms={} own={:?} targets={:?} {}",
+            built.elapsed().as_millis(),
+            (later.0, later.1),
+            later.2,
+            pool_counters()
+        );
+        if (later.0, later.1) != (before.0, before.1) {
+            failures.push(format!(
+                "resources still held {} ms after build: {:?}",
+                built.elapsed().as_millis(),
+                (later.0, later.1)
+            ));
+        }
+        if let Some(context) = context.take() {
+            let ran = Instant::now();
+            let result = context.run();
+            let run_ms = ran.elapsed().as_millis();
+            match (&result, expected) {
+                (Err(krun::StartError::Nitro(error)), Some((kind, reason)))
+                    if error.kind() == kind
+                        && error
+                            .get_ref()
+                            .and_then(|e| e.downcast_ref::<krun::ParkedReceiverError>())
+                            == Some(&reason) =>
+                {
+                    println!("UNRUN_RUN_RESULT cid={cid} typed={reason:?} run_ms={run_ms}");
+                }
+                _ => failures.push(format!("run returned {result:?} after {run_ms} ms")),
+            }
+        }
+        drop(assignment);
+        let end = own_nitro_resources()?;
+        println!(
+            "UNRUN_END cid={cid} own={:?} {}",
+            (end.0, end.1),
+            pool_counters()
+        );
+        if failures.is_empty() {
+            println!("UNRUN_PASS cid={cid} mode={mode}");
+            Ok(())
+        } else {
+            println!("UNRUN_FAIL cid={cid} mode={mode} {failures:?}");
+            Err(failures.join("; ").into())
+        }
+    }
     /// One receiver parked before any template exists. PARK_MODE=assign (default)
     /// waits for the parent's template, expire never assigns, drop releases the
     /// handle unassigned. PARK_WAIT_SECS bounds the park (default 60).
@@ -312,6 +504,11 @@ mod probe {
             attach_devices(&mut receiver, &disk, fs.clone());
         }
         receiver.park_for_template(wait);
+        if mode.starts_with("unrun") {
+            let result = unrun_child(receiver, &mode, wait, cid);
+            let _ = std::fs::remove_file(&socket);
+            return result;
+        }
         let mut context = receiver.build()?;
         let assignment = context
             .take_template_assignment()
