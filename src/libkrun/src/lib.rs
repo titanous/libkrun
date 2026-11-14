@@ -1200,6 +1200,9 @@ impl Builder {
         if !matches!(self.config.vsock_config, VsockConfig::Disabled) {
             let mut flags = match self.config.vsock_config {
                 VsockConfig::Explicit { tsi_flags } => tsi_flags,
+                VsockConfig::Implicit if self.socket_policy.internet_enabled => {
+                    TsiFlags::HIJACK_INET
+                }
                 _ => TsiFlags::empty(),
             };
             if !self.socket_policy.internet_enabled {
