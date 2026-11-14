@@ -12,9 +12,12 @@ mod muxer_rxq;
 mod muxer_thread;
 #[allow(dead_code)]
 mod packet;
+#[cfg(test)]
+mod packet_stream_tests;
 pub mod policy;
 mod proxy;
 mod reaper;
+mod stream_buffer;
 mod tsi_dgram;
 mod tsi_stream;
 mod unix;
