@@ -187,6 +187,13 @@ impl Sandbox {
                 copy[20..24].copy_from_slice(&64u32.to_le_bytes());
                 copy[24..32].copy_from_slice(&2344u64.to_le_bytes());
                 copy[64..].copy_from_slice(&entry);
+                if entry[128 + 20] & 15 == 15 {
+                    if let Ok(directory) = std::env::var("NITRO_INFO_FIXTURES") {
+                        std::fs::create_dir_all(&directory)?;
+                        let path = std::path::Path::new(&directory).join(format!("device-{uid}.bin"));
+                        if !path.exists() { std::fs::write(path, &copy)?; }
+                    }
+                }
                 return crate::device_snapshot(&copy, uid).map_err(|e| io::Error::other(format!("info page: {e:?}")));
             }
             return Ok(None);

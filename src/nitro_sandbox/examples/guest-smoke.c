@@ -13,6 +13,9 @@
 static void fail(const char *s) { printf("NITRO_SMOKE_FAIL %s errno=%d\n",s,errno); fflush(stdout); sync(); reboot(RB_POWER_OFF); _exit(1); }
 int main(void) {
  setbuf(stdout,NULL);
+#ifdef NEVER_START
+ for (;;) pause();
+#endif
  mkdir("/dev",0755); mkdir("/proc",0755); mkdir("/sys",0755); mkdir("/mnt",0755);
  mount("devtmpfs","/dev","devtmpfs",0,NULL); mount("proc","/proc","proc",0,NULL); mount("sysfs","/sys","sysfs",0,NULL);
  for(int n=0; access("/dev/vda",F_OK) && n<500; n++) usleep(10000);
