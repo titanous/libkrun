@@ -506,7 +506,7 @@ pub struct ConsoleDeviceInfo {
 #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
 pub use nitro_sandbox::lifecycle::{
     LifecycleLock as NitroLifecycleLock, OpenLock as NitroOpenLifecycleLock,
-    Serialization as NitroSerialization,
+    Serialization as NitroSerialization, LIFECYCLE_LOCK_PATH as NITRO_LIFECYCLE_LOCK_PATH,
 };
 
 #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
@@ -1662,6 +1662,21 @@ impl Builder {
             total_bytes,
             bytes_per_second,
         ));
+        self
+    }
+
+    /// Also give every kernel console byte to `observer`, before the byte budgets of
+    /// `nitro_console_sink` (for example to find a stop line after the guest flooded its
+    /// console). Call after `nitro_console_sink` (without a sink, console bytes are only
+    /// observed). Runs on the console thread; must not block.
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    pub fn nitro_console_observer(
+        &mut self,
+        observer: nitro_sandbox::console::RawObserver,
+    ) -> &mut Self {
+        self.nitro_console
+            .get_or_insert_with(nitro_sandbox::console::Console::default)
+            .set_observer(observer);
         self
     }
 
