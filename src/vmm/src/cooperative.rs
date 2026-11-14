@@ -42,7 +42,9 @@ impl ResumeEntry {
             || !canonical(word(2))
             || !canonical(word(5))
             || word(3) == 0
-            || word(3) & 4095 != 0
+            // CR3 carries a PCID in bits 11:0 when CR4.PCIDE is set.
+            // Preserve it: the continuation restores the same address space.
+            || (word(4) & (1 << 17) == 0 && word(3) & 4095 != 0)
             || word(20) & 0x8000_0001 != 0x8000_0001
             || word(4) & (1 << 5) == 0
             || word(21) & 0x500 != 0x500
@@ -93,6 +95,14 @@ mod tests {
         let entry = ResumeEntry::parse(&published()).unwrap();
         assert_eq!(entry.cr3, 0x2000);
         assert_eq!(entry.rip, 0xffff_ffff_8100_0000);
+    }
+
+    #[test]
+    fn accepts_pcid_when_enabled_and_preserves_identifier() {
+        let mut page = published();
+        page[3 * 8..4 * 8].copy_from_slice(&0x2123u64.to_le_bytes());
+        page[4 * 8..5 * 8].copy_from_slice(&(0x20u64 | (1 << 17)).to_le_bytes());
+        assert_eq!(ResumeEntry::parse(&page).unwrap().cr3, 0x2123);
     }
 
     #[test]
