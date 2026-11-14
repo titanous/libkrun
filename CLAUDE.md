@@ -23,7 +23,7 @@
 
 Normal startup creates paused vCPU threads and resumes them. Public pause/resume remain lifecycle operations. `Context::run()` returns a `VmExit`; it must not exit the host process. vCPU handle teardown signals and joins threads. `VmHandle::notify_vm_generation_change()` writes a fresh guest generation identifier then signals its registered interrupt; call after starting a copied guest. The `vm-generation-change` KVM test observes two guest-kernel random-pool reseed notices.
 
-Balloon reclaimed-page tracking remains part of normal device processing. Kernel-bundle configuration queries the host page size for alignment. DAX regions use additional KVM slots; vhost-user guest RAM is memfd-backed for daemon sharing.
+Balloon reclaimed-page bitmaps are updated during device processing but have no current production reader; they remain available for copy-time page exclusion. Kernel-bundle configuration queries the host page size for alignment. DAX regions use additional KVM slots; vhost-user guest RAM is memfd-backed for daemon sharing.
 
 ## Features
 - `embedded_init`: embed `init/init` in devices.

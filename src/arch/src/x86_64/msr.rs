@@ -240,6 +240,7 @@ pub fn setup_msrs(vcpu: &VcpuFd) -> Result<()> {
 }
 
 /// Returns the list of supported, serializable MSRs.
+/// Retained for copying guest CPU state; normal boot does not call this helper.
 ///
 /// # Arguments
 ///
