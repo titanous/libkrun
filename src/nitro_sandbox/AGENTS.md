@@ -16,7 +16,11 @@ before releasing mappings. Memory exposed by unsafe `guest_memory()` does not ow
 the driver mapping: drop all devices and memory clones before Sandbox. The current
 adapter rejects mappings above 1 GiB rather than guessing split guest ranges.
 
-Run `cargo test --manifest-path src/nitro_sandbox/Cargo.toml` from the fork root.
+The crate is a path member of the root workspace. Run `cargo test -p nitro_sandbox`
+from the fork root. Captured m8g device entries are in tests/fixtures with provenance.
+The boot/reset watchdog disarms only while all registered devices are active.
+Shared-region registration is unsafe: callers retain mappings until VM close and
+must not concurrently assign them elsewhere; registration zeroes all bytes.
 Build device example with `--features devices --example devices`. Guest-side
 `examples/guest-smoke.c` must be statically compiled for the guest architecture;
 `build-smoke.py` makes a test EIF using a reference EIF kernel. Test success requires

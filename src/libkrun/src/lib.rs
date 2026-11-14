@@ -1042,6 +1042,19 @@ impl Builder {
 
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     fn build_nitro(mut self, options: NitroBackendConfig) -> Result<Context, StartError> {
+        let unsupported = || StartError::Nitro(std::io::Error::new(std::io::ErrorKind::Unsupported, "Nitro supports EIF boot with block, userspace vsock and custom console ports only"));
+        if self.config.vmm_uid.is_some() || self.config.vmm_gid.is_some()
+            || self.config.exec_path.is_some() || self.config.env.is_some() || self.config.args.is_some()
+            || self.config.workdir.is_some() || !self.extra_kernel_args.is_empty()
+            || self.config.vmr.nested_enabled || self.config.gpu_virgl_flags.is_some()
+            || !self.config.vmr.serial_consoles.is_empty()
+        { return Err(unsupported()); }
+        #[cfg(not(feature = "tee"))]
+        if !self.config.vmr.fs.is_empty() { return Err(unsupported()); }
+        #[cfg(feature = "net")]
+        if !self.config.vmr.net.list.is_empty() || self.config.legacy_net_cfg.is_some() { return Err(unsupported()); }
+        #[cfg(feature = "vhost-user")]
+        if self.config.vhost_user_vsock || !self.config.vmr.vhost_user_devices.is_empty() || !self.config.vmr.vhost_user_fs.is_empty() { return Err(unsupported()); }
         let config = self.config.vmr.vm_config();
         let mut runtime = nitro_sandbox::runtime::Runtime::new(
             options.image.to_str().ok_or_else(|| StartError::Nitro(std::io::Error::other("non-UTF8 EIF path")))?,
