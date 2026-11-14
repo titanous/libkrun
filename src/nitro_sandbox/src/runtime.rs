@@ -15,6 +15,10 @@ pub enum Exit {
     Stopped,
     Panic,
     LivenessExpired,
+    StatedReason {
+        code: u8,
+        observed_micros: Option<u64>,
+    },
 }
 
 #[derive(Default)]
@@ -47,6 +51,7 @@ pub struct Runtime {
     stop: Arc<utils::eventfd::EventFd>,
     console: crate::console::Console,
     heartbeat: Option<crate::heartbeat::Heartbeat>,
+    stop_reason: Option<crate::stop_reason::StopReason>,
 }
 impl Runtime {
     pub fn new(
@@ -82,7 +87,12 @@ impl Runtime {
             stop: Arc::new(utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK)?),
             console: Default::default(),
             heartbeat: None,
+            stop_reason: None,
         })
+    }
+    pub fn enable_stop_reason(&mut self) -> io::Result<()> {
+        self.stop_reason = Some(crate::stop_reason::StopReason::register(&mut self.sandbox)?);
+        Ok(())
     }
     pub fn set_heartbeat(&mut self, heartbeat: crate::heartbeat::Heartbeat) {
         self.heartbeat = Some(heartbeat);
@@ -158,6 +168,9 @@ impl Runtime {
         for transport in &self.transports {
             descriptors.push(event(transport.info_fd()));
         }
+        if let Some(reason) = &self.stop_reason {
+            descriptors.push(event(reason.fd()));
+        }
         if let Some(heartbeat) = &self.heartbeat {
             descriptors.extend(heartbeat.poll_fds().into_iter().map(event));
         }
@@ -184,6 +197,16 @@ impl Runtime {
         let mut watchdog = Watchdog::new(Duration::ZERO, self.timeout);
         let mut active = 0usize;
         loop {
+            if let Some(reason) = self.stop_reason.as_ref().and_then(|device| device.reason()) {
+                let observed_micros = self
+                    .stop_reason
+                    .as_ref()
+                    .and_then(|device| device.observation_micros());
+                return Ok(Exit::StatedReason {
+                    code: reason,
+                    observed_micros,
+                });
+            }
             match self.stop.read() {
                 Ok(_) => return Ok(Exit::Stopped),
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
@@ -191,6 +214,18 @@ impl Runtime {
             }
             if self.sandbox.powered_off(0)? {
                 self.sandbox.drain_console(&mut self.console)?;
+                if let Some(device) = &self.stop_reason {
+                    if let Some(code) = device.reason() {
+                        let observed_micros = device.observation_micros();
+                        return Ok(Exit::StatedReason {
+                            code,
+                            observed_micros,
+                        });
+                    }
+                    return Err(io::Error::other(
+                        "Nitro guest stopped without stating a terminal reason",
+                    ));
+                }
                 return Ok(if self.console.panic_seen() {
                     Exit::Panic
                 } else {
@@ -213,7 +248,7 @@ impl Runtime {
                 watchdog.devices_ready();
             }
             self.sandbox.drain_console(&mut self.console)?;
-            if self.console.panic_seen() {
+            if self.stop_reason.is_none() && self.console.panic_seen() {
                 return Ok(Exit::Panic);
             }
             if self

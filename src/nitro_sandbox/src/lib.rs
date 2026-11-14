@@ -13,6 +13,8 @@ pub mod lifecycle;
 #[cfg(all(target_os = "linux", feature = "devices"))]
 pub mod runtime;
 #[cfg(all(target_os = "linux", feature = "devices"))]
+pub mod stop_reason;
+#[cfg(all(target_os = "linux", feature = "devices"))]
 pub mod transport;
 
 use std::time::Duration;

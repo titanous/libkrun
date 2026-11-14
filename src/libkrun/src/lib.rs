@@ -514,6 +514,8 @@ pub struct Builder {
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     nitro_image_cache: Option<PathBuf>,
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    nitro_stop_reason: bool,
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     nitro_console_base: Option<u32>,
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     nitro_selected_after_consoles: bool,
@@ -1435,6 +1437,9 @@ impl Builder {
                 .add_device(Arc::new(Mutex::new(console)))
                 .map_err(StartError::Nitro)?;
         }
+        if self.nitro_stop_reason {
+            runtime.enable_stop_reason().map_err(StartError::Nitro)?;
+        }
         Context::from_nitro(runtime, device_info)
     }
 
@@ -1448,6 +1453,13 @@ impl Builder {
     pub fn nitro_backend(&mut self, config: NitroBackendConfig) -> &mut Self {
         self.nitro_selected_after_consoles |= self.console_count != 0 && self.nitro.is_none();
         self.nitro = Some(config);
+        self
+    }
+
+    /// Add the maintained guest kernel's privileged terminal-reason device.
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    pub fn nitro_stop_reason(&mut self, enabled: bool) -> &mut Self {
+        self.nitro_stop_reason = enabled;
         self
     }
 
@@ -1961,6 +1973,14 @@ impl Context {
                         vmm::vm_exit::VmExit::Shutdown { exit_code: 0 }
                     }
                     nitro_sandbox::runtime::Exit::Stopped => vmm::vm_exit::VmExit::Stopped,
+                    nitro_sandbox::runtime::Exit::StatedReason {
+                        code,
+                        observed_micros,
+                    } => vmm::vm_exit::VmExit::Error {
+                        message: format!(
+                            "Nitro stated terminal reason {code} observed_micros={observed_micros:?}"
+                        ),
+                    },
                     nitro_sandbox::runtime::Exit::Watchdog => vmm::vm_exit::VmExit::DeviceWatchdog,
                     nitro_sandbox::runtime::Exit::Panic => vmm::vm_exit::VmExit::GuestPanic,
                     nitro_sandbox::runtime::Exit::LivenessExpired => {
