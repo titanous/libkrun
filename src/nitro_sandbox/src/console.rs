@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 pub struct Console {
     sink: Option<Box<dyn Write + Send>>,
+    observer: Option<Box<dyn FnMut(&[u8]) + Send>>,
     total_limit: usize,
     rate_limit: usize,
     total: usize,
@@ -17,6 +18,14 @@ impl Default for Console {
     }
 }
 impl Console {
+    pub fn set_sink(&mut self, sink: Box<dyn Write + Send>, total_limit: usize, rate_limit: usize) {
+        self.sink = Some(sink);
+        self.total_limit = total_limit;
+        self.rate_limit = rate_limit;
+    }
+    pub fn set_observer(&mut self, observer: Box<dyn FnMut(&[u8]) + Send>) {
+        self.observer = Some(observer);
+    }
     pub fn dropped_counter(&self) -> std::sync::Arc<std::sync::atomic::AtomicU64> {
         self.dropped.clone()
     }
@@ -29,6 +38,7 @@ impl Console {
     pub fn new(sink: Option<Box<dyn Write + Send>>, total_limit: usize, rate_limit: usize) -> Self {
         Self {
             sink,
+            observer: None,
             total_limit,
             rate_limit,
             total: 0,
@@ -40,6 +50,9 @@ impl Console {
 }
 impl Write for Console {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if let Some(observer) = &mut self.observer {
+            observer(bytes);
+        }
         if self.interval.elapsed() >= Duration::from_secs(1) {
             self.interval = Instant::now();
             self.interval_bytes = 0;
@@ -90,6 +103,21 @@ mod tests {
             Ok(())
         }
     }
+    #[test]
+    fn observer_sees_every_byte_before_budget_loss() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let observed = captured.clone();
+        let mut console = Console::new(None, 0, 0);
+        console.set_observer(Box::new(move |bytes| {
+            observed.lock().unwrap().extend_from_slice(bytes)
+        }));
+        let bytes = b"[    1.234567] reboot: HOLODECK GUEST STOP panic\n";
+        console.write_all(&bytes[..17]).unwrap();
+        console.write_all(&bytes[17..]).unwrap();
+        assert_eq!(&*captured.lock().unwrap(), bytes);
+        assert_eq!(console.dropped_bytes(), bytes.len() as u64);
+    }
+
     #[test]
     fn sink_receives_raw_bytes_and_default_discards() {
         let bytes = b"\x1b[2J\xffforged\n";

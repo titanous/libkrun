@@ -1640,11 +1640,20 @@ impl Builder {
         total_bytes: usize,
         bytes_per_second: usize,
     ) -> &mut Self {
-        self.nitro_console = Some(nitro_sandbox::console::Console::new(
-            Some(sink),
-            total_bytes,
-            bytes_per_second,
-        ));
+        self.nitro_console
+            .get_or_insert_with(Default::default)
+            .set_sink(sink, total_bytes, bytes_per_second);
+        self
+    }
+
+    /// Observe every raw Nitro console byte before diagnostic budgets or sink loss.
+    /// The callback must be nonblocking and keep bounded parser state. It must not
+    /// retain guest memory; these bytes are valid only for the callback duration.
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    pub fn nitro_console_observer(&mut self, observer: Box<dyn FnMut(&[u8]) + Send>) -> &mut Self {
+        self.nitro_console
+            .get_or_insert_with(Default::default)
+            .set_observer(observer);
         self
     }
 
