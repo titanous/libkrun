@@ -136,7 +136,7 @@ pub enum StartMicrovmError {
     TemplateMemoryLayoutMismatch,
     /// Configured guest kernel build ID differs from the template.
     TemplateKernelMismatch,
-    /// CPU features, xstate layout or TSC frequency differs from the template.
+    /// Architecture-specific execution compatibility differs from the template.
     TemplateCpuMismatch,
     /// The BZIP2 decoder couldn't decompress the kernel.
     ImageBz2Decoder(io::Error),
@@ -298,10 +298,9 @@ impl Display for StartMicrovmError {
                 write!(f, "Cannot read firmware contents from file: {err}")
             }
             TemplateKernelMismatch => write!(f, "template kernel build identifier mismatch"),
-            TemplateCpuMismatch => write!(
-                f,
-                "template CPU features, extended-state layout or TSC frequency mismatch"
-            ),
+            TemplateCpuMismatch => {
+                write!(f, "template architecture execution compatibility mismatch")
+            }
             TemplateTopologyMismatch => write!(f, "incompatible template topology"),
             TemplateMemoryLayoutMismatch => write!(f, "template RAM layout mismatch"),
             GuestMemoryMmap(ref err) => {
@@ -1036,13 +1035,13 @@ pub fn build_microvm(
             }
             vm.fd()
                 .set_clock(&kvm_bindings::kvm_clock_data {
-                    clock: template.clock_ns,
+                    clock: template.clock_state,
                     ..Default::default()
                 })
                 .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
             let mut page = [0; 4096];
             guest_memory
-                .read_slice(&mut page, GuestAddress(template.control))
+                .read_slice(&mut page, GuestAddress(template.control_page_address))
                 .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
             let entry = crate::cooperative::ResumeEntry::parse(&page)
                 .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
@@ -1075,7 +1074,7 @@ pub fn build_microvm(
             page[word::SEED_READY * 8..(word::SEED_READY + 1) * 8]
                 .copy_from_slice(&1u64.to_le_bytes());
             guest_memory
-                .write_slice(&page, GuestAddress(template.control))
+                .write_slice(&page, GuestAddress(template.control_page_address))
                 .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
         }
     }
@@ -2018,7 +2017,8 @@ pub fn create_guest_memory(
 > {
     #[cfg(target_arch = "x86_64")]
     if let Some(template) = &vm_resources.cooperative_template {
-        if template.ram_mib != mem_size as u64
+        if template.architecture != crate::template::Architecture::current()
+            || template.ram_mib != mem_size as u64
             || Some(template.vcpus) != vm_resources.vm_config().vcpu_count
             || vm_resources.split_irqchip
             || vm_resources.gpu_virgl_flags.is_some()
@@ -2039,7 +2039,7 @@ pub fn create_guest_memory(
             .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
         let mut page = [0; 4096];
         memory
-            .read_slice(&mut page, GuestAddress(template.control))
+            .read_slice(&mut page, GuestAddress(template.control_page_address))
             .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
         let entry = crate::cooperative::ResumeEntry::parse(&page)
             .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;

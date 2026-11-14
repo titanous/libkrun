@@ -27,14 +27,14 @@ pub mod vm_exit;
 #[cfg(target_os = "linux")]
 pub mod template_memory;
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub mod capture_request;
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub mod cooperative;
 #[cfg(target_arch = "x86_64")]
 mod kernel_identity;
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub mod template;
 #[cfg(target_arch = "x86_64")]
 mod template_topology;
@@ -251,6 +251,27 @@ pub struct Vmm {
 }
 
 impl Vmm {
+    #[cfg(target_arch = "aarch64")]
+    pub fn arm_template_capture(
+        &self,
+        _timeout: std::time::Duration,
+    ) -> std::io::Result<crate::capture_request::CaptureRequest> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "cooperative capture is not implemented by this backend",
+        ))
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    pub fn wait_template_capture(&self) -> crate::capture_request::CaptureRequest {
+        let request = crate::capture_request::CaptureRequest::default();
+        request.complete(Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "cooperative capture is not implemented by this backend",
+        )));
+        request
+    }
+
     #[cfg(target_arch = "x86_64")]
     pub fn arm_template_capture(
         &self,

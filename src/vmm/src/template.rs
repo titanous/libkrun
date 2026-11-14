@@ -36,7 +36,17 @@ mod tests {
         let reopened = Template::open(template.file.try_clone().unwrap()).unwrap();
         assert_eq!(reopened.topology, topology);
         assert_eq!(reopened.compatibility, b"cpu-xstate-tsc");
-        assert_eq!(reopened.clock_ns, 123);
+        assert_eq!(reopened.clock_state, 123);
+        assert_eq!(reopened.architecture, Architecture::current());
+        let unknown =
+            crate::template_memory::create(reopened.file.metadata().unwrap().len() as usize)
+                .unwrap();
+        let mut header = [0; HEADER];
+        reopened.file.read_exact_at(&mut header, 0).unwrap();
+        header[393 * 8..394 * 8].copy_from_slice(&99u64.to_le_bytes());
+        unknown.write_all_at(&header, 0).unwrap();
+        crate::template_memory::seal(&unknown).unwrap();
+        assert!(Template::open(unknown).is_err());
         let path = std::env::temp_dir().join(format!("krun-template-path-{}", std::process::id()));
         let staged = reopened.prepare_path(&path).unwrap();
         assert!(!path.exists());
@@ -74,7 +84,7 @@ mod tests {
         b.read_slice(&mut value, GuestAddress(0)).unwrap();
         assert_eq!(value, [0]);
         assert_eq!(reopened.regions, [(0, 8192, HEADER as u64)]);
-        assert_eq!(reopened.control, 4096);
+        assert_eq!(reopened.control_page_address, 4096);
         let race_path =
             std::env::temp_dir().join(format!("krun-export-race-{}", std::process::id()));
         let prepared = reopened.prepare_path(&race_path).unwrap();
@@ -106,10 +116,11 @@ mod tests {
         let path = directory.join("guest.ram");
         let template = Template {
             file: crate::template_memory::create(4096).unwrap(),
-            control: 0,
+            architecture: Architecture::current(),
+            control_page_address: 0,
             vcpus: 1,
             ram_mib: 1,
-            clock_ns: 0,
+            clock_state: 0,
             regions: Vec::new(),
             topology: Vec::new(),
             compatibility: Vec::new(),
@@ -134,10 +145,11 @@ mod tests {
         let file = crate::template_memory::create(4096).unwrap();
         let template = Template {
             file,
-            control: 0,
+            architecture: Architecture::current(),
+            control_page_address: 0,
             vcpus: 1,
             ram_mib: 1,
-            clock_ns: 0,
+            clock_state: 0,
             regions: Vec::new(),
             topology: Vec::new(),
             compatibility: Vec::new(),
@@ -195,14 +207,38 @@ const COMPATIBILITY_START: usize = 8192;
 const EXTENT_HEADER: usize = 4096;
 const MAX_REGIONS: usize = 128;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u64)]
+pub enum Architecture {
+    X86_64 = 1,
+    Aarch64 = 2,
+}
+
+impl Architecture {
+    pub const fn current() -> Self {
+        #[cfg(target_arch = "x86_64")]
+        {
+            Self::X86_64
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            Self::Aarch64
+        }
+    }
+}
+
 pub struct Template {
     pub file: File,
-    pub control: u64,
+    pub architecture: Architecture,
+    /// Guest physical protocol page, independent of discovery register/transport.
+    pub control_page_address: u64,
     pub vcpus: u8,
     pub ram_mib: u64,
-    pub clock_ns: u64,
+    /// Architecture-owned clock state (x86 KVM: kvm_clock_data.clock).
+    pub clock_state: u64,
     pub regions: Vec<(u64, usize, u64)>,
     pub topology: Vec<u8>,
+    /// Opaque architecture-owned execution compatibility record; embedders must not parse it.
     pub compatibility: Vec<u8>,
 }
 
@@ -358,7 +394,7 @@ impl Template {
         file.read_exact_at(&mut header, 0)?;
         let get = |n: usize| u64::from_le_bytes(header[n * 8..n * 8 + 8].try_into().unwrap());
         if &header[..8] != MAGIC
-            || get(1) != 3
+            || get(1) != 4
             || get(3) == 0
             || get(3) > 255
             || get(5) == 0
@@ -391,23 +427,29 @@ impl Template {
             last_gpa = gpa_end;
             last_file = file_end;
         }
-        let control = get(2);
-        if control & 4095 != 0
+        let control_page_address = get(2);
+        if control_page_address & 4095 != 0
             || !regions.iter().any(|(gpa, size, _)| {
-                control >= *gpa
-                    && control
+                control_page_address >= *gpa
+                    && control_page_address
                         .checked_add(4096)
                         .is_some_and(|end| end <= *gpa + *size as u64)
             })
         {
             return Err(invalid());
         }
+        let architecture = match get(393) {
+            1 => Architecture::X86_64,
+            2 => Architecture::Aarch64,
+            _ => return Err(invalid()),
+        };
         Ok(Self {
             file,
-            control,
+            architecture,
+            control_page_address,
             vcpus: get(3) as u8,
             ram_mib: get(4),
-            clock_ns: get(6),
+            clock_state: get(6),
             regions,
             topology: header[EXTENT_HEADER..EXTENT_HEADER + get(7) as usize].to_vec(),
             compatibility: header[COMPATIBILITY_START..COMPATIBILITY_START + get(392) as usize]
@@ -431,40 +473,55 @@ impl Template {
     /// The destination is sealed before it can be opened as a template.
     pub fn capture(
         memory: &GuestMemoryMmap,
-        control: u64,
+        control_page_address: u64,
         vcpus: u8,
         ram_mib: u64,
     ) -> io::Result<Self> {
-        Self::capture_with_clock(memory, control, vcpus, ram_mib, 0)
+        Self::capture_with_clock(memory, control_page_address, vcpus, ram_mib, 0)
     }
 
     pub fn capture_with_clock(
         memory: &GuestMemoryMmap,
-        control: u64,
+        control_page_address: u64,
         vcpus: u8,
         ram_mib: u64,
-        clock_ns: u64,
+        clock_state: u64,
     ) -> io::Result<Self> {
-        Self::capture_with_topology(memory, control, vcpus, ram_mib, clock_ns, &[])
+        Self::capture_with_topology(
+            memory,
+            control_page_address,
+            vcpus,
+            ram_mib,
+            clock_state,
+            &[],
+        )
     }
 
     pub fn capture_with_topology(
         memory: &GuestMemoryMmap,
-        control: u64,
+        control_page_address: u64,
         vcpus: u8,
         ram_mib: u64,
-        clock_ns: u64,
+        clock_state: u64,
         topology: &[u8],
     ) -> io::Result<Self> {
-        Self::capture_with_manifest(memory, control, vcpus, ram_mib, clock_ns, topology, &[])
+        Self::capture_with_manifest(
+            memory,
+            control_page_address,
+            vcpus,
+            ram_mib,
+            clock_state,
+            topology,
+            &[],
+        )
     }
 
     pub fn capture_with_manifest(
         memory: &GuestMemoryMmap,
-        control: u64,
+        control_page_address: u64,
         vcpus: u8,
         ram_mib: u64,
-        clock_ns: u64,
+        clock_state: u64,
         topology: &[u8],
         compatibility: &[u8],
     ) -> io::Result<Self> {
@@ -476,7 +533,7 @@ impl Template {
         }
         let mut page = [0; 4096];
         memory
-            .read_slice(&mut page, GuestAddress(control))
+            .read_slice(&mut page, GuestAddress(control_page_address))
             .map_err(io::Error::other)?;
         crate::cooperative::ResumeEntry::parse(&page)?;
         if memory.num_regions() > MAX_REGIONS || vcpus == 0 {
@@ -490,13 +547,14 @@ impl Template {
         header[..8].copy_from_slice(MAGIC);
         let mut put =
             |n: usize, value: u64| header[n * 8..n * 8 + 8].copy_from_slice(&value.to_le_bytes());
-        put(1, 3);
+        put(1, 4);
+        put(393, Architecture::current() as u64);
         put(392, compatibility.len() as u64);
-        put(2, control);
+        put(2, control_page_address);
         put(3, vcpus as u64);
         put(4, ram_mib);
         put(5, memory.num_regions() as u64);
-        put(6, clock_ns);
+        put(6, clock_state);
         put(7, topology.len() as u64);
         let mut offset = HEADER as u64;
         let mut buffer = vec![0; 1024 * 1024];

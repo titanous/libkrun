@@ -6,7 +6,10 @@ mod readiness;
 pub use readiness::{GuestReadiness, GuestReadyTimeout};
 
 /// A cooperative template descriptor or owner-only persisted file.
-#[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    not(feature = "tee")
+))]
 pub enum TemplateSource {
     Descriptor(std::fs::File),
     Path(std::path::PathBuf),
@@ -646,7 +649,10 @@ impl Builder {
 
     /// Declare a block disk's frozen content identity (digest or snapshot token).
     /// A new guest must declare each disk as a copy of the source token.
-    #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        not(feature = "tee")
+    ))]
     pub fn template_disk_identity(
         &mut self,
         block_id: impl Into<String>,
@@ -661,7 +667,10 @@ impl Builder {
 
     /// Mark this guest as a future cooperative template, retaining descriptor-backed RAM.
     /// Capture remains disarmed until explicitly requested through VmHandle.
-    #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        not(feature = "tee")
+    ))]
     pub fn future_template(&mut self) -> &mut Self {
         self.config.vmr.cooperative_capture = Some((0, std::path::PathBuf::new()));
         self
@@ -671,7 +680,10 @@ impl Builder {
     /// page and emits the cooperative freeze exit. The source never resumes.
     /// Pass zero to discover the GPA from BSP RSI at that exit, or a nonzero
     /// address to require an exact match with the reported GPA.
-    #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        not(feature = "tee")
+    ))]
     pub fn capture_cooperative_template(
         &mut self,
         control_page: u64,
@@ -685,7 +697,10 @@ impl Builder {
     /// rule, disk snapshot declarations, CID and identifiers in one operation.
     /// The returned deadline starts now, including subsequent build time.
     /// Mark it ready only after validating the new agent's identity/generation.
-    #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        not(feature = "tee")
+    ))]
     pub fn start_from_template(
         &mut self,
         source: TemplateSource,
@@ -707,14 +722,20 @@ impl Builder {
 
     /// Start a new VM over a sealed template descriptor. Configure the same
     /// device list in the same order, with independent writable disk backends.
-    #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        not(feature = "tee")
+    ))]
     pub fn start_from_template_fd(&mut self, file: std::fs::File) -> std::io::Result<&mut Self> {
         self.config.vmr.cooperative_template = Some(vmm::template::Template::open(file)?);
         Ok(self)
     }
 
     /// Load a persisted template into immutable backing before starting a VM.
-    #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        not(feature = "tee")
+    ))]
     pub fn start_from_template_path(
         &mut self,
         path: impl AsRef<std::path::Path>,
@@ -2447,7 +2468,10 @@ impl VmHandle {
     /// the workload through the agent and authorize its trigger after arming.
     /// The returned template owns a sealed descriptor. For a sequential agent
     /// handshake, use arm_template_capture followed by wait_template_capture.
-    #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        not(feature = "tee")
+    ))]
     pub fn freeze_template(
         &self,
         timeout: std::time::Duration,
@@ -2472,7 +2496,10 @@ impl VmHandle {
     /// Authorize capture after the agent has quiesced the workload.
     /// After this returns, authorize the agent to write the kernel trigger.
     /// Receive the sealed descriptor with wait_template_capture.
-    #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        not(feature = "tee")
+    ))]
     pub fn arm_template_capture(&self, timeout: std::time::Duration) -> std::io::Result<()> {
         let request = self
             .vmm
@@ -2491,7 +2518,10 @@ impl VmHandle {
     }
 
     /// Wait for a previously armed capture using its original deadline.
-    #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        not(feature = "tee")
+    ))]
     pub fn wait_template_capture(&self) -> std::io::Result<vmm::capture_request::CaptureOutcome> {
         let request = self
             .vmm
