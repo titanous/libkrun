@@ -332,7 +332,10 @@ impl VmResources {
     }
 
     pub fn set_kernel_bundle(&mut self, kernel_bundle: KernelBundle) -> Result<KernelBundleError> {
-        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+        // SAFETY: sysconf reads a process-wide constant and takes no pointers.
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        assert!(page_size > 0, "cannot determine host page size");
+        let page_size = page_size as usize;
 
         if (kernel_bundle.host_addr.get() as usize) & (page_size - 1) != 0 {
             return Err(KernelBundleError::InvalidHostAddress);

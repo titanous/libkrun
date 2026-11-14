@@ -142,6 +142,6 @@ impl GICDevice for KvmGicV3 {
     }
 
     fn version(&self) -> u32 {
-        3
+        kvm_bindings::kvm_device_type_KVM_DEV_TYPE_ARM_VGIC_V3
     }
 }
