@@ -315,6 +315,12 @@ mod tests {
         let kvm = Kvm::new().unwrap();
         let vm = kvm.create_vm().unwrap();
         let vcpu = vm.create_vcpu(0).unwrap();
+        // Long-mode register validation requires the same CPUID setup as guest boot.
+        vcpu.set_cpuid2(
+            &kvm.get_supported_cpuid(kvm_bindings::KVM_MAX_CPUID_ENTRIES)
+                .unwrap(),
+        )
+        .unwrap();
         let gm = create_guest_mem();
 
         assert!(vcpu.set_sregs(&Default::default()).is_ok());
