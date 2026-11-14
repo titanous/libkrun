@@ -64,6 +64,50 @@ pub struct Server {
     fs: Box<dyn FileSystem + Send + Sync>,
     options: AtomicU64,
     dax_mapper: Option<Arc<dyn DaxMapper>>,
+    measure: Option<Box<Measure>>,
+}
+
+/// Opt-in (environment `HOLODECK_FS_MEASURE`) cumulative request counts and service time per
+/// FUSE opcode, for performance measurement only. The guest's root can read them as the value
+/// of the extended attribute `trusted.holodeck.fs-counters` on any node of the mount (the
+/// `trusted` namespace is privileged in the guest), which lets a benchmark take a snapshot at
+/// an exact point between its phases.
+struct Measure {
+    counts: [AtomicU64; 64],
+    nanos: [AtomicU64; 64],
+}
+
+const COUNTERS_XATTR: &[u8] = b"trusted.holodeck.fs-counters";
+
+fn opcode_name(opcode: usize) -> String {
+    const NAMES: [(usize, &str); 34] = [
+        (1, "lookup"), (2, "forget"), (3, "getattr"), (4, "setattr"), (5, "readlink"),
+        (6, "symlink"), (9, "mkdir"), (10, "unlink"), (11, "rmdir"), (12, "rename"),
+        (14, "open"), (15, "read"), (16, "write"), (17, "statfs"), (18, "release"),
+        (20, "fsync"), (21, "setxattr"), (22, "getxattr"), (23, "listxattr"), (25, "flush"),
+        (26, "init"), (27, "opendir"), (28, "readdir"), (29, "releasedir"), (30, "fsyncdir"),
+        (34, "access"), (35, "create"), (39, "ioctl"), (42, "batch_forget"), (44, "readdirplus"),
+        (45, "rename2"), (46, "lseek"), (48, "setupmapping"), (49, "removemapping"),
+    ];
+    NAMES
+        .iter()
+        .find(|(code, _)| *code == opcode)
+        .map(|(_, name)| (*name).to_owned())
+        .unwrap_or_else(|| format!("op{opcode}"))
+}
+
+impl Measure {
+    fn text(&self) -> Vec<u8> {
+        let mut text = String::new();
+        for (opcode, count) in self.counts.iter().enumerate() {
+            let count = count.load(Ordering::Relaxed);
+            if count != 0 {
+                let nanos = self.nanos[opcode].load(Ordering::Relaxed);
+                text.push_str(&format!("{}={}:{} ", opcode_name(opcode), count, nanos));
+            }
+        }
+        text.into_bytes()
+    }
 }
 
 impl Server {
@@ -75,6 +119,12 @@ impl Server {
             fs,
             options: AtomicU64::new(FsOptions::empty().bits()),
             dax_mapper: None,
+            measure: std::env::var_os("HOLODECK_FS_MEASURE").map(|_| {
+                Box::new(Measure {
+                    counts: std::array::from_fn(|_| AtomicU64::new(0)),
+                    nanos: std::array::from_fn(|_| AtomicU64::new(0)),
+                })
+            }),
         }
     }
 
@@ -100,7 +150,9 @@ impl Server {
             );
         }
         debug!("opcode: {}", in_header.opcode);
-        match fuse_dispatch::classify_opcode(in_header.opcode) {
+        let started = self.measure.as_ref().map(|_| std::time::Instant::now());
+        let opcode = in_header.opcode;
+        let result = match fuse_dispatch::classify_opcode(in_header.opcode) {
             Some(Opcode::Lookup) => self.lookup(in_header, r, w),
             Some(Opcode::Forget) => self.forget(in_header, r), // No reply.
             Some(Opcode::Getattr) => self.getattr(in_header, r, w),
@@ -171,7 +223,13 @@ impl Server {
                 in_header.unique,
                 w,
             ),
+        };
+        if let (Some(measure), Some(started)) = (self.measure.as_ref(), started) {
+            let index = usize::try_from(opcode).map_or(63, |opcode| opcode.min(63));
+            measure.counts[index].fetch_add(1, Ordering::Relaxed);
+            measure.nanos[index].fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
         }
+        result
     }
 
     fn lookup(&self, in_header: InHeader, mut r: Reader, w: Writer) -> Result<usize> {
@@ -749,12 +807,26 @@ impl Server {
             );
         }
 
-        match self.fs.getxattr(
-            Context::from(in_header),
-            in_header.nodeid.into(),
-            bytes_to_cstr(&name)?,
-            size,
-        ) {
+        let name = bytes_to_cstr(&name)?;
+        let reply = match self.measure.as_ref() {
+            Some(measure) if name.to_bytes() == COUNTERS_XATTR => {
+                let text = measure.text();
+                if size == 0 {
+                    Ok(GetxattrReply::Count(text.len() as u32))
+                } else if (size as usize) < text.len() {
+                    Err(io::Error::from_raw_os_error(libc::ERANGE))
+                } else {
+                    Ok(GetxattrReply::Value(text))
+                }
+            }
+            _ => self.fs.getxattr(
+                Context::from(in_header),
+                in_header.nodeid.into(),
+                name,
+                size,
+            ),
+        };
+        match reply {
             Ok(GetxattrReply::Value(val)) => reply_ok(None::<u8>, Some(&val), in_header.unique, w),
             Ok(GetxattrReply::Count(count)) => {
                 let out = GetxattrOut {
