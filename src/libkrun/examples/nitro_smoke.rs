@@ -12,12 +12,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let memory_mib = std::env::var("NITRO_MEMORY_MIB")
         .unwrap_or_else(|_| "1024".into())
         .parse()?;
+    let cid = std::env::var("NITRO_CID")
+        .unwrap_or_else(|_| "200".into())
+        .parse()?;
+    let expected_watchdog = std::env::var_os("NITRO_EXPECT_WATCHDOG").is_some();
+    builder.nitro_backend(NitroBackendConfig {
+        image: args[1].clone().into(),
+        cid,
+        watchdog: std::time::Duration::from_secs(if expected_watchdog { 3 } else { 15 }),
+    });
     builder.vm_config(2, memory_mib)?;
     builder.disable_implicit_console()?;
-    let console_path =
-        std::env::var("NITRO_CONSOLE_LOG").unwrap_or_else(|_| "virtio-console.log".into());
-    let output = devices::virtio::port_io::output_file(std::fs::File::create(console_path)?)?;
-    builder.add_virtio_console_with_ports(vec![PortDescription::output_pipe("smoke", output)]);
     builder.add_block_cfg(BlockDeviceConfig {
         block_id: "disk".into(),
         cache_type: CacheType::Writeback,
@@ -34,15 +39,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         builder.internet_socket_forwarding(true);
         builder.outbound_policy(std::sync::Arc::new(krun::AllowlistPolicy::new([])));
     }
-    let cid = std::env::var("NITRO_CID")
-        .unwrap_or_else(|_| "200".into())
-        .parse()?;
-    let expected_watchdog = std::env::var_os("NITRO_EXPECT_WATCHDOG").is_some();
-    builder.nitro_backend(NitroBackendConfig {
-        image: args[1].clone().into(),
-        cid,
-        watchdog: std::time::Duration::from_secs(if expected_watchdog { 3 } else { 15 }),
-    });
+    let console_path =
+        std::env::var("NITRO_CONSOLE_LOG").unwrap_or_else(|_| "virtio-console.log".into());
+    let output = devices::virtio::port_io::output_file(std::fs::File::create(console_path)?)?;
+    let paths =
+        builder.add_virtio_console_with_ports(vec![PortDescription::output_pipe("smoke", output)]);
+    assert_eq!(paths, ["/dev/vport2p0"]);
     match builder.build()?.run()? {
         VmExit::Error { message }
             if expected_watchdog && message == "Nitro guest watchdog expired" =>

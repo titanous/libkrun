@@ -497,6 +497,10 @@ pub struct NitroBackendConfig {
 pub struct Builder {
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     nitro: Option<NitroBackendConfig>,
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    nitro_console_base: Option<u32>,
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    nitro_selected_after_consoles: bool,
     config: ContextConfig,
     kernel_cmdline: Vec<String>,
     kernel_cmdline_configured: bool,
@@ -817,7 +821,19 @@ impl Builder {
     ///
     /// The device index determines the X in /dev/vportXpY.
     /// Device order: balloon(1) + rng(1) + rtc(1) + implicit_console(0 or 1) + consoles_added
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    fn nitro_device_count_before_consoles(&self) -> u32 {
+        self.config.block_cfgs.len() as u32
+            + u32::from(self.config.root_block_cfg.is_some())
+            + u32::from(self.config.data_block_cfg.is_some())
+            + u32::from(!matches!(self.config.vsock_config, VsockConfig::Disabled))
+    }
+
     fn next_console_device_index(&self) -> u32 {
+        #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+        if self.nitro.is_some() {
+            return self.nitro_device_count_before_consoles() + self.console_count;
+        }
         let mut idx: u32 = 0;
 
         // balloon (non-TEE only)
@@ -852,6 +868,10 @@ impl Builder {
     ///
     /// For incremental port addition, use `add_virtio_console()` followed by `add_port()`.
     pub fn add_virtio_console_with_ports(&mut self, ports: Vec<PortDescription>) -> Vec<String> {
+        #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+        if self.nitro.is_some() && self.nitro_console_base.is_none() {
+            self.nitro_console_base = Some(self.nitro_device_count_before_consoles());
+        }
         let device_idx = self.next_console_device_index();
         let num_ports = ports.len();
 
@@ -957,6 +977,10 @@ impl Builder {
     /// Use `console_port_path(info.device_index, port_index)` to get the path for each port.
     /// Ports are added with `add_port()` or the convenience methods `add_port_fd()` / `add_port_console_fd()`.
     pub fn add_virtio_console(&mut self) -> ConsoleDeviceInfo {
+        #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+        if self.nitro.is_some() && self.nitro_console_base.is_none() {
+            self.nitro_console_base = Some(self.nitro_device_count_before_consoles());
+        }
         let console_id = self.config.vmr.virtio_consoles.len();
         let device_index = self.next_console_device_index();
 
@@ -1179,6 +1203,16 @@ impl Builder {
         {
             return Err(unsupported());
         }
+        if self.nitro_selected_after_consoles
+            || self
+                .nitro_console_base
+                .is_some_and(|base| base != self.nitro_device_count_before_consoles())
+        {
+            return Err(StartError::Nitro(std::io::Error::new(std::io::ErrorKind::Unsupported, "unsupported on this backend: select Nitro and configure block/vsock devices before adding consoles so returned port paths remain valid")));
+        }
+        if !self.config.vmr.disable_implicit_console {
+            return Err(StartError::Nitro(std::io::Error::new(std::io::ErrorKind::Unsupported, "unsupported on this backend: disable the implicit console and configure custom Nitro console ports explicitly")));
+        }
         let config = self.config.vmr.vm_config();
         let mut runtime = nitro_sandbox::runtime::Runtime::new(
             options
@@ -1246,6 +1280,7 @@ impl Builder {
     /// application exit status; workloads must report that over their protocol.
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     pub fn nitro_backend(&mut self, config: NitroBackendConfig) -> &mut Self {
+        self.nitro_selected_after_consoles |= self.console_count != 0 && self.nitro.is_none();
         self.nitro = Some(config);
         self
     }

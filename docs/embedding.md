@@ -154,7 +154,11 @@ replacement), virtio-fs and unsupported device/configuration methods fail build
 with `unsupported on this backend`; they are never silently discarded. Use the
 EIF builder to package the platform kernel/initramfs and exact command line before
 calling the Nitro builder. Caller-supplied block storage and its read-only setting
-are shared with KVM unchanged.
+are shared with KVM unchanged. Select Nitro and configure block/vsock devices
+before adding custom consoles, and call `disable_implicit_console()`. Returned
+console paths follow Nitro's actual block/vsock/console registration order; build
+rejects selecting the backend after console paths were returned or changing that
+layout afterward. An implicit console is rejected rather than silently omitted.
 `backend_must_enforce_configured_rule` is a public-API KVM conformance test using
 a live denied host listener; it fails if the configured rule is ignored. Backend
 integration must run that same semantic test or assert explicit unsupported

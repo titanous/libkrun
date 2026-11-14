@@ -22,6 +22,29 @@ fn rejects_eif_incompatible_exec_before_allocating_vm() {
     rejected(builder, "EIF");
 }
 #[test]
+fn nitro_console_paths_follow_registered_device_order() {
+    let mut builder = Builder::new();
+    builder.nitro_backend(NitroBackendConfig {
+        image: "/unused".into(),
+        cid: 200,
+        watchdog: std::time::Duration::from_secs(3),
+    });
+    builder.disable_implicit_console().unwrap();
+    let paths =
+        builder.add_virtio_console_with_ports(vec![devices::virtio::PortDescription::output_pipe(
+            "test",
+            devices::virtio::port_io::output_to_log_as_err(),
+        )]);
+    assert_eq!(paths, ["/dev/vport1p0"]); // implicit vsock precedes console
+}
+#[test]
+fn rejects_backend_selection_after_console_paths_returned() {
+    let mut builder = Builder::new();
+    builder.disable_implicit_console().unwrap();
+    builder.add_virtio_console();
+    rejected(builder, "before adding consoles");
+}
+#[test]
 fn rejects_even_empty_commandline_override() {
     let mut builder = Builder::new();
     builder.set_kernel_cmdline(vec![]);
