@@ -22,15 +22,19 @@ mod tests {
             page[n * 8..n * 8 + 8].copy_from_slice(&value.to_le_bytes());
         }
         memory.write_slice(&page, GuestAddress(4096)).unwrap();
-        let template = Template::capture(&memory, 4096, 1, 1).unwrap();
+        assert!(Template::capture_with_topology(&memory, 4096, 1, 1, 123, &[0; 4097]).is_err());
+        let topology = b"ordered device topology";
+        let template = Template::capture_with_topology(&memory, 4096, 1, 1, 123, topology).unwrap();
         let reopened = Template::open(template.file.try_clone().unwrap()).unwrap();
+        assert_eq!(reopened.topology, topology);
+        assert_eq!(reopened.clock_ns, 123);
         let a = reopened.map_private().unwrap();
         let b = reopened.map_private().unwrap();
         a.write_slice(&[42], GuestAddress(0)).unwrap();
         let mut value = [0];
         b.read_slice(&mut value, GuestAddress(0)).unwrap();
         assert_eq!(value, [0]);
-        assert_eq!(reopened.regions, [(0, 8192, 4096)]);
+        assert_eq!(reopened.regions, [(0, 8192, 8192)]);
         assert_eq!(reopened.control, 4096);
     }
 
@@ -58,7 +62,8 @@ use vm_memory::{
 };
 
 const MAGIC: &[u8; 8] = b"KRUNFRZ1";
-const HEADER: usize = 4096;
+const HEADER: usize = 8192;
+const EXTENT_HEADER: usize = 4096;
 const MAX_REGIONS: usize = 128;
 
 pub struct Template {
@@ -68,6 +73,7 @@ pub struct Template {
     pub ram_mib: u64,
     pub clock_ns: u64,
     pub regions: Vec<(u64, usize, u64)>,
+    pub topology: Vec<u8>,
 }
 
 fn invalid() -> io::Error {
@@ -113,11 +119,12 @@ impl Template {
         file.read_exact_at(&mut header, 0)?;
         let get = |n: usize| u64::from_le_bytes(header[n * 8..n * 8 + 8].try_into().unwrap());
         if &header[..8] != MAGIC
-            || get(1) != 1
+            || get(1) != 2
             || get(3) == 0
             || get(3) > 255
             || get(5) == 0
             || get(5) > MAX_REGIONS as u64
+            || get(7) > EXTENT_HEADER as u64
         {
             return Err(invalid());
         }
@@ -162,6 +169,7 @@ impl Template {
             ram_mib: get(4),
             clock_ns: get(6),
             regions,
+            topology: header[EXTENT_HEADER..EXTENT_HEADER + get(7) as usize].to_vec(),
         })
     }
 
@@ -195,6 +203,20 @@ impl Template {
         ram_mib: u64,
         clock_ns: u64,
     ) -> io::Result<Self> {
+        Self::capture_with_topology(memory, control, vcpus, ram_mib, clock_ns, &[])
+    }
+
+    pub fn capture_with_topology(
+        memory: &GuestMemoryMmap,
+        control: u64,
+        vcpus: u8,
+        ram_mib: u64,
+        clock_ns: u64,
+        topology: &[u8],
+    ) -> io::Result<Self> {
+        if topology.len() > EXTENT_HEADER {
+            return Err(invalid());
+        }
         let mut page = [0; 4096];
         memory
             .read_slice(&mut page, GuestAddress(control))
@@ -211,12 +233,13 @@ impl Template {
         header[..8].copy_from_slice(MAGIC);
         let mut put =
             |n: usize, value: u64| header[n * 8..n * 8 + 8].copy_from_slice(&value.to_le_bytes());
-        put(1, 1);
+        put(1, 2);
         put(2, control);
         put(3, vcpus as u64);
         put(4, ram_mib);
         put(5, memory.num_regions() as u64);
         put(6, clock_ns);
+        put(7, topology.len() as u64);
         let mut offset = HEADER as u64;
         let mut buffer = vec![0; 1024 * 1024];
         for (i, region) in memory.iter().enumerate() {
@@ -234,6 +257,7 @@ impl Template {
             }
             offset += region.len();
         }
+        header[EXTENT_HEADER..EXTENT_HEADER + topology.len()].copy_from_slice(topology);
         file.write_all_at(&header, 0)?;
         crate::template_memory::seal(&file)?;
         Self::open(file)

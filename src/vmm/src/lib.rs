@@ -32,6 +32,8 @@ pub mod cooperative;
 
 #[cfg(target_arch = "x86_64")]
 pub mod template;
+#[cfg(target_arch = "x86_64")]
+mod template_topology;
 /// Wrappers over structures used to configure the VMM.
 pub mod vmm_config;
 
@@ -214,6 +216,10 @@ pub struct Vmm {
     exit_evt: EventFd,
     #[cfg(target_arch = "x86_64")]
     cooperative_capture: Option<(u64, std::path::PathBuf, u8, u64)>,
+    #[cfg(target_arch = "x86_64")]
+    cooperative_topology: Vec<u8>,
+    #[cfg(target_arch = "x86_64")]
+    cooperative_shm: Vec<(vm_memory::GuestAddress, usize)>,
     vm: Vm,
     exit_observers: Vec<Arc<Mutex<dyn VmmExitObserver>>>,
     exit_code: Arc<AtomicI32>,
@@ -498,7 +504,9 @@ impl Subscriber for Vmm {
                             std::io::Error::other("cooperative capture not configured")
                         })?;
                     if *control != 0 && *control != reported_control {
-                        return Err(std::io::Error::other("reported control GPA does not match expectation"));
+                        return Err(std::io::Error::other(
+                            "reported control GPA does not match expectation",
+                        ));
                     }
                     if !self.mmio_device_manager.all_virtio_reset() {
                         return Err(std::io::Error::other(
@@ -506,12 +514,22 @@ impl Subscriber for Vmm {
                         ));
                     }
                     let clock = self.vm.fd().get_clock().map_err(std::io::Error::other)?;
-                    let template = crate::template::Template::capture_with_clock(
-                        &self.guest_memory,
+                    // DAX mappings have been revoked by FREEZE. They are not RAM
+                    // and must be recreated empty against each fresh backend.
+                    let mut ram = self.guest_memory.clone();
+                    for (address, size) in &self.cooperative_shm {
+                        ram = ram
+                            .remove_region(*address, *size as u64)
+                            .map_err(std::io::Error::other)?
+                            .0;
+                    }
+                    let template = crate::template::Template::capture_with_topology(
+                        &ram,
                         reported_control,
                         *vcpus,
                         *ram_mib,
                         clock.clock,
+                        &self.cooperative_topology,
                     )?;
                     template.write_to_path(path)?;
                     Ok(path.clone())

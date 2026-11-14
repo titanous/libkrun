@@ -1375,7 +1375,11 @@ impl Vcpu {
                             .duration_since(std::time::UNIX_EPOCH)
                             .map_err(|_| Error::VcpuUnhandledKvmExit)?
                             .as_nanos() as u64;
-                        let value = if addr == 0xe6 { now as u32 } else { (now >> 32) as u32 };
+                        let value = if addr == 0xe6 {
+                            now as u32
+                        } else {
+                            (now >> 32) as u32
+                        };
                         data.copy_from_slice(&value.to_le_bytes());
                         return Ok(VcpuEmulation::Handled);
                     }
@@ -1388,8 +1392,11 @@ impl Vcpu {
                         if self.id != 0 || data != [1] {
                             return Err(Error::VcpuUnhandledKvmExit);
                         }
-                        let control = self.fd.get_regs()
-                            .map_err(|_| Error::VcpuUnhandledKvmExit)?.rsi;
+                        let control = self
+                            .fd
+                            .get_regs()
+                            .map_err(|_| Error::VcpuUnhandledKvmExit)?
+                            .rsi;
                         return Ok(VcpuEmulation::Frozen(control));
                     }
                     self.io_bus.write(0, u64::from(addr), data);

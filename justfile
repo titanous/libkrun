@@ -45,6 +45,11 @@ cooperative-clone kernel initramfs control output cycles="20" concurrent="16" mo
     CARGO_BUILD_JOBS=12 cargo build -p libkrun --example cooperative-console --features net,blk,vhost-user
     python3 tests/cooperative/run.py --kernel "{{kernel}}" --initramfs "{{initramfs}}" --control "{{control}}" --output "{{output}}" --cycles "{{cycles}}" --concurrent "{{concurrent}}" {{mode}}
 
+# Real-copy virtio-fs clone matrix with retained files, mappings and watches.
+cooperative-fs kernel initramfs output children="20":
+    CARGO_BUILD_JOBS=12 cargo build -p libkrun --example cooperative-console --features net,blk,vhost-user
+    python3 tests/cooperative/fs-run.py --kernel "{{kernel}}" --initramfs "{{initramfs}}" --output "{{output}}" --children "{{children}}"
+
 # Benchmark boot-timing-e2e with release builds; prints min/p50/p95/mean/max/stddev.
 # Runs one warmup iteration then N timed samples.
 # vcpus: vCPU count passed to the VM (default 1).

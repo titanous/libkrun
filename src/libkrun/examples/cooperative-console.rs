@@ -1,5 +1,6 @@
 //! Minimal separate-process cooperative freeze/clone proof launcher.
 use std::path::PathBuf;
+mod cooperative_fs;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
@@ -9,6 +10,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let control = u64::from_str_radix(args[3].trim_start_matches("0x"), 16)?;
     let mut builder = krun::Builder::new();
     builder.omit_balloon_device();
+    if let Some(mode) = std::env::var_os("CLONE_FS") {
+        let dax = if mode == "dax" { Some(64 << 20) } else { None };
+        builder.add_virtiofs("clone_ro", Box::new(cooperative_fs::Tree::new(true)), dax);
+        builder.add_virtiofs("clone_rw", Box::new(cooperative_fs::Tree::new(false)), dax);
+    }
     if let Some(kernel) = std::env::var_os("CLONE_KERNEL") {
         let initramfs = std::env::var_os("CLONE_INITRAMFS").map(PathBuf::from);
         builder.external_kernel(PathBuf::from(kernel), krun::KernelFormat::Elf, initramfs)?;
@@ -37,7 +43,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             fn allow(&self, op: krun::SocketOperation, addr: &krun::SocketAddress) -> bool {
                 addr.as_unix_addr().is_none()
                     || (op == krun::SocketOperation::UnixConnect
-                        && addr.as_unix_addr().and_then(|address| address.path()) == Some(self.0.as_path()))
+                        && addr.as_unix_addr().and_then(|address| address.path())
+                            == Some(self.0.as_path()))
             }
         }
         builder.internet_socket_forwarding(false);
@@ -58,6 +65,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "initcall_debug",
         "pm_print_times",
     ]);
+    if std::env::var_os("CLONE_FS").is_some_and(|mode| mode == "dax") {
+        builder.add_kernel_cmdline_args(&["clone_dax"]);
+    }
     if std::env::var_os("CLONE_HVC_CONSOLE").is_some() {
         builder.add_kernel_cmdline_args(&["console=hvc0"]);
     }

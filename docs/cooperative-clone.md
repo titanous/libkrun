@@ -52,12 +52,23 @@ and enter the kernel's saved continuation over private file-backed RAM.
    The control-page realtime word remains the resume-time validity flag. Kernels with
    x86 patch 0101 require these ports; older VMMs are incompatible with that patch.
 
-The current caller supplies the same device order and features. RAM/vCPU count,
-control-page version and long-mode prerequisites are checked. This format is
+The caller supplies the same device order and features. RAM/vCPU count,
+control-page version, long-mode prerequisites, and a byte-exact host topology
+manifest are checked. The manifest records console structure, block/net/vsock
+features and queues, and ordered filesystem tags, queues and DAX GPA ranges.
+Backend paths, connection policy and server objects are deliberately excluded:
+new guests receive their own configuration and fresh backends. This format is
 same-host/same-kernel only, not a portable or hostile-input migration format.
-Full CPUID/kernel-build/device-manifest compatibility fencing is required before
-accepting templates from outside the supervising daemon's trusted artifact set.
-Virtio-fs/DAX and GPU mappings are not supported by this path.
+Full CPUID/kernel-build compatibility fencing is required before accepting
+untrusted templates. GPU and vhost-user backends are unsupported.
+
+In-process virtio-fs supports plain and DAX mounts with the kernel's cooperative
+FUSE patches (0200/0201). FREEZE revokes DAX mappings; capture excludes those
+host-known SHM extents, and each clone allocates empty mappings at exactly the
+same GPAs before attaching fresh servers. No DAX content or host file descriptor
+is serialized. Servers must preserve the filesystem's stable inode identity and
+handle semantics across reconstruction; this is a caller contract, not something
+a tag/queue manifest can verify.
 
 ## Control page
 
@@ -98,11 +109,13 @@ not a host XSAVE/device-state snapshot.
 ## Template file
 
 Page 0 is a little-endian header: words 0..6 are magic bytes `KRUNFRZ1`,
-version 1, control GPA, vCPU count, configured RAM MiB, extent count, and KVM
-clock nanoseconds. Words 8 onward are `(GPA, byte length, file offset)` triples,
-up to 128 extents. Extents are page-aligned, ordered, non-overlapping and bounded
-by file length. RAM starts at file offset 4096. No active virtqueues or backend
-state are serialized. Child RAM writes cannot modify the source or other clones.
+version 2, control GPA, vCPU count, configured RAM MiB, extent count, and KVM
+clock nanoseconds. Word 7 is topology-manifest length (at most4096 bytes);
+words 8 onward are `(GPA, byte length, file offset)` triples, up to128 extents.
+Page1 contains the topology bytes. Extents are page-aligned, ordered,
+non-overlapping and bounded by file length. RAM starts at file offset8192.
+No active virtqueues, DAX content or backend state are serialized. Child RAM
+writes cannot modify the source or other clones.
 
 ## Real-KVM tests
 
@@ -148,3 +161,19 @@ Logs and measurements.json remain in the result directory. Freeze timing is
 host receipt of the flushed guest trigger marker to the synchronous frozen exit;
 resume timing is process invocation to the userspace marker, including file import.
 Private RSS is Private_Clean + Private_Dirty in smaps_rollup at ten seconds idle.
+
+For the separate filesystem matrix, build a combined kernel with 0100–0102 plus
+0200/0201 using `tests/cooperative/fs-kernel.nix`, and build the initramfs with
+`--argstr workload fs`. Then run:
+
+```
+nix develop --command just cooperative-fs VMLINUX FS_INITRAMFS NEW_RESULT_DIR
+```
+
+Defaults are20 new VMM processes from each of a plain and a DAX template. The
+fixture creates fresh read-only `/workspace` and writable `/scratch` servers for
+each process with stable handles. It checks open descriptors, mmap, a background
+reader and an inotify watch across the actual freeze/capture/new-process restore;
+both fresh server INIT handshakes are required and mismatched DAX layouts must
+be rejected. This is a protocol fixture, not the production content server.
+Observed results and limitations are in [cooperative-clone-results.md](cooperative-clone-results.md).

@@ -1128,6 +1128,17 @@ pub fn build_microvm(
                     device_info.ram_mib as u64,
                 )
             }),
+        #[cfg(target_arch = "x86_64")]
+        cooperative_shm: _shm_manager.regions(),
+        #[cfg(target_arch = "x86_64")]
+        cooperative_topology: if vm_resources.cooperative_capture.is_some()
+            || vm_resources.cooperative_template.is_some()
+        {
+            crate::template_topology::encode(&vm_resources, &_shm_manager)
+                .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?
+        } else {
+            Vec::new()
+        },
         exit_observers: Vec::new(),
         exit_code: exit_code.clone(),
         vm_exit: vm_exit.clone(),
@@ -1385,14 +1396,19 @@ pub fn build_microvm(
     }
     #[cfg(target_arch = "x86_64")]
     if vm_resources.cooperative_template.is_some() {
-        let generation = vmm.notify_vm_generation_change()
+        let generation = vmm
+            .notify_vm_generation_change()
             .map_err(StartMicrovmError::Internal)?;
         eprintln!("COOPERATIVE GENERATION {generation:02x?}");
         // The initial edge can be cleared by the guest's IOAPIC syscore
         // restoration. Re-notify once its post-syscore time read traps.
         vcpus[0].cooperative_generation_irq = Some(
-            vmm.vmgenid.as_ref().ok_or(StartMicrovmError::Internal(Error::VmGenerationUnavailable))?
-                .interrupt_evt().try_clone().map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?
+            vmm.vmgenid
+                .as_ref()
+                .ok_or(StartMicrovmError::Internal(Error::VmGenerationUnavailable))?
+                .interrupt_evt()
+                .try_clone()
+                .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?,
         );
     }
     timer.checkpoint("configure_system");
@@ -1898,14 +1914,13 @@ pub fn create_guest_memory(
             || Some(template.vcpus) != vm_resources.vm_config().vcpu_count
             || vm_resources.split_irqchip
             || vm_resources.gpu_virgl_flags.is_some()
-            || !vm_resources.fs.is_empty()
         {
             return Err(StartMicrovmError::GuestMemoryMmap(
                 "incompatible template topology".into(),
             ));
         }
         let (info, _) = arch::arch_memory_regions(mem_size << 20, None, 0, 0, None);
-        let memory = template
+        let mut memory = template
             .map_private()
             .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
         let mut page = [0; 4096];
@@ -1914,7 +1929,31 @@ pub fn create_guest_memory(
             .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
         let entry = crate::cooperative::ResumeEntry::parse(&page)
             .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
-        let shm = ShmManager::new(&info);
+        let mut shm = ShmManager::new(&info);
+        #[cfg(not(feature = "tee"))]
+        for (index, mount) in vm_resources.fs.iter().enumerate() {
+            if let Some(size) = mount.shm_size {
+                shm.create_fs_region(index, size)
+                    .map_err(StartMicrovmError::ShmCreate)?;
+            }
+        }
+        for (address, size) in shm.regions() {
+            let mapping = vm_memory::MmapRegion::new(size)
+                .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
+            let region = GuestRegionMmap::new(mapping, address)
+                .ok_or_else(|| StartMicrovmError::GuestMemoryMmap("DAX range overflow".into()))?;
+            memory = memory
+                .insert_region(Arc::new(region))
+                .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
+        }
+        let topology = crate::template_topology::encode(vm_resources, &shm)
+            .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
+        if topology != template.topology {
+            return Err(StartMicrovmError::GuestMemoryMmap(
+                "template device/filesystem topology mismatch (order, tag, queues or DAX range)"
+                    .into(),
+            ));
+        }
         return Ok((
             memory,
             info,
