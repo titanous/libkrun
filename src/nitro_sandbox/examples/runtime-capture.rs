@@ -28,8 +28,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         fn prepare(
             &mut self,
             memory: &vm_memory::GuestMemoryMmap,
-            _: u64,
+            control: u64,
         ) -> io::Result<Option<Box<dyn PreparedCapture>>> {
+            let length: u64 = memory
+                .read_obj(GuestAddress(control + 30 * 8))
+                .map_err(io::Error::other)?;
+            let mut identity = [0u8; 20];
+            memory
+                .read_slice(&mut identity, GuestAddress(control + 27 * 8))
+                .map_err(io::Error::other)?;
+            if length != 20 || identity.iter().all(|byte| *byte == 0) {
+                return Err(io::Error::other("missing kernel build identity"));
+            }
+            eprintln!("KERNEL_ID_PUBLISHED bytes={length}");
             let mut bytes = Vec::new();
             for region in memory.iter() {
                 let mut copy = vec![0; region.len() as usize];
