@@ -1462,6 +1462,10 @@ impl Vcpu {
                 }
                 #[cfg(target_arch = "x86_64")]
                 VcpuExit::IoOut(addr, data) => {
+                    if addr == crate::cooperative::MARKER_PORT && self.id == 0 && data.len() == 1 {
+                        self.capture_request.confirm_marker(data[0] == 1);
+                        return Ok(VcpuEmulation::Handled);
+                    }
                     if addr == crate::cooperative::FREEZE_PORT {
                         if self.id != 0 || data != [1] {
                             return Err(Error::VcpuUnhandledKvmExit);

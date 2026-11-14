@@ -4,6 +4,7 @@ use std::io;
 
 pub const FROZEN_MAGIC: u64 = 0x4652_4f5a_454e_3031;
 pub const FREEZE_PORT: u16 = 0xe5;
+pub const MARKER_PORT: u16 = 0xe9;
 pub const CONTROL_SIZE: usize = 4096;
 
 #[derive(Debug)]

@@ -28,6 +28,7 @@ pub fn refusal_errno(error: &io::Error) -> i32 {
 struct State {
     deadline: Option<Instant>,
     accepted: bool,
+    marker_confirmed: bool,
     result: Option<io::Result<CaptureOutcome>>,
 }
 
@@ -35,8 +36,18 @@ struct State {
 pub struct CaptureRequest(Arc<(Mutex<State>, Condvar)>);
 
 impl CaptureRequest {
+    pub fn confirm_marker(&self, active: bool) {
+        self.0 .0.lock().unwrap().marker_confirmed = active;
+    }
+
     pub fn arm(&self, timeout: Duration) -> io::Result<()> {
         let mut state = self.0 .0.lock().unwrap();
+        if !state.marker_confirmed {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                crate::cooperative::TemplateMarkerMissing,
+            ));
+        }
         if state.deadline.is_some() || state.accepted {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -140,6 +151,7 @@ mod tests {
     #[test]
     fn acceptance_and_timeout_have_one_terminal_decision() {
         let expired = CaptureRequest::default();
+        expired.confirm_marker(true);
         expired.arm(Duration::ZERO).unwrap();
         assert!(!expired.accept());
         assert!(expired
@@ -151,6 +163,7 @@ mod tests {
         assert!(!expired.accept());
 
         let accepted = CaptureRequest::default();
+        accepted.confirm_marker(true);
         accepted.arm(Duration::from_secs(30)).unwrap();
         assert!(accepted.accept());
         assert!(!accepted.accept());
@@ -168,6 +181,12 @@ mod tests {
     fn timeout_disarms_and_requests_are_consumed_once() {
         let request = CaptureRequest::default();
         assert!(!request.is_armed());
+        let error = request.arm(Duration::from_secs(1)).unwrap_err();
+        assert!(error
+            .get_ref()
+            .unwrap()
+            .is::<crate::cooperative::TemplateMarkerMissing>());
+        request.confirm_marker(true);
         request.arm(Duration::from_millis(1)).unwrap();
         assert!(request.arm(Duration::from_secs(1)).is_err());
         assert_eq!(

@@ -15,6 +15,8 @@ int main(void)
         return 1;
     }
     puts("HOSTREQUEST USER READY");
+    /* Minimal fixture gives the host helper time to consume boot confirmation. */
+    usleep(100000);
     int fd = open("/sys/power/nitro_freeze", O_WRONLY);
     if (fd < 0 || write(fd, "1", 1) != 1) {
         perror("agent freeze trigger");
