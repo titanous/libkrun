@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use libc::EINVAL;
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use nix::sys::socket::{
-    accept, bind, connect, getpeername, listen, recv, send, setsockopt, shutdown, socket, sockopt,
+    accept, bind, connect, getpeername, listen, recv, setsockopt, shutdown, socket, sockopt,
     AddressFamily, Backlog, MsgFlags, Shutdown, SockFlag, SockType, SockaddrLike, SockaddrStorage,
 };
 
@@ -53,6 +53,8 @@ pub struct TsiStreamProxy {
     push_cnt: Wrapping<u32>,
     pending_accepts: u64,
     unixsock_path: Option<PathBuf>,
+    pending: super::stream_buffer::StreamBuffer,
+    rx_paused: bool,
 }
 
 impl TsiStreamProxy {
@@ -119,6 +121,8 @@ impl TsiStreamProxy {
             push_cnt: Wrapping(0),
             pending_accepts: 0,
             unixsock_path: None,
+            pending: Default::default(),
+            rx_paused: false,
         })
     }
 
@@ -158,6 +162,8 @@ impl TsiStreamProxy {
             push_cnt: Wrapping(0),
             pending_accepts: 0,
             unixsock_path: None,
+            pending: Default::default(),
+            rx_paused: false,
         }
     }
 
@@ -276,7 +282,8 @@ impl TsiStreamProxy {
     }
 
     fn peer_avail_credit(&self) -> usize {
-        (Wrapping(self.peer_buf_alloc) - (self.rx_cnt - self.peer_fwd_cnt)).0 as usize
+        self.peer_buf_alloc
+            .saturating_sub((self.rx_cnt - self.peer_fwd_cnt).0) as usize
     }
 
     fn recv_to_pkt(&self, pkt: &mut VsockPacket) -> RecvPkt {
@@ -325,7 +332,11 @@ impl TsiStreamProxy {
         let mut wait_credit = false;
         let mut queue = self.queue.lock().unwrap();
 
-        while let Some(head) = queue.pop(&self.mem) {
+        loop {
+            let Some(head) = queue.pop(&self.mem) else {
+                self.rx_paused = true;
+                break;
+            };
             let len = match VsockPacket::from_rx_virtq_head(&head) {
                 Ok(mut pkt) => match self.recv_to_pkt(&mut pkt) {
                     RecvPkt::WaitForCredit => {
@@ -401,17 +412,43 @@ impl TsiStreamProxy {
 
     fn switch_to_connected(&mut self) {
         self.status = ProxyStatus::Connected;
-        match fcntl(&self.fd, FcntlArg::F_GETFL) {
-            Ok(flags) => match OFlag::from_bits(flags) {
-                Some(flags) => {
-                    if let Err(e) = fcntl(&self.fd, FcntlArg::F_SETFL(flags & !OFlag::O_NONBLOCK)) {
-                        warn!("error switching to blocking: id={}, err={}", self.id, e);
-                    }
-                }
-                None => error!("invalid fd flags id={}", self.id),
-            },
-            Err(e) => error!("couldn't obtain fd flags id={}, err={}", self.id, e),
-        };
+    }
+
+    fn stream_events(&self) -> EventSet {
+        let mut events = EventSet::empty();
+        if self.status == ProxyStatus::Connected && !self.rx_paused {
+            events |= EventSet::IN;
+        }
+        if !self.pending.is_empty() {
+            events |= EventSet::OUT;
+        }
+        events
+    }
+
+    fn flush_pending(&mut self) -> ProxyUpdate {
+        let mut update = ProxyUpdate::default();
+        match self.pending.flush(self.fd.as_raw_fd()) {
+            Ok(count) => self.tx_cnt += Wrapping(count as u32),
+            Err(_) => {
+                self.push_reset();
+                self.status = ProxyStatus::Closed;
+                update.signal_queue = true;
+                update.remove_proxy = ProxyRemoval::Deferred;
+                update.polling = Some((self.id, self.fd.as_raw_fd(), EventSet::empty()));
+                return update;
+            }
+        }
+        if self.tx_cnt != self.last_tx_cnt_sent {
+            self.last_tx_cnt_sent = self.tx_cnt;
+            self.push_pkt(MuxerRx::CreditUpdate {
+                local_port: self.local_port,
+                peer_port: self.peer_port,
+                fwd_cnt: self.tx_cnt.0,
+            });
+            update.signal_queue = true;
+        }
+        update.polling = Some((self.id, self.fd.as_raw_fd(), self.stream_events()));
+        update
     }
 
     fn get_addr_len(&self, addr: &SockaddrStorage) -> Option<u32> {
@@ -585,52 +622,21 @@ impl Proxy for TsiStreamProxy {
     }
 
     fn sendmsg(&mut self, pkt: &VsockPacket) -> ProxyUpdate {
-        debug!("sendmsg");
-
-        let mut update = ProxyUpdate::default();
-
-        let ret = if let Some(buf) = pkt.buf() {
-            #[cfg(target_os = "linux")]
-            let flags = MsgFlags::MSG_NOSIGNAL;
-
-            match send(self.fd.as_raw_fd(), buf, flags) {
-                Ok(sent) => {
-                    if sent != buf.len() {
-                        error!("couldn't set everything: buf={}, sent={}", buf.len(), sent);
-                    }
-                    self.tx_cnt += Wrapping(sent as u32);
-                    sent as i32
-                }
-                Err(err) => {
-                    #[cfg(target_os = "linux")]
-                    let errno = -(err as i32);
-                    errno
-                }
-            }
-        } else {
-            -libc::EINVAL
-        };
-
-        if ret > 0
-            && (self.tx_cnt - self.last_tx_cnt_sent).0 as usize >= (defs::CONN_TX_BUF_SIZE / 2)
+        if pkt
+            .buf()
+            .and_then(|buf| buf.get(..pkt.len() as usize))
+            .is_none_or(|buf| self.pending.enqueue(buf).is_err())
         {
-            debug!(
-                "sending credit update: id={}, tx_cnt={}, last_tx_cnt={}",
-                self.id, self.tx_cnt, self.last_tx_cnt_sent
-            );
-            self.last_tx_cnt_sent = self.tx_cnt;
-            // This packet goes to the connection.
-            let rx = MuxerRx::CreditUpdate {
-                local_port: pkt.dst_port(),
-                peer_port: pkt.src_port(),
-                fwd_cnt: self.tx_cnt.0,
+            self.push_reset();
+            self.status = ProxyStatus::Closed;
+            return ProxyUpdate {
+                signal_queue: true,
+                remove_proxy: ProxyRemoval::Deferred,
+                polling: Some((self.id, self.fd.as_raw_fd(), EventSet::empty())),
+                ..Default::default()
             };
-            self.push_pkt(rx);
-            update.signal_queue = true;
         }
-
-        debug!("sendmsg ret={ret}");
-        update
+        self.flush_pending()
     }
 
     fn sendto_addr(&mut self, _req: TsiSendtoAddr) -> ProxyUpdate {
@@ -697,10 +703,21 @@ impl Proxy for TsiStreamProxy {
         self.peer_buf_alloc = pkt.buf_alloc();
         self.peer_fwd_cnt = Wrapping(pkt.fwd_cnt());
 
-        self.status = ProxyStatus::Connected;
-
+        if self.status == ProxyStatus::WaitingCreditUpdate && self.peer_avail_credit() > 0 {
+            self.status = ProxyStatus::Connected;
+        }
+        let request = pkt.op() == uapi::VSOCK_OP_CREDIT_REQUEST;
+        if request {
+            self.push_pkt(MuxerRx::CreditUpdate {
+                local_port: self.local_port,
+                peer_port: self.peer_port,
+                fwd_cnt: self.tx_cnt.0,
+            });
+            self.last_tx_cnt_sent = self.tx_cnt;
+        }
         ProxyUpdate {
-            polling: Some((self.id, self.fd.as_raw_fd(), EventSet::IN)),
+            signal_queue: request,
+            polling: Some((self.id, self.fd.as_raw_fd(), self.stream_events())),
             ..Default::default()
         }
     }
@@ -769,16 +786,13 @@ impl Proxy for TsiStreamProxy {
         let recv_off = pkt.flags() & uapi::VSOCK_FLAGS_SHUTDOWN_RCV != 0;
         let send_off = pkt.flags() & uapi::VSOCK_FLAGS_SHUTDOWN_SEND != 0;
 
-        let how = if recv_off && send_off {
-            Shutdown::Both
-        } else if recv_off {
-            Shutdown::Read
-        } else {
-            Shutdown::Write
-        };
-
-        if let Err(e) = shutdown(self.fd.as_raw_fd(), how) {
-            debug!("error sending shutdown to socket: {e}");
+        if send_off {
+            self.pending.shutdown_write(self.fd.as_raw_fd());
+        }
+        if recv_off {
+            if let Err(e) = shutdown(self.fd.as_raw_fd(), Shutdown::Read) {
+                debug!("error sending shutdown to socket: {e}");
+            }
         }
     }
 
@@ -796,6 +810,17 @@ impl Proxy for TsiStreamProxy {
             remove_proxy,
             ..Default::default()
         }
+    }
+
+    fn resume_rx(&mut self) -> Option<ProxyUpdate> {
+        if !self.rx_paused {
+            return None;
+        }
+        self.rx_paused = false;
+        Some(ProxyUpdate {
+            polling: Some((self.id, self.fd.as_raw_fd(), self.stream_events())),
+            ..Default::default()
+        })
     }
 
     fn process_event(&mut self, evset: EventSet) -> ProxyUpdate {
@@ -825,6 +850,7 @@ impl Proxy for TsiStreamProxy {
             if self.status == ProxyStatus::Connected {
                 let (signal_queue, wait_credit) = self.recv_pkt();
                 update.signal_queue = signal_queue;
+                update.polling = Some((self.id, self.fd.as_raw_fd(), self.stream_events()));
 
                 if wait_credit && self.status != ProxyStatus::WaitingCreditUpdate {
                     self.status = ProxyStatus::WaitingCreditUpdate;
@@ -847,7 +873,7 @@ impl Proxy for TsiStreamProxy {
                     return update;
                 } else if self.status == ProxyStatus::WaitingCreditUpdate {
                     debug!("process_event: WaitingCreditUpdate");
-                    update.polling = Some((self.id(), self.fd.as_raw_fd(), EventSet::empty()));
+                    update.polling = Some((self.id(), self.fd.as_raw_fd(), self.stream_events()));
                 }
             } else if self.status == ProxyStatus::Listening
                 || self.status == ProxyStatus::WaitingOnAccept
@@ -884,8 +910,13 @@ impl Proxy for TsiStreamProxy {
                 // Stop listening for events in the TCP socket until we receive
                 // OP_REQUEST and the vsock transport is fully established.
                 update.polling = Some((self.id(), self.fd.as_raw_fd(), EventSet::empty()));
-            } else {
-                debug!("EventSet::OUT while not connecting");
+            } else if self.status == ProxyStatus::Connected
+                || self.status == ProxyStatus::WaitingCreditUpdate
+            {
+                let flushed = self.flush_pending();
+                update.signal_queue |= flushed.signal_queue;
+                update.polling = flushed.polling;
+                update.remove_proxy = flushed.remove_proxy;
             }
         }
 

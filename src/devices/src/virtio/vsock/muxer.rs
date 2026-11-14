@@ -264,6 +264,14 @@ impl VsockMuxer {
         }
     }
 
+    pub fn resume_rx(&self) {
+        for (id, proxy) in self.proxy_map.read().unwrap().iter() {
+            if let Some(update) = proxy.lock().unwrap().resume_rx() {
+                self.process_proxy_update(*id, update);
+            }
+        }
+    }
+
     pub fn update_polling(&self, id: u64, fd: RawFd, evset: EventSet) {
         debug!("update_polling id={id} fd={fd:?} evset={evset:?}");
         let _ = self
@@ -723,6 +731,8 @@ impl VsockMuxer {
                 pkt.dst_port()
             );
             let mut proxy = proxy_lock.lock().unwrap();
+            let credit = proxy.update_peer_credit(pkt);
+            self.process_proxy_update(id, credit);
             let update = proxy.sendmsg(pkt);
             self.process_proxy_update(id, update);
         } else {
@@ -789,7 +799,9 @@ impl VsockMuxer {
             uapi::VSOCK_OP_REQUEST => self.process_op_request(pkt),
             uapi::VSOCK_OP_RESPONSE => self.process_op_response(pkt),
             uapi::VSOCK_OP_SHUTDOWN => self.process_op_shutdown(pkt),
-            uapi::VSOCK_OP_CREDIT_UPDATE => self.process_op_credit_update(pkt),
+            uapi::VSOCK_OP_CREDIT_UPDATE | uapi::VSOCK_OP_CREDIT_REQUEST => {
+                self.process_op_credit_update(pkt)
+            }
             uapi::VSOCK_OP_RW => self.process_stream_rw(pkt),
             uapi::VSOCK_OP_RST => self.process_stream_rst(pkt),
             _ => warn!("stream: unhandled op={}", pkt.op()),
