@@ -146,7 +146,11 @@ Every backend must honour each configured method, or fail build with a clear
   internet forwarding, or reject build.
 
 The Nitro backend (`nitro-sandbox` feature) applies the same socket rule and
-forwarding switch to its shared userspace vsock device. It boots an EIF v4 image
+forwarding switch to its shared userspace vsock device. With external-kernel
+packaging it also appends the guest kernel's forwarding switches
+(`tsi_hijack`, `tsi_hijack_unix`) to the packaged command line exactly when the
+device forwards those families, as the KVM builder inserts them; a prepackaged
+EIF must carry them itself. It boots an EIF v4 image
 through `nitro_backend`: the image contains the arm64 Linux Image, initramfs and
 command line, with flags matching PCI virtio and CPU-overcommit mode.
 Alternatively, `external_kernel` accepts an arm64 Raw Image, optional initramfs,

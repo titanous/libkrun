@@ -1182,6 +1182,25 @@ impl Builder {
         self
     }
 
+    /// Socket-forwarding flags of the Nitro vsock device: the same decision as the KVM path
+    /// (explicit flags, or inet hijacking implied by internet forwarding; never inet hijacking
+    /// while internet forwarding is off). Also decides the guest command-line switches.
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    fn nitro_tsi_flags(&self) -> TsiFlags {
+        let mut flags = match self.config.vsock_config {
+            VsockConfig::Explicit { tsi_flags } => tsi_flags,
+            VsockConfig::Implicit if self.socket_policy.internet_enabled => TsiFlags::HIJACK_INET,
+            _ => TsiFlags::empty(),
+        };
+        if !self.socket_policy.internet_enabled {
+            flags.remove(TsiFlags::HIJACK_INET);
+        }
+        if matches!(self.config.vsock_config, VsockConfig::Disabled) {
+            flags = TsiFlags::empty();
+        }
+        flags
+    }
+
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     fn create_nitro_vsock(
         cid: u64,
@@ -1327,7 +1346,8 @@ impl Builder {
             }
             let mut args = self.kernel_cmdline.clone();
             args.extend(self.extra_kernel_args.iter().cloned());
-            let cmdline = args.join(" ");
+            // The guest kernel's socket-forwarding switches, as the KVM builder inserts them.
+            let cmdline = nitro_cmdline(&args, self.nitro_tsi_flags());
             let (file, _) = nitro_sandbox::image::cached_files(
                 &kernel.path,
                 kernel.initramfs_path.as_deref(),
@@ -1386,16 +1406,7 @@ impl Builder {
                 .map_err(StartError::Nitro)?;
         }
         if !matches!(self.config.vsock_config, VsockConfig::Disabled) {
-            let mut flags = match self.config.vsock_config {
-                VsockConfig::Explicit { tsi_flags } => tsi_flags,
-                VsockConfig::Implicit if self.socket_policy.internet_enabled => {
-                    TsiFlags::HIJACK_INET
-                }
-                _ => TsiFlags::empty(),
-            };
-            if !self.socket_policy.internet_enabled {
-                flags.remove(TsiFlags::HIJACK_INET);
-            }
+            let flags = self.nitro_tsi_flags();
             let vsock = Self::create_nitro_vsock(
                 options.cid,
                 self.config.tsi_port_map,
@@ -2424,6 +2435,56 @@ impl VmHandle {
     #[cfg(not(feature = "tee"))]
     pub fn balloon(&self) -> Option<&BalloonHandle> {
         self.balloon.as_ref()
+    }
+}
+
+/// The command line packaged into a Nitro image: the caller's tokens, then the guest kernel's
+/// socket-forwarding switches (`tsi_hijack`, `tsi_hijack_unix`) exactly when the vsock device
+/// forwards those families, as the KVM builder inserts them. Without them the guest never
+/// redirects its sockets and forwarding silently does nothing.
+#[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+fn nitro_cmdline(args: &[String], flags: TsiFlags) -> String {
+    let mut tokens: Vec<&str> = args.iter().map(String::as_str).collect();
+    if flags.contains(TsiFlags::HIJACK_INET) {
+        tokens.push("tsi_hijack");
+    }
+    if flags.contains(TsiFlags::HIJACK_UNIX) {
+        tokens.push("tsi_hijack_unix");
+    }
+    tokens.join(" ")
+}
+
+#[cfg(all(test, target_os = "linux", feature = "nitro-sandbox"))]
+mod nitro_cmdline_tests {
+    use super::*;
+    #[test]
+    fn forwarding_switches_follow_the_vsock_flags() {
+        let args = vec!["panic=-1".to_owned(), "rdinit=/init".to_owned()];
+        assert_eq!(
+            nitro_cmdline(&args, TsiFlags::empty()),
+            "panic=-1 rdinit=/init"
+        );
+        assert_eq!(
+            nitro_cmdline(&args, TsiFlags::HIJACK_INET),
+            "panic=-1 rdinit=/init tsi_hijack"
+        );
+        assert_eq!(
+            nitro_cmdline(&args, TsiFlags::HIJACK_INET | TsiFlags::HIJACK_UNIX),
+            "panic=-1 rdinit=/init tsi_hijack tsi_hijack_unix"
+        );
+    }
+    #[test]
+    fn builder_flags_follow_internet_forwarding() {
+        let mut builder = Builder::new();
+        assert_eq!(
+            builder.nitro_tsi_flags(),
+            TsiFlags::empty(),
+            "off by default"
+        );
+        builder.internet_socket_forwarding(true);
+        assert!(builder.nitro_tsi_flags().contains(TsiFlags::HIJACK_INET));
+        builder.internet_socket_forwarding(false);
+        assert!(!builder.nitro_tsi_flags().contains(TsiFlags::HIJACK_INET));
     }
 }
 
