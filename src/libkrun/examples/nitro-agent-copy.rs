@@ -84,8 +84,66 @@ mod probe {
         builder.add_vsock_port(7000, socket.into(), false);
         Ok(builder)
     }
+    fn restore_child(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::fd::FromRawFd;
+        let cid = args[3].parse::<u64>()?;
+        if !(700..=899).contains(&cid) {
+            return Err("CID outside lane range".into());
+        }
+        let directory = std::path::PathBuf::from(&args[5]);
+        let socket = directory.join(format!("copy-{cid}.sock"));
+        let listener = UnixListener::bind(&socket)?;
+        listener.set_nonblocking(true)?;
+        // SAFETY: parent pre_exec duplicates only the sealed template to fd100.
+        let file = unsafe { std::fs::File::from_raw_fd(100) };
+        let mut receiver = builder(&args[2], cid, &socket)?;
+        let _readiness = receiver.start_from_template(
+            TemplateSource::Descriptor(file),
+            Duration::from_secs(20),
+            |_| Ok(()),
+        )?;
+        let context = receiver.build()?;
+        let boot_id = args[4].clone();
+        let worker = std::thread::spawn(move || -> io::Result<()> {
+            let mut connection = accept(&listener)?;
+            let hello = response(&mut connection, "hello")?;
+            if hello["boot_id"] != boot_id
+                || hello["token"] != "clone-test-token"
+                || hello["generation"] != 0
+            {
+                return Err(io::Error::other("copy identity mismatch"));
+            }
+            send(
+                &mut connection,
+                json!({"type":"welcome","version":3,"features":[]}),
+            )?;
+            send(
+                &mut connection,
+                json!({"type":"copied","request":3,"generation":1}),
+            )?;
+            response(&mut connection, "ack")?;
+            std::fs::write(directory.join(format!("ready-{cid}")), b"ready")?;
+            let deadline = Instant::now() + Duration::from_secs(12);
+            while !directory.join("release").exists() {
+                if Instant::now() >= deadline {
+                    return Err(io::Error::other("concurrent release deadline"));
+                }
+                std::thread::yield_now();
+            }
+            send(&mut connection, json!({"type":"power_off","request":4}))?;
+            response(&mut connection, "ack")?;
+            Ok(())
+        });
+        let _exit = context.run()?;
+        worker.join().map_err(|_| "copy worker panicked")??;
+        std::fs::remove_file(socket)?;
+        Ok(())
+    }
     pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         let args: Vec<_> = std::env::args().collect();
+        if args.len() == 6 && args[1] == "--restore-child" {
+            return restore_child(&args);
+        }
         if args.len() != 3 {
             return Err("usage: nitro-agent-copy agent-source.eif receiver.eif".into());
         }
@@ -156,6 +214,65 @@ mod probe {
             .map_err(|_| "source I/O thread panicked")??;
         let template = handle.wait_template_capture()?;
         eprintln!("AGENT_TEMPLATE_CAPTURED");
+        if std::env::var_os("AGENT_CONCURRENT").is_some() {
+            use std::os::{fd::AsRawFd, unix::process::CommandExt};
+            let directory =
+                std::env::current_dir()?.join(format!("agent-concurrent-{}", std::process::id()));
+            std::fs::create_dir(&directory)?;
+            let mut children = Vec::new();
+            for cid in 740..744 {
+                let mut command = std::process::Command::new(std::env::current_exe()?);
+                command.args([
+                    "--restore-child",
+                    &args[2],
+                    &cid.to_string(),
+                    hello["boot_id"].as_str().ok_or("missing boot_id")?,
+                    directory.to_str().ok_or("nonutf8 directory")?,
+                ]);
+                let fd = template.file.as_raw_fd();
+                // SAFETY: pre_exec only duplicates a live sealed descriptor; no allocation or locks.
+                unsafe {
+                    command.pre_exec(move || {
+                        if libc::dup2(fd, 100) < 0 {
+                            return Err(io::Error::last_os_error());
+                        }
+                        Ok(())
+                    });
+                }
+                children.push(command.spawn()?);
+            }
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                if (740..744).all(|cid| directory.join(format!("ready-{cid}")).exists()) {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    for child in &mut children {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
+                    return Err("four-copy ready deadline".into());
+                }
+                std::thread::yield_now();
+            }
+            if children
+                .iter_mut()
+                .any(|child| child.try_wait().ok().flatten().is_some())
+            {
+                return Err("copy exited before four-alive barrier".into());
+            }
+            println!("AGENT_FOUR_ALIVE count=4");
+            std::fs::write(directory.join("release"), b"release")?;
+            for child in &mut children {
+                if !child.wait()?.success() {
+                    return Err("concurrent copy failed".into());
+                }
+            }
+            std::fs::remove_dir_all(directory)?;
+            std::fs::remove_file(socket)?;
+            println!("AGENT_FOUR_COMPLETED count=4");
+            return Ok(());
+        }
         let copies = std::env::var("AGENT_COPIES")
             .unwrap_or_else(|_| "1".into())
             .parse::<u64>()?;
