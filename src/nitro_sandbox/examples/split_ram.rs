@@ -16,4 +16,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 #[cfg(not(feature = "devices"))]
-fn main() { panic!("requires --features devices"); }
+fn main() {
+    panic!("requires --features devices");
+}
