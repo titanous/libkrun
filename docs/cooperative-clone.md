@@ -191,7 +191,7 @@ host receipt of the flushed guest trigger marker to the synchronous frozen exit;
 resume timing is process invocation to the userspace marker, including file import.
 Private RSS is Private_Clean + Private_Dirty in smaps_rollup at ten seconds idle.
 
-For the separate filesystem matrix, build a combined kernel with 0100–0102 plus
+For the separate filesystem matrix, build a combined kernel with 0100-0107 plus
 0200/0201 using `tests/cooperative/fs-kernel.nix`, and build the initramfs with
 `--argstr workload fs`. Then run:
 
@@ -206,3 +206,35 @@ reader and an inotify watch across the actual freeze/capture/new-process restore
 both fresh server INIT handshakes are required and mismatched DAX layouts must
 be rejected. This is a protocol fixture, not the production content server.
 Observed results and limitations are in [cooperative-clone-results.md](cooperative-clone-results.md).
+
+The guest publishes its frozen TSC in control word31. New guests use the KVM
+vCPU TSC-offset attribute with one host-counter sample and a common offset for
+all CPUs; they do not write IA32_TSC, whose KVM synchronization heuristic can
+reuse the initial boot timeline for nearby counter values. The VMM verifies
+counter readback and refuses unsupported offset ioctls or mismatched frequency.
+Guest hibernation timekeeping restores monotonic state, while the synchronous
+host-time exchange corrects realtime before tasks thaw.
+
+## Remaining review limitations
+
+- Capture skips zero-page writes and exports sparse files, but still scans source
+  RAM; retaining its original descriptor without a scan is deferred pending a
+  safe mapping-ownership transfer. Cold path-start latency can exceed the
+  descriptor-start target; use a shared sealed descriptor for latency-sensitive
+  callers. Private mapped RSS is not a complete cgroup charge measurement.
+- Freeze and readiness waits are bounded at the public API. A wedged device
+  callback or teardown still requires the per-guest process supervisor to kill
+  and reap the VMM; the library does not promise in-process cancellation.
+- VMGENID's one-shot interrupt is re-raised through the post-syscore time-port
+  exchange. A general post-restore edge-interrupt replay protocol is deferred:
+  callers must not send early serial input while restoring, and the control-page
+  seed plus pollable event remain the primary clone identity notification.
+- The continuation enters with interrupts masked and the kernel repairs TR/LDTR
+  through `restore_processor_state`. Publishing/restoring TSS and LDT descriptors
+  before the first instruction is deferred; an early NMI/debug/machine-check
+  window remains. Default SYSENTER/STAR/MTRR MSRs and reset XCR0 are temporary
+  until normal hibernation processor/FPU restoration, not captured CPU state.
+- Root-without-CAP_SYS_ADMIN and concurrent trigger writers are tested. A trigger
+  racing ordinary suspend is not separately injected; both use the transition
+  mutex, but that inference is not runtime coverage.
+

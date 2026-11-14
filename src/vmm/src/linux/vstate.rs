@@ -1262,14 +1262,45 @@ impl Vcpu {
     }
 
     #[cfg(target_arch = "x86_64")]
-    pub fn restore_cooperative_tsc(&self, tsc: u64) -> Result<()> {
+    pub fn restore_cooperative_tsc(&self, tsc: u64, offset: u64) -> Result<()> {
+        use std::os::fd::AsRawFd;
+        let attribute = kvm_bindings::kvm_device_attr {
+            group: 0, // KVM_VCPU_TSC_CTRL
+            attr: 0,  // KVM_VCPU_TSC_OFFSET
+            addr: &offset as *const u64 as u64,
+            flags: 0,
+        };
+        // KVM_SET_DEVICE_ATTR = _IOW(KVMIO, 0xe1, struct kvm_device_attr).
+        // SAFETY: the vCPU descriptor and both pointed-to values remain valid
+        // for this synchronous ioctl; the kernel reads a 24-byte UAPI structure.
+        if unsafe {
+            libc::ioctl(
+                self.fd.as_raw_fd(),
+                0x4018_aee1 as libc::c_ulong,
+                &attribute,
+            )
+        } < 0
+        {
+            return Err(Error::VcpuSetMsrs(kvm_ioctls::Error::new(
+                std::io::Error::last_os_error()
+                    .raw_os_error()
+                    .unwrap_or(libc::EIO),
+            )));
+        }
         let msrs = kvm_bindings::Msrs::from_entries(&[kvm_bindings::kvm_msr_entry {
             index: 0x10, // IA32_TSC
             data: tsc,
             ..Default::default()
         }])
         .expect("one MSR fits");
-        if self.fd.set_msrs(&msrs).map_err(Error::VcpuSetMsrs)? != 1 {
+        let mut restored = msrs;
+        if self
+            .fd
+            .get_msrs(&mut restored)
+            .map_err(Error::VcpuSetMsrs)?
+            != 1
+            || restored.as_slice()[0].data < tsc
+        {
             return Err(Error::VcpuSetMsrs(kvm_ioctls::Error::new(libc::EIO)));
         }
         Ok(())

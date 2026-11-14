@@ -1031,8 +1031,12 @@ pub fn build_microvm(
                 .configure_cooperative_entry(&entry)
                 .map_err(Error::Vcpu)
                 .map_err(StartMicrovmError::Internal)?;
+            // One offset keeps all guest CPUs on the same counter timeline.
+            // SAFETY: x86_64 provides RDTSC; template frequency is fenced above.
+            let host_tsc = unsafe { std::arch::x86_64::_rdtsc() };
+            let offset = entry.tsc.wrapping_sub(host_tsc);
             for cpu in &vcpus {
-                cpu.restore_cooperative_tsc(entry.tsc)
+                cpu.restore_cooperative_tsc(entry.tsc, offset)
                     .map_err(Error::Vcpu)
                     .map_err(StartMicrovmError::Internal)?;
             }
