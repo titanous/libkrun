@@ -225,7 +225,9 @@ mod tests {
             .unwrap()
             .to_string()
             .contains("before acceptance"));
-        request.complete(Err(io::Error::other("late completion of the expired attempt")));
+        request.complete(Err(io::Error::other(
+            "late completion of the expired attempt",
+        )));
         request.arm(Duration::from_secs(30)).unwrap();
         assert!(request.is_armed());
         assert!(request.0 .0.lock().unwrap().result.is_none());
