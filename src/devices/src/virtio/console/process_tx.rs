@@ -200,6 +200,9 @@ fn write_desc_to_output(
                     .elapsed()
                     >= std::time::Duration::from_millis(100)
             {
+                state
+                    .dropped
+                    .fetch_add((desc.len as usize - total) as u64, Ordering::Relaxed);
                 return Err(io::ErrorKind::TimedOut.into());
             }
             let remaining = src.offset(written_in_slice).map_err(io::Error::other)?;
@@ -248,6 +251,7 @@ fn write_desc_to_output(
                             );
                         }
                     }
+                    stalled_since = None;
                     written_in_slice += n;
                     total += n;
                     if written_in_slice >= slice_len {
@@ -257,6 +261,9 @@ fn write_desc_to_output(
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                     if stop.load(Ordering::Acquire) {
+                        state
+                            .dropped
+                            .fetch_add((desc.len as usize - total) as u64, Ordering::Relaxed);
                         return Err(e);
                     }
                     // Backpressure must not retain guest buffers forever: console
@@ -602,6 +609,21 @@ mod tests {
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
         assert_eq!(state.dropped_bytes(), payload.len() as u64);
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        let (mem, mut queue, _) = make_mem_and_queue(payload);
+        let desc = queue.pop(&mem).unwrap();
+        let state = super::super::ConsoleTxState::default();
+        let result = write_desc_to_output(
+            desc,
+            &mut Stalled,
+            &make_interrupt(),
+            0,
+            0,
+            0,
+            &AtomicBool::new(true),
+            &state,
+        );
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(state.dropped_bytes(), payload.len() as u64);
     }
 
     #[test]
