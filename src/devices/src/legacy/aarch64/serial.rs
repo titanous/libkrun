@@ -47,8 +47,6 @@ const PL011_ID: [u8; 8] = [0x11, 0x10, 0x14, 0x00, 0x0d, 0xf0, 0x05, 0xb1];
 const AMBA_ID_LOW: u64 = 0x3f8;
 const AMBA_ID_HIGH: u64 = 0x401;
 
-const PL011_FIFO_SIZE: usize = 16;
-
 #[derive(Debug)]
 pub enum Error {
     BadWriteOffset(u64),

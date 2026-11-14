@@ -9,7 +9,9 @@
 //!
 
 use std::fmt;
-use std::time::{Duration, Instant};
+#[cfg(kani)]
+use std::time::Duration;
+use std::time::Instant;
 use std::{io, result};
 
 use crate::BusDevice;

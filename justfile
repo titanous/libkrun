@@ -19,6 +19,11 @@ check:
     cargo fmt --check
     cargo clippy -p libkrun --features {{features}} -- -D warnings
 
+# Cross-build and lint Linux arm64 under `nix develop` (warnings denied).
+check-aarch64:
+    cargo build --workspace --target aarch64-unknown-linux-gnu --features embedded_init,net,blk,vhost-user
+    cargo clippy --workspace --target aarch64-unknown-linux-gnu --features embedded_init,net,blk,vhost-user -- -D warnings
+
 # Build the release library
 build: build-init
     cargo build --release -p libkrun --features {{features}}

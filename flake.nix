@@ -300,6 +300,15 @@ KCONFIG_EOF
           CC_x86_64_unknown_linux_gnu = "${pkgs.gcc}/bin/gcc";
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER = "${pkgs.gcc}/bin/gcc";
 
+          # Linux arm64 cross builds use target libraries, never host cap-ng.
+          CC_aarch64_unknown_linux_gnu = "${pkgs.pkgsCross.aarch64-multiplatform.stdenv.cc}/bin/aarch64-unknown-linux-gnu-cc";
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER =
+            "${pkgs.pkgsCross.aarch64-multiplatform.stdenv.cc}/bin/aarch64-unknown-linux-gnu-cc";
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS =
+            "-L native=${pkgs.pkgsCross.aarch64-multiplatform.libcap_ng}/lib -D warnings";
+          BINDGEN_EXTRA_CLANG_ARGS_aarch64_unknown_linux_gnu =
+            "--target=aarch64-unknown-linux-gnu -isystem ${pkgs.pkgsCross.aarch64-multiplatform.glibc.dev}/include";
+
           # Force the NixOS-wrapped clang++ for C++ compilation (used by libfuzzer-sys
           # build.rs). The gcc-wrapper g++ has a broken #include_next search order on
           # NixOS: glibc is added via -isystem (position 3) before gcc's own C++ headers
