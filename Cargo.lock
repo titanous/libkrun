@@ -922,6 +922,7 @@ dependencies = [
  "nitro_sandbox",
  "polly",
  "proptest",
+ "signal-hook",
  "thiserror 1.0.69",
  "utils",
  "vm-memory",

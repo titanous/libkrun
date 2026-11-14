@@ -194,6 +194,10 @@ that default is not safe on hosts requiring serialized teardown, including m9g.
 to be gone, then release the lock. Hold it across all those steps. Killing a VMM
 without the lock bypasses library teardown serialization. Prefer a handle stop
 request, which stops workers and closes the VM under the configured lock.
+A one-guest VMM can call `handle.install_sigterm_handler()` and retain the returned
+guard through `run`; SIGTERM then writes the same stop event and returns
+`VmExit::Stopped`. Installation is explicit so the library does not silently
+replace the embedder's process-wide signal policy.
 All cooperating VMMs and the daemon must resolve the path to the same inode,
 including across mount namespaces. Starts/stops in different processes are
 serialized by the kernel's flock, not a process-local mutex.

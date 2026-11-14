@@ -2012,7 +2012,43 @@ impl BalloonHandle {
     }
 }
 
+/// Scoped SIGTERM-to-stop registration for a one-guest Nitro VMM process.
+#[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+pub struct NitroSigtermGuard(signal_hook::SigId);
+#[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+impl Drop for NitroSigtermGuard {
+    fn drop(&mut self) {
+        signal_hook::low_level::unregister(self.0);
+    }
+}
+
 impl VmHandle {
+    /// Route SIGTERM through the same orderly stop event as a handle request.
+    /// Keep the returned guard alive while running the guest.
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    pub fn install_sigterm_handler(&self) -> Result<NitroSigtermGuard, StartError> {
+        use std::os::fd::AsRawFd;
+        if self.vmm.is_some() {
+            return Err(StartError::Nitro(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "unsupported on this backend: Nitro SIGTERM registration requires a Nitro handle",
+            )));
+        }
+        let stop = self.shutdown_efd.clone().ok_or_else(|| {
+            StartError::Nitro(std::io::Error::other("Nitro stop event unavailable"))
+        })?;
+        // write(2) is async-signal-safe. Retaining the Arc prevents fd reuse
+        // until signal-hook has unregistered this callback.
+        let id = unsafe {
+            signal_hook::low_level::register(libc::SIGTERM, move || {
+                let value = 1u64;
+                libc::write(stop.as_raw_fd(), (&value as *const u64).cast(), 8);
+            })
+        }
+        .map_err(StartError::Nitro)?;
+        Ok(NitroSigtermGuard(id))
+    }
+
     fn kvm(&self) -> Result<&Arc<Mutex<vmm::Vmm>>, StartError> {
         self.vmm.as_ref().ok_or_else(|| {
             #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
