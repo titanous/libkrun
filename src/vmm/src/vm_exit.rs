@@ -7,6 +7,8 @@ use std::sync::{Arc, Mutex};
 pub enum VmExit {
     /// An explicit workload exit code, including zero; not a kernel power-off.
     Shutdown { exit_code: i32 },
+    /// Guest cooperatively froze; its immutable template was written to this path.
+    Frozen { template_path: std::path::PathBuf },
     /// The guest kernel stated power-off intent before its terminal event.
     PowerOffRequested,
     /// The guest kernel requested reboot; the VMM does not restart it in place.

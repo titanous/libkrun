@@ -100,6 +100,31 @@ impl Cmdline {
         }
     }
 
+    fn push_kernel_argument(&mut self, argument: &str) {
+        let mut quoted = false;
+        let mut separator = None;
+        for (index, character) in self.line.char_indices() {
+            if character == '"' {
+                quoted = !quoted;
+            }
+            if !quoted
+                && self.line[index..].starts_with("--")
+                && (index == 0 || self.line.as_bytes()[index - 1] == b' ')
+                && (index + 2 == self.line.len() || self.line.as_bytes()[index + 2] == b' ')
+            {
+                separator = Some(index);
+                break;
+            }
+        }
+        if let Some(index) = separator {
+            self.line.insert_str(index, &format!("{argument} "));
+        } else {
+            self.start_push();
+            self.line.push_str(argument);
+        }
+        self.end_push();
+    }
+
     fn start_push(&mut self) {
         if !self.line.is_empty() {
             self.line.push(' ');
@@ -131,11 +156,7 @@ impl Cmdline {
         valid_element(v)?;
         self.has_capacity(k.len() + v.len() + 1)?;
 
-        self.start_push();
-        self.line.push_str(k);
-        self.line.push('=');
-        self.line.push_str(v);
-        self.end_push();
+        self.push_kernel_argument(&format!("{k}={v}"));
 
         Ok(())
     }
@@ -147,9 +168,7 @@ impl Cmdline {
 
         self.has_capacity(s.len())?;
 
-        self.start_push();
-        self.line.push_str(s);
-        self.end_push();
+        self.push_kernel_argument(s);
 
         Ok(())
     }
@@ -168,6 +187,16 @@ impl Cmdline {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kernel_arguments_precede_init_separator() {
+        let mut line = Cmdline::new(256);
+        line.insert_str("console=ttyS0 -- daemon-argument").unwrap();
+        line.insert_str("cooperative_template").unwrap();
+        line.insert("virtio_mmio.device", "4K@0xd0000000:5")
+            .unwrap();
+        assert_eq!(line.as_str(), "console=ttyS0 cooperative_template virtio_mmio.device=4K@0xd0000000:5 -- daemon-argument");
+    }
 
     #[test]
     fn insert_hello_world() {

@@ -89,7 +89,12 @@ use nix::unistd::isatty;
 use polly::event_manager::{Error as EventManagerError, EventManager};
 use utils::eventfd::EventFd;
 use utils::worker_message::WorkerMessage;
-#[cfg(all(target_arch = "x86_64", not(feature = "efi"), not(feature = "tee")))]
+#[cfg(all(
+    target_arch = "x86_64",
+    feature = "vhost-user",
+    not(feature = "efi"),
+    not(feature = "tee")
+))]
 use vm_memory::mmap::MmapRegion;
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 use vm_memory::Address;
@@ -98,7 +103,6 @@ use vm_memory::Bytes;
 use vm_memory::FileOffset;
 #[cfg(not(feature = "aws-nitro"))]
 use vm_memory::GuestMemoryBackend;
-#[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
 use vm_memory::GuestRegionMmap;
 use vm_memory::{GuestAddress, GuestMemoryMmap};
 
@@ -126,6 +130,14 @@ pub enum StartMicrovmError {
     FirmwareRead(io::Error),
     /// Memory regions are overlapping or mmap fails.
     GuestMemoryMmap(String),
+    /// Template CPU count, RAM size, or device configuration is incompatible.
+    TemplateTopologyMismatch,
+    /// Template RAM extents differ from the configured architecture layout.
+    TemplateMemoryLayoutMismatch,
+    /// Configured guest kernel build ID differs from the template.
+    TemplateKernelMismatch,
+    /// Architecture-specific execution compatibility differs from the template.
+    TemplateCpuMismatch,
     /// The BZIP2 decoder couldn't decompress the kernel.
     ImageBz2Decoder(io::Error),
     /// Cannot find compressed kernel in file.
@@ -285,6 +297,12 @@ impl Display for StartMicrovmError {
             FirmwareRead(ref err) => {
                 write!(f, "Cannot read firmware contents from file: {err}")
             }
+            TemplateKernelMismatch => write!(f, "template kernel build identifier mismatch"),
+            TemplateCpuMismatch => {
+                write!(f, "template architecture execution compatibility mismatch")
+            }
+            TemplateTopologyMismatch => write!(f, "incompatible template topology"),
+            TemplateMemoryLayoutMismatch => write!(f, "template RAM layout mismatch"),
             GuestMemoryMmap(ref err) => {
                 // Remove imbricated quotes from error message.
                 let mut err_msg = format!("{err:?}");
@@ -733,6 +751,10 @@ pub fn build_microvm(
 
     #[cfg(target_arch = "x86_64")]
     kernel_cmdline.insert_str("holodeck.stop_port=1")?;
+    #[cfg(target_arch = "x86_64")]
+    if vm_resources.cooperative_capture.is_some() {
+        kernel_cmdline.insert_str("cooperative_template")?;
+    }
 
     // if let Some(cmdline) = &vm_resources.kernel_cmdline.krun_env {
     //     kernel_cmdline.insert_str(cmdline.as_str()).unwrap();
@@ -952,6 +974,9 @@ pub fn build_microvm(
         (arch::IRQ_BASE, arch::IRQ_MAX),
     );
 
+    #[cfg(target_arch = "x86_64")]
+    let mut vcpus;
+    #[cfg(target_arch = "aarch64")]
     let vcpus;
     let intc: IrqChip;
 
@@ -980,7 +1005,9 @@ pub fn build_microvm(
             Some(intc.clone()),
         )?;
 
-        let kernel_boot = vm_resources.firmware_config.is_none() && !cfg!(feature = "tee");
+        let kernel_boot = vm_resources.firmware_config.is_none()
+            && !cfg!(feature = "tee")
+            && vm_resources.cooperative_template.is_none();
 
         vcpus = create_vcpus_x86_64(
             &vm,
@@ -995,6 +1022,63 @@ pub fn build_microvm(
             _sender,
         )
         .map_err(StartMicrovmError::Internal)?;
+        if let Some(template) = &vm_resources.cooperative_template {
+            let compatibility = template_compatibility(vm_resources, &vcpus[0])
+                .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
+            if compatibility.len() >= 20
+                && template.compatibility.len() >= 20
+                && compatibility[compatibility.len() - 20..]
+                    != template.compatibility[template.compatibility.len() - 20..]
+            {
+                return Err(StartMicrovmError::TemplateKernelMismatch);
+            }
+            if compatibility != template.compatibility {
+                return Err(StartMicrovmError::TemplateCpuMismatch);
+            }
+            vm.fd()
+                .set_clock(&kvm_bindings::kvm_clock_data {
+                    clock: template.clock_state,
+                    ..Default::default()
+                })
+                .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
+            let mut page = [0; 4096];
+            guest_memory
+                .read_slice(&mut page, GuestAddress(template.control_page_address))
+                .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
+            let entry = crate::cooperative::ResumeEntry::parse(&page)
+                .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
+            vcpus[0]
+                .configure_cooperative_entry(&entry)
+                .map_err(Error::Vcpu)
+                .map_err(StartMicrovmError::Internal)?;
+            // One offset keeps all guest CPUs on the same counter timeline.
+            // SAFETY: x86_64 provides RDTSC; template frequency is fenced above.
+            let host_tsc = unsafe { std::arch::x86_64::_rdtsc() };
+            let offset = entry.tsc.wrapping_sub(host_tsc);
+            for cpu in &vcpus {
+                cpu.restore_cooperative_tsc(entry.tsc, offset)
+                    .map_err(Error::Vcpu)
+                    .map_err(StartMicrovmError::Internal)?;
+            }
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?
+                .as_nanos() as u64;
+            use crate::cooperative::word;
+            page[word::REALTIME * 8..(word::REALTIME + 1) * 8].copy_from_slice(&now.to_le_bytes());
+            let mut random = std::fs::File::open("/dev/urandom")
+                .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
+            std::io::Read::read_exact(
+                &mut random,
+                &mut page[word::RANDOM_START * 8..word::RANDOM_END * 8],
+            )
+            .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
+            page[word::SEED_READY * 8..(word::SEED_READY + 1) * 8]
+                .copy_from_slice(&1u64.to_le_bytes());
+            guest_memory
+                .write_slice(&page, GuestAddress(template.control_page_address))
+                .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
+        }
     }
 
     #[cfg(feature = "tdx")]
@@ -1076,12 +1160,54 @@ pub fn build_microvm(
     // Shared VM exit state.
     let vm_exit: crate::vm_exit::SharedVmExit = Arc::new(Mutex::new(None));
 
+    #[cfg(target_arch = "x86_64")]
+    let capture_request = crate::capture_request::CaptureRequest::default();
+    #[cfg(target_arch = "x86_64")]
+    for cpu in &mut vcpus {
+        cpu.capture_request = capture_request.clone();
+    }
     let mut vmm = Vmm {
+        #[cfg(target_arch = "x86_64")]
+        capture_request,
         guest_memory,
         arch_memory_info,
         kernel_cmdline,
         vcpus_handles: Vec::new(),
         exit_evt,
+        #[cfg(target_arch = "x86_64")]
+        cooperative_capture: vm_resources
+            .cooperative_capture
+            .clone()
+            .map(|(control, path)| {
+                (
+                    control,
+                    path,
+                    device_info.vcpu_count,
+                    device_info.ram_mib as u64,
+                )
+            }),
+        #[cfg(target_arch = "x86_64")]
+        cooperative_shm: _shm_manager.regions(),
+        #[cfg(all(target_arch = "x86_64", feature = "blk"))]
+        cooperative_disks: vm_resources.block.list.iter().cloned().collect(),
+        #[cfg(target_arch = "x86_64")]
+        cooperative_compatibility: if vm_resources.cooperative_capture.is_some()
+            || vm_resources.cooperative_template.is_some()
+        {
+            template_compatibility(vm_resources, &vcpus[0])
+                .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?
+        } else {
+            Vec::new()
+        },
+        #[cfg(target_arch = "x86_64")]
+        cooperative_topology: if vm_resources.cooperative_capture.is_some()
+            || vm_resources.cooperative_template.is_some()
+        {
+            crate::template_topology::encode(vm_resources, &_shm_manager)
+                .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?
+        } else {
+            Vec::new()
+        },
         exit_observers: Vec::new(),
         exit_code: exit_code.clone(),
         vm_exit: vm_exit.clone(),
@@ -1104,9 +1230,8 @@ pub fn build_microvm(
     timer.checkpoint("create_vcpus + legacy_devices");
 
     #[cfg(not(feature = "tee"))]
-    let balloon_device = attach_balloon_device(&mut vmm, event_manager, intc.clone())?;
-    #[cfg(not(feature = "tee"))]
-    {
+    if !vm_resources.omit_balloon {
+        let balloon_device = attach_balloon_device(&mut vmm, event_manager, intc.clone())?;
         vmm.balloon = Some(balloon_device);
     }
 
@@ -1321,15 +1446,40 @@ pub fn build_microvm(
     // Write the kernel command line to guest memory. This is x86_64 specific, since on
     // aarch64 the command line will be specified through the FDT.
     #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
-    load_cmdline(&vmm)?;
+    if vm_resources.cooperative_template.is_none() {
+        load_cmdline(&vmm)?;
+    }
 
-    vmm.configure_system(
-        vcpus.as_slice(),
-        &intc,
-        &payload_config.initrd_config,
-        &vm_resources.smbios_oem_strings,
-    )
-    .map_err(StartMicrovmError::Internal)?;
+    #[cfg(target_arch = "x86_64")]
+    let configure_boot = vm_resources.cooperative_template.is_none();
+    #[cfg(not(target_arch = "x86_64"))]
+    let configure_boot = true;
+    if configure_boot {
+        vmm.configure_system(
+            vcpus.as_slice(),
+            &intc,
+            &payload_config.initrd_config,
+            &vm_resources.smbios_oem_strings,
+        )
+        .map_err(StartMicrovmError::Internal)?;
+    }
+    #[cfg(target_arch = "x86_64")]
+    if vm_resources.cooperative_template.is_some() {
+        let generation = vmm
+            .notify_vm_generation_change()
+            .map_err(StartMicrovmError::Internal)?;
+        eprintln!("COOPERATIVE GENERATION {generation:02x?}");
+        // The initial edge can be cleared by the guest's IOAPIC syscore
+        // restoration. Re-notify once its post-syscore time read traps.
+        vcpus[0].cooperative_generation_irq = Some(
+            vmm.vmgenid
+                .as_ref()
+                .ok_or(StartMicrovmError::Internal(Error::VmGenerationUnavailable))?
+                .interrupt_evt()
+                .try_clone()
+                .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?,
+        );
+    }
     timer.checkpoint("configure_system");
 
     #[cfg(feature = "tee")]
@@ -1705,18 +1855,21 @@ fn load_payload(
                 #[cfg(not(feature = "vhost-user"))]
                 unreachable!()
             } else {
-                // A guest modifies its kernel data. Never expose the cached firmware
-                // library's original bytes to KVM or a later VM boots corrupted data.
+                // Guest writes must never modify the cached firmware bundle.
+                let region = if _vm_resources.cooperative_capture.is_some() {
+                    let file = crate::template_memory::create(kernel_size)
+                        .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
+                    crate::template_memory::map(&file, 0, kernel_size, false)
+                        .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?
+                } else {
+                    vm_memory::MmapRegion::new(kernel_size).map_err(StartMicrovmError::InvalidKernelBundle)?
+                };
                 validate_bundle_range(kernel_host_addr, kernel_size as u64)
                     .map_err(StartMicrovmError::InvalidBundleAddressRange)?;
-                let region =
-                    MmapRegion::new(kernel_size).map_err(StartMicrovmError::InvalidKernelBundle)?;
-                // SAFETY: validated source bundle and newly allocated, disjoint region.
+                // SAFETY: validated bundle and independent owned destination.
                 unsafe {
                     std::ptr::copy_nonoverlapping(
-                        kernel_host_addr as *const u8,
-                        region.as_ptr(),
-                        kernel_size,
+                        kernel_host_addr as *const u8, region.as_ptr(), kernel_size,
                     );
                 }
                 region
@@ -1818,6 +1971,32 @@ pub struct PayloadConfig {
     kernel_cmdline: Option<String>,
 }
 
+#[cfg(target_arch = "x86_64")]
+fn template_compatibility(resources: &VmResources, cpu: &Vcpu) -> io::Result<Vec<u8>> {
+    let mut data = cpu.template_compatibility()?;
+    let kernel = resources.external_kernel.as_ref().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::Unsupported,
+            "templates require an external ELF kernel with build ID",
+        )
+    })?;
+    let file = std::fs::File::open(&kernel.path)?;
+    let size = usize::try_from(file.metadata()?.len()).map_err(io::Error::other)?;
+    if size == 0 {
+        return Err(io::Error::other("empty template kernel"));
+    }
+    let mapping: vm_memory::MmapRegion = vm_memory::mmap::MmapRegionBuilder::new(size)
+        .with_file_offset(vm_memory::FileOffset::new(file, 0))
+        .with_mmap_prot(libc::PROT_READ)
+        .with_mmap_flags(libc::MAP_PRIVATE)
+        .build()
+        .map_err(io::Error::other)?;
+    // SAFETY: the read-only mapping owns size readable bytes for this scope.
+    let bytes = unsafe { std::slice::from_raw_parts(mapping.as_ptr(), size) };
+    data.extend_from_slice(&crate::kernel_identity::build_id(bytes)?);
+    Ok(data)
+}
+
 pub fn create_guest_memory(
     mem_size: usize,
     vm_resources: &VmResources,
@@ -1826,6 +2005,67 @@ pub fn create_guest_memory(
     (GuestMemoryMmap, ArchMemoryInfo, ShmManager, PayloadConfig),
     StartMicrovmError,
 > {
+    #[cfg(target_arch = "x86_64")]
+    if let Some(template) = &vm_resources.cooperative_template {
+        if template.architecture != crate::template::Architecture::current()
+            || template.ram_mib != mem_size as u64
+            || Some(template.vcpus) != vm_resources.vm_config().vcpu_count
+            || vm_resources.split_irqchip
+            || vm_resources.gpu_virgl_flags.is_some()
+        {
+            return Err(StartMicrovmError::TemplateTopologyMismatch);
+        }
+        let (info, expected) = arch::arch_memory_regions(mem_size << 20, None, 0, 0, None);
+        if !template
+            .regions
+            .iter()
+            .map(|(gpa, size, _)| (GuestAddress(*gpa), *size))
+            .eq(expected.iter().copied())
+        {
+            return Err(StartMicrovmError::TemplateMemoryLayoutMismatch);
+        }
+        let mut memory = template
+            .map_private()
+            .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
+        let mut page = [0; 4096];
+        memory
+            .read_slice(&mut page, GuestAddress(template.control_page_address))
+            .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
+        let entry = crate::cooperative::ResumeEntry::parse(&page)
+            .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
+        let mut shm = ShmManager::new(&info);
+        #[cfg(not(feature = "tee"))]
+        for (index, mount) in vm_resources.fs.iter().enumerate() {
+            if let Some(size) = mount.shm_size {
+                shm.create_fs_region(index, size)
+                    .map_err(StartMicrovmError::ShmCreate)?;
+            }
+        }
+        for (address, size) in shm.regions() {
+            let mapping = vm_memory::MmapRegion::new(size)
+                .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
+            let region = GuestRegionMmap::new(mapping, address)
+                .ok_or_else(|| StartMicrovmError::GuestMemoryMmap("DAX range overflow".into()))?;
+            memory = memory
+                .insert_region(Arc::new(region))
+                .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
+        }
+        let topology = crate::template_topology::encode(vm_resources, &shm)
+            .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
+        if topology != template.topology {
+            return Err(StartMicrovmError::TemplateTopologyMismatch);
+        }
+        return Ok((
+            memory,
+            info,
+            shm,
+            PayloadConfig {
+                entry_addr: GuestAddress(entry.rip),
+                initrd_config: None,
+                kernel_cmdline: None,
+            },
+        ));
+    }
     let mem_size = mem_size << 20;
 
     #[cfg(not(feature = "efi"))]
@@ -1902,6 +2142,10 @@ pub fn create_guest_memory(
     // Add SHM regions before creating guest memory
     arch_mem_regions.extend(shm_manager.regions());
 
+    #[cfg(target_arch = "x86_64")]
+    let cooperative_capture = vm_resources.cooperative_capture.is_some();
+    #[cfg(not(target_arch = "x86_64"))]
+    let cooperative_capture = false;
     let guest_mem = if use_vhost_user {
         #[cfg(feature = "vhost-user")]
         {
@@ -1952,6 +2196,20 @@ pub fn create_guest_memory(
         }
         #[cfg(not(feature = "vhost-user"))]
         unreachable!()
+    } else if cooperative_capture {
+        let regions = arch_mem_regions
+            .iter()
+            .map(|(addr, size)| {
+                let file = crate::template_memory::create(*size)?;
+                let mapping = crate::template_memory::map(&file, 0, *size, false)?;
+                GuestRegionMmap::new(mapping, *addr).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "RAM region overflow")
+                })
+            })
+            .collect::<Result<Vec<_>, io::Error>>()
+            .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
+        GuestMemoryMmap::from_regions(regions)
+            .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?
     } else {
         GuestMemoryMmap::from_ranges(&arch_mem_regions)
             .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?
@@ -2910,6 +3168,16 @@ pub mod tests {
         });
 
         create_guest_memory(mem_size_mib, &vm_resources, &Payload::Empty)
+    }
+
+    #[test]
+    fn ordinary_guest_memory_is_private_anonymous() {
+        let (memory, _, _, _) = default_guest_memory(128).unwrap();
+        for region in memory.iter() {
+            assert!(region.file_offset().is_none());
+            assert_ne!(region.flags() & libc::MAP_PRIVATE, 0);
+            assert_ne!(region.flags() & libc::MAP_ANONYMOUS, 0);
+        }
     }
 
     #[test]

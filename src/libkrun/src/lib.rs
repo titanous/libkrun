@@ -2,6 +2,18 @@
 compile_error!("unsupported on this backend: nitro-sandbox cannot be combined with tee");
 #[cfg(all(feature = "nitro-sandbox", feature = "aws-nitro"))]
 compile_error!("unsupported on this backend: nitro-sandbox cannot be combined with aws-nitro");
+mod readiness;
+pub use readiness::{GuestReadiness, GuestReadyTimeout};
+
+/// A cooperative template descriptor or owner-only persisted file.
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    not(feature = "tee")
+))]
+pub enum TemplateSource {
+    Descriptor(std::fs::File),
+    Path(std::path::PathBuf),
+}
 
 use crossbeam_channel::unbounded;
 #[cfg(feature = "gpu")]
@@ -637,6 +649,103 @@ impl Builder {
         self
     }
 
+    /// Declare a block disk's frozen content identity (digest or snapshot token).
+    /// A new guest must declare each disk as a copy of the source token.
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        not(feature = "tee")
+    ))]
+    pub fn template_disk_identity(
+        &mut self,
+        block_id: impl Into<String>,
+        content_id: impl Into<String>,
+    ) -> &mut Self {
+        self.config
+            .vmr
+            .template_disk_identities
+            .insert(block_id.into(), content_id.into());
+        self
+    }
+
+    /// Mark this guest as a future cooperative template, retaining descriptor-backed RAM.
+    /// Capture remains disarmed until explicitly requested through VmHandle.
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        not(feature = "tee")
+    ))]
+    pub fn future_template(&mut self) -> &mut Self {
+        self.config.vmr.cooperative_capture = Some((0, std::path::PathBuf::new()));
+        self
+    }
+
+    /// Capture a template only after the guest publishes its frozen control
+    /// page and emits the cooperative freeze exit. The source never resumes.
+    /// Pass zero to discover the GPA from BSP RSI at that exit, or a nonzero
+    /// address to require an exact match with the reported GPA.
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        not(feature = "tee")
+    ))]
+    pub fn capture_cooperative_template(
+        &mut self,
+        control_page: u64,
+        path: impl Into<std::path::PathBuf>,
+    ) -> &mut Self {
+        self.config.vmr.cooperative_capture = Some((control_page, path.into()));
+        self
+    }
+
+    /// Import a template and configure this new guest's devices, connection
+    /// rule, disk snapshot declarations, CID and identifiers in one operation.
+    /// The returned deadline starts now, including subsequent build time.
+    /// Mark it ready only after validating the new agent's identity/generation.
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        not(feature = "tee")
+    ))]
+    pub fn start_from_template(
+        &mut self,
+        source: TemplateSource,
+        timeout: std::time::Duration,
+        configure: impl FnOnce(&mut Self) -> std::io::Result<()>,
+    ) -> std::io::Result<GuestReadiness> {
+        let readiness = GuestReadiness::new(timeout)?;
+        match source {
+            TemplateSource::Descriptor(file) => {
+                self.start_from_template_fd(file)?;
+            }
+            TemplateSource::Path(path) => {
+                self.start_from_template_path(path)?;
+            }
+        }
+        configure(self)?;
+        Ok(readiness)
+    }
+
+    /// Start a new VM over a sealed template descriptor. Configure the same
+    /// device list in the same order, with independent writable disk backends.
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        not(feature = "tee")
+    ))]
+    pub fn start_from_template_fd(&mut self, file: std::fs::File) -> std::io::Result<&mut Self> {
+        self.config.vmr.cooperative_template = Some(vmm::template::Template::open(file)?);
+        Ok(self)
+    }
+
+    /// Load a persisted template into immutable backing before starting a VM.
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        not(feature = "tee")
+    ))]
+    pub fn start_from_template_path(
+        &mut self,
+        path: impl AsRef<std::path::Path>,
+    ) -> std::io::Result<&mut Self> {
+        self.config.vmr.cooperative_template = Some(vmm::template::Template::from_path(path)?);
+        Ok(self)
+    }
+
     pub fn workdir(&mut self, workdir: String) -> &mut Self {
         self.config.workdir = Some(workdir);
         self
@@ -1168,8 +1277,16 @@ impl Builder {
         self
     }
 
-    /// Enable the memory balloon device, exposing it through the Rust API via VmHandle::balloon().
+    /// Leave the memory-balloon transport out of this VM. Existing callers
+    /// retain the historical device list unless they opt out explicitly.
     #[cfg(not(feature = "tee"))]
+    pub fn omit_balloon_device(&mut self) -> &mut Self {
+        self.config.vmr.omit_balloon = true;
+        self
+    }
+
+    #[cfg(not(feature = "tee"))]
+    /// Enable balloon control through VmHandle::balloon().
     pub fn enable_balloon(&mut self) -> &mut Self {
         self.config.vmr.balloon_enabled = true;
         self
@@ -2443,6 +2560,81 @@ impl VmHandle {
             }
         })
     }
+    /// Arm capture and wait for an independently coordinated guest-agent trigger.
+    /// This does not request a freeze from the kernel. The daemon must quiesce
+    /// the workload through the agent and authorize its trigger after arming.
+    /// The returned template owns a sealed descriptor. For a sequential agent
+    /// handshake, use arm_template_capture followed by wait_template_capture.
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        not(feature = "tee")
+    ))]
+    pub fn freeze_template(
+        &self,
+        timeout: std::time::Duration,
+    ) -> std::io::Result<vmm::capture_request::CaptureOutcome> {
+        let request = {
+            let vmm = self
+                .vmm
+                .as_ref()
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::Unsupported,
+                        "cooperative capture requires Linux KVM",
+                    )
+                })?
+                .lock()
+                .unwrap();
+            vmm.arm_template_capture(timeout)?
+        };
+        request.wait()
+    }
+
+    /// Authorize capture after the agent has quiesced the workload.
+    /// After this returns, authorize the agent to write the kernel trigger.
+    /// Receive the sealed descriptor with wait_template_capture.
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        not(feature = "tee")
+    ))]
+    pub fn arm_template_capture(&self, timeout: std::time::Duration) -> std::io::Result<()> {
+        let request = self
+            .vmm
+            .as_ref()
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "cooperative capture requires Linux KVM",
+                )
+            })?
+            .lock()
+            .unwrap()
+            .arm_template_capture(timeout)?;
+        let _ = request;
+        Ok(())
+    }
+
+    /// Wait for a previously armed capture using its original deadline.
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        not(feature = "tee")
+    ))]
+    pub fn wait_template_capture(&self) -> std::io::Result<vmm::capture_request::CaptureOutcome> {
+        let request = self
+            .vmm
+            .as_ref()
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "cooperative capture requires Linux KVM",
+                )
+            })?
+            .lock()
+            .unwrap()
+            .wait_template_capture();
+        request.wait()
+    }
+
     /// Give a running guest a fresh generation identifier and raise its notification interrupt.
     /// Call after copying guest memory and starting the copy, so its kernel reseeds randomness.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
