@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use nix::sys::socket::{
-    bind, connect, getpeername, recv, send, sendto, socket, AddressFamily, MsgFlags, SockFlag,
-    SockType, SockaddrLike, SockaddrStorage,
+    bind, connect, getpeername, recvfrom, send, sendto, socket, AddressFamily, MsgFlags, SockFlag,
+    SockType, SockaddrLike, SockaddrStorage, UnixAddr,
 };
 
 use super::super::Queue as VirtQueue;
@@ -24,8 +24,58 @@ use super::proxy::{Proxy, ProxyError, ProxyRemoval, ProxyStatus, ProxyUpdate, Re
 use utils::epoll::EventSet;
 use vm_memory::GuestMemoryMmap;
 
+fn wildcard_address(family: AddressFamily) -> Option<SockaddrStorage> {
+    match family {
+        AddressFamily::Inet => Some(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0).into()),
+        AddressFamily::Inet6 => {
+            Some(std::net::SocketAddrV6::new(std::net::Ipv6Addr::UNSPECIFIED, 0, 0, 0).into())
+        }
+        AddressFamily::Unix => {
+            let addr = UnixAddr::new_unnamed();
+            // SAFETY: addr owns a valid unnamed sockaddr_un.
+            unsafe { SockaddrStorage::from_raw(addr.as_ptr().cast(), Some(addr.len())) }
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn unix_datagram_autobind_can_send() {
+        let file = utils::tempfile::TempFile::new().unwrap();
+        std::fs::remove_file(file.as_path()).unwrap();
+        let receiver = std::os::unix::net::UnixDatagram::bind(file.as_path()).unwrap();
+        receiver
+            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        let sender = socket(
+            AddressFamily::Unix,
+            SockType::Datagram,
+            SockFlag::empty(),
+            None,
+        )
+        .unwrap();
+        bind(
+            sender.as_raw_fd(),
+            &wildcard_address(AddressFamily::Unix).unwrap(),
+        )
+        .unwrap();
+        let destination = UnixAddr::new(file.as_path()).unwrap();
+        assert_eq!(
+            sendto(sender.as_raw_fd(), b"unix", &destination, MsgFlags::empty()).unwrap(),
+            4
+        );
+        let mut data = [0; 4];
+        assert_eq!(receiver.recv(&mut data).unwrap(), 4);
+        assert_eq!(&data, b"unix");
+    }
+}
+
 pub struct TsiDgramProxy {
     pub(crate) socket_policy: super::policy::SocketPolicy,
+    family: AddressFamily,
     pub id: u64,
     cid: u64,
     local_port: u32,
@@ -79,6 +129,7 @@ impl TsiDgramProxy {
 
         Ok(TsiDgramProxy {
             socket_policy: Default::default(),
+            family,
             id,
             cid,
             local_port: 0,
@@ -132,6 +183,14 @@ impl TsiDgramProxy {
     }
     */
 
+    fn send_operation(&self) -> SocketOperation {
+        if self.family == AddressFamily::Unix {
+            SocketOperation::UnixDatagramSend
+        } else {
+            SocketOperation::UdpSend
+        }
+    }
+
     fn recv_to_pkt(&self, pkt: &mut VsockPacket) -> RecvPkt {
         if let Some(buf) = pkt.buf_mut() {
             // Disable UDP credit accounting until is fixed in the kernel
@@ -152,8 +211,18 @@ impl TsiDgramProxy {
             }
             */
 
-            match recv(self.fd.as_raw_fd(), &mut buf[..max_len], MsgFlags::empty()) {
-                Ok(cnt) => {
+            let mut data = vec![0; max_len];
+            match recvfrom::<SockaddrStorage>(self.fd.as_raw_fd(), &mut data) {
+                Ok((cnt, source)) => {
+                    let source = source.or_else(|| getpeername(self.fd.as_raw_fd()).ok());
+                    if source.is_none_or(|addr| {
+                        self.socket_policy
+                            .check(SocketOperation::ReceiveDatagram, &addr)
+                            .is_err()
+                    }) {
+                        return RecvPkt::Error;
+                    }
+                    buf[..cnt].copy_from_slice(&data[..cnt]);
                     debug!("recv cnt={cnt}");
                     if cnt > 0 {
                         RecvPkt::Read(cnt)
@@ -230,9 +299,14 @@ impl Proxy for TsiDgramProxy {
 
     fn connect(&mut self, pkt: &VsockPacket, req: TsiConnectReq) -> ProxyUpdate {
         debug!("connect: addr={}", req.addr);
+        let operation = if self.family == AddressFamily::Unix {
+            SocketOperation::UnixDatagramConnect
+        } else {
+            SocketOperation::UdpConnect
+        };
         let res = match self
             .socket_policy
-            .check(SocketOperation::UdpConnect, &req.addr)
+            .check(operation, &req.addr)
             .and_then(|()| connect(self.fd.as_raw_fd(), &req.addr))
         {
             Ok(()) => {
@@ -304,7 +378,7 @@ impl Proxy for TsiDgramProxy {
             let flags = MsgFlags::MSG_NOSIGNAL;
 
             let authorization = getpeername::<SockaddrStorage>(self.fd.as_raw_fd())
-                .and_then(|addr| self.socket_policy.check(SocketOperation::UdpSend, &addr));
+                .and_then(|addr| self.socket_policy.check(self.send_operation(), &addr));
             match authorization.and_then(|()| send(self.fd.as_raw_fd(), buf, flags)) {
                 Ok(sent) => {
                     self.tx_cnt += Wrapping(sent as u32);
@@ -334,7 +408,9 @@ impl Proxy for TsiDgramProxy {
 
         self.sendto_addr = Some(req.addr);
         if !self.listening {
-            let addr: SockaddrStorage = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0).into();
+            let Some(addr) = wildcard_address(self.family) else {
+                return update;
+            };
             match self
                 .socket_policy
                 .check(SocketOperation::Bind, &addr)
@@ -346,6 +422,10 @@ impl Proxy for TsiDgramProxy {
                 }
                 Err(e) => {
                     self.sendto_addr = None;
+                    self.push_pkt(MuxerRx::Reset {
+                        local_port: self.local_port,
+                        peer_port: self.peer_port,
+                    });
                     debug!("couldn't bind socket: {e}");
                 }
             }
@@ -367,7 +447,7 @@ impl Proxy for TsiDgramProxy {
 
                 match self
                     .socket_policy
-                    .check(SocketOperation::UdpSend, &addr)
+                    .check(self.send_operation(), &addr)
                     .and_then(|()| sendto(self.fd.as_raw_fd(), buf, &addr, flags))
                 {
                     Ok(sent) => {

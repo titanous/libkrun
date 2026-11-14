@@ -722,13 +722,13 @@ pub fn build_microvm(
     #[allow(unused_mut)]
     let mut kernel_cmdline = Cmdline::new(arch::CMDLINE_MAX_SIZE);
     if let Some(cmdline) = payload_config.kernel_cmdline {
-        kernel_cmdline.insert_str(cmdline.as_str()).unwrap();
+        kernel_cmdline.insert_str(cmdline.as_str())?;
     } else if !vm_resources.kernel_cmdline.cmdline.is_empty() {
         for part in vm_resources.kernel_cmdline.cmdline.iter() {
-            kernel_cmdline.insert_str(part).unwrap();
+            kernel_cmdline.insert_str(part)?;
         }
     } else {
-        kernel_cmdline.insert_str(DEFAULT_KERNEL_CMDLINE).unwrap();
+        kernel_cmdline.insert_str(DEFAULT_KERNEL_CMDLINE)?;
     }
 
     // if let Some(cmdline) = &vm_resources.kernel_cmdline.krun_env {
@@ -737,17 +737,9 @@ pub fn build_microvm(
 
     if let Some(kernel_console) = &vm_resources.kernel_console {
         let cmdline = kernel_cmdline.as_str();
-        let console_start_idx = cmdline.find("console=").unwrap();
-        let console_end_idx = cmdline
-            .get(console_start_idx..)
-            .and_then(|s| s.find(" ").map(|i| i + console_start_idx));
-
-        let cmdline = cmdline.replace(
-            &cmdline[console_start_idx..console_end_idx.unwrap()],
-            format!("console={kernel_console}").as_str(),
-        );
+        let rewritten = rewrite_console(cmdline, kernel_console);
         kernel_cmdline = Cmdline::new(arch::CMDLINE_MAX_SIZE);
-        kernel_cmdline.insert_str(cmdline).unwrap();
+        kernel_cmdline.insert_str(rewritten)?;
     }
 
     #[cfg(not(feature = "tee"))]
@@ -1204,7 +1196,11 @@ pub fn build_microvm(
 
     // Inject KRUN_*_DEV env vars for named console ports so the guest init
     // can open them directly without scanning sysfs.
-    for port in &device_info.console_ports {
+    for port in device_info
+        .console_ports
+        .iter()
+        .filter(|_| !vm_resources.kernel_cmdline.args.is_empty())
+    {
         match port.name.as_deref() {
             Some("krun-stdin") => {
                 vmm.kernel_cmdline
@@ -1312,7 +1308,7 @@ pub fn build_microvm(
 
     if !vm_resources.kernel_cmdline.args.is_empty() {
         for arg in &vm_resources.kernel_cmdline.args {
-            vmm.kernel_cmdline.insert_str(arg).unwrap();
+            vmm.kernel_cmdline.insert_str(arg)?;
         }
     };
 
@@ -1382,6 +1378,30 @@ pub fn build_microvm(
         #[cfg(not(feature = "tee"))]
         balloon_enabled: vm_resources.balloon_enabled,
     })
+}
+
+fn rewrite_console(cmdline: &str, console: &str) -> String {
+    let mut parts: Vec<String> = cmdline.split_whitespace().map(str::to_owned).collect();
+    if let Some(part) = parts.iter_mut().find(|part| part.starts_with("console=")) {
+        *part = format!("console={console}");
+    } else {
+        parts.push(format!("console={console}"));
+    }
+    parts.join(" ")
+}
+
+#[test]
+fn console_rewrite_accepts_missing_and_final_tokens() {
+    assert_eq!(rewrite_console("", "hvc0"), "console=hvc0");
+    assert_eq!(rewrite_console("quiet", "hvc0"), "quiet console=hvc0");
+    assert_eq!(
+        rewrite_console("quiet console=ttyS0", "hvc0"),
+        "quiet console=hvc0"
+    );
+    assert_eq!(
+        rewrite_console("notconsole=x", "hvc0"),
+        "notconsole=x console=hvc0"
+    );
 }
 
 fn load_external_kernel(

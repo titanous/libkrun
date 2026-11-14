@@ -16,7 +16,10 @@ Expose `Builder`, `Context`, `VmHandle`, `StartError`, `VmExit` and the optional
 - Firmware is dynamically loaded by default; `static-firmware` supports static musl launchers.
 - `external_kernel` configures external kernel/initramfs loading without requiring libkrunfw.
 - `add_block_backend` attaches caller storage with an identifier and read-only flag.
-- `outbound_policy` and `internet_socket_forwarding` configure userspace socket forwarding, not virtio-net or external servers.
+- `outbound_policy` configures normalized outbound and inbound socket rules; `AllowlistPolicy` is closed except explicit operation/address pairs. Callback code must not block or reenter VM controls.
+- `internet_socket_forwarding(false)` preserves guest-local sockets and mapped vsock while disabling internet hijacking/host forwarding. Neither control is a virtio-net firewall; external vhost-user configurations reject unsupported rule controls.
+- Explicit command lines omit bundled-init environment/arguments. Device-required MMIO/TSI entries and explicit console selection are the only VMM additions.
+- FUSE INIT failure is replied to the guest; Linux may complete mount before that asynchronous reply. Verify a known file operation for readiness.
 - See `../../docs/embedding.md` for image formats, ownership, DAX callbacks and policy errors.
 
 All API implementation lives in `src/lib.rs`. VMM lifecycle belongs to the vmm crate; device queue handling belongs to devices.

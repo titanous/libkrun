@@ -613,6 +613,7 @@ impl AsRawFd for UnixProxy {
 }
 
 pub struct UnixAcceptorProxy {
+    pub(crate) socket_policy: super::policy::SocketPolicy,
     id: u64,
     fd: OwnedFd,
     peer_port: u32,
@@ -647,7 +648,12 @@ impl UnixAcceptorProxy {
         .map_err(ProxyError::CreatingSocket)?;
         listen(&fd, Backlog::new(5).map_err(ProxyError::CreatingSocket)?)
             .map_err(ProxyError::CreatingSocket)?;
-        Ok(UnixAcceptorProxy { id, fd, peer_port })
+        Ok(UnixAcceptorProxy {
+            id,
+            fd,
+            peer_port,
+            socket_policy: Default::default(),
+        })
     }
 }
 
@@ -705,6 +711,15 @@ impl Proxy for UnixAcceptorProxy {
                 Ok(accept_fd) => {
                     // Safe because we've just obtained the FD from the `accept` call above.
                     let new_fd = unsafe { OwnedFd::from_raw_fd(accept_fd) };
+                    if nix::sys::socket::getpeername::<nix::sys::socket::SockaddrStorage>(accept_fd)
+                        .map_or(true, |addr| {
+                            self.socket_policy
+                                .check(super::policy::SocketOperation::Accept, &addr)
+                                .is_err()
+                        })
+                    {
+                        return update;
+                    }
                     update.new_proxy = Some((
                         self.peer_port,
                         new_fd,

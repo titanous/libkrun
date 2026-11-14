@@ -46,6 +46,16 @@ impl BlockBackend for MemoryDisk {
     }
 }
 
+pub struct FailingTree;
+impl FileSystem for FailingTree {
+    fn init(
+        &self,
+        _: devices::virtio::fs::filesystem::FsOptions,
+    ) -> io::Result<devices::virtio::fs::filesystem::FsOptions> {
+        Err(io::Error::from_raw_os_error(libc::EIO))
+    }
+}
+
 pub struct ReadOnlyTree;
 impl ReadOnlyTree {
     fn attr(inode: Inode) -> libc::stat64 {

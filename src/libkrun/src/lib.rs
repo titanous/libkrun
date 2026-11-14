@@ -34,8 +34,9 @@ pub use devices::virtio::net::{
 pub use devices::virtio::port_io::{self, PortInput, PortOutput};
 #[cfg(not(feature = "tee"))]
 pub use devices::virtio::rng::{OsRngBackend, RngBackend};
+use devices::virtio::vsock::policy::SocketPolicy;
 pub use devices::virtio::vsock::policy::{
-    OutboundPolicy, SocketAddress, SocketOperation, SocketPolicy,
+    AllowlistPolicy, OutboundPolicy, SocketAddress, SocketOperation,
 };
 pub use devices::virtio::PortDescription;
 pub use devices::virtio::VmmExitObserver;
@@ -1154,7 +1155,9 @@ impl Builder {
             return Err(StartError::MissingTeeConfig);
         }
 
-        let kernel_cmdline = if self.kernel_cmdline.is_empty() {
+        let use_bundled_defaults =
+            self.kernel_cmdline.is_empty() && ctx_cfg.vmr.external_kernel.is_none();
+        let kernel_cmdline = if use_bundled_defaults {
             let mut cmdline = vec![
                 DEFAULT_KERNEL_CMDLINE.to_owned(),
                 format!("init={INIT_PATH}"),
@@ -1171,18 +1174,10 @@ impl Builder {
             }
         } else {
             let mut cmdline = self.kernel_cmdline;
-            let external = ctx_cfg.vmr.external_kernel.is_some();
-            if !external {
-                cmdline.push(ctx_cfg.get_env());
-            }
             cmdline.extend(self.extra_kernel_args);
             KernelCmdlineConfig {
                 cmdline,
-                args: if external {
-                    Vec::new()
-                } else {
-                    vec![format!(" -- {}", ctx_cfg.get_args())]
-                },
+                args: Vec::new(),
             }
         };
 
@@ -1224,7 +1219,11 @@ impl Builder {
                         guest_cid: 3,
                         host_port_map: ctx_cfg.tsi_port_map,
                         unix_ipc_port_map: ctx_cfg.unix_ipc_port_map.clone(),
-                        tsi_flags: *tsi_flags,
+                        tsi_flags: if self.socket_policy.internet_enabled {
+                            *tsi_flags
+                        } else {
+                            *tsi_flags & !TsiFlags::HIJACK_INET
+                        },
                     };
                     ctx_cfg.vmr.set_vsock_device(vsock_device_config).unwrap();
                 }
@@ -1239,7 +1238,14 @@ impl Builder {
 
                     if enable_tsi || has_ipc_map {
                         let (tsi_flags, host_port_map) = if enable_tsi {
-                            (TsiFlags::HIJACK_INET, ctx_cfg.tsi_port_map)
+                            (
+                                if self.socket_policy.internet_enabled {
+                                    TsiFlags::HIJACK_INET
+                                } else {
+                                    TsiFlags::empty()
+                                },
+                                ctx_cfg.tsi_port_map,
+                            )
                         } else {
                             (TsiFlags::empty(), None)
                         };
