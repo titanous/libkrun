@@ -38,8 +38,10 @@ memory, written into a fresh VM that has booted a small parked stub.
 The arm timeout must cover kernel freeze, the complete sealed-memory copy, and
 waiting for source close under the lifecycle lock. A timeout before acceptance
 leaves the source resumable; after acceptance the source must be discarded. A
-wait timeout is terminal: a late result is dropped, including its template, and
-no later wait can retrieve it.
+wait timeout is terminal for that attempt: a late result is dropped, including
+its template, and no later wait can retrieve it. After a timeout before
+acceptance the resumed source can be armed again (once the guest has returned
+from the expired trigger); after acceptance it never can.
 
 The host parses bounded boot-console publications before the kernel's template
 marker, which precedes userspace. Repeated or malformed publications disable

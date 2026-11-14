@@ -78,6 +78,16 @@ impl CaptureRequest {
                 crate::cooperative::TemplateMarkerMissing,
             ));
         }
+        if state.timed_out && !state.accepted {
+            // The previous attempt expired before acceptance: nothing was captured and the
+            // source resumed in place, so it may be armed again. Its timeout was reported by
+            // `wait`; a completion of it arriving before this point was already dropped
+            // (`complete` ignores completions after a timeout). The embedder arms again only
+            // after the guest has returned from the expired trigger, so the expired attempt has
+            // no work left that could complete into this one.
+            state.timed_out = false;
+            state.result = None;
+        }
         if state.deadline.is_some() || state.accepted || state.timed_out {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -197,6 +207,30 @@ mod tests {
             request.wait().err().unwrap().kind(),
             io::ErrorKind::TimedOut
         );
+    }
+
+    /// A source whose capture expired before acceptance resumes and stays usable, so it can be
+    /// armed again; a completion of the expired attempt never becomes the new attempt's result
+    /// (it carries no template: nothing is captured without acceptance). After acceptance a
+    /// source is never armed again.
+    #[test]
+    fn rearm_after_timeout_before_acceptance() {
+        let request = CaptureRequest::default();
+        request.confirm_marker(true);
+        request.arm(Duration::ZERO).unwrap();
+        assert!(!request.accept());
+        assert!(request
+            .wait()
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("before acceptance"));
+        request.complete(Err(io::Error::other("late completion of the expired attempt")));
+        request.arm(Duration::from_secs(30)).unwrap();
+        assert!(request.is_armed());
+        assert!(request.0 .0.lock().unwrap().result.is_none());
+        assert!(request.accept());
+        assert!(request.arm(Duration::from_secs(1)).is_err());
     }
 
     #[test]
