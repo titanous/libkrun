@@ -999,6 +999,14 @@ pub fn build_microvm(
         )
         .map_err(StartMicrovmError::Internal)?;
         if let Some(template) = &vm_resources.cooperative_template {
+            let compatibility = vcpus[0]
+                .template_compatibility()
+                .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
+            if compatibility != template.compatibility {
+                return Err(StartMicrovmError::GuestMemoryMmap(
+                    "template CPU features, extended-state layout or TSC frequency mismatch".into(),
+                ));
+            }
             vm.fd()
                 .set_clock(&kvm_bindings::kvm_clock_data {
                     clock: template.clock_ns,
@@ -1138,6 +1146,16 @@ pub fn build_microvm(
             }),
         #[cfg(target_arch = "x86_64")]
         cooperative_shm: _shm_manager.regions(),
+        #[cfg(target_arch = "x86_64")]
+        cooperative_compatibility: if vm_resources.cooperative_capture.is_some()
+            || vm_resources.cooperative_template.is_some()
+        {
+            vcpus[0]
+                .template_compatibility()
+                .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?
+        } else {
+            Vec::new()
+        },
         #[cfg(target_arch = "x86_64")]
         cooperative_topology: if vm_resources.cooperative_capture.is_some()
             || vm_resources.cooperative_template.is_some()

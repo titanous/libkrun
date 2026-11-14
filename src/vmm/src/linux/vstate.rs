@@ -1160,6 +1160,39 @@ impl Vcpu {
         Ok(())
     }
 
+    /// Guest-visible CPUID (including xsave layout) and virtual TSC frequency.
+    #[cfg(target_arch = "x86_64")]
+    pub fn template_compatibility(&self) -> std::io::Result<Vec<u8>> {
+        let mut data = Vec::new();
+        for entry in self.cpuid.as_slice() {
+            // Extended topology EDX is a logical CPU identity, not a feature;
+            // KVM may source it from the host CPU running this process.
+            for word in [
+                entry.function,
+                entry.index,
+                entry.flags,
+                entry.eax,
+                entry.ebx,
+                entry.ecx,
+                if entry.function == 0xb || entry.function == 0x1f {
+                    0
+                } else {
+                    entry.edx
+                },
+            ] {
+                data.extend_from_slice(&word.to_le_bytes());
+            }
+        }
+        data.extend_from_slice(
+            &self
+                .fd
+                .get_tsc_khz()
+                .map_err(std::io::Error::other)?
+                .to_le_bytes(),
+        );
+        Ok(data)
+    }
+
     /// Enter a cooperatively frozen kernel without running boot setup or
     /// writing page tables into its RAM. Call after CPUID configuration.
     #[cfg(target_arch = "x86_64")]

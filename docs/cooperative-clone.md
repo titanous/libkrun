@@ -131,11 +131,16 @@ import a template from an untrusted writer. Templates must remain within one
 trust domain: siblings retain the source kernel address layout and secrets.
 
 Page 0 is a little-endian header: words 0..6 are magic bytes `KRUNFRZ1`,
-version 2, control GPA, vCPU count, configured RAM MiB, extent count, and KVM
+version 3, control GPA, vCPU count, configured RAM MiB, extent count, and KVM
 clock nanoseconds. Word 7 is topology-manifest length (at most4096 bytes);
 words 8 onward are `(GPA, byte length, file offset)` triples, up to128 extents.
-Page1 contains the topology bytes. Extents are page-aligned, ordered,
-non-overlapping and bounded by file length. RAM starts at file offset8192.
+Word392 is compatibility-manifest length (at most16384 bytes). Page1 contains
+topology bytes; pages2-5 contain configured BSP CPUID entries (including xsave
+layout) and KVM TSC frequency. Logical CPU IDs in extended-topology EDX are
+normalized because they are not CPU features. A new VM refuses differing
+features/layout/frequency before entering KVM. Kernel build-ID fencing is not
+yet supplied. Extents are page-aligned, ordered, non-overlapping and bounded by
+file length. RAM starts at file offset24576. Earlier formats are refused.
 No active virtqueues, DAX content or backend state are serialized. Child RAM
 writes cannot modify the source or other clones.
 

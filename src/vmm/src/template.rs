@@ -24,7 +24,9 @@ mod tests {
         memory.write_slice(&page, GuestAddress(4096)).unwrap();
         assert!(Template::capture_with_topology(&memory, 4096, 1, 1, 123, &[0; 4097]).is_err());
         let topology = b"ordered device topology";
-        let template = Template::capture_with_topology(&memory, 4096, 1, 1, 123, topology).unwrap();
+        let template =
+            Template::capture_with_manifest(&memory, 4096, 1, 1, 123, topology, b"cpu-xstate-tsc")
+                .unwrap();
         use std::os::unix::fs::MetadataExt;
         assert!(
             template.file.metadata().unwrap().blocks() * 512
@@ -33,6 +35,7 @@ mod tests {
         );
         let reopened = Template::open(template.file.try_clone().unwrap()).unwrap();
         assert_eq!(reopened.topology, topology);
+        assert_eq!(reopened.compatibility, b"cpu-xstate-tsc");
         assert_eq!(reopened.clock_ns, 123);
         let path = std::env::temp_dir().join(format!("krun-template-path-{}", std::process::id()));
         reopened.write_to_path(&path).unwrap();
@@ -50,7 +53,7 @@ mod tests {
         let mut value = [0];
         b.read_slice(&mut value, GuestAddress(0)).unwrap();
         assert_eq!(value, [0]);
-        assert_eq!(reopened.regions, [(0, 8192, 8192)]);
+        assert_eq!(reopened.regions, [(0, 8192, HEADER as u64)]);
         assert_eq!(reopened.control, 4096);
     }
 
@@ -69,6 +72,7 @@ mod tests {
             clock_ns: 0,
             regions: Vec::new(),
             topology: Vec::new(),
+            compatibility: Vec::new(),
         };
         template.write_to_path(&path).unwrap();
         let metadata = std::fs::metadata(&path).unwrap();
@@ -105,7 +109,8 @@ use vm_memory::{
 };
 
 const MAGIC: &[u8; 8] = b"KRUNFRZ1";
-const HEADER: usize = 8192;
+const HEADER: usize = 24576;
+const COMPATIBILITY_START: usize = 8192;
 const EXTENT_HEADER: usize = 4096;
 const MAX_REGIONS: usize = 128;
 
@@ -117,6 +122,7 @@ pub struct Template {
     pub clock_ns: u64,
     pub regions: Vec<(u64, usize, u64)>,
     pub topology: Vec<u8>,
+    pub compatibility: Vec<u8>,
 }
 
 fn invalid() -> io::Error {
@@ -185,12 +191,13 @@ impl Template {
         file.read_exact_at(&mut header, 0)?;
         let get = |n: usize| u64::from_le_bytes(header[n * 8..n * 8 + 8].try_into().unwrap());
         if &header[..8] != MAGIC
-            || get(1) != 2
+            || get(1) != 3
             || get(3) == 0
             || get(3) > 255
             || get(5) == 0
             || get(5) > MAX_REGIONS as u64
             || get(7) > EXTENT_HEADER as u64
+            || get(392) > (HEADER - COMPATIBILITY_START) as u64
         {
             return Err(invalid());
         }
@@ -236,6 +243,8 @@ impl Template {
             clock_ns: get(6),
             regions,
             topology: header[EXTENT_HEADER..EXTENT_HEADER + get(7) as usize].to_vec(),
+            compatibility: header[COMPATIBILITY_START..COMPATIBILITY_START + get(392) as usize]
+                .to_vec(),
         })
     }
 
@@ -280,6 +289,21 @@ impl Template {
         clock_ns: u64,
         topology: &[u8],
     ) -> io::Result<Self> {
+        Self::capture_with_manifest(memory, control, vcpus, ram_mib, clock_ns, topology, &[])
+    }
+
+    pub fn capture_with_manifest(
+        memory: &GuestMemoryMmap,
+        control: u64,
+        vcpus: u8,
+        ram_mib: u64,
+        clock_ns: u64,
+        topology: &[u8],
+        compatibility: &[u8],
+    ) -> io::Result<Self> {
+        if compatibility.len() > HEADER - COMPATIBILITY_START {
+            return Err(invalid());
+        }
         if topology.len() > EXTENT_HEADER {
             return Err(invalid());
         }
@@ -299,7 +323,8 @@ impl Template {
         header[..8].copy_from_slice(MAGIC);
         let mut put =
             |n: usize, value: u64| header[n * 8..n * 8 + 8].copy_from_slice(&value.to_le_bytes());
-        put(1, 2);
+        put(1, 3);
+        put(392, compatibility.len() as u64);
         put(2, control);
         put(3, vcpus as u64);
         put(4, ram_mib);
@@ -330,6 +355,8 @@ impl Template {
             offset += region.len();
         }
         header[EXTENT_HEADER..EXTENT_HEADER + topology.len()].copy_from_slice(topology);
+        header[COMPATIBILITY_START..COMPATIBILITY_START + compatibility.len()]
+            .copy_from_slice(compatibility);
         file.write_all_at(&header, 0)?;
         crate::template_memory::seal(&file)?;
         Self::open(file)

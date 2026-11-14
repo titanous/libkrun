@@ -223,6 +223,8 @@ pub struct Vmm {
     #[cfg(target_arch = "x86_64")]
     cooperative_topology: Vec<u8>,
     #[cfg(target_arch = "x86_64")]
+    cooperative_compatibility: Vec<u8>,
+    #[cfg(target_arch = "x86_64")]
     cooperative_shm: Vec<(vm_memory::GuestAddress, usize)>,
     vm: Vm,
     exit_observers: Vec<Arc<Mutex<dyn VmmExitObserver>>>,
@@ -547,13 +549,14 @@ impl Subscriber for Vmm {
                             .map_err(std::io::Error::other)?
                             .0;
                     }
-                    let template = crate::template::Template::capture_with_topology(
+                    let template = crate::template::Template::capture_with_manifest(
                         &ram,
                         reported_control,
                         *vcpus,
                         *ram_mib,
                         clock.clock,
                         &self.cooperative_topology,
+                        &self.cooperative_compatibility,
                     )?;
                     if !path.as_os_str().is_empty() {
                         template.write_to_path(path)?;
