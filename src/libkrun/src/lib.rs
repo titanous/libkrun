@@ -521,6 +521,8 @@ pub struct Builder {
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     nitro_precreated_stop: Option<Arc<EventFd>>,
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    nitro_descriptor_handoff: Option<std::os::unix::net::UnixStream>,
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     nitro_console_base: Option<u32>,
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     nitro_selected_after_consoles: bool,
@@ -1351,7 +1353,8 @@ impl Builder {
             ram_mib: config.mem_size_mib.unwrap_or(1024) as u32,
         };
         let mut console_id = self.nitro_device_count_before_consoles();
-        let mut runtime = nitro_sandbox::runtime::Runtime::with_lifecycle_lock(
+        let handoff = self.nitro_descriptor_handoff.take();
+        let mut runtime = nitro_sandbox::runtime::Runtime::create(
             image_path
                 .to_str()
                 .ok_or_else(|| StartError::Nitro(std::io::Error::other("non-UTF8 EIF path")))?,
@@ -1360,6 +1363,7 @@ impl Builder {
             options.cid,
             options.watchdog,
             self.nitro_lifecycle_lock.take(),
+            handoff.as_ref(),
         )
         .map_err(StartError::Nitro)?;
         drop(packaged);
@@ -1517,6 +1521,24 @@ impl Builder {
             total_bytes,
             bytes_per_second,
         ));
+        self
+    }
+
+    /// Send a duplicate of the VM descriptor over `socket` (the host daemon's end of a
+    /// connected Unix socket) immediately after the create ioctl returns, inside `build` and
+    /// before any other VM ioctl (one `SCM_RIGHTS` message, payload
+    /// `nitro_sandbox::lifecycle::VM_DESCRIPTOR_MESSAGE`; the daemon can receive it with
+    /// `nitro_sandbox::lifecycle::receive_vm_descriptor`). The interval in which a death of
+    /// this process can make the final close is then only the return of that ioctl. `build`
+    /// fails if the send fails. Acknowledgement is the embedder's protocol: wait for it after
+    /// `build`, before `run`, with a time limit, and never while holding the lifecycle lock
+    /// (use `NitroSerialization::Teardown`). Prefer this to `duplicate_nitro_vm_descriptor`.
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    pub fn nitro_descriptor_handoff(
+        &mut self,
+        socket: std::os::unix::net::UnixStream,
+    ) -> &mut Self {
+        self.nitro_descriptor_handoff = Some(socket);
         self
     }
 

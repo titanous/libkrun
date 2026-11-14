@@ -216,14 +216,23 @@ the library opens it without following symlinks and retains that inode. Do not
 unlink, replace, or rotate the file while any VMM exists. No lock is used by default;
 that default is not safe on hosts requiring serialized teardown, including m9g.
 
-**The host daemon retains a VM descriptor for every guest.** After `build` and
-before `run`, call `Context::duplicate_nitro_vm_descriptor()` and transfer the
-owned descriptor to the daemon with `SCM_RIGHTS`. Wait for the daemon's
-acknowledgment before starting. A VM lives until the last duplicate is closed:
-SIGKILL, a crash, OOM, or a panicking destructor in the VMM cannot perform the
-final close while the daemon retains its duplicate. This handoff is required on
-hosts with serialized teardown. The interval before handoff is not protected
-against an unexpected process death; supervise creation accordingly.
+**The host daemon retains a VM descriptor for every guest.** Give the builder
+the VMM's end of a connected Unix socket to the daemon with
+`nitro_descriptor_handoff(socket)`: `build` then sends a duplicate of the VM
+descriptor (one `SCM_RIGHTS` message, payload `vm_descriptor\n`;
+`nitro_sandbox::lifecycle::receive_vm_descriptor` reads it) immediately after
+the create ioctl returns, before any other VM ioctl, and fails if the send
+fails. Once the message is sent the descriptor in flight is a reference of its
+own, so the only interval in which a death of the VMM can make the final close
+is the return of that one ioctl. After `build`, wait (with a time limit) for the
+daemon's acknowledgment before `run`; the daemon must acknowledge from a thread
+that never performs locked closes, and the lock must not be held across that
+round trip (use `Teardown` serialization). `duplicate_nitro_vm_descriptor()`
+after `build` remains for tests; its interval spans the whole build. A VM lives
+until the last duplicate is closed: SIGKILL, a crash, OOM, or a panicking
+destructor in the VMM cannot perform the final close while the daemon retains
+its duplicate, and the guest's vCPUs keep running until the daemon closes it.
+This handoff is required on hosts with serialized teardown.
 
 The daemon opens the same inode using `NitroLifecycleLock::open`, reaps the VMM,
 then calls `NitroOpenLifecycleLock::close_vm_descriptor(&mut descriptor)` off its
