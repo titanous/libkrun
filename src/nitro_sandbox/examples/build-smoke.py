@@ -27,7 +27,8 @@ body = bytearray(); offsets=[0]*32; sizes=[0]*32
 for i,(kind,data) in enumerate(sections):
     offsets[i]=548+len(body); sizes[i]=len(data)
     body += struct.pack('>HHQ',kind,0,len(data))+data
-header=struct.pack('>4sHHQQHH32Q32QII',b'.eif',4,0xa41,1<<30,2,0,len(sections),*offsets,*sizes,0,0)
+memory_mib = int(sys.argv[4]) if len(sys.argv) > 4 else 1024
+header=struct.pack('>4sHHQQHH32Q32QII',b'.eif',4,0xa41,memory_mib<<20,2,0,len(sections),*offsets,*sizes,0,0)
 image=bytearray(header)+body
 image[544:548]=struct.pack('>I',zlib.crc32(image[548:],zlib.crc32(image[:544])))
 pathlib.Path(sys.argv[3]).write_bytes(image)

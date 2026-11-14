@@ -9,7 +9,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("usage: nitro_smoke EIF DISK UNIX_SOCKET".into());
     }
     let mut builder = Builder::new();
-    builder.vm_config(2, 1024)?;
+    let memory_mib = std::env::var("NITRO_MEMORY_MIB")
+        .unwrap_or_else(|_| "1024".into())
+        .parse()?;
+    builder.vm_config(2, memory_mib)?;
     builder.disable_implicit_console()?;
     let console_path =
         std::env::var("NITRO_CONSOLE_LOG").unwrap_or_else(|_| "virtio-console.log".into());

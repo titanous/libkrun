@@ -71,7 +71,7 @@ def launch(i, slot=None):
         start = time.monotonic()
         with (logs / f'guest-{i}.log').open('wb') as output:
             try:
-                p = subprocess.run(['sudo', 'env', f'NITRO_CID={200+slot}', f'NITRO_CONSOLE_LOG={logs / f"console-{i}.log"}', str(binary), str(image), str(disk), path], stdout=output, stderr=subprocess.STDOUT, timeout=35)
+                p = subprocess.run(['sudo', 'env', f'NITRO_MEMORY_MIB={os.environ.get("NITRO_MEMORY_MIB", "1024")}', f'NITRO_CID={200+slot}', f'NITRO_CONSOLE_LOG={logs / f"console-{i}.log"}', str(binary), str(image), str(disk), path], stdout=output, stderr=subprocess.STDOUT, timeout=35)
                 code = p.returncode
             except subprocess.TimeoutExpired:
                 code = 'timeout'
