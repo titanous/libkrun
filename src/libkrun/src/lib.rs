@@ -2064,7 +2064,27 @@ fn nitro_terminal_exit(facts: nitro_sandbox::runtime::TerminalFacts) -> VmExit {
     } else {
         VmExit::Fault
     };
-    VmExit::resolve(terminal, facts.exit_code, facts.reason)
+    let outcome = VmExit::resolve(terminal, facts.exit_code, facts.reason);
+    // Until Nitro supplies typed reasons, retain its firmware power-off outcome
+    // even if the diagnostic marker was lost. Typed-device guests stay strict.
+    if facts.legacy_poweroff && outcome == VmExit::Fault {
+        VmExit::PowerOffRequested
+    } else {
+        outcome
+    }
+}
+
+#[cfg(all(test, target_os = "linux", feature = "nitro-sandbox"))]
+#[test]
+fn nitro_poweroff_without_reason_device_preserves_legacy_outcome() {
+    assert_eq!(
+        nitro_terminal_exit(nitro_sandbox::runtime::TerminalFacts {
+            legacy_poweroff: true,
+            ..Default::default()
+        }),
+        VmExit::PowerOffRequested
+    );
+    assert_eq!(nitro_terminal_exit(Default::default()), VmExit::Fault);
 }
 
 #[cfg(all(test, target_os = "linux", feature = "nitro-sandbox"))]

@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, Default)]
 pub struct TerminalFacts {
+    /// Firmware power-off on a guest without the typed stop-reason device.
+    pub legacy_poweroff: bool,
     /// Successful source capture, not a guest stop; set only after source close.
     pub frozen: bool,
     pub guest_fault: bool,
@@ -298,6 +300,7 @@ impl Runtime {
                 Err(error) => return Err(error),
             }
             if self.sandbox.powered_off(0)? {
+                facts.legacy_poweroff = self.stop_reason.is_none();
                 // The terminal status can become visible just after the loop's
                 // first sample. Read the final ordered byte, including a clear.
                 if let Some(device) = &self.stop_reason {
