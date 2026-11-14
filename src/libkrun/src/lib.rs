@@ -1876,12 +1876,14 @@ impl Builder {
                 let heartbeat = runtime.heartbeat_control();
                 let console_dropped = runtime.console_dropped_counter();
                 let observation = runtime.observation_state();
+                let stated = runtime.stated_reason_state();
                 context.built_vm.nitro_parked = Some(NitroParked {
                     run: runtime.start_parked().map_err(StartError::Nitro)?,
                     observers,
                     heartbeat,
                     console_dropped,
                     observation,
+                    stated,
                 });
             }
             context.built_vm.nitro_park = park;
@@ -2310,6 +2312,7 @@ struct NitroParked {
     // stop-reason observation work for parked receivers and their copies too.
     console_dropped: Arc<std::sync::atomic::AtomicU64>,
     observation: Arc<Mutex<Option<u64>>>,
+    stated: Arc<std::sync::atomic::AtomicU8>,
 }
 
 struct ContextVm {
@@ -2633,25 +2636,29 @@ impl Context {
     pub fn vm_handle(&self) -> VmHandle {
         #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
         if self.built_vm.nitro.is_some() || self.built_vm.nitro_parked.is_some() {
-            let (heartbeat_control, nitro_console_dropped) = match &self.built_vm.nitro_parked {
-                Some(parked) => (
-                    parked.heartbeat.clone(),
-                    Some(parked.console_dropped.clone()),
-                ),
-                None => {
-                    let runtime = self.built_vm.nitro.as_ref();
-                    (
-                        runtime.and_then(|runtime| runtime.heartbeat_control()),
-                        runtime.map(|runtime| runtime.console_dropped_counter()),
-                    )
-                }
-            };
+            let (heartbeat_control, nitro_console_dropped, nitro_stated) =
+                match &self.built_vm.nitro_parked {
+                    Some(parked) => (
+                        parked.heartbeat.clone(),
+                        Some(parked.console_dropped.clone()),
+                        Some(parked.stated.clone()),
+                    ),
+                    None => {
+                        let runtime = self.built_vm.nitro.as_ref();
+                        (
+                            runtime.and_then(|runtime| runtime.heartbeat_control()),
+                            runtime.map(|runtime| runtime.console_dropped_counter()),
+                            runtime.map(|runtime| runtime.stated_reason_state()),
+                        )
+                    }
+                };
             return VmHandle {
                 vmm: None,
                 #[cfg(target_arch = "x86_64")]
                 stated_reason: None,
                 console_tx_states: Vec::new(),
                 nitro_console_dropped,
+                nitro_stated,
                 #[cfg(target_arch = "aarch64")]
                 nitro_capture: self.built_vm.nitro_capture.clone(),
                 heartbeat_control,
@@ -2693,6 +2700,8 @@ impl Context {
             heartbeat_control: None,
             #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
             nitro_console_dropped: None,
+            #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+            nitro_stated: None,
             #[cfg(all(
                 target_os = "linux",
                 target_arch = "aarch64",
@@ -2857,6 +2866,9 @@ pub struct VmHandle {
     console_tx_states: Vec<Arc<devices::virtio::console::ConsoleTxState>>,
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     nitro_console_dropped: Option<Arc<std::sync::atomic::AtomicU64>>,
+    /// Nitro: the reason byte from the kernel's reason device, as the run holds it.
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    nitro_stated: Option<Arc<std::sync::atomic::AtomicU8>>,
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     heartbeat_control: Option<nitro_sandbox::heartbeat::DeadlineControl>,
     #[cfg(all(
@@ -3026,6 +3038,13 @@ impl VmHandle {
         #[cfg(target_arch = "x86_64")]
         if let Some(reason) = &self.stated_reason {
             let reason = reason.0.load(std::sync::atomic::Ordering::Acquire);
+            if (1..=4).contains(&reason) {
+                return Some(VmExit::from_stated_reason(reason));
+            }
+        }
+        #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+        if let Some(reason) = &self.nitro_stated {
+            let reason = reason.load(std::sync::atomic::Ordering::Acquire);
             if (1..=4).contains(&reason) {
                 return Some(VmExit::from_stated_reason(reason));
             }
@@ -3411,6 +3430,7 @@ mod tests {
         let stop = Arc::new(EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap());
         #[cfg(target_arch = "x86_64")]
         let reason = Arc::new(vmm::stop_reason::StopReason::default());
+        let nitro_stated = Arc::new(std::sync::atomic::AtomicU8::new(0));
         let handle = VmHandle {
             vmm: None,
             #[cfg(target_arch = "x86_64")]
@@ -3419,6 +3439,8 @@ mod tests {
             heartbeat_control: None,
             #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
             nitro_console_dropped: Some(Arc::new(std::sync::atomic::AtomicU64::new(17))),
+            #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+            nitro_stated: Some(nitro_stated.clone()),
             #[cfg(all(
                 target_os = "linux",
                 target_arch = "aarch64",
@@ -3454,6 +3476,16 @@ mod tests {
                     .store(ignored, std::sync::atomic::Ordering::Release);
                 assert_eq!(handle.stated_stop_reason(), None);
             }
+        }
+        // Nitro: the reason the run holds from the kernel's reason device.
+        for (byte, expected) in [
+            (2, Some(VmExit::RebootRequested)),
+            (4, Some(VmExit::Panic)),
+            (5, None),
+            (0, None),
+        ] {
+            nitro_stated.store(byte, std::sync::atomic::Ordering::Release);
+            assert_eq!(handle.stated_stop_reason(), expected);
         }
         assert_eq!(handle.console_dropped_bytes(), 17);
         handle.trigger_shutdown_event().unwrap();

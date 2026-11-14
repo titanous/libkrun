@@ -286,6 +286,9 @@ pub struct Runtime {
     stop_reason: Option<crate::stop_reason::StopReason>,
     exit_code: Arc<std::sync::atomic::AtomicI32>,
     observation: Arc<Mutex<Option<u64>>>,
+    /// The reason byte as the run holds it (after the final-reason latch), for
+    /// embedders that must know a stated reason before the run returns.
+    stated: Arc<std::sync::atomic::AtomicU8>,
     capture: Option<Box<dyn crate::capture::CaptureHandler>>,
     accepted_capture: Option<crate::capture::AcceptedCapture>,
     marker_notified: bool,
@@ -345,6 +348,7 @@ impl Runtime {
             stop_reason: None,
             exit_code: Arc::new(std::sync::atomic::AtomicI32::new(i32::MAX)),
             observation: Arc::new(Mutex::new(None)),
+            stated: Default::default(),
             capture: None,
             accepted_capture: None,
             marker_notified: false,
@@ -704,6 +708,10 @@ impl Runtime {
         Ok(false)
     }
 
+    /// The stated reason byte (0 none, 1-4 final, 5 preparing) as the run holds it.
+    pub fn stated_reason_state(&self) -> Arc<std::sync::atomic::AtomicU8> {
+        self.stated.clone()
+    }
     pub fn observation_state(&self) -> Arc<Mutex<Option<u64>>> {
         self.observation.clone()
     }
@@ -851,7 +859,10 @@ impl Runtime {
             // reason ends the run at power-off or after a bounded console drain
             // (a reboot or panic resets a Nitro guest in place).
             self.observe_reason(&mut facts);
-            if final_reason.update(&mut facts, Instant::now()) {
+            let ended = final_reason.update(&mut facts, Instant::now());
+            self.stated
+                .store(facts.reason, std::sync::atomic::Ordering::Release);
+            if ended {
                 self.sandbox.drain_console(&mut self.console)?;
                 return Ok(facts);
             }
@@ -869,6 +880,8 @@ impl Runtime {
                 // first sample. Read the final ordered byte, including a clear.
                 self.observe_reason(&mut facts);
                 final_reason.update(&mut facts, Instant::now());
+                self.stated
+                    .store(facts.reason, std::sync::atomic::Ordering::Release);
                 self.sandbox.drain_console(&mut self.console)?;
                 match self.stop.read() {
                     Ok(_) => facts.host_stop = true,
