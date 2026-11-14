@@ -1608,6 +1608,7 @@ impl Vcpu {
                 // So we pause vCPU0 and send a signal to the emulation thread to stop the VMM.
                 Ok(VcpuEmulation::Stopped) => return self.exit(FC_EXIT_CODE_OK),
                 Ok(VcpuEmulation::Rebooted) => return self.exit(FC_EXIT_CODE_REBOOT),
+                #[cfg(target_arch = "x86_64")]
                 Ok(VcpuEmulation::Frozen(control)) => {
                     self.response_sender
                         .send(VcpuResponse::Frozen(control))
@@ -1858,6 +1859,7 @@ enum VcpuEmulation {
     Interrupted,
     Stopped,
     Rebooted,
+    #[cfg(target_arch = "x86_64")]
     Frozen(u64),
 }
 
