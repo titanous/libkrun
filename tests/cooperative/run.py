@@ -4,6 +4,7 @@ from console_markers import userspace_bytes
 import argparse
 import concurrent.futures
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -22,7 +23,11 @@ parser.add_argument("--control", required=True)
 parser.add_argument("--output", required=True, type=Path)
 parser.add_argument("--cycles", type=int, default=20)
 parser.add_argument("--concurrent", type=int, default=16)
+parser.add_argument("--single-template-copies", type=int, default=0,
+                    help="instead of the matrix, run this many copies from one hashed 8-CPU template")
 parser.add_argument("--passed-fd", action="store_true", help="share one sealed memfd across new VMM processes")
+parser.add_argument("--require-blocked-random", action="store_true",
+                    help="fail unless every copy ran the userfaultfd-held random read (test-variant kernel)")
 args = parser.parse_args()
 args.output.mkdir(parents=True, exist_ok=False)
 launcher = Path("target/release/examples/cooperative-console").resolve()
@@ -139,7 +144,11 @@ def run_child(cpus, source_disk, image, name):
             if process.poll() is None:
                 process.kill()
                 process.wait()
-    data = log_path.read_text(errors="replace")
+    data = userspace_bytes(log_path.read_bytes()).decode(errors="replace")
+    required = ("CLONE TSC nondecreasing", "CLONE VECTOR width=", "CLONE FORWARDING disabled",
+                "CLONE VMGENID irq=", "CLONE CLOCK error_ns=", "CLONE USERSPACE clock_error_ns=")
+    if any(marker not in data for marker in required):
+        raise RuntimeError(f"missing independent device check: {name}")
     if "CLONE PASS" not in data or "CLONE FAIL" in data or "SIMD=ok" not in data or f"cpus={cpus}" not in data:
         raise RuntimeError(f"child assertions failed: {name}")
     if userspace is None or private_kib is None:
@@ -153,20 +162,71 @@ def run_child(cpus, source_disk, image, name):
     if generation is None:
         raise RuntimeError(f"missing generation identifier: {name}")
     random = re.search(r"CLONE RANDOM ([0-9a-f]{64})", data)
-    if random is None or "crng reseeded due to virtual machine fork" not in data:
+    if random is None or b"crng reseeded due to virtual machine fork" not in log_path.read_bytes():
         raise RuntimeError(f"missing guest randomness/reseed proof: {name}")
     pending = re.search(r"CLONE PENDING_RANDOM ([0-9a-f]{64}) EVENT=ok", data)
     if pending is None:
         raise RuntimeError(f"missing independent reader/event proof: {name}")
+    source_data = userspace_bytes(image.with_suffix(".freeze.log").read_bytes()).decode(errors="replace")
+    available = "CLONE CHECKS userfaultfd=available blocked_random=required pending_random=required devices=required"
+    unavailable = "CLONE CHECKS userfaultfd=unavailable blocked_random=skipped pending_random=required devices=required"
+    if source_data.count(available) + source_data.count(unavailable) != 1:
+        raise RuntimeError(f"missing or ambiguous source check declaration: {name}")
     blocked = re.search(r"CLONE BLOCKED_RANDOM ([0-9a-f]{64})", data)
-    if blocked is None:
-        raise RuntimeError(f"missing blocked random-read proof: {name}")
-    return {"blocked_random": blocked.group(1), "cpus": cpus, "name": name, "resume_ms": (userspace-start)/1e6,
+    blocked_required = available in source_data
+    if args.require_blocked_random and not blocked_required:
+        raise RuntimeError(f"held random-read check required but the source declared it skipped: {name}")
+    skipped = "CLONE BLOCKED_RANDOM skipped userfaultfd=unavailable" in data
+    if (blocked_required and (blocked is None or skipped)) or (not blocked_required and (blocked is not None or not skipped)):
+        raise RuntimeError(f"blocked random-read coverage mismatch: {name}")
+    return {"blocked_random": blocked.group(1) if blocked else None, "cpus": cpus, "name": name, "resume_ms": (userspace-start)/1e6,
             "private_kib_10s": private_kib, "generation": generation.group(1),
             "random": random.group(1), "pending_random": pending.group(1)}
 
+def check_tcp_listener_unreached():
+    try:
+        unexpected, _ = tcp_probe.accept()
+    except BlockingIOError:
+        return
+    unexpected.close()
+    raise RuntimeError("disabled forwarding reached live host TCP listener")
+
+def single_template_copies():
+    disk, image, _, _ = run_source(8, 0)
+    def digest():
+        # Hash what the copies map: the sealed memfd with --passed-fd, otherwise the template file.
+        if args.passed_fd:
+            fd, offset, sha = template_fd(image), 0, hashlib.sha256()
+            while chunk := os.pread(fd, 1 << 20, offset):
+                sha.update(chunk)
+                offset += len(chunk)
+            return sha.hexdigest()
+        with image.open("rb") as template:
+            return hashlib.file_digest(template, "sha256").hexdigest()
+    before = digest()
+    run_denied_child(8, disk, image, "scale")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(args.concurrent, 16))) as pool:
+        results = list(pool.map(lambda i: run_child(8, disk, image, f"scale-{i}"), range(args.single_template_copies)))
+    after = digest()
+    for field in ("random", "pending_random", "generation"):
+        if len({m[field] for m in results}) != len(results):
+            raise RuntimeError(f"duplicate {field} in single-template copies")
+    blocked = [m["blocked_random"] for m in results if m["blocked_random"] is not None]
+    if len(set(blocked)) != len(blocked):
+        raise RuntimeError("duplicate blocked-reader random bytes")
+    if before != after:
+        raise RuntimeError("template bytes changed")
+    check_tcp_listener_unreached()
+    hashed = "memfd" if args.passed_fd else "file"
+    (args.output / "measurements.json").write_text(json.dumps({"copies": results,
+        "template_hashed": hashed, "template_sha256_before": before, "template_sha256_after": after}, indent=2))
+    print(f"ACCEPTANCE PASS copies={len(results)} template_{hashed}_sha256={before} policy=denied tcp=unreached", flush=True)
+
 try:
     ready()
+    if args.single_template_copies:
+        single_template_copies()
+        raise SystemExit(0)
     last = None
     for cpus in (1, 4, 8):
         for cycle in range(args.cycles):
@@ -199,17 +259,12 @@ try:
         raise RuntimeError("duplicate VM generation identifier")
     if len({m["random"] for m in measurements}) != len(measurements):
         raise RuntimeError("duplicate guest random bytes")
-    if len({m["blocked_random"] for m in measurements}) != len(measurements):
+    blocked_samples = [m["blocked_random"] for m in measurements if m["blocked_random"] is not None]
+    if len(set(blocked_samples)) != len(blocked_samples):
         raise RuntimeError("duplicate blocked-reader random bytes")
     if len({m["pending_random"] for m in measurements}) != len(measurements):
         raise RuntimeError("duplicate independent-reader random bytes")
-    try:
-        unexpected, _ = tcp_probe.accept()
-    except BlockingIOError:
-        pass
-    else:
-        unexpected.close()
-        raise RuntimeError("disabled forwarding reached live host TCP listener")
+    check_tcp_listener_unreached()
     print("ACCEPTANCE PASS", flush=True)
 finally:
     tcp_probe.close()

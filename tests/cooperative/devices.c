@@ -82,11 +82,23 @@ static void *blocked_random_reader(void *unused)
     close(fd);
     return NULL;
 }
+static int random_fault_fd=-1;
+static void detect_random_fault(void)
+{
+    random_fault_fd=syscall(SYS_userfaultfd,O_CLOEXEC|O_NONBLOCK);
+    if(random_fault_fd<0) {
+        if(errno!=ENOSYS) fail("random userfault probe");
+        puts("CLONE CHECKS userfaultfd=unavailable blocked_random=skipped pending_random=required devices=required");
+    } else {
+        puts("CLONE CHECKS userfaultfd=available blocked_random=required pending_random=required devices=required");
+    }
+}
 static int block_random_read(pthread_t *reader)
 {
-    int fd=syscall(SYS_userfaultfd,O_CLOEXEC|O_NONBLOCK);
+    int fd=random_fault_fd;
+    if(fd<0) return -1;
     struct uffdio_api api={.api=UFFD_API};
-    if(fd<0 || ioctl(fd,UFFDIO_API,&api)) fail("random userfault api");
+    if(ioctl(fd,UFFDIO_API,&api)) fail("random userfault api");
     blocked_random_page=mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
     struct uffdio_register reg={.range={.start=(uintptr_t)blocked_random_page,.len=4096},.mode=UFFDIO_REGISTER_MODE_MISSING};
     if(blocked_random_page==MAP_FAILED || ioctl(fd,UFFDIO_REGISTER,&reg) || pthread_create(reader,NULL,blocked_random_reader,NULL)) fail("random userfault register");
@@ -189,6 +201,7 @@ int main(void)
         0x9182736455463728ULL,0xfedcba9876543210ULL}, restored[4]={0};
     __builtin_cpu_init();
     int wide_simd=__builtin_cpu_supports("avx2");
+    detect_random_fault();
     pthread_t blocked_reader;
     int blocked_fault=block_random_read(&blocked_reader);
     int freeze=open("/sys/power/nitro_freeze",O_WRONLY);
@@ -210,7 +223,8 @@ int main(void)
     if(tsc_after<tsc_before) fail("TSC went backwards");
     printf("CLONE TSC nondecreasing\n");
     printf("CLONE VECTOR width=%d preserved\n",wide_simd ? 256 : 128);
-    unblock_random_read(blocked_fault,blocked_reader);
+    if(blocked_fault>=0) unblock_random_read(blocked_fault,blocked_reader);
+    else puts("CLONE BLOCKED_RANDOM skipped userfaultfd=unavailable");
     if(ptrace(PTRACE_DETACH,reader,NULL,NULL)) fail("reader detach");
     unsigned char pending_random[32];
     struct pollfd random_ready={.fd=random_pipe[0],.events=POLLIN};
