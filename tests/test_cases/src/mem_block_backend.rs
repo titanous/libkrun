@@ -30,16 +30,6 @@ impl MemBlockBackend {
             data,
         )
     }
-
-    /// Create a backend from an existing data buffer (for phase-2 restore scenarios).
-    pub fn from_data(data: Arc<tokio::sync::Mutex<Vec<u8>>>) -> Self {
-        let sector_count = {
-            // Compute from current buffer size; caller must ensure it is sector-aligned
-            let guard = data.blocking_lock();
-            (guard.len() / 512) as u64
-        };
-        MemBlockBackend { data, sector_count }
-    }
 }
 
 impl AsyncBlockBackend for MemBlockBackend {

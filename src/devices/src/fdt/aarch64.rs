@@ -297,8 +297,6 @@ fn create_psci_node(fdt: &mut FdtWriter) -> Result<()> {
     // So, since we are using kvm, we need to use hvc.
     #[cfg(target_os = "linux")]
     fdt.property_string("method", "hvc")?;
-    #[cfg(target_os = "macos")]
-    fdt.property_string("method", "smc")?;
     fdt.end_node(node)?;
 
     Ok(())
@@ -311,12 +309,6 @@ fn create_virtio_node<T: DeviceInfoForFDT + Clone + Debug>(
     let device_reg_prop = generate_prop64(&[dev_info.addr(), dev_info.length()]);
     #[cfg(target_os = "linux")]
     let irq = generate_prop32(&[GIC_FDT_IRQ_TYPE_SPI, dev_info.irq(), IRQ_TYPE_EDGE_RISING]);
-    #[cfg(target_os = "macos")]
-    let irq = generate_prop32(&[
-        GIC_FDT_IRQ_TYPE_SPI,
-        dev_info.irq() - 32,
-        IRQ_TYPE_EDGE_RISING,
-    ]);
 
     let virtio_node = fdt.begin_node(&format!("virtio_mmio@{:x}", dev_info.addr()))?;
     fdt.property_string("compatible", "virtio,mmio")?;
@@ -335,12 +327,6 @@ fn create_serial_node<T: DeviceInfoForFDT + Clone + Debug>(
     let serial_reg_prop = generate_prop64(&[dev_info.addr(), dev_info.length()]);
     #[cfg(target_os = "linux")]
     let irq = generate_prop32(&[GIC_FDT_IRQ_TYPE_SPI, dev_info.irq(), IRQ_TYPE_EDGE_RISING]);
-    #[cfg(target_os = "macos")]
-    let irq = generate_prop32(&[
-        GIC_FDT_IRQ_TYPE_SPI,
-        dev_info.irq() - 32,
-        IRQ_TYPE_EDGE_RISING,
-    ]);
 
     let node = fdt.begin_node(&format!("uart@{:x}", dev_info.addr()))?;
     fdt.property_string("compatible", "arm,pl011")?;
@@ -362,8 +348,6 @@ fn create_rtc_node<T: DeviceInfoForFDT + Clone + Debug>(
     let rtc_reg_prop = generate_prop64(&[dev_info.addr(), dev_info.length()]);
     #[cfg(target_os = "linux")]
     let irq = generate_prop32(&[GIC_FDT_IRQ_TYPE_SPI, dev_info.irq(), IRQ_TYPE_LEVEL_HI]);
-    #[cfg(target_os = "macos")]
-    let irq = generate_prop32(&[GIC_FDT_IRQ_TYPE_SPI, dev_info.irq() - 32, IRQ_TYPE_LEVEL_HI]);
     let rtc_node = fdt.begin_node(&format!("rtc@{:x}", dev_info.addr()))?;
     fdt.property("compatible", compatible)?;
     fdt.property("reg", &rtc_reg_prop)?;
@@ -428,16 +412,8 @@ fn create_vmgenid_node<T: DeviceInfoForFDT + Clone + Debug>(
     fdt.property("reg", &reg)?;
 
     // interrupts = <GIC_SPI irq_num IRQ_TYPE_EDGE_RISING>
-    // Platform split: Linux uses GSI directly, macOS subtracts 32 (SPI offset).
-    // This matches the pattern in create_virtio_node, create_serial_node, etc.
     #[cfg(target_os = "linux")]
     let irq = generate_prop32(&[GIC_FDT_IRQ_TYPE_SPI, dev_info.irq(), IRQ_TYPE_EDGE_RISING]);
-    #[cfg(target_os = "macos")]
-    let irq = generate_prop32(&[
-        GIC_FDT_IRQ_TYPE_SPI,
-        dev_info.irq() - 32,
-        IRQ_TYPE_EDGE_RISING,
-    ]);
     fdt.property("interrupts", &irq)?;
 
     fdt.end_node(vmgenid_node)?;

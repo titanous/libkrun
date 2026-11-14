@@ -1230,11 +1230,6 @@ impl Builder {
             t_build_start.elapsed().as_secs_f64() * 1000.0,
         );
 
-        #[cfg(target_os = "macos")]
-        if ctx_cfg.gpu_virgl_flags.is_some() {
-            vmm::worker::start_worker_thread(built_vm.vmm().clone(), _receiver).unwrap();
-        }
-
         #[cfg(target_arch = "x86_64")]
         if ctx_cfg.vmr.split_irqchip {
             vmm::worker::start_worker_thread(built_vm.vmm().clone(), _receiver.clone()).unwrap();

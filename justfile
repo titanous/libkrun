@@ -146,39 +146,27 @@ miri:
     MIRIFLAGS="-Zmiri-backtrace=full" \
     cargo +nightly miri test -p arch -- gdt --skip proptest_tests
     MIRIFLAGS="-Zmiri-backtrace=full" \
-    cargo +nightly miri test -p vmm --features snapshot -- dirty_bitmap --skip proptest_tests
-    MIRIFLAGS="-Zmiri-backtrace=full" \
-    cargo +nightly miri test -p vmm --features snapshot -- snapshot::tests::test_header --skip proptest_tests
-    MIRIFLAGS="-Zmiri-backtrace=full" \
-    cargo +nightly miri test -p vmm --features uffd,snapshot -- uffd::page_tracker --skip proptest_tests
-    MIRIFLAGS="-Zmiri-backtrace=full" \
     cargo +nightly miri test -p devices --features net,blk -- balloon::reclaimed_bitmap --skip proptest_tests
     MIRIFLAGS="-Zmiri-backtrace=full" \
     cargo +nightly miri test -p devices --features net,blk -- virtio::block::request --skip proptest_tests
 
 # proptest: property-based tests for bitmap invariants, GDT, address translation, round-trips
 proptest:
-    cargo test -p vmm --features snapshot -- proptest_tests
-    cargo test -p vmm --features uffd,snapshot -- uffd::page_tracker::tests::proptest_tests
     cargo test -p devices --features net -- virtio::balloon::reclaimed_bitmap::tests::proptest_tests
     cargo test -p arch -- x86_64::gdt::tests::proptest_tests
     cargo test -p libkrun --features {{features}} -- tests::proptest_tests
 
 # proptest-long: extended runs (10x cases)
 proptest-long:
-    PROPTEST_CASES=10000 cargo test -p vmm --features snapshot -- proptest_tests
-    PROPTEST_CASES=10000 cargo test -p vmm --features uffd,snapshot -- uffd::page_tracker::tests::proptest_tests
     PROPTEST_CASES=10000 cargo test -p devices --features net -- virtio::balloon::reclaimed_bitmap::tests::proptest_tests
 
 # Requires --release for performance (loom is computationally intensive).
 # Exhaustive concurrency testing on all bitmap/tracker types.
 loom:
-    RUSTFLAGS="--cfg loom" cargo test --release -p vmm -- dirty_bitmap::tests::loom_tests
-    RUSTFLAGS="--cfg loom" cargo test --release -p vmm --features uffd -- uffd::page_tracker::tests::loom_tests
     RUSTFLAGS="--cfg loom" cargo test --release -p devices --features net -- virtio::balloon::reclaimed_bitmap::tests::loom_tests
 
 # Usage: just fuzz <target> [duration]
-#   just fuzz fuzz_snapshot_deser
+#   just fuzz fuzz_block_request
 #   just fuzz fuzz_fuse_parsing 120
 # Run a single fuzz target for the given duration (default 60s).
 fuzz target duration="60":
@@ -199,7 +187,7 @@ fuzz-list:
         || grep '^name = ' fuzz/Cargo.toml | grep -v 'libkrun-fuzz' | sed 's/name = "\(.*\)"/\1/'
 
 # Usage: just fuzz-corpus <target>
-#   just fuzz-corpus fuzz_snapshot_deser
+#   just fuzz-corpus fuzz_block_request
 # Show corpus statistics for a fuzz target.
 fuzz-corpus target:
     @if [ -d "fuzz/corpus/{{target}}" ]; then \
@@ -217,11 +205,11 @@ asan:
     RUSTFLAGS="-Zsanitizer=address" \
     cargo +nightly test \
         --target x86_64-unknown-linux-gnu \
-        -p devices --features net,snapshot,vhost-user
+        -p devices --features net,blk,vhost-user
     RUSTFLAGS="-Zsanitizer=address" \
     cargo +nightly test \
         --target x86_64-unknown-linux-gnu \
-        -p vmm --features uffd,snapshot
+        -p vmm --features net,blk,vhost-user
 
 # integration-asan: run integration tests under AddressSanitizer.
 #
@@ -270,9 +258,9 @@ kani:
     # -Z stubbing: #[kani::stub], #[kani::stub_verified]
     # -j: run harnesses in parallel within each crate
     pids=()
-    cargo kani -j --output-format terse -p vmm --features snapshot,uffd -Z function-contracts &
+    cargo kani -j --output-format terse -p vmm --features net,blk,vhost-user -Z function-contracts &
     pids+=($!)
-    cargo kani -j --output-format terse -p devices --features net,snapshot,vhost-user -Z function-contracts -Z stubbing &
+    cargo kani -j --output-format terse -p devices --features net,blk,vhost-user -Z function-contracts -Z stubbing &
     pids+=($!)
     cargo kani -j --output-format terse -p arch -Z function-contracts -Z stubbing &
     pids+=($!)
@@ -295,8 +283,8 @@ kani:
 #   just kani-proof proof_mark_dirty_no_panic
 # Run a single named Kani proof across all packages.
 kani-proof name:
-    cargo kani -p vmm --features snapshot,uffd -Z function-contracts --harness {{name}} 2>/dev/null || \
-    cargo kani -p devices --features net,snapshot,vhost-user -Z function-contracts -Z stubbing --harness {{name}} 2>/dev/null || \
+    cargo kani -p vmm --features net,blk,vhost-user -Z function-contracts --harness {{name}} 2>/dev/null || \
+    cargo kani -p devices --features net,blk,vhost-user -Z function-contracts -Z stubbing --harness {{name}} 2>/dev/null || \
     cargo kani -p arch -Z function-contracts -Z stubbing --harness {{name}} 2>/dev/null || \
     cargo kani -p utils -Z function-contracts --harness {{name}} 2>/dev/null || \
     cargo kani -p kernel --harness {{name}} 2>/dev/null || \
@@ -305,8 +293,8 @@ kani-proof name:
 
 # Run a single Kani proof with concrete playback for debugging failures.
 kani-playback name:
-    cargo kani -p vmm --features snapshot,uffd -Z function-contracts --harness {{name}} --concrete-playback=print 2>/dev/null || \
-    cargo kani -p devices --features net,snapshot,vhost-user -Z function-contracts -Z stubbing --harness {{name}} --concrete-playback=print 2>/dev/null || \
+    cargo kani -p vmm --features net,blk,vhost-user -Z function-contracts --harness {{name}} --concrete-playback=print 2>/dev/null || \
+    cargo kani -p devices --features net,blk,vhost-user -Z function-contracts -Z stubbing --harness {{name}} --concrete-playback=print 2>/dev/null || \
     cargo kani -p arch -Z function-contracts -Z stubbing --harness {{name}} --concrete-playback=print 2>/dev/null || \
     cargo kani -p utils -Z function-contracts --harness {{name}} --concrete-playback=print 2>/dev/null || \
     cargo kani -p kernel --harness {{name}} --concrete-playback=print 2>/dev/null || \
@@ -318,7 +306,7 @@ kani-playback name:
 # Builder::build, Context::run, and VmExit plumbing. KRUN_INIT_BIN env var
 # provides the absolute path to the init binary so devices/build.rs can copy
 # it into OUT_DIR even when cargo-mutants copies the workspace to a temp dir.
-mutants_features := "embedded_init,net,snapshot,uffd,blk,vhost-user"
+mutants_features := "embedded_init,net,blk,vhost-user"
 
 # Packages to mutate. Explicit -p flags prevent cargo-mutants from building the full
 # workspace, which avoids bindgen crates (krun_input, krun_display) that require libclang
@@ -328,7 +316,7 @@ mutants_packages := "-p libkrun -p vmm -p devices -p arch -p kernel -p utils -p 
 
 # Excluded subsystems (no tests exist for these)
 # Note: mutants_excludes relies on sh -c word splitting to expand multiple -e flags.
-mutants_excludes := "-e 'src/rutabaga_gfx' -e 'src/hvf' -e 'src/devices/src/virtio/gpu' -e 'src/devices/src/virtio/snd' -e 'src/devices/src/virtio/input' -e 'src/krun_display'"
+mutants_excludes := "-e 'src/rutabaga_gfx' -e 'src/devices/src/virtio/gpu' -e 'src/devices/src/virtio/snd' -e 'src/devices/src/virtio/input' -e 'src/krun_display'"
 
 # Full mutation test suite. Produces mutants.out/outcomes.json.
 # Builds init binary first and sets KRUN_INIT_BIN so embedded_init works in

@@ -13,26 +13,6 @@ use test_tsi_tcp_guest_listen::TestTsiTcpGuestListen;
 mod test_multiport_console;
 use test_multiport_console::TestMultiportConsole;
 
-mod test_snapshot_restore;
-use test_snapshot_restore::{TestSnapshotRestore, TestSnapshotRestoreIncremental};
-
-mod test_snapshot_serial;
-use test_snapshot_serial::TestSnapshotSerial;
-
-mod test_snapshot_block;
-use test_snapshot_block::TestSnapshotBlock;
-
-mod test_snapshot_incremental_state;
-use test_snapshot_incremental_state::TestSnapshotIncrementalState;
-
-mod test_snapshot_net;
-use test_snapshot_net::TestSnapshotNet;
-
-mod test_snapshot_errors;
-use test_snapshot_errors::{
-    TestSnapshotNestedMismatch, TestSnapshotVcpuMismatch, TestSnapshotWrongMagic,
-};
-
 mod test_rust_api;
 use test_rust_api::{
     TestRustApiDeviceInfo, TestRustApiPauseResume, TestRustApiShutdown, TestRustApiZeroVcpu,
@@ -46,9 +26,6 @@ mod mem_block_backend;
 
 #[cfg(feature = "host")]
 mod loopback_net;
-
-#[cfg(feature = "host")]
-mod mock_snapshot_store;
 
 #[cfg(feature = "host")]
 mod failing_block_backend;
@@ -65,15 +42,8 @@ use test_custom_block_backend::TestCustomBlockBackend;
 mod test_net_async_loopback;
 use test_net_async_loopback::TestNetAsyncLoopback;
 
-mod test_vhost_user_fs;
-use test_vhost_user_fs::{
-    TestVhostUserFsDaxAlways, TestVhostUserFsDaxInode, TestVhostUserFsDaxNever,
-};
-
 mod test_vhost_user_vsock;
-use test_vhost_user_vsock::{
-    TestVhostUserVsockEcho, TestVhostUserVsockFd, TestVhostUserVsockSnapshot,
-};
+use test_vhost_user_vsock::{TestVhostUserVsockEcho, TestVhostUserVsockFd};
 
 mod test_virtiofs_generic_passthrough;
 use test_virtiofs_generic_passthrough::TestVirtiofsGenericPassthrough;
@@ -83,32 +53,8 @@ mod net_helpers;
 #[cfg(feature = "guest")]
 mod vsock_helpers;
 
-mod test_uffd_demand_page;
-use test_uffd_demand_page::TestUffdDemandPageOnly;
-
-mod test_uffd_preload;
-use test_uffd_preload::{TestUffdPreloadFull, TestUffdPreloadPartial};
-
-mod test_uffd_incremental;
-use test_uffd_incremental::TestUffdIncrementalChain;
-
-mod test_uffd_error;
-use test_uffd_error::TestUffdErrorHandling;
-
-mod test_uffd_parallel;
-use test_uffd_parallel::TestUffdParallelFaults;
-
 mod test_balloon_inflate;
 use test_balloon_inflate::TestBalloonInflateDeflateStats;
-
-mod test_balloon_snapshot;
-use test_balloon_snapshot::{TestBalloonIncrementalReclaimed, TestBalloonSnapshotExcludes};
-
-mod test_balloon_uffd;
-use test_balloon_uffd::TestBalloonUffdZeroFill;
-
-mod test_snapshot_rng_reseed;
-use test_snapshot_rng_reseed::TestSnapshotRngReseed;
 
 mod test_block_backend_errors;
 use test_block_backend_errors::TestBlockBackendErrors;
@@ -118,21 +64,6 @@ use test_block_backend_slow::TestBlockBackendSlow;
 
 mod test_virtiofs_minimal;
 use test_virtiofs_minimal::TestVirtiofsMinimalFs;
-
-mod test_balloon_snapshot_uffd;
-use test_balloon_snapshot_uffd::TestBalloonSnapshotUffd;
-
-mod test_block_snapshot_uffd;
-use test_block_snapshot_uffd::TestBlockSnapshotUffd;
-
-mod test_virtiofs_dax_snapshot;
-use test_virtiofs_dax_snapshot::TestVirtiofsDaxSnapshot;
-
-mod test_balloon_snapshot_race;
-use test_balloon_snapshot_race::TestBalloonSnapshotRace;
-
-mod test_uffd_balloon_parallel;
-use test_uffd_balloon_parallel::TestUffdBalloonParallel;
 
 mod test_boot_timing_e2e;
 use test_boot_timing_e2e::TestBootTimingE2e;
@@ -167,30 +98,6 @@ pub fn test_cases() -> Vec<TestCase> {
             Box::new(TestTsiTcpGuestListen::new()),
         ),
         TestCase::new("multiport-console", Box::new(TestMultiportConsole)),
-        TestCase::new("snapshot-restore-full", Box::new(TestSnapshotRestore)),
-        TestCase::new(
-            "snapshot-restore-incremental",
-            Box::new(TestSnapshotRestoreIncremental),
-        ),
-        TestCase::new("snapshot-serial-scratch", Box::new(TestSnapshotSerial)),
-        TestCase::new("snapshot-block-data", Box::new(TestSnapshotBlock)),
-        TestCase::new(
-            "snapshot-incremental-state",
-            Box::new(TestSnapshotIncrementalState),
-        ),
-        TestCase::new("snapshot-net-connectivity", Box::new(TestSnapshotNet)),
-        TestCase::new(
-            "snapshot-error-wrong-magic",
-            Box::new(TestSnapshotWrongMagic),
-        ),
-        TestCase::new(
-            "snapshot-error-vcpu-mismatch",
-            Box::new(TestSnapshotVcpuMismatch),
-        ),
-        TestCase::new(
-            "snapshot-error-nested-mismatch",
-            Box::new(TestSnapshotNestedMismatch),
-        ),
         TestCase::new("rust-api-zero-vcpu", Box::new(TestRustApiZeroVcpu)),
         TestCase::new("rust-api-device-info", Box::new(TestRustApiDeviceInfo)),
         TestCase::new("rust-api-pause-resume", Box::new(TestRustApiPauseResume)),
@@ -199,50 +106,19 @@ pub fn test_cases() -> Vec<TestCase> {
         TestCase::new("vm-exit-observer", Box::new(TestVmExitObserver)),
         TestCase::new("custom-block-backend", Box::new(TestCustomBlockBackend)),
         TestCase::new("net-async-loopback", Box::new(TestNetAsyncLoopback)),
-        TestCase::new(
-            "vhost-user-fs-dax-always",
-            Box::new(TestVhostUserFsDaxAlways),
-        ),
-        TestCase::new("vhost-user-fs-dax-inode", Box::new(TestVhostUserFsDaxInode)),
-        TestCase::new("vhost-user-fs-dax-never", Box::new(TestVhostUserFsDaxNever)),
         TestCase::new("vhost-user-vsock-echo", Box::new(TestVhostUserVsockEcho)),
         TestCase::new("vhost-user-vsock-fd", Box::new(TestVhostUserVsockFd)),
-        TestCase::new(
-            "vhost-user-vsock-snapshot",
-            Box::new(TestVhostUserVsockSnapshot),
-        ),
         TestCase::new(
             "virtiofs-generic-passthrough",
             Box::new(TestVirtiofsGenericPassthrough),
         ),
-        TestCase::new("uffd-demand-page-only", Box::new(TestUffdDemandPageOnly)),
-        TestCase::new("uffd-preload-full", Box::new(TestUffdPreloadFull)),
-        TestCase::new("uffd-preload-partial", Box::new(TestUffdPreloadPartial)),
-        TestCase::new("uffd-incremental-chain", Box::new(TestUffdIncrementalChain)),
-        TestCase::new("uffd-error-handling", Box::new(TestUffdErrorHandling)),
-        TestCase::new("uffd-parallel-faults", Box::new(TestUffdParallelFaults)),
         TestCase::new(
             "balloon-inflate-deflate-stats",
             Box::new(TestBalloonInflateDeflateStats),
         ),
-        TestCase::new(
-            "balloon-snapshot-excludes-pages",
-            Box::new(TestBalloonSnapshotExcludes),
-        ),
-        TestCase::new("balloon-uffd-zero-fill", Box::new(TestBalloonUffdZeroFill)),
-        TestCase::new(
-            "balloon-incremental-reclaimed",
-            Box::new(TestBalloonIncrementalReclaimed),
-        ),
-        TestCase::new("snapshot-rng-reseed", Box::new(TestSnapshotRngReseed)),
         TestCase::new("block-backend-errors", Box::new(TestBlockBackendErrors)),
         TestCase::new("block-backend-slow", Box::new(TestBlockBackendSlow)),
         TestCase::new("virtiofs-minimal-fs", Box::new(TestVirtiofsMinimalFs)),
-        TestCase::new("balloon-snapshot-uffd", Box::new(TestBalloonSnapshotUffd)),
-        TestCase::new("block-snapshot-uffd", Box::new(TestBlockSnapshotUffd)),
-        TestCase::new("virtiofs-dax-snapshot", Box::new(TestVirtiofsDaxSnapshot)),
-        TestCase::new("balloon-snapshot-race", Box::new(TestBalloonSnapshotRace)),
-        TestCase::new("uffd-balloon-parallel", Box::new(TestUffdBalloonParallel)),
         TestCase::new("boot-timing-e2e", Box::new(TestBootTimingE2e)),
         TestCase::new("nested-virt", Box::new(TestNestedVirt)),
     ]

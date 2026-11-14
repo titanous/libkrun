@@ -11,8 +11,6 @@ use std::sync::{Arc, Mutex};
 
 #[cfg(target_os = "linux")]
 use libc::EINVAL;
-#[cfg(target_os = "macos")]
-use libc::EINVAL;
 use nix::errno::Errno;
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use nix::sys::socket::{
@@ -20,8 +18,6 @@ use nix::sys::socket::{
     AddressFamily, Backlog, MsgFlags, Shutdown, SockFlag, SockType, SockaddrLike, SockaddrStorage,
 };
 
-#[cfg(target_os = "macos")]
-use super::super::linux_errno::linux_errno_raw;
 use super::super::Queue as VirtQueue;
 use super::defs;
 use super::defs::uapi;
@@ -99,21 +95,6 @@ impl TsiStreamProxy {
             setsockopt(&fd, sockopt::ReuseAddr, &true).map_err(ProxyError::SettingReuseAddr)?;
         } else {
             setsockopt(&fd, sockopt::ReusePort, &true).map_err(ProxyError::SettingReusePort)?;
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            // nix doesn't provide an abstraction for SO_NOSIGPIPE, fall back to libc.
-            let option_value: libc::c_int = 1;
-            unsafe {
-                libc::setsockopt(
-                    fd.as_raw_fd(),
-                    libc::SOL_SOCKET,
-                    libc::SO_NOSIGPIPE,
-                    &option_value as *const _ as *const libc::c_void,
-                    std::mem::size_of_val(&option_value) as libc::socklen_t,
-                )
-            };
         }
 
         Ok(TsiStreamProxy {
@@ -251,8 +232,6 @@ impl TsiStreamProxy {
                         }
                         Err(e) => {
                             warn!("proxy: id={} err={}", self.id, e);
-                            #[cfg(target_os = "macos")]
-                            let errno = -linux_errno_raw(e as i32);
                             #[cfg(target_os = "linux")]
                             let errno = -(e as i32);
                             errno
@@ -260,8 +239,6 @@ impl TsiStreamProxy {
                     },
                     Err(e) => {
                         warn!("proxy: id={} err={}", self.id, e);
-                        #[cfg(target_os = "macos")]
-                        let errno = -linux_errno_raw(e as i32);
                         #[cfg(target_os = "linux")]
                         let errno = -(e as i32);
                         errno
@@ -270,8 +247,6 @@ impl TsiStreamProxy {
             }
             Err(e) => {
                 warn!("tcp bind: id={} err={}", self.id, e);
-                #[cfg(target_os = "macos")]
-                let errno = -linux_errno_raw(e as i32);
                 #[cfg(target_os = "linux")]
                 let errno = -(e as i32);
                 errno
@@ -485,8 +460,6 @@ impl Proxy for TsiStreamProxy {
             }
             Err(e) => {
                 debug!("TcpProxy: Error connecting: {e}");
-                #[cfg(target_os = "macos")]
-                let errno = -linux_errno_raw(Errno::last_raw());
                 #[cfg(target_os = "linux")]
                 let errno = -Errno::last_raw();
                 errno
@@ -548,16 +521,12 @@ impl Proxy for TsiStreamProxy {
                     if let Some(addr_len) = self.get_addr_len(&addr) {
                         (0, addr_len, addr)
                     } else {
-                        #[cfg(target_os = "macos")]
-                        let errno = -linux_errno_raw(EINVAL);
                         #[cfg(target_os = "linux")]
                         let errno = -EINVAL;
                         (errno, 0, addr)
                     }
                 }
                 Err(e) => {
-                    #[cfg(target_os = "macos")]
-                    let errno = -linux_errno_raw(e as i32);
                     #[cfg(target_os = "linux")]
                     let errno = -(e as i32);
                     (
@@ -591,8 +560,6 @@ impl Proxy for TsiStreamProxy {
         let mut update = ProxyUpdate::default();
 
         let ret = if let Some(buf) = pkt.buf() {
-            #[cfg(target_os = "macos")]
-            let flags = MsgFlags::empty();
             #[cfg(target_os = "linux")]
             let flags = MsgFlags::MSG_NOSIGNAL;
 
@@ -605,8 +572,6 @@ impl Proxy for TsiStreamProxy {
                     sent as i32
                 }
                 Err(err) => {
-                    #[cfg(target_os = "macos")]
-                    let errno = -linux_errno_raw(err as i32);
                     #[cfg(target_os = "linux")]
                     let errno = -(err as i32);
                     errno

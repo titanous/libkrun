@@ -17,8 +17,6 @@ use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-#[cfg(target_os = "macos")]
-use super::super::linux_errno::linux_errno_raw;
 use super::super::Queue as VirtQueue;
 use super::muxer::{push_packet, MuxerRx};
 use super::muxer_rxq::MuxerRxQ;
@@ -68,21 +66,6 @@ fn proxy_fd_create(id: u64) -> Result<OwnedFd, ProxyError> {
         },
         Err(e) => error!("couldn't obtain fd flags id={id}, err={e}"),
     };
-
-    #[cfg(target_os = "macos")]
-    {
-        // nix doesn't provide an abstraction for SO_NOSIGPIPE, fall back to libc.
-        let option_value: libc::c_int = 1;
-        unsafe {
-            libc::setsockopt(
-                fd.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_NOSIGPIPE,
-                &option_value as *const _ as *const libc::c_void,
-                std::mem::size_of_val(&option_value) as libc::socklen_t,
-            )
-        };
-    }
 
     Ok(fd)
 }
@@ -342,8 +325,6 @@ impl Proxy for UnixProxy {
             }
             Err(e) => {
                 debug!("Error connecting: {e}");
-                #[cfg(target_os = "macos")]
-                let errno = -linux_errno_raw(Errno::last_raw());
                 #[cfg(target_os = "linux")]
                 let errno = -Errno::last_raw();
                 errno
@@ -395,9 +376,6 @@ impl Proxy for UnixProxy {
         let mut update = ProxyUpdate::default();
 
         let ret = if let Some(buf) = pkt.buf() {
-            #[cfg(target_os = "macos")]
-            let flags = MsgFlags::empty();
-
             #[cfg(target_os = "linux")]
             let flags = MsgFlags::MSG_NOSIGNAL;
 
@@ -410,9 +388,6 @@ impl Proxy for UnixProxy {
                     sent as i32
                 }
                 Err(err) => {
-                    #[cfg(target_os = "macos")]
-                    let errno = -linux_errno_raw(err as i32);
-
                     #[cfg(target_os = "linux")]
                     let errno = -(err as i32);
                     errno

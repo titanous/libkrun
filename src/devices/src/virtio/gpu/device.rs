@@ -1,7 +1,5 @@
 use std::io::Write;
 
-#[cfg(target_os = "macos")]
-use crossbeam_channel::Sender;
 use vm_memory::{ByteValued, GuestMemoryMmap};
 
 use super::super::{
@@ -15,8 +13,6 @@ use super::worker::Worker;
 use crate::virtio::display::DisplayInfo;
 use crate::virtio::InterruptTransport;
 use krun_display::DisplayBackend;
-#[cfg(target_os = "macos")]
-use utils::worker_message::WorkerMessage;
 
 // Supported features.
 pub(crate) const AVAIL_FEATURES: u64 = (1u64 << uapi::VIRTIO_F_VERSION_1)
@@ -36,8 +32,6 @@ pub struct Gpu {
     pub(crate) device_state: DeviceState,
     shm_region: Option<VirtioShmRegion>,
     virgl_flags: u32,
-    #[cfg(target_os = "macos")]
-    map_sender: Sender<WorkerMessage>,
     export_table: Option<ExportTable>,
     displays: Box<[DisplayInfo]>,
     display_backend: DisplayBackend<'static>,
@@ -48,7 +42,6 @@ impl Gpu {
         virgl_flags: u32,
         displays: Box<[DisplayInfo]>,
         display_backend: DisplayBackend<'static>,
-        #[cfg(target_os = "macos")] map_sender: Sender<WorkerMessage>,
     ) -> super::Result<Gpu> {
         Ok(Gpu {
             avail_features: AVAIL_FEATURES,
@@ -56,8 +49,6 @@ impl Gpu {
             device_state: DeviceState::Inactive,
             shm_region: None,
             virgl_flags,
-            #[cfg(target_os = "macos")]
-            map_sender,
             export_table: None,
             displays,
             display_backend,
@@ -213,8 +204,6 @@ impl VirtioDevice for Gpu {
             interrupt.clone(),
             shm_region,
             self.virgl_flags,
-            #[cfg(target_os = "macos")]
-            self.map_sender.clone(),
             self.export_table.take(),
             self.displays.clone(),
             self.display_backend,

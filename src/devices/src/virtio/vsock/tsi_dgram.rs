@@ -11,8 +11,6 @@ use nix::sys::socket::{
     SockType, SockaddrIn, SockaddrLike, SockaddrStorage,
 };
 
-#[cfg(target_os = "macos")]
-use super::super::linux_errno::linux_errno_raw;
 use super::super::Queue as VirtQueue;
 use super::defs;
 use super::defs::uapi;
@@ -76,21 +74,6 @@ impl TsiDgramProxy {
             },
             Err(e) => error!("couldn't obtain fd flags id={id}, err={e}"),
         };
-
-        #[cfg(target_os = "macos")]
-        {
-            // nix doesn't provide an abstraction for SO_NOSIGPIPE, fall back to libc.
-            let option_value: libc::c_int = 1;
-            unsafe {
-                libc::setsockopt(
-                    fd.as_raw_fd(),
-                    libc::SOL_SOCKET,
-                    libc::SO_NOSIGPIPE,
-                    &option_value as *const _ as *const libc::c_void,
-                    std::mem::size_of_val(&option_value) as libc::socklen_t,
-                )
-            };
-        }
 
         Ok(TsiDgramProxy {
             id,
@@ -252,8 +235,6 @@ impl Proxy for TsiDgramProxy {
             }
             Err(e) => {
                 debug!("Error connecting: {e}");
-                #[cfg(target_os = "macos")]
-                let errno = -linux_errno_raw(e as i32);
                 #[cfg(target_os = "linux")]
                 let errno = -(e as i32);
                 errno
@@ -284,8 +265,6 @@ impl Proxy for TsiDgramProxy {
         let (result, addr): (i32, SockaddrStorage) = match getpeername(self.fd.as_raw_fd()) {
             Ok(name) => (0, name),
             Err(e) => {
-                #[cfg(target_os = "macos")]
-                let errno = -linux_errno_raw(e as i32);
                 #[cfg(target_os = "linux")]
                 let errno = -(e as i32);
                 (
@@ -314,8 +293,6 @@ impl Proxy for TsiDgramProxy {
         debug!("sendmsg");
 
         let ret = if let Some(buf) = pkt.buf() {
-            #[cfg(target_os = "macos")]
-            let flags = MsgFlags::empty();
             #[cfg(target_os = "linux")]
             let flags = MsgFlags::MSG_NOSIGNAL;
 
@@ -362,8 +339,6 @@ impl Proxy for TsiDgramProxy {
 
         if let Some(addr) = self.sendto_addr {
             if let Some(buf) = pkt.buf() {
-                #[cfg(target_os = "macos")]
-                let flags = MsgFlags::empty();
                 #[cfg(target_os = "linux")]
                 let flags = MsgFlags::MSG_NOSIGNAL;
 

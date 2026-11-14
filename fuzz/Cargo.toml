@@ -15,13 +15,11 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-bincode-next = "3.0.0-rc.5"
 vm-memory = { version = "0.18", features = ["backend-mmap"] }
 
 # Crates under test.
 # Include all features needed by the fuzz targets.
 devices = { path = "../src/devices", features = ["blk", "vhost-user"] }
-vmm = { path = "../src/vmm", features = ["snapshot"] }
 vhost = { version = "0.15", features = ["vhost-user-backend"] }
 
 # Must mirror root [patch.crates-io] — the fuzz workspace is separate and
@@ -29,12 +27,6 @@ vhost = { version = "0.15", features = ["vhost-user-backend"] }
 [patch.crates-io]
 vhost = { path = "../vendor/vhost" }
 linux-loader = { git = "https://github.com/theoparis/linux-loader", rev = "af90928dcfa1666d47a5269061ef77857eff46d3" }
-
-[[bin]]
-name = "fuzz_snapshot_deser"
-path = "fuzz_targets/fuzz_snapshot_deser.rs"
-test = false
-doc = false
 
 [[bin]]
 name = "fuzz_block_request"
