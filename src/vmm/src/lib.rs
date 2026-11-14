@@ -588,14 +588,23 @@ impl Subscriber for Vmm {
                         &self.cooperative_topology,
                         &self.cooperative_compatibility,
                     )?;
-                    if !path.as_os_str().is_empty() {
-                        template.write_to_path(path)?;
-                    }
+                    let prepared_path = if path.as_os_str().is_empty() {
+                        None
+                    } else {
+                        Some(template.prepare_path(path)?)
+                    };
                     if !self.capture_request.accept() {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::TimedOut,
                             "cooperative freeze timed out during preparation",
                         ));
+                    }
+                    if let Some(prepared) = prepared_path {
+                        if let Err(error) = prepared.publish() {
+                            // Acceptance is irreversible. Preserve the sealed descriptor
+                            // instead of incorrectly resuming an accepted source.
+                            eprintln!("accepted template export failed: {error}");
+                        }
                     }
                     captured_template = Some(template);
                     Ok(path.clone())

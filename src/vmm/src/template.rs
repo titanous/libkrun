@@ -38,6 +38,13 @@ mod tests {
         assert_eq!(reopened.compatibility, b"cpu-xstate-tsc");
         assert_eq!(reopened.clock_ns, 123);
         let path = std::env::temp_dir().join(format!("krun-template-path-{}", std::process::id()));
+        let staged = reopened.prepare_path(&path).unwrap();
+        assert!(!path.exists());
+        drop(staged);
+        assert!(
+            !path.exists(),
+            "cancelled capture must not publish a template"
+        );
         reopened.write_to_path(&path).unwrap();
         let imported = Template::from_path(&path).unwrap();
         let imported_inode = imported.file.metadata().unwrap().ino();
@@ -86,6 +93,41 @@ mod tests {
     }
 
     #[test]
+    fn failed_export_removes_staged_and_final_paths() {
+        let directory =
+            std::env::temp_dir().join(format!("krun-export-failure-{}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("guest.ram");
+        let file = crate::template_memory::create(4096).unwrap();
+        let template = Template {
+            file,
+            control: 0,
+            vcpus: 1,
+            ram_mib: 1,
+            clock_ns: 0,
+            regions: Vec::new(),
+            topology: Vec::new(),
+            compatibility: Vec::new(),
+        };
+        // Inject failure after one chunk, before publication.
+        let source = directory.join("source");
+        let mut template = template;
+        template.file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&source)
+            .unwrap();
+        template.file.set_len(2 * 1024 * 1024).unwrap();
+        FAIL_EXPORT.with(|fail| fail.set(true));
+        assert!(template.write_to_path(&path).is_err());
+        assert!(!path.exists());
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+        std::fs::remove_file(source).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
     fn rejects_bad_header_and_truncated_file() {
         let file = crate::template_memory::create(4096).unwrap();
         assert!(Template::open(file.try_clone().unwrap()).is_err());
@@ -108,6 +150,11 @@ use vm_memory::{
     GuestRegionMmap,
 };
 
+#[cfg(test)]
+thread_local! {
+    static FAIL_EXPORT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 const MAGIC: &[u8; 8] = b"KRUNFRZ1";
 const HEADER: usize = 24576;
 const COMPATIBILITY_START: usize = 8192;
@@ -129,13 +176,56 @@ fn invalid() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, "invalid cooperative template")
 }
 
+pub struct PreparedTemplatePath {
+    temporary: std::path::PathBuf,
+    destination: std::path::PathBuf,
+}
+
+impl Drop for PreparedTemplatePath {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.temporary);
+    }
+}
+
+impl PreparedTemplatePath {
+    pub fn publish(self) -> io::Result<()> {
+        std::fs::hard_link(&self.temporary, &self.destination)?;
+        File::open(
+            self.destination
+                .parent()
+                .unwrap_or(std::path::Path::new(".")),
+        )?
+        .sync_all()
+    }
+}
+
 impl Template {
     pub fn write_to_path(&self, path: impl AsRef<std::path::Path>) -> io::Result<()> {
+        self.prepare_path(path)?.publish()
+    }
+
+    pub fn prepare_path(
+        &self,
+        path: impl AsRef<std::path::Path>,
+    ) -> io::Result<PreparedTemplatePath> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let path = path.as_ref();
+        let parent = path.parent().unwrap_or(std::path::Path::new("."));
+        let temporary = parent.join(format!(
+            ".krun-template-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
         let destination = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
-            .open(path)?;
+            .open(&temporary)?;
+        let prepared = PreparedTemplatePath {
+            temporary,
+            destination: path.to_path_buf(),
+        };
         let mut offset = 0;
         let mut buffer = vec![0; 1024 * 1024];
         let len = self.file.metadata()?.len();
@@ -149,8 +239,13 @@ impl Template {
                 }
             }
             offset += count as u64;
+            #[cfg(test)]
+            if FAIL_EXPORT.with(|fail| fail.replace(false)) {
+                return Err(io::Error::other("injected mid-export failure"));
+            }
         }
-        destination.sync_all()
+        destination.sync_all()?;
+        Ok(prepared)
     }
 
     pub fn from_path(path: impl AsRef<std::path::Path>) -> io::Result<Self> {
