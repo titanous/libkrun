@@ -9,7 +9,6 @@ use vm_memory::GuestMemoryMmap;
 use crate::virtio::console::console_control::ConsoleControl;
 use crate::virtio::console::port_io::{PortInput, PortOutput};
 use crate::virtio::console::process_rx::process_rx;
-use crate::virtio::console::process_tx::process_tx;
 use crate::virtio::port_io::PortTerminalProperties;
 use crate::virtio::{InterruptTransport, Queue};
 
@@ -78,6 +77,7 @@ pub(crate) struct Port {
     input: Option<Arc<Mutex<Box<dyn PortInput + Send>>>>,
     output: Option<Arc<Mutex<Box<dyn PortOutput + Send>>>>,
     terminal: Option<Box<dyn PortTerminalProperties>>,
+    tx_state: Arc<super::ConsoleTxState>,
 }
 
 impl Port {
@@ -91,7 +91,12 @@ impl Port {
                 .output
                 .map(|output| Arc::new(Mutex::new(output))),
             terminal: description.terminal,
+            tx_state: Arc::new(super::ConsoleTxState::default()),
         }
+    }
+
+    pub(crate) fn set_tx_state(&mut self, state: Arc<super::ConsoleTxState>) {
+        self.tx_state = state;
     }
 
     pub fn name(&self) -> &str {
@@ -158,12 +163,15 @@ impl Port {
                 .unwrap()
         });
 
+        let tx_state = self.tx_state.clone();
         let tx_thread = output.map(|output| {
             let stop = stop.clone();
             let drain = drain.clone();
             let port_id = self.port_id;
             thread::spawn(move || {
-                process_tx(port_id, mem, tx_queue, interrupt, output, stop, drain)
+                super::process_tx::process_tx_with_state(
+                    port_id, mem, tx_queue, interrupt, output, stop, drain, tx_state,
+                )
             })
         });
 

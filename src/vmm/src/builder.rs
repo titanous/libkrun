@@ -2664,6 +2664,10 @@ fn attach_console_devices(
     }
 
     let console = Arc::new(Mutex::new(devices::virtio::Console::new(ports).unwrap()));
+    #[cfg(target_arch = "x86_64")]
+    vmm.pio_device_manager
+        .stop_reason
+        .register_console(console.lock().unwrap().tx_state());
 
     vmm.exit_observers.push(console.clone());
 

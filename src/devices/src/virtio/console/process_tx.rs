@@ -36,7 +36,29 @@ impl TxSliceDiagnostics {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn process_tx(
+    port_id: u32,
+    mem: GuestMemoryMmap,
+    queue: Queue,
+    interrupt: InterruptTransport,
+    output: Arc<Mutex<Box<dyn PortOutput + Send>>>,
+    stop: Arc<AtomicBool>,
+    drain: Arc<AtomicBool>,
+) {
+    process_tx_with_state(
+        port_id,
+        mem,
+        queue,
+        interrupt,
+        output,
+        stop,
+        drain,
+        Arc::new(super::ConsoleTxState::default()),
+    );
+}
+
+pub(crate) fn process_tx_with_state(
     port_id: u32,
     mem: GuestMemoryMmap,
     mut queue: Queue,
@@ -44,6 +66,7 @@ pub(crate) fn process_tx(
     output: Arc<Mutex<Box<dyn PortOutput + Send>>>,
     stop: Arc<AtomicBool>,
     drain: Arc<AtomicBool>,
+    state: Arc<super::ConsoleTxState>,
 ) {
     let mut remaining = queue.size;
     let mut drain_started = None;
@@ -87,6 +110,7 @@ pub(crate) fn process_tx(
                 head_index,
                 desc_ordinal,
                 &stop,
+                &state,
             ) {
                 Ok(0) => {
                     break;
@@ -152,6 +176,7 @@ fn write_desc_to_output(
     head_index: u16,
     desc_ordinal: usize,
     stop: &AtomicBool,
+    state: &super::ConsoleTxState,
 ) -> Result<usize, io::Error> {
     let mut total = 0;
     let mut stop_started = None;
@@ -234,9 +259,18 @@ fn write_desc_to_output(
                     }
                     // Backpressure must not retain guest buffers forever: console
                     // close during reboot waits for these descriptors to complete.
-                    let since = stalled_since.get_or_insert_with(std::time::Instant::now);
-                    if since.elapsed() >= std::time::Duration::from_millis(100) {
-                        return Err(io::ErrorKind::TimedOut.into());
+                    if state.ending.load(Ordering::Acquire) || stop.load(Ordering::Acquire) {
+                        let since = stalled_since.get_or_insert_with(std::time::Instant::now);
+                        if since.elapsed() >= std::time::Duration::from_millis(100) {
+                            let dropped = desc.len as usize - total;
+                            state.dropped.fetch_add(dropped as u64, Ordering::Relaxed);
+                            log::warn!(
+                                "console port {port_id}: discarded {dropped} bytes while ending"
+                            );
+                            return Err(io::ErrorKind::TimedOut.into());
+                        }
+                    } else {
+                        stalled_since = None;
                     }
                     output.wait_until_writable();
                 }
@@ -490,6 +524,85 @@ mod tests {
     }
 
     #[test]
+    fn normal_operation_backpressures_without_discard() {
+        struct Slow {
+            start: std::time::Instant,
+            bytes: Arc<Mutex<Vec<u8>>>,
+        }
+        impl PortOutput for Slow {
+            fn write_volatile(&mut self, buf: &VolatileSlice) -> io::Result<usize> {
+                if self.start.elapsed() < std::time::Duration::from_millis(150) {
+                    return Err(io::ErrorKind::WouldBlock.into());
+                }
+                let mut bytes = vec![0; buf.len()];
+                buf.copy_to(&mut bytes);
+                self.bytes.lock().unwrap().extend(bytes);
+                Ok(buf.len())
+            }
+            fn wait_until_writable(&self) {
+                std::thread::park_timeout(std::time::Duration::from_millis(10));
+            }
+        }
+        let payload = b"slow but live reader";
+        let (mem, queue, _) = make_mem_and_queue(payload);
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = stop.clone();
+        let observed = received.clone();
+        let handle = std::thread::spawn(move || {
+            process_tx(
+                0,
+                mem,
+                queue,
+                make_interrupt(),
+                Arc::new(Mutex::new(Box::new(Slow {
+                    start: std::time::Instant::now(),
+                    bytes: observed,
+                }))),
+                worker_stop,
+                Arc::new(AtomicBool::new(false)),
+            )
+        });
+        std::thread::park_timeout(std::time::Duration::from_millis(250));
+        stop.store(true, Ordering::Release);
+        handle.thread().unpark();
+        handle.join().unwrap();
+        assert_eq!(received.lock().unwrap().as_slice(), payload);
+    }
+
+    #[test]
+    fn ending_discards_and_counts_only_unwritten_bytes() {
+        struct Stalled;
+        impl PortOutput for Stalled {
+            fn write_volatile(&mut self, _: &VolatileSlice) -> io::Result<usize> {
+                Err(io::ErrorKind::WouldBlock.into())
+            }
+            fn wait_until_writable(&self) {
+                std::thread::park_timeout(std::time::Duration::from_millis(10));
+            }
+        }
+        let payload = b"pending output";
+        let (mem, mut queue, _) = make_mem_and_queue(payload);
+        let desc = queue.pop(&mem).unwrap();
+        let state = super::super::ConsoleTxState::default();
+        state.set_ending(true);
+        let started = std::time::Instant::now();
+        let result = write_desc_to_output(
+            desc,
+            &mut Stalled,
+            &make_interrupt(),
+            0,
+            0,
+            0,
+            &AtomicBool::new(false),
+            &state,
+        );
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
+        assert_eq!(state.dropped_bytes(), payload.len() as u64);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
     fn final_drain_does_not_wait_for_stalled_reader() {
         struct Stalled;
         impl PortOutput for Stalled {
@@ -617,6 +730,7 @@ mod tests {
             0, // head_index
             0, // desc_ordinal
             &AtomicBool::new(false),
+            &super::super::ConsoleTxState::default(),
         );
 
         // The result should be an error (broken pipe)
@@ -654,6 +768,7 @@ mod tests {
             0, // head_index
             0, // desc_ordinal
             &AtomicBool::new(false),
+            &super::super::ConsoleTxState::default(),
         );
 
         // Should succeed with 0 bytes written (zero-length descriptor)
@@ -719,6 +834,7 @@ mod tests {
             0,
             0,
             &AtomicBool::new(false),
+            &super::super::ConsoleTxState::default(),
         );
 
         assert_eq!(result.unwrap(), payload.len());
@@ -751,6 +867,7 @@ mod tests {
             0,
             0,
             &AtomicBool::new(false),
+            &super::super::ConsoleTxState::default(),
         );
 
         assert_eq!(result.unwrap(), payload.len());

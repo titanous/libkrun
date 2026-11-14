@@ -56,6 +56,7 @@ pub struct Console {
     pub(crate) device_state: DeviceState,
     pub(crate) control: Arc<ConsoleControl>,
     pub(crate) ports: Vec<Port>,
+    tx_state: Arc<super::ConsoleTxState>,
 
     queue_config: Vec<QueueConfig>,
     // Queues are stored as Option so individual queues can be taken when ports start.
@@ -81,8 +82,13 @@ impl Console {
             .map(|_| QueueConfig::new(QUEUE_SIZE))
             .collect();
 
+        let tx_state = Arc::new(super::ConsoleTxState::default());
         let ports: Vec<Port> = zip(0u32.., ports)
-            .map(|(port_id, description)| Port::new(port_id, description))
+            .map(|(port_id, description)| {
+                let mut port = Port::new(port_id, description);
+                port.set_tx_state(tx_state.clone());
+                port
+            })
             .collect();
 
         let (cols, rows) = ports[0]
@@ -94,6 +100,7 @@ impl Console {
         Ok(Console {
             control: ConsoleControl::new(),
             ports,
+            tx_state,
             queue_config,
             queues: Vec::new(),
             queue_events: Vec::new(),
@@ -106,6 +113,10 @@ impl Console {
             device_state: DeviceState::Inactive,
             config,
         })
+    }
+
+    pub fn tx_state(&self) -> Arc<super::ConsoleTxState> {
+        self.tx_state.clone()
     }
 
     pub fn id(&self) -> &str {

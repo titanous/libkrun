@@ -51,6 +51,11 @@ The platform's x86 KVM control-port allocation is defined here:
 Copy-related ports are implemented by the cooperative-copy branch, not by every
 build. `0xe9` is reserved for the conventional debug console. Stop reason bytes
 are 0 none/clear, 1 requested power-off, 2 requested reboot, 3 halt, 4 panic.
+Byte 5 announces shutdown preparation only: it allows bounded console discard
+before device teardown, never sets a terminal reason or stops a guest. During
+normal operation virtio-console output retains backpressure without a time-based
+discard. Once ending, an unwritable descriptor has a 100 ms discard budget;
+`Console::tx_state().dropped_bytes()` exposes discarded bytes.
 Invalid widths/values are ignored; panic cannot be replaced or cleared. A write
 alone does not stop the VM. The x86 KVM builder supplies `holodeck.stop_port=1`
 so the maintained guest only writes the port on this platform.

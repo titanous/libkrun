@@ -75,6 +75,6 @@ impl StopReason {
         // Acquire the guest's ordered byte store before its queue notification.
         let reason = unsafe { std::ptr::read_volatile(self.address as *const u8) };
         std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
-        (reason != 0).then_some(reason)
+        (1..=4).contains(&reason).then_some(reason)
     }
 }
