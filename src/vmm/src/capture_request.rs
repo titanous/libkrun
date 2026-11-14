@@ -26,6 +26,23 @@ impl std::ops::Deref for CaptureOutcome {
     }
 }
 
+#[cfg(any(target_arch = "x86_64", test))]
+pub(crate) fn validate_stopped_source(joined: bool, reason: u8) -> io::Result<()> {
+    let outcome = if !joined {
+        Some(crate::vm_exit::VmExit::Error {
+            message: "vCPU failed or missed capture stop join deadline".into(),
+        })
+    } else if (1..=4).contains(&reason) {
+        Some(crate::vm_exit::VmExit::from_stated_reason(reason))
+    } else {
+        None
+    };
+    match outcome {
+        Some(outcome) => Err(io::Error::other(GuestStoppedDuringCapture(outcome))),
+        None => Ok(()),
+    }
+}
+
 pub fn refusal_errno(error: &io::Error) -> i32 {
     match error.kind() {
         io::ErrorKind::PermissionDenied => -libc::EPERM,
@@ -151,6 +168,26 @@ impl CaptureRequest {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn publication_rejects_late_reason_after_cpus_stop() {
+        let error = super::validate_stopped_source(true, 4).unwrap_err();
+        let stopped = error
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<super::GuestStoppedDuringCapture>()
+            .unwrap();
+        assert_eq!(stopped.0, crate::vm_exit::VmExit::Panic);
+    }
+    #[test]
+    fn publication_rejects_a_cpu_that_did_not_stop() {
+        let error = super::validate_stopped_source(false, 0).unwrap_err();
+        let stopped = error
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<super::GuestStoppedDuringCapture>()
+            .unwrap();
+        assert!(matches!(stopped.0, crate::vm_exit::VmExit::Error { .. }));
+    }
     #[test]
     fn stop_capture_failure_retains_typed_terminal_reason() {
         let error = std::io::Error::other(super::GuestStoppedDuringCapture(

@@ -688,6 +688,34 @@ impl Subscriber for Vmm {
                             "cooperative freeze timed out during preparation",
                         ));
                     }
+                    for cpu in &self.vcpus_handles {
+                        let _ = cpu.send_event(VcpuEvent::FreezeAccepted);
+                    }
+                    self.vcpu_exit_flag.store(true, Ordering::Release);
+                    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                    let mut joined = true;
+                    for cpu in &mut self.vcpus_handles {
+                        cpu.request_shutdown();
+                    }
+                    for cpu in &mut self.vcpus_handles {
+                        joined &= cpu.join_until(deadline);
+                    }
+                    let later_code =
+                        aggregate_vcpu_exits(self.vcpus_handles.iter().flat_map(|cpu| {
+                            cpu.response_receiver()
+                                .try_iter()
+                                .filter_map(|response| match response {
+                                    VcpuResponse::Exited(code) => Some(code),
+                                    _ => None,
+                                })
+                        }));
+                    crate::capture_request::validate_stopped_source(
+                        joined && later_code != FC_EXIT_CODE_GENERIC_ERROR,
+                        self.pio_device_manager
+                            .stop_reason
+                            .0
+                            .load(Ordering::Acquire),
+                    )?;
                     let export =
                         prepared_path.map(|prepared| prepared.publish().map(|()| path.clone()));
                     captured_template =
@@ -718,11 +746,6 @@ impl Subscriber for Vmm {
                         return;
                     }
                 };
-                for cpu in &self.vcpus_handles {
-                    let _ = cpu.send_event(VcpuEvent::FreezeAccepted);
-                }
-                self.vcpu_exit_flag.store(true, Ordering::Release);
-                self.vcpus_handles.clear();
                 self.capture_request
                     .complete(Ok(captured_template.expect("validated template")));
                 self.stop(crate::vm_exit::VmExit::Frozen { template_path });

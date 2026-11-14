@@ -1789,6 +1789,7 @@ pub struct VcpuHandle {
     // Rust JoinHandles have to be wrapped in Option if you ever plan on 'join()'ing them.
     // We want to be able to join these threads in tests.
     vcpu_thread: Option<thread::JoinHandle<()>>,
+    join_failed: bool,
 }
 
 impl VcpuHandle {
@@ -1801,6 +1802,7 @@ impl VcpuHandle {
             event_sender,
             response_receiver,
             vcpu_thread: Some(vcpu_thread),
+            join_failed: false,
         }
     }
 
@@ -1833,16 +1835,18 @@ impl VcpuHandle {
 
     pub fn join_until(&mut self, deadline: std::time::Instant) -> bool {
         let Some(thread) = self.vcpu_thread.take() else {
-            return true;
+            return !self.join_failed;
         };
         while !thread.is_finished() && std::time::Instant::now() < deadline {
             std::thread::park_timeout(std::time::Duration::from_millis(1));
         }
         if !thread.is_finished() {
             error!("vCPU join deadline expired; detached worker retains its owned state");
+            self.join_failed = true;
             return false;
         }
-        thread.join().is_ok()
+        self.join_failed |= thread.join().is_err();
+        !self.join_failed
     }
 }
 
@@ -1880,6 +1884,23 @@ mod tests {
     use devices::legacy::KvmIoapic;
 
     use utils::signal::validate_signal_num;
+
+    #[test]
+    fn missed_join_remains_failed_on_a_second_check() {
+        let (sender, _events) = unbounded();
+        let (_responses, receiver) = unbounded();
+        let (release, wait) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _ = wait.recv();
+        });
+        let mut handle = VcpuHandle::new(sender, receiver, worker);
+        assert!(!handle.join_until(std::time::Instant::now()));
+        let second = handle.join_until(std::time::Instant::now());
+        release.send(()).unwrap();
+        // Test Drop assumes a real KVM thread and is not applicable here.
+        std::mem::forget(handle);
+        assert!(!second);
+    }
 
     // In tests we need to close any pending Vcpu threads on test completion.
     impl Drop for VcpuHandle {
