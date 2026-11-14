@@ -28,10 +28,11 @@ impl BusDevice for StopReasonDevice {
     }
 
     fn write(&mut self, _vcpuid: u64, _offset: u64, data: &[u8]) {
-        if data == [5] {
-            // Preparation changes console backpressure, never terminal classification.
+        if let [byte @ 0..=5] = data {
+            // Preparation and final intent mark ending; kexec clear resets it.
+            // This flag never supplies a terminal reason.
             for state in self.0 .1.lock().unwrap().iter() {
-                state.set_ending(true);
+                state.set_ending(*byte != 0);
             }
         }
         if let [reason @ 0..=4] = data {

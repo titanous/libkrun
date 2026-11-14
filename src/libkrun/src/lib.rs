@@ -2491,6 +2491,20 @@ impl Drop for NitroSigtermGuard {
 }
 
 impl VmHandle {
+    /// Cumulative guest console bytes discarded by bounded host output buffers.
+    /// Remains readable after `Context::run` returns. Backends without these
+    /// virtio console buffers return zero.
+    pub fn console_dropped_bytes(&self) -> u64 {
+        self.vmm.as_ref().map_or(0, |vmm| {
+            vmm.lock()
+                .unwrap()
+                .console_tx_states
+                .iter()
+                .map(|state| state.dropped_bytes())
+                .sum()
+        })
+    }
+
     /// Suspend Nitro guest heartbeat expiry while the embedder freezes a guest.
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     pub fn suspend_liveness_deadline(&self) -> std::io::Result<()> {

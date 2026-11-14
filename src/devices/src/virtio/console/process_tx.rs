@@ -62,6 +62,30 @@ pub(crate) fn process_tx(
 pub(crate) fn process_tx_with_state(
     port_id: u32,
     mem: GuestMemoryMmap,
+    queue: Queue,
+    interrupt: InterruptTransport,
+    output: Arc<Mutex<Box<dyn PortOutput + Send>>>,
+    stop: Arc<AtomicBool>,
+    drain: Arc<AtomicBool>,
+    state: Arc<super::ConsoleTxState>,
+) {
+    let buffer = Arc::new(super::tx_buffer::Buffer::new(state.clone()));
+    let writer_buffer = buffer.clone();
+    let writer = thread::spawn(move || writer_buffer.write(output.lock().unwrap().as_mut()));
+    let copied: Arc<Mutex<Box<dyn PortOutput + Send>>> = Arc::new(Mutex::new(Box::new(
+        super::tx_buffer::BufferedOutput(buffer.clone()),
+    )));
+    process_tx_copied(port_id, mem, queue, interrupt, copied, stop, drain, state);
+    buffer.finish();
+    if writer.join().is_err() {
+        log::error!("console writer panicked on port {port_id}");
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_tx_copied(
+    port_id: u32,
+    mem: GuestMemoryMmap,
     mut queue: Queue,
     interrupt: InterruptTransport,
     output: Arc<Mutex<Box<dyn PortOutput + Send>>>,
@@ -264,7 +288,7 @@ fn write_desc_to_output(
                         state
                             .dropped
                             .fetch_add((desc.len as usize - total) as u64, Ordering::Relaxed);
-                        return Err(e);
+                        return Err(io::ErrorKind::TimedOut.into());
                     }
                     // Backpressure must not retain guest buffers forever: console
                     // close during reboot waits for these descriptors to complete.
@@ -622,7 +646,7 @@ mod tests {
             &AtomicBool::new(true),
             &state,
         );
-        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
         assert_eq!(state.dropped_bytes(), payload.len() as u64);
     }
 

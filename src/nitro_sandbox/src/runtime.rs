@@ -251,9 +251,7 @@ impl Runtime {
     pub fn run_facts(mut self) -> io::Result<TerminalFacts> {
         let result = self
             .run_inner()
-            .or_else(|error| {
-                guest_error_facts(error, &self.stop)
-            })
+            .or_else(|error| guest_error_facts(error, &self.stop))
             .map(|mut facts| {
                 let code = self.exit_code.load(std::sync::atomic::Ordering::Acquire);
                 facts.exit_code = (code != i32::MAX).then_some(code);
@@ -379,7 +377,10 @@ impl Drop for Runtime {
     }
 }
 
-fn guest_error_facts(error: io::Error, stop: &utils::eventfd::EventFd) -> io::Result<TerminalFacts> {
+fn guest_error_facts(
+    error: io::Error,
+    stop: &utils::eventfd::EventFd,
+) -> io::Result<TerminalFacts> {
     if !crate::is_guest_data_error(&error) {
         return Err(error);
     }
@@ -388,7 +389,11 @@ fn guest_error_facts(error: io::Error, stop: &utils::eventfd::EventFd) -> io::Re
         Err(error) if error.kind() == io::ErrorKind::WouldBlock => false,
         Err(error) => return Err(error),
     };
-    Ok(TerminalFacts { guest_fault: true, host_stop, ..Default::default() })
+    Ok(TerminalFacts {
+        guest_fault: true,
+        host_stop,
+        ..Default::default()
+    })
 }
 
 #[cfg(test)]
@@ -397,7 +402,8 @@ mod tests {
     fn pending_host_stop_survives_guest_data_fault() {
         let stop = utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap();
         stop.write(1).unwrap();
-        let facts = super::guest_error_facts(crate::guest_data_error("bad guest data"), &stop).unwrap();
+        let facts =
+            super::guest_error_facts(crate::guest_data_error("bad guest data"), &stop).unwrap();
         assert!(facts.guest_fault);
         assert!(facts.host_stop);
     }

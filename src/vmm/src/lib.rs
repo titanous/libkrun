@@ -234,6 +234,7 @@ pub struct Vmm {
     cooperative_shm: Vec<(vm_memory::GuestAddress, usize)>,
     vm: Vm,
     exit_observers: Vec<Arc<Mutex<dyn VmmExitObserver>>>,
+    pub console_tx_states: Vec<Arc<devices::virtio::console::ConsoleTxState>>,
     exit_code: Arc<AtomicI32>,
     vm_exit: crate::vm_exit::SharedVmExit,
     vcpu_exit_flag: Arc<AtomicBool>,
@@ -700,8 +701,6 @@ impl Subscriber for Vmm {
                 self.stop(crate::vm_exit::VmExit::Frozen { template_path });
                 return;
             }
-            #[cfg(not(target_arch = "x86_64"))]
-            let _ = frozen;
 
             let vmm_exit_code = self.exit_code.load(Ordering::SeqCst);
 

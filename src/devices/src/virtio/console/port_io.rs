@@ -1,6 +1,4 @@
-use libc::{
-    O_NONBLOCK, STDERR_FILENO, STDIN_FILENO, STDOUT_FILENO, TIOCGWINSZ,
-};
+use libc::{O_NONBLOCK, STDERR_FILENO, STDIN_FILENO, STDOUT_FILENO, TIOCGWINSZ};
 use log::Level;
 use nix::errno::Errno;
 use nix::ioctl_read_bad;
@@ -139,13 +137,12 @@ impl PortInput for PortInputFd {
         // valid for writes of length `buf.len() by the invariants upheld by the constructor
         // of `VolatileSlice`.
         let received = unsafe { libc::recv(fd, dst, buf.len(), libc::MSG_DONTWAIT) };
-        let bytes_read = if received < 0
-            && io::Error::last_os_error().raw_os_error() == Some(libc::ENOTSOCK)
-        {
-            unsafe { libc::read(fd, dst, buf.len()) }
-        } else {
-            received
-        };
+        let bytes_read =
+            if received < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ENOTSOCK) {
+                unsafe { libc::read(fd, dst, buf.len()) }
+            } else {
+                received
+            };
 
         if bytes_read < 0 {
             let err = std::io::Error::last_os_error();

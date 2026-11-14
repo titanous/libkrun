@@ -1209,6 +1209,7 @@ pub fn build_microvm(
             Vec::new()
         },
         exit_observers: Vec::new(),
+        console_tx_states: Vec::new(),
         exit_code: exit_code.clone(),
         vm_exit: vm_exit.clone(),
         vcpu_exit_flag,
@@ -1862,14 +1863,17 @@ fn load_payload(
                     crate::template_memory::map(&file, 0, kernel_size, false)
                         .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?
                 } else {
-                    vm_memory::MmapRegion::new(kernel_size).map_err(StartMicrovmError::InvalidKernelBundle)?
+                    vm_memory::MmapRegion::new(kernel_size)
+                        .map_err(StartMicrovmError::InvalidKernelBundle)?
                 };
                 validate_bundle_range(kernel_host_addr, kernel_size as u64)
                     .map_err(StartMicrovmError::InvalidBundleAddressRange)?;
                 // SAFETY: validated bundle and independent owned destination.
                 unsafe {
                     std::ptr::copy_nonoverlapping(
-                        kernel_host_addr as *const u8, region.as_ptr(), kernel_size,
+                        kernel_host_addr as *const u8,
+                        region.as_ptr(),
+                        kernel_size,
                     );
                 }
                 region
@@ -2927,6 +2931,8 @@ fn attach_console_devices(
         .stop_reason
         .register_console(console.lock().unwrap().tx_state());
 
+    vmm.console_tx_states
+        .push(console.lock().unwrap().tx_state());
     vmm.exit_observers.push(console.clone());
 
     event_manager
