@@ -34,6 +34,12 @@ and enter the kernel's saved continuation over private file-backed RAM.
    processor context, syscore state, APs through normal hotplug startup, devices
    through RESTORE, consoles and tasks. It applies wall clock and VM-fork entropy.
    Old vsock connections are dead; userspace reconnects guest-to-host CID 2.
+   On x86 the final post-RESTORE hook refreshes realtime through 32-bit I/O reads:
+   port `0xe6` returns low 32 bits of host realtime nanoseconds since Unix epoch,
+   `0xe7` returns high 32 bits. A high-low-high read repeats on rollover. This
+   avoids treating AP/device restoration time as a fixed wall-clock offset; the
+   control-page realtime word remains the resume-time validity flag. Kernels with
+   patch 0102 require these ports; older VMMs are incompatible with that patch.
 
 The current caller supplies the same device order and features. RAM/vCPU count,
 control-page version and long-mode prerequisites are checked. This format is

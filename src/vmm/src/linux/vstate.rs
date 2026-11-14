@@ -1362,6 +1362,17 @@ impl Vcpu {
                 }
                 #[cfg(target_arch = "x86_64")]
                 VcpuExit::IoIn(addr, data) => {
+                    // Post-RESTORE wall-clock reads avoid including CPU/device
+                    // restoration latency in the guest's new realtime epoch.
+                    if (addr == 0xe6 || addr == 0xe7) && data.len() == 4 {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_err(|_| Error::VcpuUnhandledKvmExit)?
+                            .as_nanos() as u64;
+                        let value = if addr == 0xe6 { now as u32 } else { (now >> 32) as u32 };
+                        data.copy_from_slice(&value.to_le_bytes());
+                        return Ok(VcpuEmulation::Handled);
+                    }
                     self.io_bus.read(0, u64::from(addr), data);
                     Ok(VcpuEmulation::Handled)
                 }

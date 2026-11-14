@@ -13,6 +13,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -86,6 +87,10 @@ int main(void)
     int random_fd=open("/dev/hwrng",O_RDONLY);
     if(random_fd<0 || read(random_fd,random_bytes,sizeof(random_bytes))!=sizeof(random_bytes)) fail("entropy restore");
     close(random_fd);
+    if(syscall(SYS_getrandom,random_bytes,sizeof(random_bytes),0)!=sizeof(random_bytes)) fail("getrandom restore");
+    printf("CLONE RANDOM ");
+    for(unsigned int i=0;i<sizeof(random_bytes);i++) printf("%02x",random_bytes[i]);
+    printf("\n");
     uint64_t after=ns(CLOCK_MONOTONIC);
     if(after<before || after-before>10000000000ULL) fail("monotonic");
     char byte;
@@ -97,6 +102,7 @@ int main(void)
     if(send(fresh,"time",4,MSG_NOSIGNAL)!=4 || recv(fresh,&host_time,8,MSG_WAITALL)!=8) fail("host time");
     uint64_t realtime=ns(CLOCK_REALTIME);
     uint64_t error_ns=realtime>host_time ? realtime-host_time : host_time-realtime;
+    printf("CLONE CLOCK error_ns=%llu guest=%llu host=%llu\n",(unsigned long long)error_ns,(unsigned long long)realtime,(unsigned long long)host_time);
     if(error_ns>100000000ULL) fail("wall clock exceeds 100ms");
     close(fresh);
     while(atomic_load(&sequence)<frozen_seq+100 && !atomic_load(&errors)) usleep(1000);
