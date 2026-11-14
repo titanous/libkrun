@@ -16,7 +16,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         is_disk_read_only: false, direct_io: false,
     });
     builder.add_vsock_port(7000, args[3].clone().into(), false);
-    builder.nitro_backend(NitroBackendConfig { image: args[1].clone().into(), cid: 200, watchdog: std::time::Duration::from_secs(15) });
+    let cid = std::env::var("NITRO_CID").unwrap_or_else(|_| "200".into()).parse()?;
+    builder.nitro_backend(NitroBackendConfig { image: args[1].clone().into(), cid, watchdog: std::time::Duration::from_secs(15) });
     match builder.build()?.run()? {
         VmExit::Shutdown { .. } => Ok(()),
         other => Err(format!("unexpected exit: {other:?}").into()),

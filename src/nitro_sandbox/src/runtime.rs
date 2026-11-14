@@ -43,7 +43,10 @@ impl Runtime {
         let mut watchdog = Watchdog::new(Duration::ZERO, self.timeout);
         let mut active = 0usize;
         loop {
-            if self.sandbox.powered_off(0)? { return Ok(Exit::PowerOff); }
+            if self.sandbox.powered_off(0)? {
+                self.sandbox.drain_console(&mut io::stdout())?;
+                return Ok(Exit::PowerOff);
+            }
             for transport in &mut self.transports {
                 match transport.refresh(&self.sandbox, self.memory.as_ref().unwrap())? {
                     Action::Start => { active += 1; watchdog.devices_ready(); }
