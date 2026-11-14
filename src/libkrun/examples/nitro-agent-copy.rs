@@ -104,13 +104,15 @@ mod probe {
             .map_err(io::Error::other)?
             .as_nanos() as u64;
         if !report.starts_with("VERIFIED ")
+            || fields.get("random") == fields.get("nonce")
             || number("bad")? != 0
             || (std::env::var_os("AGENT_DEVICES").is_some()
                 && (number("device_bad")? != 0
                     || number("writes")? == 0
                     || number("traffic")? == 0))
             || number("cid")? != cid
-            || old > 0
+            || old != -1
+            || number("old_errno")? != libc::ENOTCONN as u64
             || number("monotonic_after")? < number("monotonic_before")?
             || now.abs_diff(number("realtime_after")?) > 2_000_000_000
         {
@@ -527,7 +529,7 @@ mod probe {
             if let Some(listener) = source_workload {
                 send(
                     &mut connection,
-                    json!({"type":"exec","request":9,"process":1,"command":{"argv":if full_devices {vec!["/clone-workload","devices"]}else{vec!["/clone-workload"]}}}),
+                    json!({"type":"exec","request":9,"process":1,"command":{"argv":if std::env::var_os("AGENT_CONSOLE_INJECT").is_some() {vec!["/clone-workload","devices","inject"]}else if full_devices {vec!["/clone-workload","devices"]}else{vec!["/clone-workload"]}}}),
                 )?;
                 response(&mut connection, "ack")?;
                 let mut stream = accept(&listener)?;

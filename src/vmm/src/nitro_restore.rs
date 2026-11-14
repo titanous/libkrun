@@ -2,6 +2,31 @@
 use crate::template::Template;
 use std::{io, os::unix::fs::FileExt};
 
+/// A template/receiver compatibility refusal, before receiver RAM is modified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestoreMismatch {
+    Architecture,
+    CpuCount,
+    MemorySize,
+    DeviceList,
+    KernelIdentity,
+}
+impl std::fmt::Display for RestoreMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Architecture => "Nitro template architecture mismatch",
+            Self::CpuCount => "Nitro template CPU count mismatch",
+            Self::MemorySize => "Nitro template memory size mismatch",
+            Self::DeviceList => "Nitro template device list mismatch",
+            Self::KernelIdentity => "Nitro receiver kernel identity mismatch",
+        })
+    }
+}
+impl std::error::Error for RestoreMismatch {}
+fn mismatch(reason: RestoreMismatch) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, reason)
+}
+
 pub struct NitroRestore {
     pub template: Template,
     pub vcpus: u8,
@@ -25,10 +50,6 @@ impl nitro_sandbox::runtime::RestoreHandler for NitroRestore {
         validate_parked_receiver(&self.template, sandbox)?;
         let mut seed = [0u8; 32];
         std::fs::File::open("/dev/urandom")?.read_exact(&mut seed)?;
-        let realtime = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(io::Error::other)?
-            .as_nanos() as u64;
         // SAFETY: runtime invokes this only after parked receiver READY; source
         // manifest was validated and all fresh backends are idle before release.
         unsafe {
@@ -37,7 +58,6 @@ impl nitro_sandbox::runtime::RestoreHandler for NitroRestore {
                 sandbox.ram.address() as *mut u8,
                 self.ram_mib,
                 seed,
-                realtime,
             )
         }
     }
@@ -78,7 +98,7 @@ fn validate_receiver_identity(compatibility: &[u8], identity: &[u8; 20]) -> io::
         || !compatibility.starts_with(PREFIX)
         || &compatibility[PREFIX.len()..] != identity
     {
-        return Err(invalid());
+        return Err(mismatch(RestoreMismatch::KernelIdentity));
     }
     Ok(())
 }
@@ -91,16 +111,20 @@ pub fn validate(
     topology: &[u8],
     compatibility: &[u8],
 ) -> io::Result<()> {
-    if template.architecture != crate::template::Architecture::Aarch64
-        || template.vcpus != vcpus
-        || template.ram_mib != ram_mib
-        || template.topology != topology
-        || template.compatibility != compatibility
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Nitro template shape/device/kernel identity mismatch",
-        ));
+    if template.architecture != crate::template::Architecture::Aarch64 {
+        return Err(mismatch(RestoreMismatch::Architecture));
+    }
+    if template.vcpus != vcpus {
+        return Err(mismatch(RestoreMismatch::CpuCount));
+    }
+    if template.ram_mib != ram_mib {
+        return Err(mismatch(RestoreMismatch::MemorySize));
+    }
+    if template.topology != topology {
+        return Err(mismatch(RestoreMismatch::DeviceList));
+    }
+    if template.compatibility != compatibility {
+        return Err(mismatch(RestoreMismatch::KernelIdentity));
     }
     let expected = if ram_mib <= 1024 { 1 } else { 2 };
     if template.regions.len() != expected {
@@ -191,7 +215,6 @@ pub unsafe fn copy_and_release(
     base: *mut u8,
     ram_mib: u64,
     seed: [u8; 32],
-    realtime: u64,
 ) -> io::Result<()> {
     use nitro_sandbox::{cooperative::ResumeEntry, receiver};
     if base.is_null() || ram_mib != template.ram_mib || !(1024..=4096).contains(&ram_mib) {
@@ -210,6 +233,9 @@ pub unsafe fn copy_and_release(
         *word = unsafe { control.add(index).read_volatile() };
     }
     receiver::validate_ready(&state)?;
+    if !nitro_sandbox::cooperative::outside_receiver(template.control_page_address, 4096) {
+        return Err(invalid());
+    }
     let mut page = [0u8; 4096];
     let &(gpa, len, file_offset) = template
         .regions
@@ -239,9 +265,23 @@ pub unsafe fn copy_and_release(
                 .file
                 .read_exact_at(&mut buffer[..count], file_offset + position as u64)?;
             let at = offset + position;
-            if !(0x30000000..0x30200000).contains(&at) {
+            // Copy the portions outside the reservation even when a chunk
+            // straddles either boundary (independent of buffer alignment/size).
+            let end = at.checked_add(count).ok_or_else(invalid)?;
+            let before_end = end.min(0x30000000);
+            if at < before_end {
                 unsafe {
-                    std::ptr::copy_nonoverlapping(buffer.as_ptr(), base.add(at), count);
+                    std::ptr::copy_nonoverlapping(buffer.as_ptr(), base.add(at), before_end - at);
+                }
+            }
+            let after_start = at.max(0x30200000);
+            if after_start < end {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        buffer.as_ptr().add(after_start - at),
+                        base.add(after_start),
+                        end - after_start,
+                    );
                 }
             }
             position += count;
@@ -260,6 +300,12 @@ pub unsafe fn copy_and_release(
         template.control_page_address - 0x400000000 + 0x40000000
     };
     let guest = unsafe { base.add(offset as usize) } as *mut u64;
+    // Sample after import, immediately before release: do not charge the guest
+    // wall clock with time spent copying its RAM.
+    let realtime = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(io::Error::other)?
+        .as_nanos() as u64;
     unsafe {
         guest.add(8).write_volatile(realtime);
         std::ptr::copy_nonoverlapping(seed.as_ptr(), guest.add(10) as *mut u8, 32);

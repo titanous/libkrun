@@ -348,7 +348,18 @@ impl Runtime {
         let Some(discovery) = self.console.freeze_discovery() else {
             return Ok(false);
         };
+        if discovery.disabled {
+            self.capture.as_mut().unwrap().marker_confirmed(false);
+            self.capture = None;
+            return Ok(false);
+        }
+        // Publications are provisional until the final pre-userspace marker.
+        if discovery.marker.is_none() {
+            return Ok(false);
+        }
         let Some(control) = discovery.control else {
+            self.capture.as_mut().unwrap().marker_confirmed(false);
+            self.capture = None;
             return Ok(false);
         };
         if !discovery.receiver_reserved {
@@ -362,13 +373,24 @@ impl Runtime {
         }
         // SAFETY: used only within this call; queue workers must be reset before
         // capture preparation below, and only the control word is read first.
-        let memory = unsafe { self.sandbox.owned_guest_memory(&discovery.memory)? };
-        if !memory.check_range(
-            GuestAddress(control),
-            4096,
-            vm_memory::Permissions::ReadWrite,
-        ) {
-            return Err(io::Error::other("freeze control outside owned RAM"));
+        let memory = match unsafe { self.sandbox.owned_guest_memory(&discovery.memory) } {
+            Ok(memory) => memory,
+            Err(_) => {
+                self.capture.as_mut().unwrap().marker_confirmed(false);
+                self.capture = None;
+                return Ok(false);
+            }
+        };
+        if !crate::cooperative::outside_receiver(control, 4096)
+            || !memory.check_range(
+                GuestAddress(control),
+                4096,
+                vm_memory::Permissions::ReadWrite,
+            )
+        {
+            self.capture.as_mut().unwrap().marker_confirmed(false);
+            self.capture = None;
+            return Ok(false);
         }
         let offset = if control < 0x80000000 {
             control - 0x40000000
@@ -381,9 +403,9 @@ impl Runtime {
                 // SAFETY: the entire aligned control page was validated above.
                 let confirmed = unsafe { pointer.add(32).read_volatile() } == 1;
                 if confirmed != active {
-                    return Err(io::Error::other(
-                        "template marker notification disagrees with control page",
-                    ));
+                    self.capture.as_mut().unwrap().marker_confirmed(false);
+                    self.capture = None;
+                    return Ok(false);
                 }
                 self.capture.as_mut().unwrap().marker_confirmed(active);
                 self.marker_notified = true;
@@ -513,6 +535,9 @@ impl Runtime {
                         parked = false;
                         self.park = None;
                         watchdog = Watchdog::new(start.elapsed(), self.timeout);
+                        if let Some(heartbeat) = &mut self.heartbeat {
+                            heartbeat.start(Instant::now());
+                        }
                     }
                     if std::env::var_os("NITRO_COPY_TIMINGS").is_some() {
                         eprintln!(
@@ -598,6 +623,7 @@ impl Runtime {
                 return Ok(Exit::Panic);
             }
             if stated.is_none()
+                && !parked
                 && self
                     .heartbeat
                     .as_mut()
@@ -617,6 +643,11 @@ impl Runtime {
         }
     }
     fn shutdown(&mut self) -> io::Result<()> {
+        if let Some((slot, _)) = &self.park {
+            let mut state = slot.state.lock().unwrap();
+            state.1 = true;
+            state.0 = None;
+        }
         let mut failure = None;
         for transport in &mut self.transports {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

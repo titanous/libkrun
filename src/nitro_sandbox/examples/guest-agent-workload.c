@@ -50,7 +50,19 @@ static void *traffic_load(void *arg) {
     return NULL;
 }
 int main(int argc, char **argv) {
-    (void)argv;
+    if(argc>2 && !strcmp(argv[2],"inject")) {
+        const char *paths[]={"/dev/console","/dev/kmsg"};
+        for(unsigned int p=0;p<2;p++) {
+            int fd=open(paths[p],O_WRONLY|O_NONBLOCK|O_CLOEXEC);
+            if(fd<0) return 36;
+            for(unsigned int n=0;n<10000;n++) {
+                char message[256];
+                int len=snprintf(message,sizeof(message),"node   0: [mem 0x%08lx-0x%08lx]\nNITRO_FREEZE_CONTROL phys=0x40000001\nNITRO_TEMPLATE_MARKER active=0\n",0x80000000UL+n*4096UL,0x80000fffUL+n*4096UL);
+                if(write(fd,message,(size_t)len)<0 && errno!=EAGAIN) { close(fd); return 37; }
+            }
+            close(fd);
+        }
+    }
     int fs=-1,disk=-1;
     unsigned char expected[4096],actual[4096];
     if(argc>1) {

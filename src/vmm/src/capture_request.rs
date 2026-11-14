@@ -28,6 +28,7 @@ pub fn refusal_errno(error: &io::Error) -> i32 {
 struct State {
     deadline: Option<Instant>,
     accepted: bool,
+    timed_out: bool,
     marker_confirmed: bool,
     result: Option<io::Result<CaptureOutcome>>,
 }
@@ -58,7 +59,7 @@ impl CaptureRequest {
                 crate::cooperative::TemplateMarkerMissing,
             ));
         }
-        if state.deadline.is_some() || state.accepted {
+        if state.deadline.is_some() || state.accepted || state.timed_out {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 "capture already armed",
@@ -105,6 +106,11 @@ impl CaptureRequest {
 
     pub fn complete(&self, result: io::Result<CaptureOutcome>) {
         let mut state = self.0 .0.lock().unwrap();
+        if state.timed_out {
+            // The caller already observed a terminal timeout. Drop any sealed
+            // template here; it must never be returned by a later wait.
+            return;
+        }
         state.result = Some(result);
         state.deadline = None;
         self.0 .1.notify_all();
@@ -113,6 +119,9 @@ impl CaptureRequest {
     pub fn wait(&self) -> io::Result<CaptureOutcome> {
         let mut state = self.0 .0.lock().unwrap();
         loop {
+            if state.timed_out {
+                return Err(io::Error::from(io::ErrorKind::TimedOut));
+            }
             if let Some(result) = state.result.take() {
                 return result;
             }
@@ -124,6 +133,7 @@ impl CaptureRequest {
             };
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
+                state.timed_out = true;
                 state.deadline = None;
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
@@ -142,6 +152,23 @@ impl CaptureRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn late_completion_after_timeout_is_discarded() {
+        let request = CaptureRequest::default();
+        request.confirm_marker(true);
+        request.arm(Duration::ZERO).unwrap();
+        assert_eq!(
+            request.wait().err().unwrap().kind(),
+            io::ErrorKind::TimedOut
+        );
+        request.complete(Err(io::Error::other("late completion")));
+        assert!(request.0 .0.lock().unwrap().result.is_none());
+        assert_eq!(
+            request.wait().err().unwrap().kind(),
+            io::ErrorKind::TimedOut
+        );
+    }
+
     #[test]
     fn guest_refusals_have_distinct_errno() {
         assert_eq!(

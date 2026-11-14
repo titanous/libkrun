@@ -9,6 +9,13 @@ pub const FROZEN_MAGIC: u64 = 0x4652_4f5a_454e_3031;
 pub const CONTROL_SIZE: u64 = 4096;
 pub const MAX_GIC_WRITES: u64 = 256;
 
+/// A source address must not overlap the parked receiver's private reservation.
+pub fn outside_receiver(start: u64, len: u64) -> bool {
+    start
+        .checked_add(len)
+        .is_some_and(|end| end <= 0x70000000 || start >= 0x70200000)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResumeEntry {
     pub entry: u64,
@@ -40,11 +47,13 @@ impl ResumeEntry {
             || word(1) != 0
             || result.entry == 0
             || !result.entry.is_multiple_of(4)
+            || !outside_receiver(result.entry, 4)
             || !contains(result.entry, 4)
             || result.gic_count == 0
             || result.gic_count > MAX_GIC_WRITES
             || !result.gic_list.is_multiple_of(8)
             || result.gic_list.checked_add(result.gic_count * 16).is_none()
+            || !outside_receiver(result.gic_list, result.gic_count * 16)
             || !contains(result.gic_list, result.gic_count * 16)
         {
             return Err(invalid());
@@ -56,6 +65,15 @@ impl ResumeEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn receiver_reservation_is_excluded_including_straddles() {
+        assert!(outside_receiver(0x6ffff000, 4096));
+        assert!(outside_receiver(0x70200000, 4096));
+        assert!(!outside_receiver(0x70000000, 4));
+        assert!(!outside_receiver(0x6ffffffc, 8));
+        assert!(!outside_receiver(0x701ffffc, 8));
+        assert!(!outside_receiver(u64::MAX, 8));
+    }
 
     fn page() -> [u8; 4096] {
         let mut page = [0; 4096];
