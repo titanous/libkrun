@@ -1,4 +1,11 @@
-//! Host protocol for the kernel-matched low-RAM parked receiver.
+//! Host protocol and build assets for the kernel-matched low-RAM parked receiver.
+//!
+//! Assemble `STUB_SOURCE` for AArch64, link at 0x70000000 and extract the raw
+//! binary, then run `IMAGE_INJECTOR` with Image, stub binary, output and the
+//! vmlinux-derived build-id file. The injector verifies that exact identity in
+//! the Image and binds it into the stub before READY can be published.
+pub const STUB_SOURCE: &str = include_str!("receiver_image/receiver.S");
+pub const IMAGE_INJECTOR: &str = include_str!("receiver_image/receiver-image.py");
 use crate::cooperative::ResumeEntry;
 use std::{
     io,
