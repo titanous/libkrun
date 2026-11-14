@@ -483,6 +483,15 @@ mod probe {
                     let mut connection = accept(&copy_listener)?;
                     let copied = response(&mut connection, "hello")?;
                     eprintln!("COPY_IO_HELLO copy={copy}");
+                    if std::env::var_os("NITRO_COPY_TIMINGS").is_some() {
+                        eprintln!(
+                            "NITRO_AGENT_HELLO_TIMING host_ns={}",
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map_err(io::Error::other)?
+                                .as_nanos()
+                        );
+                    }
                     if copied["boot_id"] != hello["boot_id"]
                         || copied["generation"] != 0
                         || copied["token"] != "clone-test-token"

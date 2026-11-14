@@ -228,6 +228,7 @@ pub unsafe fn copy_and_release(
         })
     })?;
     let _ = len;
+    let copy_started = std::time::Instant::now();
     let mut buffer = vec![0u8; 1024 * 1024];
     for &(gpa, len, file_offset) in &template.regions {
         let offset = if gpa == 0x40000000 { 0 } else { 1 << 30 };
@@ -245,6 +246,13 @@ pub unsafe fn copy_and_release(
             }
             position += count;
         }
+    }
+    if std::env::var_os("NITRO_COPY_TIMINGS").is_some() {
+        eprintln!(
+            "NITRO_IMPORT_TIMING copy_us={} ram_mib={}",
+            copy_started.elapsed().as_micros(),
+            ram_mib
+        );
     }
     let offset = if template.control_page_address < 0x80000000 {
         template.control_page_address - 0x40000000

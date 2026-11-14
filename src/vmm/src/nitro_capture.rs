@@ -112,6 +112,7 @@ impl CaptureHandler for NitroCapture {
         }
         let mut compatibility = self.compatibility.clone();
         compatibility.extend_from_slice(&identity);
+        let capture_started = std::time::Instant::now();
         let template = Template::capture_with_manifest(
             memory,
             control,
@@ -121,6 +122,13 @@ impl CaptureHandler for NitroCapture {
             &self.topology,
             &compatibility,
         )?;
+        if std::env::var_os("NITRO_COPY_TIMINGS").is_some() {
+            eprintln!(
+                "NITRO_CAPTURE_TIMING capture_us={} ram_mib={}",
+                capture_started.elapsed().as_micros(),
+                self.ram_mib
+            );
+        }
         Ok(Some(Box::new(Prepared {
             request: self.request.clone(),
             template: Some(template),

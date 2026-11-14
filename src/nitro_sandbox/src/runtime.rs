@@ -355,6 +355,7 @@ impl Runtime {
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
             Err(error) => return Err(error),
         }
+        let receiver_start = Instant::now();
         self.sandbox.start(self.cid)?;
         let start = Instant::now();
         if let Some(heartbeat) = &mut self.heartbeat {
@@ -370,7 +371,22 @@ impl Runtime {
                 // shapes; the aligned control page is inside its reservation.
                 if unsafe { (address as *const u64).read_volatile() } == crate::receiver::READY {
                     std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+                    if std::env::var_os("NITRO_COPY_TIMINGS").is_some() {
+                        eprintln!(
+                            "NITRO_RECEIVER_TIMING start_to_ready_us={}",
+                            receiver_start.elapsed().as_micros()
+                        );
+                    }
                     self.restore.take().unwrap().restore(&self.sandbox)?;
+                    if std::env::var_os("NITRO_COPY_TIMINGS").is_some() {
+                        eprintln!(
+                            "NITRO_RELEASE_TIMING host_ns={}",
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map_err(io::Error::other)?
+                                .as_nanos()
+                        );
+                    }
                 }
             }
             if stated.is_none() {
