@@ -1659,11 +1659,11 @@ impl Builder {
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     pub fn nitro_console_observer(
         &mut self,
-        observer: nitro_sandbox::console::Observer,
+        observer: nitro_sandbox::console::RawObserver,
     ) -> &mut Self {
         self.nitro_console
             .get_or_insert_with(nitro_sandbox::console::Console::default)
-            .observe(observer);
+            .set_observer(observer);
         self
     }
 

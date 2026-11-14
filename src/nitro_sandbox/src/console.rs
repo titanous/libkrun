@@ -2,8 +2,9 @@
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
-/// Sees every console byte the guest wrote, before the byte budgets (see `Console::observe`).
-pub type Observer = Box<dyn FnMut(&[u8]) + Send>;
+/// Sees every console byte the guest wrote, before the byte budgets (see
+/// `Console::set_observer`). Same name and shape as on fork branch nitro-stop2.
+pub type RawObserver = Box<dyn FnMut(&[u8]) + Send>;
 
 /// The longest console line the panic matcher keeps (a stop line is about 60 bytes; the
 /// matcher keeps the END of a longer line, where the marker must be).
@@ -12,7 +13,7 @@ const MARKER: &[u8] = b"HOLODECK GUEST STOP ";
 
 pub struct Console {
     sink: Option<Box<dyn Write + Send>>,
-    observer: Option<Observer>,
+    observer: Option<RawObserver>,
     total_limit: usize,
     rate_limit: usize,
     total: usize,
@@ -47,7 +48,7 @@ impl Console {
     /// Give every byte the guest writes to `observer` as well, BEFORE the byte budgets: a
     /// stop marker printed after the guest flooded its console still reaches it. It runs on the
     /// console thread and must not block.
-    pub fn observe(&mut self, observer: Observer) {
+    pub fn set_observer(&mut self, observer: RawObserver) {
         self.observer = Some(observer);
     }
     /// Whether the kernel printed its panic stop line. Only the kernel's line shape counts:
@@ -187,7 +188,11 @@ mod tests {
         ] {
             let mut console = Console::default();
             console.write_all(unshaped).unwrap();
-            assert!(!console.panic_seen(), "{}", String::from_utf8_lossy(unshaped));
+            assert!(
+                !console.panic_seen(),
+                "{}",
+                String::from_utf8_lossy(unshaped)
+            );
         }
     }
     #[test]
@@ -197,7 +202,9 @@ mod tests {
         let observed = Arc::new(Mutex::new(Vec::new()));
         let mut console = Console::new(Some(Box::new(Sink(captured.clone()))), 64, 64);
         let seen = observed.clone();
-        console.observe(Box::new(move |bytes| seen.lock().unwrap().extend_from_slice(bytes)));
+        console.set_observer(Box::new(move |bytes| {
+            seen.lock().unwrap().extend_from_slice(bytes)
+        }));
         console.write_all(&[b'x'; 10000]).unwrap();
         console.write_all(b"\n").unwrap();
         console.write_all(PANIC_LINE).unwrap();
