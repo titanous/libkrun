@@ -30,6 +30,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         direct_io: false,
     });
     builder.add_vsock_port(7000, args[3].clone().into(), false);
+    if std::env::var_os("NITRO_DENY_ALL").is_some() {
+        builder.internet_socket_forwarding(true);
+        builder.outbound_policy(std::sync::Arc::new(krun::AllowlistPolicy::new([])));
+    }
     let cid = std::env::var("NITRO_CID")
         .unwrap_or_else(|_| "200".into())
         .parse()?;

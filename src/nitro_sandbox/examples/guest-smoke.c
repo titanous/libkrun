@@ -28,7 +28,12 @@ int main(void) {
  int s=socket(AF_VSOCK,SOCK_STREAM,0); if(s<0) fail("vsock socket");
  struct timeval tv={5,0}; setsockopt(s,SOL_SOCKET,SO_RCVTIMEO,&tv,sizeof(tv)); setsockopt(s,SOL_SOCKET,SO_SNDTIMEO,&tv,sizeof(tv));
  struct sockaddr_vm a={.svm_family=AF_VSOCK,.svm_cid=2,.svm_port=7000};
+#ifdef DENY_MAPPED
+ if(connect(s,(void*)&a,sizeof(a))==0) fail("policy unexpectedly allowed mapped connection");
+ printf("NITRO_POLICY_DENY_OK\n"); close(s); umount("/mnt"); sync(); reboot(RB_POWER_OFF); return 1;
+#else
  if(connect(s,(void*)&a,sizeof(a))) fail("vsock connect");
+#endif
  if(write(s,text,sizeof(text))!=sizeof(text)) fail("vsock write");
  size_t n=0; while(n<sizeof(text)) { ssize_t r=read(s,b+n,sizeof(text)-n); if(r<=0) fail("vsock read"); n+=r; }
  if(memcmp(b,text,sizeof(text))) fail("vsock data"); close(s); printf("NITRO_VSOCK_OK\n");
