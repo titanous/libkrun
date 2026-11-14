@@ -69,6 +69,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "panic=-1",
         "reboot=k",
     ]);
+    if std::env::var_os("CLONE_TEST_INIT_ARGS").is_some() {
+        builder.add_kernel_cmdline_args(&["-- daemon-argument"]);
+    }
     if std::env::var_os("CLONE_FS").is_some_and(|mode| mode == "dax") {
         builder.add_kernel_cmdline_args(&["clone_dax"]);
     }
@@ -131,7 +134,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match (args[1].as_str(), result) {
         ("freeze" | "host-freeze", krun::VmExit::Frozen { .. }) => Ok(()),
         (
-            "resume" | "resume-fd" | "refuse" | "unsolicited",
+            "ordinary" | "resume" | "resume-fd" | "refuse" | "unsolicited",
             krun::VmExit::Shutdown { exit_code: 0 },
         ) => Ok(()),
         _ => Err("unexpected VM exit".into()),
