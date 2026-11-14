@@ -67,8 +67,44 @@ static void *sleep_wait(void *arg) {
     state->sleep_at=ns(CLOCK_MONOTONIC);
     return NULL;
 }
+/* Timed flood after boot: look-alike discovery lines (memory ranges, control
+   page, template marker) written alternately to the console and the kernel
+   log for `seconds`, then a summary line with the writer's uid. Runs as a
+   thread so the agent still sees one quiescent workload process. */
+struct flood_state { unsigned int seconds; unsigned int console; unsigned int kmsg; int failed; };
+static void *flood(void *arg) {
+    struct flood_state *state=arg;
+    int console=open("/dev/console",O_WRONLY|O_NONBLOCK|O_CLOEXEC);
+    int kmsg=open("/dev/kmsg",O_WRONLY|O_NONBLOCK|O_CLOEXEC);
+    if(console<0 || kmsg<0) { state->failed=1; return NULL; }
+    /* Announced first: the host keeps only a bounded amount of console text. */
+    char start[64];
+    int start_len=snprintf(start,sizeof(start),"INJECT_START uid=%u\n",(unsigned int)getuid());
+    int blocking=open("/dev/console",O_WRONLY|O_CLOEXEC);
+    if(blocking<0 || write(blocking,start,(size_t)start_len)!=start_len) state->failed=1;
+    if(blocking>=0) close(blocking);
+    uint64_t end=ns(CLOCK_MONOTONIC)+(uint64_t)state->seconds*1000000000ULL;
+    for(unsigned long n=0; ns(CLOCK_MONOTONIC)<end; n++) {
+        char message[256];
+        int len=snprintf(message,sizeof(message),"node   0: [mem 0x%08lx-0x%08lx]\nNITRO_FREEZE_CONTROL phys=0x40000001\nNITRO_TEMPLATE_MARKER active=0\nNITRO_RECEIVER_RANGE reserved [0x70000000-0x701fffff]\n",0x80000000UL+(n%100000)*4096UL,0x80000fffUL+(n%100000)*4096UL);
+        if(write(console,message,(size_t)len)>0) state->console++;
+        if(write(kmsg,message,(size_t)len)>0) state->kmsg++;
+    }
+    char done[128];
+    int len=snprintf(done,sizeof(done),"INJECT_DONE uid=%u console=%u kmsg=%u\n",(unsigned int)getuid(),state->console,state->kmsg);
+    if(write(console,done,(size_t)len)<0) state->failed=1;
+    close(console);
+    close(kmsg);
+    return NULL;
+}
 int main(int argc, char **argv) {
-    if(argc>2 && !strcmp(argv[2],"inject")) {
+    static struct flood_state flood_state;
+    if(argc>3 && !strcmp(argv[2],"inject")) {
+        /* The host waits out the flood before arming and checks INJECT_DONE. */
+        pthread_t flood_thread;
+        flood_state.seconds=(unsigned int)strtoul(argv[3],NULL,10);
+        if(pthread_create(&flood_thread,NULL,flood,&flood_state) || pthread_detach(flood_thread)) return 38;
+    } else if(argc>2 && !strcmp(argv[2],"inject")) {
         const char *paths[]={"/dev/console","/dev/kmsg"};
         for(unsigned int p=0;p<2;p++) {
             int fd=open(paths[p],O_WRONLY|O_NONBLOCK|O_CLOEXEC);

@@ -907,6 +907,41 @@ mod probe {
             attach_devices(&mut source, &source_disk, source_fs.clone());
         }
         source.future_template();
+        // RSS_SAMPLES=<file>: record this VMM process's resident memory every
+        // 100 ms from source build until the template is captured.
+        let rss_epoch = Instant::now();
+        let mut rss_sampler = match std::env::var("RSS_SAMPLES") {
+            Ok(path) => {
+                let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let stopped = stop.clone();
+                let thread = std::thread::spawn(move || -> io::Result<()> {
+                    let mut out = std::fs::File::create(path)?;
+                    let started = rss_epoch;
+                    while !stopped.load(std::sync::atomic::Ordering::SeqCst) {
+                        let status = std::fs::read_to_string("/proc/self/status")?;
+                        let field = |name: &str| {
+                            status
+                                .lines()
+                                .find(|l| l.starts_with(name))
+                                .and_then(|l| l.split_whitespace().nth(1))
+                                .unwrap_or("?")
+                                .to_string()
+                        };
+                        writeln!(
+                            out,
+                            "{} {} {}",
+                            started.elapsed().as_millis(),
+                            field("VmRSS:"),
+                            field("RssAnon:")
+                        )?;
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                    Ok(())
+                });
+                Some((stop, thread))
+            }
+            Err(_) => None,
+        };
         eprintln!("AGENT_SOURCE_BUILD");
         let context = source.build()?;
         eprintln!("AGENT_SOURCE_RUN");
@@ -929,7 +964,7 @@ mod probe {
             if let Some(listener) = source_workload {
                 send(
                     &mut connection,
-                    json!({"type":"exec","request":9,"process":1,"command":{"argv":if let Ok(seconds)=std::env::var("AGENT_TIMER_SECS") {vec!["/clone-workload".to_string(),"devices".into(),"timers".into(),seconds]}else if std::env::var_os("AGENT_CONSOLE_INJECT").is_some() {vec!["/clone-workload".into(),"devices".into(),"inject".into()]}else if full_devices {vec!["/clone-workload".into(),"devices".into()]}else{vec!["/clone-workload".to_string()]}}}),
+                    json!({"type":"exec","request":9,"process":1,"command":{"argv":if let Ok(seconds)=std::env::var("AGENT_TIMER_SECS") {vec!["/clone-workload".to_string(),"devices".into(),"timers".into(),seconds]}else if let Ok(seconds)=std::env::var("AGENT_CONSOLE_INJECT_SECS") {vec!["/clone-workload".into(),"devices".into(),"inject".into(),seconds]}else if std::env::var_os("AGENT_CONSOLE_INJECT").is_some() {vec!["/clone-workload".into(),"devices".into(),"inject".into()]}else if full_devices {vec!["/clone-workload".into(),"devices".into()]}else{vec!["/clone-workload".to_string()]}}}),
                 )?;
                 response(&mut connection, "ack")?;
                 let mut stream = accept(&listener)?;
@@ -939,6 +974,20 @@ mod probe {
                 }
                 eprintln!("WORKLOAD_SOURCE {ready}");
                 workload_connection = Some(stream);
+                if let Ok(seconds) = std::env::var("AGENT_CONSOLE_INJECT_SECS") {
+                    // The guest floods its console and kernel log from a thread
+                    // for this long; wait it out (plus margin) before quiescing.
+                    let seconds: u64 = seconds.parse().map_err(io::Error::other)?;
+                    eprintln!(
+                        "AGENT_FLOOD_STARTED secs={seconds} at_ms={}",
+                        rss_epoch.elapsed().as_millis()
+                    );
+                    std::thread::sleep(Duration::from_secs(seconds + 3));
+                    eprintln!(
+                        "AGENT_FLOOD_WAITED at_ms={}",
+                        rss_epoch.elapsed().as_millis()
+                    );
+                }
             }
             send(
                 &mut connection,
@@ -1127,6 +1176,23 @@ mod probe {
             .join()
             .map_err(|_| "source I/O thread panicked")??;
         let template = handle.wait_template_capture()?;
+        // What the host captured from boot discovery: compare across runs with
+        // and without a console flood.
+        println!(
+            "AGENT_TEMPLATE_MANIFEST control=0x{:x} regions={:?} vcpus={} ram_mib={}",
+            template.control_page_address,
+            template
+                .regions
+                .iter()
+                .map(|&(gpa, len, _)| (format!("0x{gpa:x}"), len))
+                .collect::<Vec<_>>(),
+            template.vcpus,
+            template.ram_mib
+        );
+        if let Some((stop, sampler)) = rss_sampler.take() {
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            let _ = sampler.join();
+        }
         let frozen_disk = if full_devices {
             Some(std::fs::read(&source_disk)?)
         } else {
