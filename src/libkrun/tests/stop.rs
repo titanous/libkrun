@@ -48,6 +48,31 @@ fn stopped(mode: &str, cpus: u8, kernel: &str) -> krun::VmExit {
     result
 }
 
+#[test]
+#[ignore = "requires KVM and compiled STOP_FIXTURES"]
+fn raw_terminal_mechanisms() {
+    let root = std::path::PathBuf::from(std::env::var_os("STOP_FIXTURES").unwrap());
+    for (fixture, expected) in [
+        ("fault", krun::VmExit::Fault),
+        ("reset", krun::VmExit::Fault),
+        ("declared-reset", krun::VmExit::PowerOffRequested),
+        ("cleared", krun::VmExit::Fault),
+        ("invalid", krun::VmExit::Fault),
+        ("sticky-panic", krun::VmExit::Panic),
+    ] {
+        let mut builder = krun::Builder::new();
+        builder.vm_config(1, 128).unwrap();
+        builder
+            .external_kernel(root.join(fixture), krun::KernelFormat::Elf, None)
+            .unwrap();
+        assert_eq!(
+            builder.build().unwrap().run().unwrap(),
+            expected,
+            "{fixture}"
+        );
+    }
+}
+
 fn cases() -> [(&'static str, krun::VmExit); 4] {
     [
         ("embed_stop_poweroff", krun::VmExit::PowerOffRequested),
