@@ -858,6 +858,10 @@ pub struct Vcpu {
     #[allow(dead_code)]
     #[cfg_attr(all(test, target_arch = "aarch64"), allow(unused))]
     exit_evt: EventFd,
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) cooperative_generation_irq: Option<EventFd>,
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) capture_request: crate::capture_request::CaptureRequest,
 
     #[cfg(target_arch = "x86_64")]
     io_bus: devices::Bus,
@@ -1004,6 +1008,8 @@ impl Vcpu {
             id,
             mmio_bus: None,
             exit_evt,
+            cooperative_generation_irq: None,
+            capture_request: crate::capture_request::CaptureRequest::default(),
             io_bus,
             cpuid,
             kernel_enomem_workaround,
@@ -1154,6 +1160,145 @@ impl Vcpu {
         Ok(())
     }
 
+    /// Guest-visible CPUID (including xsave layout) and virtual TSC frequency.
+    #[cfg(target_arch = "x86_64")]
+    pub fn template_compatibility(&self) -> std::io::Result<Vec<u8>> {
+        let mut data = Vec::new();
+        for entry in self.cpuid.as_slice() {
+            // Extended topology EDX is a logical CPU identity, not a feature;
+            // KVM may source it from the host CPU running this process.
+            for word in [
+                entry.function,
+                entry.index,
+                entry.flags,
+                entry.eax,
+                entry.ebx,
+                entry.ecx,
+                if entry.function == 0xb || entry.function == 0x1f {
+                    0
+                } else {
+                    entry.edx
+                },
+            ] {
+                data.extend_from_slice(&word.to_le_bytes());
+            }
+        }
+        data.extend_from_slice(
+            &self
+                .fd
+                .get_tsc_khz()
+                .map_err(std::io::Error::other)?
+                .to_le_bytes(),
+        );
+        Ok(data)
+    }
+
+    /// Enter a cooperatively frozen kernel without running boot setup or
+    /// writing page tables into its RAM. Call after CPUID configuration.
+    #[cfg(target_arch = "x86_64")]
+    pub fn configure_cooperative_entry(
+        &mut self,
+        entry: &crate::cooperative::ResumeEntry,
+    ) -> Result<()> {
+        use kvm_bindings::{kvm_dtable, kvm_regs, kvm_segment};
+        let mut sregs = self.fd.get_sregs().map_err(Error::VcpuGetSregs)?;
+        let code = kvm_segment {
+            base: 0,
+            limit: u32::MAX,
+            selector: 0x10,
+            type_: 11,
+            present: 1,
+            dpl: 0,
+            db: 0,
+            s: 1,
+            l: 1,
+            g: 1,
+            avl: 0,
+            unusable: 0,
+            padding: 0,
+        };
+        let data = kvm_segment {
+            selector: 0x18,
+            type_: 3,
+            l: 0,
+            db: 1,
+            ..code
+        };
+        sregs.cs = code;
+        sregs.ds = data;
+        sregs.es = data;
+        sregs.ss = data;
+        sregs.fs = data;
+        sregs.gs = kvm_segment {
+            base: entry.gs_base,
+            ..data
+        };
+        sregs.gdt = kvm_dtable {
+            base: entry.gdt_base,
+            limit: entry.gdt_limit,
+            padding: [0; 3],
+        };
+        sregs.idt = kvm_dtable {
+            base: entry.idt_base,
+            limit: entry.idt_limit,
+            padding: [0; 3],
+        };
+        sregs.cr0 = entry.cr0;
+        sregs.cr3 = entry.cr3;
+        sregs.cr4 = entry.cr4;
+        sregs.efer = entry.efer;
+        self.fd.set_sregs(&sregs).map_err(Error::VcpuSetSregs)?;
+        self.fd
+            .set_regs(&kvm_regs {
+                rip: entry.rip,
+                rsp: entry.stack,
+                rflags: 2,
+                ..Default::default()
+            })
+            .map_err(Error::VcpuSetRegs)?;
+        arch::x86_64::regs::setup_fpu(&self.fd).map_err(Error::FPUConfiguration)?;
+        arch::x86_64::msr::setup_msrs(&self.fd).map_err(Error::MSRSConfiguration)?;
+        Ok(())
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    pub fn restore_cooperative_tsc(&self, tsc: u64, offset: u64) -> Result<()> {
+        use std::os::fd::AsRawFd;
+        let attribute = kvm_bindings::kvm_device_attr {
+            group: 0, // KVM_VCPU_TSC_CTRL
+            attr: 0,  // KVM_VCPU_TSC_OFFSET
+            addr: &offset as *const u64 as u64,
+            flags: 0,
+        };
+        // KVM_SET_DEVICE_ATTR = _IOW(KVMIO, 0xe1, struct kvm_device_attr).
+        // SAFETY: the vCPU descriptor and both pointed-to values remain valid
+        // for this synchronous ioctl; the kernel reads a 24-byte UAPI structure.
+        if unsafe { libc::ioctl(self.fd.as_raw_fd(), 0x4018_aee1_u32 as _, &attribute) } < 0 {
+            return Err(Error::VcpuSetMsrs(kvm_ioctls::Error::new(
+                std::io::Error::last_os_error()
+                    .raw_os_error()
+                    .unwrap_or(libc::EIO),
+            )));
+        }
+        let msrs = kvm_bindings::Msrs::from_entries(&[kvm_bindings::kvm_msr_entry {
+            index: 0x10, // IA32_TSC
+            data: tsc,
+            ..Default::default()
+        }])
+        .expect("one MSR fits");
+        let mut restored = msrs;
+        if self
+            .fd
+            .get_msrs(&mut restored)
+            .map_err(Error::VcpuSetMsrs)?
+            != 1
+            || restored.as_slice()[0].data < tsc
+        {
+            return Err(Error::VcpuSetMsrs(kvm_ioctls::Error::new(libc::EIO)));
+        }
+        Ok(())
+    }
+
     #[cfg(target_arch = "aarch64")]
     /// Configures an aarch64 specific vcpu.
     ///
@@ -1294,11 +1439,44 @@ impl Vcpu {
                 }
                 #[cfg(target_arch = "x86_64")]
                 VcpuExit::IoIn(addr, data) => {
+                    // Post-RESTORE wall-clock reads avoid including CPU/device
+                    // restoration latency in the guest's new realtime epoch.
+                    if (addr == 0xe6 || addr == 0xe7) && data.len() == 4 {
+                        if let Some(event) = self.cooperative_generation_irq.take() {
+                            event.write(1).map_err(|_| Error::VcpuUnhandledKvmExit)?;
+                        }
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_err(|_| Error::VcpuUnhandledKvmExit)?
+                            .as_nanos() as u64;
+                        let value = if addr == 0xe6 {
+                            now as u32
+                        } else {
+                            (now >> 32) as u32
+                        };
+                        data.copy_from_slice(&value.to_le_bytes());
+                        return Ok(VcpuEmulation::Handled);
+                    }
                     self.io_bus.read(0, u64::from(addr), data);
                     Ok(VcpuEmulation::Handled)
                 }
                 #[cfg(target_arch = "x86_64")]
                 VcpuExit::IoOut(addr, data) => {
+                    if addr == crate::cooperative::MARKER_PORT && data.len() == 1 {
+                        self.capture_request.confirm_marker(data[0] == 1);
+                        return Ok(VcpuEmulation::Handled);
+                    }
+                    if addr == crate::cooperative::FREEZE_PORT {
+                        if self.id != 0 || data != [1] {
+                            return Err(Error::VcpuUnhandledKvmExit);
+                        }
+                        let control = self
+                            .fd
+                            .get_regs()
+                            .map_err(|_| Error::VcpuUnhandledKvmExit)?
+                            .rsi;
+                        return Ok(VcpuEmulation::Frozen(control));
+                    }
                     self.io_bus.write(0, u64::from(addr), data);
                     Ok(VcpuEmulation::Handled)
                 }
@@ -1423,6 +1601,30 @@ impl Vcpu {
                 // So we pause vCPU0 and send a signal to the emulation thread to stop the VMM.
                 Ok(VcpuEmulation::Stopped) => return self.exit(FC_EXIT_CODE_OK),
                 Ok(VcpuEmulation::Rebooted) => return self.exit(FC_EXIT_CODE_REBOOT),
+                #[cfg(target_arch = "x86_64")]
+                Ok(VcpuEmulation::Frozen(control)) => {
+                    self.response_sender
+                        .send(VcpuResponse::Frozen(control))
+                        .expect("failed to report cooperative freeze");
+                    self.exit_evt
+                        .write(1)
+                        .expect("failed to signal cooperative freeze");
+                    match self.event_receiver.recv() {
+                        #[cfg(target_arch = "x86_64")]
+                        Ok(VcpuEvent::FreezeRejected(error)) => {
+                            let mut regs = match self.fd.get_regs() {
+                                Ok(regs) => regs,
+                                Err(_) => return self.exit(FC_EXIT_CODE_GENERIC_ERROR),
+                            };
+                            regs.rax = error as i64 as u64;
+                            if self.fd.set_regs(&regs).is_err() {
+                                return self.exit(FC_EXIT_CODE_GENERIC_ERROR);
+                            }
+                            return StateMachine::next(Self::running);
+                        }
+                        _ => return StateMachine::next(Self::exited),
+                    }
+                }
                 // Emulation errors lead to vCPU exit.
                 Err(_) => return self.exit(FC_EXIT_CODE_GENERIC_ERROR),
             }
@@ -1458,6 +1660,10 @@ impl Vcpu {
                     .send(VcpuResponse::Resumed)
                     .expect("failed to send resume status");
             }
+            Ok(VcpuEvent::FreezeAccepted) => {
+                state = StateMachine::next(Self::exited);
+            }
+            Ok(VcpuEvent::FreezeRejected(_)) => (),
             // Unhandled exit of the other end.
             Err(TryRecvError::Disconnected) => {
                 // Move to 'exited' state.
@@ -1530,6 +1736,11 @@ impl Vcpu {
     }
 
     #[cfg(test)]
+    fn exited(&mut self) -> StateMachine<Self> {
+        StateMachine::finish()
+    }
+
+    #[cfg(test)]
     // In tests the main/vmm thread exits without 'exit()'ing the whole process.
     // All channels get closed on the other side while this Vcpu thread is still running.
     // This Vcpu thread should just do a clean finish without reporting back to the main thread.
@@ -1552,6 +1763,10 @@ pub enum VcpuEvent {
     Pause,
     /// Event that should resume the Vcpu.
     Resume,
+    /// Recover a cooperatively paused source with a negative errno.
+    FreezeRejected(i32),
+    /// Commit the source's terminal frozen state.
+    FreezeAccepted,
 }
 
 #[derive(Debug)]
@@ -1561,6 +1776,8 @@ pub enum VcpuResponse {
     Paused,
     /// Vcpu is resumed.
     Resumed,
+    /// Boot CPU has cooperatively frozen and will never enter KVM again.
+    Frozen(u64),
     /// Vcpu is stopped.
     Exited(u8),
 }
@@ -1636,6 +1853,8 @@ enum VcpuEmulation {
     Interrupted,
     Stopped,
     Rebooted,
+    #[cfg(target_arch = "x86_64")]
+    Frozen(u64),
 }
 
 #[cfg(test)]

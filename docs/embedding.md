@@ -48,6 +48,15 @@ guest feature negotiation. Those features are not advertised on read-only disks.
 `add_block_cfg(BlockDeviceConfig)` retains image and async-factory support.
 Backends must bounds-check requests and must not block indefinitely.
 
+For a cooperative source and every guest started from it, declare each block
+ID with `template_disk_identity(block_id, content_id)`. Use an immutable content
+digest or storage snapshot name; each new disk must be a private copy of that
+snapshot. The VMM compares the declaration, capacity, and read-only mode before
+starting a new guest. It cannot authenticate caller declarations or make storage
+snapshots itself. Capture flushes and synchronizes synchronous backends before
+acceptance; asynchronous backends are unsupported for templates. Never reuse a
+writable source disk concurrently with its copies.
+
 ## Caller-supplied filesystem and readiness
 
 Outside TEE builds:
@@ -130,6 +139,82 @@ ports still work subject to Unix rules. This is not a firewall for virtio-net.
 External vhost-user-vsock plus these controls fails build with
 `UnsupportedSocketPolicy`, not silent omission.
 
+## Cooperative templates on x86-64 KVM
+
+Template descriptions use format 4 with an explicit architecture tag. Compatibility
+bytes and clock_state are architecture-owned; embedders must not parse them.
+control_page_address is a guest physical protocol address, not a register contract.
+Mark a source with `Builder::future_template()` before build; its kernel marker
+and generated device arguments are inserted before an unquoted `--` and all init
+arguments. Capture requires the kernel's marker-active confirmation. Ordinary
+guests have no cooperative trigger file and retain anonymous private RAM. This is a capability reservation, not permission
+for a guest to capture itself. Obtain `Context::vm_handle()` and run the context
+on its event-loop thread. Ask the guest agent over its control channel to quiesce
+the workload, and wait for its acknowledgement. Call
+`handle.arm_template_capture(Duration::from_secs(30))`, then authorize the agent
+to write `1` to `/sys/power/nitro_freeze`. Receive the result with
+`handle.wait_template_capture()`. The kernel does not poll a host-request port.
+An unsolicited sysfs trigger is refused and recovers. The host validates and
+prepares capture before accepting the source's terminal freeze.
+`capture_cooperative_template(control, path)` reserves an optional caller-chosen
+export path but does not arm capture. The existing `freeze_template(timeout)`
+convenience call arms and waits; it does not signal the agent or kernel and
+requires a separately coordinated agent trigger after arming.
+
+`wait_template_capture` returns `CaptureOutcome { template, export }`.
+`template` owns the sealed descriptor; `export` is `None` for descriptor-only
+capture or `Some(Result<PathBuf, io::Error>)` for requested publication. Acceptance
+is irreversible even when publication fails: retain the descriptor and inspect
+`export`, never assume the requested path exists. Guest trigger refusal returns
+EPERM when not armed, ETIMEDOUT when the deadline expired, or EINVAL for validation.
+The guest must reconnect its control channel after device freeze/refusal.
+
+Temporary exports are named `.krun-template-<pid>-<counter>` in the destination
+directory. Before accepting captures at daemon startup, exclusively own each
+trusted template directory and sweep `.krun-template-*` leftovers from dead VMMs.
+Never sweep while another publisher can be active. These files contain sensitive
+whole-guest memory; retain owner-only directory access.
+
+The outcome's `template` owns the sealed memory
+file only after source vCPU teardown. Its `file` can be duplicated or sent to
+another process with SCM_RIGHTS; `write_to_path` exports owner-only sensitive
+whole-guest memory. A freeze deadline returns `io::ErrorKind::TimedOut`, distinct
+from unsupported capture and validation failures. Acceptance and deadline
+cancellation are serialized: a timeout before acceptance prevents later
+acceptance, allowing kernel recovery. A timeout after acceptance explicitly
+reports that the source must be discarded; acceptance is irreversible even if
+vCPU teardown misses the deadline. The daemon must destroy a source that does
+not recover promptly after a pre-acceptance timeout; kernel device callbacks
+can block indefinitely. Do not retry a timed-out request until the source's
+state has been resolved.
+
+For a new guest use its own builder: configure matching CPU/RAM and devices,
+independent disk copies, its CID, identifiers and connection policy, then call
+`start_from_template_fd(file)` or `start_from_template_path(path)` before build.
+Path input is copied into sealed memory before use, so later path mutation or
+truncation cannot affect copies. For one-copy-per-build workflows, descriptor starts are required: import once
+and pass duplicated sealed descriptors. Keep the template's memory-charging
+cgroup alive and sized for the template's entire lifetime, even after source
+vCPUs exit. Freeze descriptor-only first; export afterwards with write_to_path
+and check the separate result so the arm deadline does not include disk export. RAM regions are checked against the
+configured architecture layout before mapping.
+Network devices are refused because guest MAC state is retained. Keep templates
+within one trust domain: kernel secrets and address layouts remain shared.
+The daemon must impose a separate start-to-valid-agent-Hello deadline and
+destroy an unready copy; kernel continuation is not proof of application ready.
+For a bounded library wait use
+`start_from_template(TemplateSource::{Descriptor(file), Path(path)}, timeout,
+|builder| { /* fresh devices, policy, disk identities and guest IDs */ Ok(()) })`.
+It returns `GuestReadiness`; the deadline starts at this call and includes build
+and launch. Clone this handle to the host's agent listener, and call
+`mark_ready()` only after validating the expected Hello identity and generation.
+Call `wait()` on the supervising thread, never the VMM event loop. It returns
+`GuestReadyTimeout`, a distinct typed error from freeze `TimedOut`; late
+confirmation is refused. The process supervisor must kill/reap the VMM on this
+error. The library cannot validate application protocol bytes on the caller's
+socket, and this handle deliberately does not mistake kernel/device activity
+for agent readiness.
+
 ## Contract for every hypervisor backend
 
 Every backend must honour each configured method, or fail build with a clear
@@ -146,7 +231,11 @@ Every backend must honour each configured method, or fail build with a clear
   internet forwarding, or reject build.
 
 The Nitro backend (`nitro-sandbox` feature) applies the same socket rule and
-forwarding switch to its shared userspace vsock device. It boots an EIF v4 image
+forwarding switch to its shared userspace vsock device. With external-kernel
+packaging it also appends the guest kernel's forwarding switches
+(`tsi_hijack`, `tsi_hijack_unix`) to the packaged command line exactly when the
+device forwards those families, as the KVM builder inserts them; a prepackaged
+EIF must carry them itself. It boots an EIF v4 image
 through `nitro_backend`: the image contains the arm64 Linux Image, initramfs and
 command line, with flags matching PCI virtio and CPU-overcommit mode.
 Alternatively, `external_kernel` accepts an arm64 Raw Image, optional initramfs,
@@ -216,14 +305,23 @@ the library opens it without following symlinks and retains that inode. Do not
 unlink, replace, or rotate the file while any VMM exists. No lock is used by default;
 that default is not safe on hosts requiring serialized teardown, including m9g.
 
-**The host daemon retains a VM descriptor for every guest.** After `build` and
-before `run`, call `Context::duplicate_nitro_vm_descriptor()` and transfer the
-owned descriptor to the daemon with `SCM_RIGHTS`. Wait for the daemon's
-acknowledgment before starting. A VM lives until the last duplicate is closed:
-SIGKILL, a crash, OOM, or a panicking destructor in the VMM cannot perform the
-final close while the daemon retains its duplicate. This handoff is required on
-hosts with serialized teardown. The interval before handoff is not protected
-against an unexpected process death; supervise creation accordingly.
+**The host daemon retains a VM descriptor for every guest.** Give the builder
+the VMM's end of a connected Unix socket to the daemon with
+`nitro_descriptor_handoff(socket)`: `build` then sends a duplicate of the VM
+descriptor (one `SCM_RIGHTS` message, payload `vm_descriptor\n`;
+`nitro_sandbox::lifecycle::receive_vm_descriptor` reads it) immediately after
+the create ioctl returns, before any other VM ioctl, and fails if the send
+fails. Once the message is sent the descriptor in flight is a reference of its
+own, so the only interval in which a death of the VMM can make the final close
+is the return of that one ioctl. After `build`, wait (with a time limit) for the
+daemon's acknowledgment before `run`; the daemon must acknowledge from a thread
+that never performs locked closes, and the lock must not be held across that
+round trip (use `Teardown` serialization). `duplicate_nitro_vm_descriptor()`
+after `build` remains for tests; its interval spans the whole build. A VM lives
+until the last duplicate is closed: SIGKILL, a crash, OOM, or a panicking
+destructor in the VMM cannot perform the final close while the daemon retains
+its duplicate, and the guest's vCPUs keep running until the daemon closes it.
+This handoff is required on hosts with serialized teardown.
 
 The daemon opens the same inode using `NitroLifecycleLock::open`, reaps the VMM,
 then calls `NitroOpenLifecycleLock::close_vm_descriptor(&mut descriptor)` off its

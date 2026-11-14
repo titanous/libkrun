@@ -2,6 +2,18 @@
 compile_error!("unsupported on this backend: nitro-sandbox cannot be combined with tee");
 #[cfg(all(feature = "nitro-sandbox", feature = "aws-nitro"))]
 compile_error!("unsupported on this backend: nitro-sandbox cannot be combined with aws-nitro");
+mod readiness;
+pub use readiness::{GuestReadiness, GuestReadyTimeout};
+
+/// A cooperative template descriptor or owner-only persisted file.
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    not(feature = "tee")
+))]
+pub enum TemplateSource {
+    Descriptor(std::fs::File),
+    Path(std::path::PathBuf),
+}
 
 use crossbeam_channel::unbounded;
 #[cfg(feature = "gpu")]
@@ -525,6 +537,8 @@ pub struct Builder {
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     nitro_precreated_stop: Option<Arc<EventFd>>,
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    nitro_descriptor_handoff: Option<std::os::unix::net::UnixStream>,
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     nitro_console_base: Option<u32>,
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     nitro_selected_after_consoles: bool,
@@ -637,6 +651,103 @@ impl Builder {
     pub fn internet_socket_forwarding(&mut self, enabled: bool) -> &mut Self {
         self.socket_policy.internet_enabled = enabled;
         self
+    }
+
+    /// Declare a block disk's frozen content identity (digest or snapshot token).
+    /// A new guest must declare each disk as a copy of the source token.
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        not(feature = "tee")
+    ))]
+    pub fn template_disk_identity(
+        &mut self,
+        block_id: impl Into<String>,
+        content_id: impl Into<String>,
+    ) -> &mut Self {
+        self.config
+            .vmr
+            .template_disk_identities
+            .insert(block_id.into(), content_id.into());
+        self
+    }
+
+    /// Mark this guest as a future cooperative template, retaining descriptor-backed RAM.
+    /// Capture remains disarmed until explicitly requested through VmHandle.
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        not(feature = "tee")
+    ))]
+    pub fn future_template(&mut self) -> &mut Self {
+        self.config.vmr.cooperative_capture = Some((0, std::path::PathBuf::new()));
+        self
+    }
+
+    /// Capture a template only after the guest publishes its frozen control
+    /// page and emits the cooperative freeze exit. The source never resumes.
+    /// Pass zero to discover the GPA from BSP RSI at that exit, or a nonzero
+    /// address to require an exact match with the reported GPA.
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        not(feature = "tee")
+    ))]
+    pub fn capture_cooperative_template(
+        &mut self,
+        control_page: u64,
+        path: impl Into<std::path::PathBuf>,
+    ) -> &mut Self {
+        self.config.vmr.cooperative_capture = Some((control_page, path.into()));
+        self
+    }
+
+    /// Import a template and configure this new guest's devices, connection
+    /// rule, disk snapshot declarations, CID and identifiers in one operation.
+    /// The returned deadline starts now, including subsequent build time.
+    /// Mark it ready only after validating the new agent's identity/generation.
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        not(feature = "tee")
+    ))]
+    pub fn start_from_template(
+        &mut self,
+        source: TemplateSource,
+        timeout: std::time::Duration,
+        configure: impl FnOnce(&mut Self) -> std::io::Result<()>,
+    ) -> std::io::Result<GuestReadiness> {
+        let readiness = GuestReadiness::new(timeout)?;
+        match source {
+            TemplateSource::Descriptor(file) => {
+                self.start_from_template_fd(file)?;
+            }
+            TemplateSource::Path(path) => {
+                self.start_from_template_path(path)?;
+            }
+        }
+        configure(self)?;
+        Ok(readiness)
+    }
+
+    /// Start a new VM over a sealed template descriptor. Configure the same
+    /// device list in the same order, with independent writable disk backends.
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        not(feature = "tee")
+    ))]
+    pub fn start_from_template_fd(&mut self, file: std::fs::File) -> std::io::Result<&mut Self> {
+        self.config.vmr.cooperative_template = Some(vmm::template::Template::open(file)?);
+        Ok(self)
+    }
+
+    /// Load a persisted template into immutable backing before starting a VM.
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        not(feature = "tee")
+    ))]
+    pub fn start_from_template_path(
+        &mut self,
+        path: impl AsRef<std::path::Path>,
+    ) -> std::io::Result<&mut Self> {
+        self.config.vmr.cooperative_template = Some(vmm::template::Template::from_path(path)?);
+        Ok(self)
     }
 
     pub fn workdir(&mut self, workdir: String) -> &mut Self {
@@ -1170,8 +1281,16 @@ impl Builder {
         self
     }
 
-    /// Enable the memory balloon device, exposing it through the Rust API via VmHandle::balloon().
+    /// Leave the memory-balloon transport out of this VM. Existing callers
+    /// retain the historical device list unless they opt out explicitly.
     #[cfg(not(feature = "tee"))]
+    pub fn omit_balloon_device(&mut self) -> &mut Self {
+        self.config.vmr.omit_balloon = true;
+        self
+    }
+
+    #[cfg(not(feature = "tee"))]
+    /// Enable balloon control through VmHandle::balloon().
     pub fn enable_balloon(&mut self) -> &mut Self {
         self.config.vmr.balloon_enabled = true;
         self
@@ -1182,6 +1301,25 @@ impl Builder {
     pub fn enable_nested_virt(&mut self) -> &mut Self {
         self.config.vmr.nested_enabled = true;
         self
+    }
+
+    /// Socket-forwarding flags of the Nitro vsock device: the same decision as the KVM path
+    /// (explicit flags, or inet hijacking implied by internet forwarding; never inet hijacking
+    /// while internet forwarding is off). Also decides the guest command-line switches.
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    fn nitro_tsi_flags(&self) -> TsiFlags {
+        let mut flags = match self.config.vsock_config {
+            VsockConfig::Explicit { tsi_flags } => tsi_flags,
+            VsockConfig::Implicit if self.socket_policy.internet_enabled => TsiFlags::HIJACK_INET,
+            _ => TsiFlags::empty(),
+        };
+        if !self.socket_policy.internet_enabled {
+            flags.remove(TsiFlags::HIJACK_INET);
+        }
+        if matches!(self.config.vsock_config, VsockConfig::Disabled) {
+            flags = TsiFlags::empty();
+        }
+        flags
     }
 
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
@@ -1329,7 +1467,8 @@ impl Builder {
             }
             let mut args = self.kernel_cmdline.clone();
             args.extend(self.extra_kernel_args.iter().cloned());
-            let cmdline = args.join(" ");
+            // The guest kernel's socket-forwarding switches, as the KVM builder inserts them.
+            let cmdline = nitro_cmdline(&args, self.nitro_tsi_flags());
             let (file, _) = nitro_sandbox::image::cached_files(
                 &kernel.path,
                 kernel.initramfs_path.as_deref(),
@@ -1355,7 +1494,8 @@ impl Builder {
             ram_mib: config.mem_size_mib.unwrap_or(1024) as u32,
         };
         let mut console_id = self.nitro_device_count_before_consoles();
-        let mut runtime = nitro_sandbox::runtime::Runtime::with_lifecycle_lock(
+        let handoff = self.nitro_descriptor_handoff.take();
+        let mut runtime = nitro_sandbox::runtime::Runtime::create(
             image_path
                 .to_str()
                 .ok_or_else(|| StartError::Nitro(std::io::Error::other("non-UTF8 EIF path")))?,
@@ -1364,6 +1504,7 @@ impl Builder {
             options.cid,
             options.watchdog,
             self.nitro_lifecycle_lock.take(),
+            handoff.as_ref(),
         )
         .map_err(StartError::Nitro)?;
         drop(packaged);
@@ -1386,16 +1527,7 @@ impl Builder {
                 .map_err(StartError::Nitro)?;
         }
         if !matches!(self.config.vsock_config, VsockConfig::Disabled) {
-            let mut flags = match self.config.vsock_config {
-                VsockConfig::Explicit { tsi_flags } => tsi_flags,
-                VsockConfig::Implicit if self.socket_policy.internet_enabled => {
-                    TsiFlags::HIJACK_INET
-                }
-                _ => TsiFlags::empty(),
-            };
-            if !self.socket_policy.internet_enabled {
-                flags.remove(TsiFlags::HIJACK_INET);
-            }
+            let flags = self.nitro_tsi_flags();
             let vsock = Self::create_nitro_vsock(
                 options.cid,
                 self.config.tsi_port_map,
@@ -1521,6 +1653,24 @@ impl Builder {
             total_bytes,
             bytes_per_second,
         ));
+        self
+    }
+
+    /// Send a duplicate of the VM descriptor over `socket` (the host daemon's end of a
+    /// connected Unix socket) immediately after the create ioctl returns, inside `build` and
+    /// before any other VM ioctl (one `SCM_RIGHTS` message, payload
+    /// `nitro_sandbox::lifecycle::VM_DESCRIPTOR_MESSAGE`; the daemon can receive it with
+    /// `nitro_sandbox::lifecycle::receive_vm_descriptor`). The interval in which a death of
+    /// this process can make the final close is then only the return of that ioctl. `build`
+    /// fails if the send fails. Acknowledgement is the embedder's protocol: wait for it after
+    /// `build`, before `run`, with a time limit, and never while holding the lifecycle lock
+    /// (use `NitroSerialization::Teardown`). Prefer this to `duplicate_nitro_vm_descriptor`.
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    pub fn nitro_descriptor_handoff(
+        &mut self,
+        socket: std::os::unix::net::UnixStream,
+    ) -> &mut Self {
+        self.nitro_descriptor_handoff = Some(socket);
         self
     }
 
@@ -2350,6 +2500,81 @@ impl VmHandle {
             }
         })
     }
+    /// Arm capture and wait for an independently coordinated guest-agent trigger.
+    /// This does not request a freeze from the kernel. The daemon must quiesce
+    /// the workload through the agent and authorize its trigger after arming.
+    /// The returned template owns a sealed descriptor. For a sequential agent
+    /// handshake, use arm_template_capture followed by wait_template_capture.
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        not(feature = "tee")
+    ))]
+    pub fn freeze_template(
+        &self,
+        timeout: std::time::Duration,
+    ) -> std::io::Result<vmm::capture_request::CaptureOutcome> {
+        let request = {
+            let vmm = self
+                .vmm
+                .as_ref()
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::Unsupported,
+                        "cooperative capture requires Linux KVM",
+                    )
+                })?
+                .lock()
+                .unwrap();
+            vmm.arm_template_capture(timeout)?
+        };
+        request.wait()
+    }
+
+    /// Authorize capture after the agent has quiesced the workload.
+    /// After this returns, authorize the agent to write the kernel trigger.
+    /// Receive the sealed descriptor with wait_template_capture.
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        not(feature = "tee")
+    ))]
+    pub fn arm_template_capture(&self, timeout: std::time::Duration) -> std::io::Result<()> {
+        let request = self
+            .vmm
+            .as_ref()
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "cooperative capture requires Linux KVM",
+                )
+            })?
+            .lock()
+            .unwrap()
+            .arm_template_capture(timeout)?;
+        let _ = request;
+        Ok(())
+    }
+
+    /// Wait for a previously armed capture using its original deadline.
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        not(feature = "tee")
+    ))]
+    pub fn wait_template_capture(&self) -> std::io::Result<vmm::capture_request::CaptureOutcome> {
+        let request = self
+            .vmm
+            .as_ref()
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "cooperative capture requires Linux KVM",
+                )
+            })?
+            .lock()
+            .unwrap()
+            .wait_template_capture();
+        request.wait()
+    }
+
     /// Give a running guest a fresh generation identifier and raise its notification interrupt.
     /// Call after copying guest memory and starting the copy, so its kernel reseeds randomness.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -2406,6 +2631,56 @@ impl VmHandle {
     #[cfg(not(feature = "tee"))]
     pub fn balloon(&self) -> Option<&BalloonHandle> {
         self.balloon.as_ref()
+    }
+}
+
+/// The command line packaged into a Nitro image: the caller's tokens, then the guest kernel's
+/// socket-forwarding switches (`tsi_hijack`, `tsi_hijack_unix`) exactly when the vsock device
+/// forwards those families, as the KVM builder inserts them. Without them the guest never
+/// redirects its sockets and forwarding silently does nothing.
+#[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+fn nitro_cmdline(args: &[String], flags: TsiFlags) -> String {
+    let mut tokens: Vec<&str> = args.iter().map(String::as_str).collect();
+    if flags.contains(TsiFlags::HIJACK_INET) {
+        tokens.push("tsi_hijack");
+    }
+    if flags.contains(TsiFlags::HIJACK_UNIX) {
+        tokens.push("tsi_hijack_unix");
+    }
+    tokens.join(" ")
+}
+
+#[cfg(all(test, target_os = "linux", feature = "nitro-sandbox"))]
+mod nitro_cmdline_tests {
+    use super::*;
+    #[test]
+    fn forwarding_switches_follow_the_vsock_flags() {
+        let args = vec!["panic=-1".to_owned(), "rdinit=/init".to_owned()];
+        assert_eq!(
+            nitro_cmdline(&args, TsiFlags::empty()),
+            "panic=-1 rdinit=/init"
+        );
+        assert_eq!(
+            nitro_cmdline(&args, TsiFlags::HIJACK_INET),
+            "panic=-1 rdinit=/init tsi_hijack"
+        );
+        assert_eq!(
+            nitro_cmdline(&args, TsiFlags::HIJACK_INET | TsiFlags::HIJACK_UNIX),
+            "panic=-1 rdinit=/init tsi_hijack tsi_hijack_unix"
+        );
+    }
+    #[test]
+    fn builder_flags_follow_internet_forwarding() {
+        let mut builder = Builder::new();
+        assert_eq!(
+            builder.nitro_tsi_flags(),
+            TsiFlags::empty(),
+            "off by default"
+        );
+        builder.internet_socket_forwarding(true);
+        assert!(builder.nitro_tsi_flags().contains(TsiFlags::HIJACK_INET));
+        builder.internet_socket_forwarding(false);
+        assert!(!builder.nitro_tsi_flags().contains(TsiFlags::HIJACK_INET));
     }
 }
 

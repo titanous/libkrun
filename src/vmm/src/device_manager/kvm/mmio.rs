@@ -278,6 +278,27 @@ impl MMIODeviceManager {
         &self.id_to_dev_info
     }
 
+    /// A cooperative template may contain only reset virtio transports.
+    #[cfg(target_arch = "x86_64")]
+    pub fn all_virtio_reset(&self) -> bool {
+        self.id_to_dev_info
+            .iter()
+            .filter(|((kind, _), _)| matches!(kind, DeviceType::Virtio(_)))
+            .all(|(_, info)| {
+                self.bus.get_device(info.addr).is_some_and(|(_, device)| {
+                    let device = device.lock().expect("poisoned virtio transport");
+                    let reset = device
+                        .as_any()
+                        .downcast_ref::<devices::virtio::MmioTransport>()
+                        .is_some_and(|transport| transport.is_reset());
+                    if !reset {
+                        eprintln!("cooperative capture: non-reset virtio at {:#x}", info.addr);
+                    }
+                    reset
+                })
+            })
+    }
+
     /// Gets the the specified device.
     pub fn get_device(
         &self,
