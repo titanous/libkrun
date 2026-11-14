@@ -1196,8 +1196,16 @@ impl Builder {
         self
     }
 
-    /// Enable the memory balloon device, exposing it through the Rust API via VmHandle::balloon().
+    /// Leave the memory-balloon transport out of this VM. Existing callers
+    /// retain the historical device list unless they opt out explicitly.
     #[cfg(not(feature = "tee"))]
+    pub fn omit_balloon_device(&mut self) -> &mut Self {
+        self.config.vmr.omit_balloon = true;
+        self
+    }
+
+    #[cfg(not(feature = "tee"))]
+    /// Enable balloon control through VmHandle::balloon().
     pub fn enable_balloon(&mut self) -> &mut Self {
         self.config.vmr.balloon_enabled = true;
         self

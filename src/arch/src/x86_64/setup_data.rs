@@ -7,7 +7,7 @@
 //! setup_data linked-list format (arch/x86/include/uapi/asm/setup_data.h):
 //!
 //!   offset  0: next     (u64) = 0  — end of chain
-//!   offset  8: type     (u32) = SETUP_VMGENID (10)
+//!   offset  8: type     (u32) = SETUP_VMGENID (0x10001)
 //!   offset 12: len      (u32) = 16 — sizeof(vmgenid_setup_data)
 //!   offset 16: guid_pa  (u64) — guest physical address of the 16-byte GUID
 //!   offset 24: irq      (u32) — PIC IRQ number for guest notification
@@ -17,8 +17,8 @@ use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
 
 use crate::x86_64::layout::{SETUP_DATA_ADDR, VMGENID_GUID_OFFSET, VMGENID_GUID_PAGE, VMGENID_IRQ};
 
-/// SETUP_VMGENID type constant (Linux 6.12+).
-const SETUP_VMGENID: u32 = 10;
+/// Private protocol shared with the guest kernel; upstream type 10 is KEXEC_KHO.
+const SETUP_VMGENID: u32 = 0x10001;
 
 /// vmgenid_setup_data payload size: guid_pa(8) + irq(4) + pad(4).
 const VMGENID_SETUP_DATA_LEN: u32 = 16;
@@ -103,8 +103,8 @@ mod tests {
 
         // offset 0: next = 0 (end of chain)
         assert_eq!(read_u64(&mem, 0), 0);
-        // offset 8: type = SETUP_VMGENID (10)
-        assert_eq!(read_u32(&mem, 8), 10);
+        // offset 8: type = SETUP_VMGENID (0x10001)
+        assert_eq!(read_u32(&mem, 8), 0x10001);
         // offset 12: len = 16
         assert_eq!(read_u32(&mem, 12), 16);
         // offset 16: guid_pa = VMGENID_GUID_PAGE + VMGENID_GUID_OFFSET

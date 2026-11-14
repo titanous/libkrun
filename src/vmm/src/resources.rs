@@ -265,6 +265,8 @@ pub struct VmResources {
     /// Whether to enable the memory balloon device through the Rust API
     #[cfg(not(feature = "tee"))]
     pub balloon_enabled: bool,
+    /// Omit the balloon transport entirely; default device list is unchanged.
+    pub omit_balloon: bool,
 }
 
 impl VmResources {
@@ -540,6 +542,7 @@ mod tests {
             rng_backend: None,
             #[cfg(not(feature = "tee"))]
             balloon_enabled: false,
+            omit_balloon: false,
         }
     }
 

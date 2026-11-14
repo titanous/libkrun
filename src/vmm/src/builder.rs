@@ -1150,9 +1150,8 @@ pub fn build_microvm(
     timer.checkpoint("create_vcpus + legacy_devices");
 
     #[cfg(not(feature = "tee"))]
-    let balloon_device = attach_balloon_device(&mut vmm, event_manager, intc.clone())?;
-    #[cfg(not(feature = "tee"))]
-    {
+    if !vm_resources.omit_balloon {
+        let balloon_device = attach_balloon_device(&mut vmm, event_manager, intc.clone())?;
         vmm.balloon = Some(balloon_device);
     }
 
@@ -1383,6 +1382,11 @@ pub fn build_microvm(
             &vm_resources.smbios_oem_strings,
         )
         .map_err(StartMicrovmError::Internal)?;
+    }
+    #[cfg(target_arch = "x86_64")]
+    if vm_resources.cooperative_template.is_some() {
+        vmm.notify_vm_generation_change()
+            .map_err(StartMicrovmError::Internal)?;
     }
     timer.checkpoint("configure_system");
 

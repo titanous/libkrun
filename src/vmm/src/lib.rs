@@ -483,6 +483,13 @@ impl Subscriber for Vmm {
 
             #[cfg(target_arch = "x86_64")]
             if frozen {
+                eprintln!(
+                    "COOPERATIVE FROZEN host_ns={}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                );
                 self.vcpu_exit_flag.store(true, Ordering::Release);
                 self.vcpus_handles.clear(); // joins every vCPU before reading RAM
                 let result = (|| -> std::io::Result<std::path::PathBuf> {

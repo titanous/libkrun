@@ -8,6 +8,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let control = u64::from_str_radix(args[3].trim_start_matches("0x"), 16)?;
     let mut builder = krun::Builder::new();
+    builder.omit_balloon_device();
     let vcpus = std::env::var("CLONE_VCPUS")
         .unwrap_or_else(|_| "1".into())
         .parse()?;

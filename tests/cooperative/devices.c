@@ -17,7 +17,7 @@
 #include <unistd.h>
 
 static atomic_ulong sequence;
-static atomic_int stopping, errors;
+static atomic_int stopping, errors, idle;
 static uint64_t ns(clockid_t clock)
 {
     struct timespec ts;
@@ -50,6 +50,7 @@ static void *writer(void *unused)
     int fd = open("/data/sequence", O_CREAT|O_RDWR|O_TRUNC, 0600);
     if (fd < 0) { atomic_fetch_add(&errors, 1); return NULL; }
     while (!atomic_load(&stopping)) {
+        if(atomic_load(&idle)) { usleep(10000); continue; }
         unsigned long seq = atomic_fetch_add(&sequence, 1) + 1;
         uint64_t record[512];
         for (unsigned i=0; i<512; i++) record[i] = seq ^ (0x123456789abcdef0ULL + i);
@@ -74,7 +75,7 @@ int main(void)
     unsigned long frozen_seq=atomic_load(&sequence);
     uint64_t sentinel[2]={0x1020304050607080ULL,0x90a0b0c0d0e0f001ULL}, restored[2];
     int freeze=open("/sys/power/nitro_freeze",O_WRONLY);
-    printf("CLONE FREEZE seq=%lu mono=%llu cpus=%ld\n",frozen_seq,(unsigned long long)before,sysconf(_SC_NPROCESSORS_ONLN));
+    printf("CLONE FREEZE seq=%lu mono=%llu realtime_ns=%llu cpus=%ld\n",frozen_seq,(unsigned long long)before,(unsigned long long)ns(CLOCK_REALTIME),sysconf(_SC_NPROCESSORS_ONLN));
     /* Keep xstate live across the syscall rather than relying on compiler spills. */
     long result;
     asm volatile("movdqu %2, %%xmm15; syscall; movdqu %%xmm15, %1"
@@ -87,8 +88,18 @@ int main(void)
     int old_result=recv(old,&byte,1,0);
     if(old_result>0 || (old_result<0 && errno==EAGAIN)) fail("old vsock not dead");
     close(old);
-    int fresh=connect_host(); echo(fresh); close(fresh);
+    int fresh=connect_host(); echo(fresh);
+    uint64_t host_time;
+    if(send(fresh,"time",4,MSG_NOSIGNAL)!=4 || recv(fresh,&host_time,8,MSG_WAITALL)!=8) fail("host time");
+    uint64_t realtime=ns(CLOCK_REALTIME);
+    uint64_t error_ns=realtime>host_time ? realtime-host_time : host_time-realtime;
+    if(error_ns>100000000ULL) fail("wall clock exceeds 100ms");
+    close(fresh);
     while(atomic_load(&sequence)<frozen_seq+100 && !atomic_load(&errors)) usleep(1000);
+    atomic_store(&idle,1);
+    printf("CLONE USERSPACE clock_error_ns=%llu\n",(unsigned long long)error_ns);
+    /* Host samples private RSS after ten seconds with this clone alive. */
+    sleep(11);
     atomic_store(&stopping,1); pthread_join(thread,NULL);
     if(atomic_load(&errors)) fail("writer after resume");
     sync();
