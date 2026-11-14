@@ -326,11 +326,32 @@ mod probe {
                 return Err(io::Error::other("source workload not quiescent"));
             }
             eprintln!("AGENT_SOURCE_QUIESCENT");
-            arm_handle.arm_template_capture(Duration::from_secs(12))?;
-            eprintln!("AGENT_SOURCE_ARMED");
+            let unarmed = std::env::var_os("AGENT_UNARMED_RECOVERY").is_some();
+            if !unarmed {
+                arm_handle.arm_template_capture(Duration::from_secs(12))?;
+                eprintln!("AGENT_SOURCE_ARMED");
+            }
             freeze_tx.send(Instant::now()).map_err(io::Error::other)?;
             send(&mut connection, json!({"type":"freeze","request":2}))?;
             eprintln!("AGENT_FREEZE_SENT");
+            if unarmed {
+                drop(connection);
+                let mut recovered = accept(&source_listener)?;
+                let recovered_hello = response(&mut recovered, "hello")?;
+                if recovered_hello["boot_id"] != hello["boot_id"] {
+                    return Err(io::Error::other("recovery changed source identity"));
+                }
+                send(
+                    &mut recovered,
+                    json!({"type":"welcome","version":3,"features":[]}),
+                )?;
+                send(&mut recovered, json!({"type":"list_processes","request":3}))?;
+                response(&mut recovered, "processes")?;
+                send(&mut recovered, json!({"type":"power_off","request":4}))?;
+                response(&mut recovered, "ack")?;
+                eprintln!("AGENT_UNARMED_SOURCE_RECOVERED running=1");
+                return Ok(hello);
+            }
             // Keep the source session alive until capture closes its backend.
             // A returned error/ack means the guest refused or recovered in place.
             loop {
@@ -352,7 +373,15 @@ mod probe {
             drop(workload_connection);
             Ok(hello)
         });
-        if !matches!(context.run()?, VmExit::Frozen { .. }) {
+        let source_exit = context.run()?;
+        if std::env::var_os("AGENT_UNARMED_RECOVERY").is_some() {
+            source_thread
+                .join()
+                .map_err(|_| "source recovery thread panicked")??;
+            println!("AGENT_UNARMED_RECOVERY_PASS exit={source_exit:?}");
+            return Ok(());
+        }
+        if !matches!(source_exit, VmExit::Frozen { .. }) {
             return Err("source not frozen".into());
         }
         let hello = source_thread
@@ -403,6 +432,8 @@ mod probe {
                 }
                 children.push(command.spawn()?);
             }
+            drop(template);
+            eprintln!("AGENT_PARENT_TEMPLATE_DROPPED copies=4");
             let deadline = Instant::now() + Duration::from_secs(15);
             loop {
                 if (740..744).all(|cid| directory.join(format!("ready-{cid}")).exists()) {
