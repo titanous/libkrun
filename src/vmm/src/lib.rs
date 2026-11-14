@@ -23,6 +23,21 @@ pub mod resources;
 pub mod signal_handler;
 /// VM exit reasons and shared exit state.
 pub mod vm_exit;
+
+#[cfg(target_os = "linux")]
+pub mod template_memory;
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub mod capture_request;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub mod cooperative;
+#[cfg(target_arch = "x86_64")]
+mod kernel_identity;
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub mod template;
+#[cfg(target_arch = "x86_64")]
+mod template_topology;
 /// Wrappers over structures used to configure the VMM.
 pub mod vmm_config;
 
@@ -203,6 +218,18 @@ pub struct Vmm {
 
     vcpus_handles: Vec<VcpuHandle>,
     exit_evt: EventFd,
+    #[cfg(target_arch = "x86_64")]
+    cooperative_capture: Option<(u64, std::path::PathBuf, u8, u64)>,
+    #[cfg(target_arch = "x86_64")]
+    pub capture_request: crate::capture_request::CaptureRequest,
+    #[cfg(target_arch = "x86_64")]
+    cooperative_topology: Vec<u8>,
+    #[cfg(target_arch = "x86_64")]
+    cooperative_compatibility: Vec<u8>,
+    #[cfg(all(target_arch = "x86_64", feature = "blk"))]
+    cooperative_disks: Vec<Arc<Mutex<devices::virtio::Block>>>,
+    #[cfg(target_arch = "x86_64")]
+    cooperative_shm: Vec<(vm_memory::GuestAddress, usize)>,
     vm: Vm,
     exit_observers: Vec<Arc<Mutex<dyn VmmExitObserver>>>,
     exit_code: Arc<AtomicI32>,
@@ -224,6 +251,48 @@ pub struct Vmm {
 }
 
 impl Vmm {
+    #[cfg(target_arch = "aarch64")]
+    pub fn arm_template_capture(
+        &self,
+        _timeout: std::time::Duration,
+    ) -> std::io::Result<crate::capture_request::CaptureRequest> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "cooperative capture is not implemented by this backend",
+        ))
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    pub fn wait_template_capture(&self) -> crate::capture_request::CaptureRequest {
+        let request = crate::capture_request::CaptureRequest::default();
+        request.complete(Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "cooperative capture is not implemented by this backend",
+        )));
+        request
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    pub fn arm_template_capture(
+        &self,
+        timeout: std::time::Duration,
+    ) -> std::io::Result<crate::capture_request::CaptureRequest> {
+        self.capture_request.require_marker()?;
+        if self.cooperative_capture.is_none() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "guest was not marked as a future template",
+            ));
+        }
+        self.capture_request.arm(timeout)?;
+        Ok(self.capture_request.clone())
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    pub fn wait_template_capture(&self) -> crate::capture_request::CaptureRequest {
+        self.capture_request.clone()
+    }
+
     /// Write a fresh generation identifier and notify the running guest.
     /// The guest driver reseeds its random pool when it handles this interrupt.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -456,14 +525,141 @@ impl Subscriber for Vmm {
             debug!("Vmm: exit_evt fired, shutting down");
             let _ = self.exit_evt.read();
 
+            let mut frozen = None;
             let vcpu_exit_code = self
                 .vcpus_handles
                 .iter()
                 .find_map(|handle| match handle.response_receiver().try_recv() {
                     Ok(VcpuResponse::Exited(exit_code)) => Some(exit_code),
+                    Ok(VcpuResponse::Frozen(control)) => {
+                        frozen = Some(control);
+                        Some(FC_EXIT_CODE_GENERIC_ERROR)
+                    }
                     _ => None,
                 })
                 .unwrap_or(FC_EXIT_CODE_OK);
+
+            #[cfg(target_arch = "x86_64")]
+            if let Some(reported_control) = frozen {
+                eprintln!(
+                    "COOPERATIVE FROZEN host_ns={}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                );
+                let mut captured_template = None;
+                let result = (|| -> std::io::Result<std::path::PathBuf> {
+                    self.capture_request.authorize()?;
+                    let (control, path, vcpus, ram_mib) =
+                        self.cooperative_capture.as_ref().ok_or_else(|| {
+                            std::io::Error::other("cooperative capture not configured")
+                        })?;
+                    if *control != 0 && *control != reported_control {
+                        return Err(std::io::Error::other(
+                            "reported control GPA does not match expectation",
+                        ));
+                    }
+                    if !self.mmio_device_manager.all_virtio_reset() {
+                        return Err(std::io::Error::other(
+                            "guest froze with an active virtio device",
+                        ));
+                    }
+                    #[cfg(feature = "blk")]
+                    for disk in &self.cooperative_disks {
+                        disk.lock().unwrap().sync_for_template()?;
+                    }
+                    let clock = self.vm.fd().get_clock().map_err(std::io::Error::other)?;
+                    // DAX mappings have been revoked by FREEZE. They are not RAM
+                    // and must be recreated empty against each fresh backend.
+                    let mut ram = self.guest_memory.clone();
+                    for (address, size) in &self.cooperative_shm {
+                        ram = ram
+                            .remove_region(*address, *size as u64)
+                            .map_err(std::io::Error::other)?
+                            .0;
+                    }
+                    let mut control_page = [0u8; 4096];
+                    vm_memory::Bytes::read_slice(
+                        &ram,
+                        &mut control_page,
+                        vm_memory::GuestAddress(reported_control),
+                    )
+                    .map_err(std::io::Error::other)?;
+                    crate::cooperative::require_template_marker(&control_page)?;
+                    use crate::cooperative::word;
+                    let build_id_start = word::KERNEL_BUILD_ID * 8;
+                    let build_id_len = word::KERNEL_BUILD_ID_LEN * 8;
+                    if u64::from_le_bytes(
+                        control_page[build_id_len..build_id_len + 8]
+                            .try_into()
+                            .unwrap(),
+                    ) != 20
+                        || self.cooperative_compatibility.len() < 20
+                        || control_page[build_id_start..build_id_start + 20]
+                            != self.cooperative_compatibility
+                                [self.cooperative_compatibility.len() - 20..]
+                    {
+                        return Err(std::io::Error::other(
+                            "guest kernel build identifier does not match configured kernel",
+                        ));
+                    }
+                    let template = crate::template::Template::capture_with_manifest(
+                        &ram,
+                        reported_control,
+                        *vcpus,
+                        *ram_mib,
+                        clock.clock,
+                        &self.cooperative_topology,
+                        &self.cooperative_compatibility,
+                    )?;
+                    let prepared_path = if path.as_os_str().is_empty() {
+                        None
+                    } else {
+                        Some(template.prepare_path(path)?)
+                    };
+                    if !self.capture_request.accept() {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "cooperative freeze timed out during preparation",
+                        ));
+                    }
+                    let export =
+                        prepared_path.map(|prepared| prepared.publish().map(|()| path.clone()));
+                    captured_template =
+                        Some(crate::capture_request::CaptureOutcome { template, export });
+                    Ok(path.clone())
+                })();
+                let template_path = match result {
+                    Ok(path) => path,
+                    Err(error) => {
+                        warn!("cooperative freeze refused: {error}");
+                        if self.capture_request.is_armed() {
+                            self.capture_request.complete(Err(std::io::Error::new(
+                                error.kind(),
+                                error.to_string(),
+                            )));
+                        }
+                        if let Some(cpu) = self.vcpus_handles.first() {
+                            let _ = cpu.send_event(VcpuEvent::FreezeRejected(
+                                crate::capture_request::refusal_errno(&error),
+                            ));
+                        }
+                        return;
+                    }
+                };
+                for cpu in &self.vcpus_handles {
+                    let _ = cpu.send_event(VcpuEvent::FreezeAccepted);
+                }
+                self.vcpu_exit_flag.store(true, Ordering::Release);
+                self.vcpus_handles.clear();
+                self.capture_request
+                    .complete(Ok(captured_template.expect("validated template")));
+                self.stop(crate::vm_exit::VmExit::Frozen { template_path });
+                return;
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            let _ = frozen;
 
             let vmm_exit_code = self.exit_code.load(Ordering::SeqCst);
 

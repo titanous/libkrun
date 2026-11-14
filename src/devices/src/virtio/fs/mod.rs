@@ -24,6 +24,11 @@ pub use self::filesystem::{
     SecContext, ZeroCopyReader, ZeroCopyWriter,
 };
 
+/// Queue sizes exposed to the guest, in transport order.
+pub fn queue_sizes() -> Vec<u16> {
+    vec![defs::QUEUE_SIZE; defs::NUM_QUEUES]
+}
+
 mod defs {
     use super::super::QueueConfig;
 

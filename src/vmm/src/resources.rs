@@ -193,6 +193,14 @@ pub struct VmResources {
     pub kernel_bundle: Option<KernelBundle>,
     /// The path to an external kernel, as an alternative to KernelBundle.
     pub external_kernel: Option<ExternalKernel>,
+    /// Sealed cooperative RAM image used instead of loading a boot payload.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    pub cooperative_template: Option<crate::template::Template>,
+    /// Physical control page and create-new output path for a frozen template.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    pub cooperative_capture: Option<(u64, PathBuf)>,
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    pub template_disk_identities: std::collections::BTreeMap<String, String>,
     /// The parameters for the qboot bundle to be loaded in this microVM.
     #[cfg(feature = "tee")]
     pub qboot_bundle: Option<QbootBundle>,
@@ -259,6 +267,8 @@ pub struct VmResources {
     /// Whether to enable the memory balloon device through the Rust API
     #[cfg(not(feature = "tee"))]
     pub balloon_enabled: bool,
+    /// Omit the balloon transport entirely; default device list is unchanged.
+    pub omit_balloon: bool,
 }
 
 impl VmResources {
@@ -496,6 +506,12 @@ mod tests {
             kernel_cmdline: default_kernel_cmdline(),
             kernel_bundle: Default::default(),
             external_kernel: None,
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            cooperative_template: None,
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            cooperative_capture: None,
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            template_disk_identities: std::collections::BTreeMap::new(),
             fs: Default::default(),
             vsock: Default::default(),
             #[cfg(feature = "net")]
@@ -530,6 +546,7 @@ mod tests {
             rng_backend: None,
             #[cfg(not(feature = "tee"))]
             balloon_enabled: false,
+            omit_balloon: false,
         }
     }
 

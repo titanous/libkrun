@@ -481,6 +481,30 @@ impl Block {
         &self.id
     }
 
+    /// Capacity and durability boundary for a cooperatively frozen template.
+    pub fn template_capacity(&self) -> io::Result<u64> {
+        match self.disk.as_ref() {
+            Some(BlockDeviceBackend::Sync(backend)) => Ok(backend.nsectors() * 512),
+            _ => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "template capture requires synchronous block backend",
+            )),
+        }
+    }
+
+    pub fn sync_for_template(&self) -> io::Result<()> {
+        match self.disk.as_ref() {
+            Some(BlockDeviceBackend::Sync(backend)) => {
+                backend.flush()?;
+                backend.sync()
+            }
+            _ => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "template capture requires synchronous block backend",
+            )),
+        }
+    }
+
     /// Provides the PARTUUID of this block device.
     pub fn partuuid(&self) -> Option<&String> {
         self.partuuid.as_ref()
