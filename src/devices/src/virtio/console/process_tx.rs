@@ -58,6 +58,7 @@ pub(crate) fn process_tx(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn process_tx_with_state(
     port_id: u32,
     mem: GuestMemoryMmap,
@@ -168,6 +169,7 @@ fn pop_head_blocking<'mem>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_desc_to_output(
     desc: DescriptorChain,
     output: &mut (dyn PortOutput + Send),

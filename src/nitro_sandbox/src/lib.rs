@@ -30,6 +30,7 @@ impl std::error::Error for GuestDataError {}
 pub(crate) fn guest_data_error(message: impl Into<String>) -> std::io::Error {
     std::io::Error::other(GuestDataError(message.into()))
 }
+#[cfg(any(feature = "devices", test))]
 pub(crate) fn is_guest_data_error(error: &std::io::Error) -> bool {
     error
         .get_ref()
