@@ -644,7 +644,6 @@ impl Builder {
         self
     }
 
-    /// Disable internet socket forwarding without disabling mapped vsock ports.
     /// Select the guest-visible userspace-vsock CID (default 3). Copies need fresh CIDs.
     pub fn vsock_cid(&mut self, cid: u32) -> std::io::Result<&mut Self> {
         if cid <= 2 || cid == u32::MAX {
@@ -657,6 +656,7 @@ impl Builder {
         Ok(self)
     }
 
+    /// Disable internet socket forwarding without disabling mapped vsock ports.
     pub fn internet_socket_forwarding(&mut self, enabled: bool) -> &mut Self {
         self.socket_policy.internet_enabled = enabled;
         self
