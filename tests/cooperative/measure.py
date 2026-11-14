@@ -39,7 +39,9 @@ def execute(size, mode, image, fd=None):
             row['private_kib_10s'] = private(child.pid)
         except FileNotFoundError:
             row['private_kib_10s'] = None
-    with (a.output / f'{size}-{mode}.log').open('wb') as log:
+    sample = sum(row['memory_mib'] == size and row['mode'] == mode for row in rows)
+    row['sample'] = sample
+    with (a.output / f'{size}-{mode}-{sample}.log').open('wb') as log:
         for line in child.stdout:
             log.write(line)
             if b'TIMING FIRST USER' in line:
@@ -74,8 +76,9 @@ for size in (256, 2048, 8192):
             offset += len(block)
     fcntl.fcntl(fd, fcntl.F_ADD_SEALS, fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW |
                 fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL)
-    execute(size, 'resume', image)
-    execute(size, 'resume-fd', image, fd)
+    for sample in range(3):
+        execute(size, 'resume', image)
+        execute(size, 'resume-fd', image, fd)
     os.close(fd)
     image.unlink()
 print('MEASUREMENT MATRIX PASS', flush=True)
