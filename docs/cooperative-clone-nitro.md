@@ -102,7 +102,7 @@ Parked receiver contract:
   release. `assign` returning `Ok` means handoff, not successful import: a race
   with the park deadline can still end with `Expired`. A kernel mismatch ends
   and consumes the receiver with the typed `vmm::nitro_restore::RestoreMismatch::KernelIdentity`
-  error (the module is internal to the VMM crate).
+  error (available through the VMM crate; not re-exported by `libkrun`).
 - Until pre-run expiry is implemented, a built but unrun parked context holds
   its slot, pool memory, and (with start-and-teardown serialization) the lock
   without a deadline. Run it immediately; never retain an unrun parked context.
