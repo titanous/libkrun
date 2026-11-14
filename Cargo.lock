@@ -993,6 +993,7 @@ dependencies = [
  "log",
  "mutants",
  "nitro-enclaves 0.5.0",
+ "nitro_sandbox",
  "polly",
  "proptest",
  "thiserror 1.0.69",
@@ -1185,6 +1186,16 @@ dependencies = [
  "libc",
  "nix 0.26.4",
  "vsock",
+]
+
+[[package]]
+name = "nitro_sandbox"
+version = "0.1.0"
+dependencies = [
+ "devices",
+ "polly",
+ "utils",
+ "vm-memory",
 ]
 
 [[package]]

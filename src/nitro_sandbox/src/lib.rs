@@ -5,6 +5,8 @@
 pub mod host;
 #[cfg(all(target_os = "linux", feature = "devices"))]
 pub mod transport;
+#[cfg(all(target_os = "linux", feature = "devices"))]
+pub mod runtime;
 
 use std::time::Duration;
 

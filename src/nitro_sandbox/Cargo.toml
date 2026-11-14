@@ -16,5 +16,3 @@ vm-memory = { version = "0.18", features = ["backend-mmap"], optional = true }
 [[example]]
 name = "devices"
 required-features = ["devices"]
-
-[workspace]

@@ -5,10 +5,13 @@ import struct
 import sys
 import zlib
 source = pathlib.Path(sys.argv[1]).read_bytes()
-h = struct.unpack('>4sHHQQHH32Q32QII', source[:548])
-at = h[7]
-size = struct.unpack('>HHQ', source[at:at+12])[2]
-kernel = source[at+12:at+12+size]
+if source[:4] == b'.eif':
+    h = struct.unpack('>4sHHQQHH32Q32QII', source[:548])
+    at = h[7]
+    size = struct.unpack('>HHQ', source[at:at+12])[2]
+    kernel = source[at+12:at+12+size]
+else:
+    kernel = source
 program = pathlib.Path(sys.argv[2]).read_bytes()
 def cpio(name, data, mode, ino):
     name = name.encode()+b'\0'
