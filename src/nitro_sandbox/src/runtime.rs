@@ -29,6 +29,10 @@ fn reason_observation_honors_clear_and_sticky_panic() {
     let mut facts = TerminalFacts::default();
     facts.observe_reason(2, Some(10));
     assert_eq!((facts.reason, facts.observed_micros), (2, Some(10)));
+    for ignored in [5, 255] {
+        facts.observe_reason(ignored, Some(15));
+        assert_eq!((facts.reason, facts.observed_micros), (2, Some(10)));
+    }
     facts.observe_reason(0, Some(20));
     assert_eq!((facts.reason, facts.observed_micros), (0, None));
     facts.observe_reason(4, Some(30));
@@ -288,7 +292,7 @@ impl Runtime {
         let mut facts = TerminalFacts::default();
         loop {
             if let Some(device) = &self.stop_reason {
-                facts.observe_reason(device.reason().unwrap_or(0), device.observation_micros());
+                facts.observe_reason(device.reason(), device.observation_micros());
                 *self.observation.lock().unwrap() = facts.observed_micros;
             }
             match self.stop.read() {
@@ -304,7 +308,7 @@ impl Runtime {
                 // The terminal status can become visible just after the loop's
                 // first sample. Read the final ordered byte, including a clear.
                 if let Some(device) = &self.stop_reason {
-                    facts.observe_reason(device.reason().unwrap_or(0), device.observation_micros());
+                    facts.observe_reason(device.reason(), device.observation_micros());
                     *self.observation.lock().unwrap() = facts.observed_micros;
                 }
                 self.sandbox.drain_console(&mut self.console)?;

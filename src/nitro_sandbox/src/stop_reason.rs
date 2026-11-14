@@ -71,10 +71,22 @@ impl StopReason {
         }
         Some(time.tv_sec as u64 * 1_000_000 + time.tv_nsec as u64 / 1000)
     }
-    pub fn reason(&self) -> Option<u8> {
-        // Acquire the guest's ordered byte store before its queue notification.
-        let reason = unsafe { std::ptr::read_volatile(self.address as *const u8) };
-        std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
-        (1..=4).contains(&reason).then_some(reason)
+    pub fn reason(&self) -> u8 {
+        read_reason(self.address)
+    }
+}
+fn read_reason(address: u64) -> u8 {
+    // Acquire the guest's ordered byte store before its queue notification.
+    let reason = unsafe { std::ptr::read_volatile(address as *const u8) };
+    std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+    reason
+}
+
+#[cfg(test)]
+#[test]
+fn preparing_and_invalid_reason_bytes_are_not_clears() {
+    for byte in [5u8, 255] {
+        let value = byte;
+        assert_eq!(read_reason((&value as *const u8) as u64), byte);
     }
 }
