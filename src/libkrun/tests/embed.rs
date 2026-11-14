@@ -1,6 +1,9 @@
 //! Real KVM tests; build embed-init.c as static /init in EMBED_INITRAMFS.
 //! Set EMBED_KERNEL to ELF vmlinux. Run with an outer timeout and one test thread.
 #[cfg(target_arch = "x86_64")]
+#[path = "large/mod.rs"]
+mod large;
+#[cfg(target_arch = "x86_64")]
 #[test]
 #[ignore = "requires KVM and external artifacts"]
 fn outbound_policy_and_disabled_forwarding() {
@@ -256,6 +259,7 @@ fn run(mut builder: krun::Builder, mode: &str) -> String {
     let ram = match mode {
         "embed_4g" => 4096,
         "embed_8g" => 8192,
+        _ if mode.starts_with("embed_large_") => 2048,
         _ => 512,
     };
     builder.vm_config(1, ram).unwrap();

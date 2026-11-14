@@ -94,5 +94,8 @@ pub trait Proxy: Send + AsRawFd {
     fn push_accept_rsp(&self, _result: i32) {}
     fn shutdown(&mut self, _pkt: &VsockPacket) {}
     fn release(&mut self) -> ProxyUpdate;
+    fn resume_rx(&mut self) -> Option<ProxyUpdate> {
+        None
+    }
     fn process_event(&mut self, evset: EventSet) -> ProxyUpdate;
 }

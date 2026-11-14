@@ -28,6 +28,7 @@ impl Vsock {
             error!("vsock: failed to read rxq event: {e:?}");
         } else {
             raise_irq |= self.process_stream_rx();
+            self.muxer.resume_rx();
         }
         if raise_irq {
             debug!("vsock: rxq raising IRQ");

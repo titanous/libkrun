@@ -229,7 +229,12 @@ impl MuxerThread {
 
                         let update = self.proxy_map.read().unwrap().get(&id).map(|proxy_lock| {
                             let mut proxy = proxy_lock.lock().unwrap();
-                            proxy.process_event(evset)
+                            let mut update = proxy.process_event(evset);
+                            // Serialize readiness changes with RX queue-kick resume and TX credit.
+                            if let Some((id, fd, events)) = update.polling.take() {
+                                self.update_polling(id, fd, events);
+                            }
+                            update
                         });
 
                         if let Some(update) = update {
