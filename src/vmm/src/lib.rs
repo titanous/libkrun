@@ -569,6 +569,7 @@ impl Subscriber for Vmm {
                         vm_memory::GuestAddress(reported_control),
                     )
                     .map_err(std::io::Error::other)?;
+                    crate::cooperative::require_template_marker(&control_page)?;
                     use crate::cooperative::word;
                     let build_id_start = word::KERNEL_BUILD_ID * 8;
                     let build_id_len = word::KERNEL_BUILD_ID_LEN * 8;
