@@ -171,6 +171,22 @@ int main(void)
     if(tcp>=0 && !connect(tcp,(void *)&endpoint,sizeof(endpoint))) fail("internet forwarding unexpectedly enabled");
     if(tcp>=0) close(tcp);
     printf("CLONE FORWARDING disabled\n");
+    FILE *interrupts=fopen("/proc/interrupts","r");
+    char irqline[512];
+    unsigned long irq_total=0;
+    if(!interrupts) fail("interrupt counters");
+    while(fgets(irqline,sizeof(irqline),interrupts)) if(strstr(irqline,"vmgenid")) {
+        char *cursor=strchr(irqline,':');
+        if(cursor) for(cursor++;*cursor;) {
+            char *end;
+            unsigned long count=strtoul(cursor,&end,10);
+            if(end==cursor) { if(*cursor==' ' || *cursor=='\t') { cursor++; continue; } break; }
+            irq_total+=count; cursor=end;
+        }
+    }
+    fclose(interrupts);
+    if(!irq_total) fail("vmgenid notification not observed");
+    printf("CLONE VMGENID irq=%lu\n",irq_total);
     int fresh=connect_host(); echo(fresh);
     uint64_t host_time;
     if(send(fresh,"time",4,MSG_NOSIGNAL)!=4 || recv(fresh,&host_time,8,MSG_WAITALL)!=8) fail("host time");

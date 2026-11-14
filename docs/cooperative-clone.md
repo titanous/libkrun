@@ -45,10 +45,12 @@ and enter the kernel's saved continuation over private file-backed RAM.
    Old vsock connections are dead; userspace reconnects guest-to-host CID 2.
    On x86 the final post-RESTORE hook refreshes realtime through 32-bit I/O reads:
    port `0xe6` returns low 32 bits of host realtime nanoseconds since Unix epoch,
-   `0xe7` returns high 32 bits. A high-low-high read repeats on rollover. This
-   avoids treating AP/device restoration time as a fixed wall-clock offset; the
-   control-page realtime word remains the resume-time validity flag. Kernels with
-   patch 0102 require these ports; older VMMs are incompatible with that patch.
+   `0xe7` returns high 32 bits. A high-low-high read repeats on rollover.
+   Reading current time avoids treating restoration latency as a fixed wall-clock
+   offset. The first read also re-injects the already-updated VMGENID notification
+   once: the pre-entry interrupt edge can be cleared by IOAPIC syscore restoration.
+   The control-page realtime word remains the resume-time validity flag. Kernels with
+   x86 patch 0101 require these ports; older VMMs are incompatible with that patch.
 
 The current caller supplies the same device order and features. RAM/vCPU count,
 control-page version and long-mode prerequisites are checked. This format is

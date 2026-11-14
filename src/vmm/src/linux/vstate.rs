@@ -858,6 +858,8 @@ pub struct Vcpu {
     #[allow(dead_code)]
     #[cfg_attr(all(test, target_arch = "aarch64"), allow(unused))]
     exit_evt: EventFd,
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) cooperative_generation_irq: Option<EventFd>,
 
     #[cfg(target_arch = "x86_64")]
     io_bus: devices::Bus,
@@ -1004,6 +1006,7 @@ impl Vcpu {
             id,
             mmio_bus: None,
             exit_evt,
+            cooperative_generation_irq: None,
             io_bus,
             cpuid,
             kernel_enomem_workaround,
@@ -1365,6 +1368,9 @@ impl Vcpu {
                     // Post-RESTORE wall-clock reads avoid including CPU/device
                     // restoration latency in the guest's new realtime epoch.
                     if (addr == 0xe6 || addr == 0xe7) && data.len() == 4 {
+                        if let Some(event) = self.cooperative_generation_irq.take() {
+                            event.write(1).map_err(|_| Error::VcpuUnhandledKvmExit)?;
+                        }
                         let now = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .map_err(|_| Error::VcpuUnhandledKvmExit)?

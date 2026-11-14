@@ -1388,6 +1388,12 @@ pub fn build_microvm(
         let generation = vmm.notify_vm_generation_change()
             .map_err(StartMicrovmError::Internal)?;
         eprintln!("COOPERATIVE GENERATION {generation:02x?}");
+        // The initial edge can be cleared by the guest's IOAPIC syscore
+        // restoration. Re-notify once its post-syscore time read traps.
+        vcpus[0].cooperative_generation_irq = Some(
+            vmm.vmgenid.as_ref().ok_or(StartMicrovmError::Internal(Error::VmGenerationUnavailable))?
+                .interrupt_evt().try_clone().map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?
+        );
     }
     timer.checkpoint("configure_system");
 
