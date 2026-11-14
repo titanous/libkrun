@@ -35,7 +35,7 @@ impl Buffer {
     /// Drop incoming bytes, preserving already accepted stream order.
     pub fn push(&self, bytes: &[u8]) {
         let mut inner = self.inner.lock().unwrap();
-        while bytes.len() > CAPACITY.saturating_sub(inner.bytes) {
+        while inner.lost != 0 || bytes.len() > CAPACITY.saturating_sub(inner.bytes) {
             let since = *inner.full_since.get_or_insert_with(Instant::now);
             if inner.finished.is_some() || since.elapsed() >= FULL_WAIT {
                 inner.lost += bytes.len() as u64;
@@ -73,6 +73,8 @@ impl Buffer {
                     }
                     if inner.lost != 0 {
                         let lost = std::mem::take(&mut inner.lost);
+                        inner.full_since = None;
+                        self.changed.notify_all();
                         break (
                             format!("\n[console: {lost} bytes dropped]\n").into_bytes(),
                             false,
@@ -205,6 +207,20 @@ mod tests {
         assert_eq!(state.dropped_bytes(), 1000);
         assert_eq!(buffer.inner.lock().unwrap().bytes, 0);
         assert!(buffer.inner.lock().unwrap().chunks.is_empty());
+    }
+    #[test]
+    fn pending_loss_is_reported_before_accepting_later_bytes() {
+        let state = Arc::new(ConsoleTxState::default());
+        let buffer = Buffer::new(state.clone());
+        {
+            let mut inner = buffer.inner.lock().unwrap();
+            inner.lost = 7;
+            inner.full_since = Some(Instant::now() - FULL_WAIT);
+        }
+        buffer.push(b"later");
+        assert!(buffer.inner.lock().unwrap().chunks.is_empty());
+        assert_eq!(buffer.inner.lock().unwrap().lost, 12);
+        assert_eq!(state.dropped_bytes(), 5);
     }
     #[test]
     fn incoming_overflow_is_bounded_and_counted_once() {
