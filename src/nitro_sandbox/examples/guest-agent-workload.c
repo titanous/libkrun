@@ -3,6 +3,8 @@
 #include <fcntl.h>
 #include <linux/vm_sockets.h>
 #include <stdint.h>
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/ioctl.h>
@@ -25,6 +27,27 @@ static int connect_host(void) {
     struct sockaddr_vm address={.svm_family=AF_VSOCK,.svm_cid=2,.svm_port=7003};
     if (fd<0 || connect(fd,(struct sockaddr *)&address,sizeof(address))) _exit(21);
     return fd;
+}
+struct load_state { int fs, disk, stream; atomic_int stop; unsigned char expected[4096]; unsigned long writes, traffic; };
+static void *write_load(void *arg) {
+    struct load_state *load=arg;
+    unsigned char block[4096];
+    for(unsigned int n=101;!atomic_load(&load->stop);n++) {
+        memset(block,(unsigned char)n,sizeof(block));
+        if(pwrite(load->fs,block,sizeof(block),0)!=sizeof(block) || fsync(load->fs) || pwrite(load->disk,block,sizeof(block),0)!=sizeof(block) || fsync(load->disk)) return (void *)1;
+        memcpy(load->expected,block,sizeof(block));
+        load->writes++;
+    }
+    return NULL;
+}
+static void *traffic_load(void *arg) {
+    struct load_state *load=arg;
+    char block[1024]={0};
+    while(!atomic_load(&load->stop)) {
+        if(send(load->stream,block,sizeof(block),MSG_NOSIGNAL)<=0) break;
+        load->traffic++;
+    }
+    return NULL;
 }
 int main(int argc, char **argv) {
     (void)argv;
@@ -49,10 +72,27 @@ int main(int argc, char **argv) {
     for(size_t i=0;i<count;i++) memory[i]=nonce^(i*0x9e3779b97f4a7c15ULL);
     uint64_t monotonic=ns(CLOCK_MONOTONIC),realtime=ns(CLOCK_REALTIME);
     int old=connect_host();
+    struct load_state load={.fs=fs,.disk=disk,.stream=old};
+    pthread_t writer,traffic;
+    if(fs>=0) {
+        memcpy(load.expected,expected,sizeof(expected));
+        struct timeval timeout={.tv_sec=1};
+        setsockopt(old,SOL_SOCKET,SO_SNDTIMEO,&timeout,sizeof(timeout));
+        if(pthread_create(&writer,NULL,write_load,&load)) return 33;
+    }
     dprintf(old,"READY nonce=%016lx monotonic=%lu realtime=%lu\n",nonce,monotonic,realtime);
+    if(fs>=0 && pthread_create(&traffic,NULL,traffic_load,&load)) return 34;
     char byte;
     ssize_t result=read(old,&byte,1);
     int read_errno=errno;
+    if(fs>=0) {
+        void *writer_error=NULL;
+        atomic_store(&load.stop,1);
+        pthread_join(writer,&writer_error);
+        pthread_join(traffic,NULL);
+        if(writer_error || load.writes==0 || load.traffic==0) return 35;
+        memcpy(expected,load.expected,sizeof(expected));
+    }
     close(old);
     int device_bad=0;
     if(fs>=0) {
@@ -71,7 +111,7 @@ int main(int argc, char **argv) {
     if(device<0 || ioctl(device,IOCTL_VM_SOCKETS_GET_LOCAL_CID,&cid)) return 25;
     close(device);
     int report=connect_host();
-    dprintf(report,"VERIFIED bad=%zu device_bad=%d nonce=%016lx random=%016lx cid=%u old_result=%ld old_errno=%d monotonic_before=%lu monotonic_after=%lu realtime_before=%lu realtime_after=%lu\n",bad,device_bad,nonce,fresh,cid,(long)result,read_errno,monotonic,ns(CLOCK_MONOTONIC),realtime,ns(CLOCK_REALTIME));
+    dprintf(report,"VERIFIED bad=%zu device_bad=%d writes=%lu traffic=%lu nonce=%016lx random=%016lx cid=%u old_result=%ld old_errno=%d monotonic_before=%lu monotonic_after=%lu realtime_before=%lu realtime_after=%lu\n",bad,device_bad,load.writes,load.traffic,nonce,fresh,cid,(long)result,read_errno,monotonic,ns(CLOCK_MONOTONIC),realtime,ns(CLOCK_REALTIME));
     close(report);
     return bad || device_bad || result>0 ? 26 : 0;
 }

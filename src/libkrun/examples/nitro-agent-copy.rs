@@ -105,7 +105,10 @@ mod probe {
             .as_nanos() as u64;
         if !report.starts_with("VERIFIED ")
             || number("bad")? != 0
-            || (std::env::var_os("AGENT_DEVICES").is_some() && number("device_bad")? != 0)
+            || (std::env::var_os("AGENT_DEVICES").is_some()
+                && (number("device_bad")? != 0
+                    || number("writes")? == 0
+                    || number("traffic")? == 0))
             || number("cid")? != cid
             || old > 0
             || number("monotonic_after")? < number("monotonic_before")?
