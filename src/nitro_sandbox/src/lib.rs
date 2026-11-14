@@ -4,9 +4,9 @@
 #[cfg(target_os = "linux")]
 pub mod host;
 #[cfg(all(target_os = "linux", feature = "devices"))]
-pub mod transport;
-#[cfg(all(target_os = "linux", feature = "devices"))]
 pub mod runtime;
+#[cfg(all(target_os = "linux", feature = "devices"))]
+pub mod transport;
 
 use std::time::Duration;
 
@@ -52,13 +52,22 @@ impl Queue {
     /// must accept only contiguous guest RAM, never an MMIO or shared-device window.
     pub fn validate(&self, maximum: u16, contains: impl Fn(u64, u64) -> bool) -> Result<(), Error> {
         let n = u64::from(self.size);
-        if !self.enabled || self.size == 0 || !self.size.is_power_of_two() || self.size > maximum
-            || self.descriptor % 16 != 0 || self.available % 2 != 0 || self.used % 4 != 0
+        if !self.enabled
+            || self.size == 0
+            || !self.size.is_power_of_two()
+            || self.size > maximum
+            || self.descriptor % 16 != 0
+            || self.available % 2 != 0
+            || self.used % 4 != 0
         {
             return Err(Error::InvalidQueue);
         }
         // Include the optional event fields even when EVENT_IDX is not negotiated.
-        for (address, length) in [(self.descriptor, 16 * n), (self.available, 6 + 2 * n), (self.used, 6 + 8 * n)] {
+        for (address, length) in [
+            (self.descriptor, 16 * n),
+            (self.available, 6 + 2 * n),
+            (self.used, 6 + 8 * n),
+        ] {
             if address.checked_add(length).is_none() || !contains(address, length) {
                 return Err(Error::InvalidQueue);
             }
@@ -93,17 +102,27 @@ pub fn device_snapshot(page: &[u8], uid: u64) -> Result<Option<DeviceSnapshot>, 
         let offset = u32_at(page, toc + 4)? as usize;
         let size = usize::try_from(u64_at(page, toc + 8)?).map_err(|_| Error::Truncated)?;
         let end = offset.checked_add(size).ok_or(Error::Truncated)?;
-        if end > page.len() { return Err(Error::Truncated); }
-        if u16_at(page, toc)? != 2 || u64_at(page, toc + 16)? != uid { continue; }
-        if size < ENTRY_SIZE { return Err(Error::Truncated); }
+        if end > page.len() {
+            return Err(Error::Truncated);
+        }
+        if u16_at(page, toc)? != 2 || u64_at(page, toc + 16)? != uid {
+            continue;
+        }
+        if size < ENTRY_SIZE {
+            return Err(Error::Truncated);
+        }
         let entry = &page[offset..end];
         let mirror = &entry[128..];
         let n = usize::from(u16_at(mirror, 18)?);
-        if n > 64 { return Err(Error::InvalidQueue); }
+        if n > 64 {
+            return Err(Error::InvalidQueue);
+        }
         if mirror[2160..2216].iter().any(|b| *b != 0) {
             return Err(Error::UnsupportedFeatures);
         }
-        if u64_at(mirror, 2096)? != uid { return Err(Error::InvalidHeader); }
+        if u64_at(mirror, 2096)? != uid {
+            return Err(Error::InvalidHeader);
+        }
         let mut queues = Vec::with_capacity(n);
         for q in 0..n {
             let at = 24 + q * 32;
@@ -116,21 +135,31 @@ pub fn device_snapshot(page: &[u8], uid: u64) -> Result<Option<DeviceSnapshot>, 
             });
         }
         return Ok(Some(DeviceSnapshot {
-            reset_count: u64_at(entry, 0)?, generation: u32_at(entry, 8)?,
-            status: mirror[20], negotiated_features: u64_at(mirror, 2080)?,
-            device_type: u16_at(mirror, 2088)?, uid, queues,
+            reset_count: u64_at(entry, 0)?,
+            generation: u32_at(entry, 8)?,
+            status: mirror[20],
+            negotiated_features: u64_at(mirror, 2080)?,
+            device_type: u16_at(mirror, 2088)?,
+            uid,
+            queues,
         }));
     }
     Ok(None)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Action { None, Start, Stop }
+pub enum Action {
+    None,
+    Start,
+    Stop,
+}
 
 /// A reset produces Stop even if the same sample is already DRIVER_OK again.
 /// The caller must finish Stop, then observe a fresh sample to restart.
 #[derive(Default, Debug)]
-pub struct DeviceLifecycle { active_reset: Option<u64> }
+pub struct DeviceLifecycle {
+    active_reset: Option<u64>,
+}
 impl DeviceLifecycle {
     pub fn observe(&mut self, snapshot: &DeviceSnapshot, offered: u64) -> Result<Action, Error> {
         let ready = snapshot.status & 15 == 15 && snapshot.status & (64 | 128) == 0;
@@ -141,8 +170,12 @@ impl DeviceLifecycle {
             }
             return Ok(Action::None);
         }
-        if !ready { return Ok(Action::None); }
-        if snapshot.negotiated_features & !offered != 0 { return Err(Error::UnsupportedFeatures); }
+        if !ready {
+            return Ok(Action::None);
+        }
+        if snapshot.negotiated_features & !offered != 0 {
+            return Err(Error::UnsupportedFeatures);
+        }
         self.active_reset = Some(snapshot.reset_count);
         Ok(Action::Start)
     }
@@ -151,14 +184,24 @@ impl DeviceLifecycle {
 /// Bounds initial boot and the interval after all devices reset. Ordinary idle
 /// guests do not expire; the timeout is not a device-I/O inactivity timeout.
 #[derive(Debug)]
-pub struct Watchdog { deadline: Option<Duration>, timeout: Duration }
+pub struct Watchdog {
+    deadline: Option<Duration>,
+    timeout: Duration,
+}
 impl Watchdog {
     pub fn new(now: Duration, timeout: Duration) -> Self {
-        Self { deadline: Some(now.saturating_add(timeout)), timeout }
+        Self {
+            deadline: Some(now.saturating_add(timeout)),
+            timeout,
+        }
     }
-    pub fn devices_ready(&mut self) { self.deadline = None; }
+    pub fn devices_ready(&mut self) {
+        self.deadline = None;
+    }
     pub fn devices_reset(&mut self, now: Duration) {
-        if self.deadline.is_none() { self.deadline = Some(now.saturating_add(self.timeout)); }
+        if self.deadline.is_none() {
+            self.deadline = Some(now.saturating_add(self.timeout));
+        }
     }
     pub fn expired(&self, now: Duration) -> bool {
         self.deadline.is_some_and(|deadline| now >= deadline)
@@ -169,8 +212,15 @@ impl Watchdog {
 mod tests {
     use super::*;
     fn snapshot() -> DeviceSnapshot {
-        DeviceSnapshot { reset_count: 0, generation: 1, status: 15,
-            negotiated_features: 1 << 32, device_type: 2, uid: 7, queues: vec![] }
+        DeviceSnapshot {
+            reset_count: 0,
+            generation: 1,
+            status: 15,
+            negotiated_features: 1 << 32,
+            device_type: 2,
+            uid: 7,
+            queues: vec![],
+        }
     }
     #[test]
     fn resets_stop_before_reactivation() {
@@ -206,9 +256,16 @@ mod tests {
     }
     #[test]
     fn queue_geometry_and_overflow() {
-        let mut q = Queue { size: 256, enabled: true, descriptor: 0x40000000,
-            available: 0x40001000, used: 0x40002000 };
-        let contains = |a: u64, n: u64| a >= 0x40000000 && a.checked_add(n).is_some_and(|end| end <= 0x50000000);
+        let mut q = Queue {
+            size: 256,
+            enabled: true,
+            descriptor: 0x40000000,
+            available: 0x40001000,
+            used: 0x40002000,
+        };
+        let contains = |a: u64, n: u64| {
+            a >= 0x40000000 && a.checked_add(n).is_some_and(|end| end <= 0x50000000)
+        };
         assert_eq!(q.validate(256, contains), Ok(()));
         q.size = 257;
         assert_eq!(q.validate(512, contains), Err(Error::InvalidQueue));
@@ -241,6 +298,8 @@ mod tests {
     }
     #[test]
     fn short_pages_never_panic() {
-        for length in 0..4096 { let _ = device_snapshot(&vec![0; length], 0); }
+        for length in 0..4096 {
+            let _ = device_snapshot(&vec![0; length], 0);
+        }
     }
 }
