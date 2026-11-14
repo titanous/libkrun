@@ -31,7 +31,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
     if let Some(socket) = std::env::var_os("CLONE_ECHO_SOCKET") {
-        builder.add_vsock_port(7000, PathBuf::from(socket), false);
+        let path = PathBuf::from(socket);
+        struct EchoPolicy(PathBuf);
+        impl krun::OutboundPolicy for EchoPolicy {
+            fn allow(&self, op: krun::SocketOperation, addr: &krun::SocketAddress) -> bool {
+                addr.as_unix_addr().is_none()
+                    || (op == krun::SocketOperation::UnixConnect
+                        && addr.as_unix_addr().and_then(|address| address.path()) == Some(self.0.as_path()))
+            }
+        }
+        builder.internet_socket_forwarding(false);
+        if std::env::var_os("CLONE_DENY").is_some() {
+            builder.outbound_policy(std::sync::Arc::new(krun::AllowlistPolicy::new([])));
+        } else {
+            builder.outbound_policy(std::sync::Arc::new(EchoPolicy(path.clone())));
+        }
+        builder.add_vsock_port(7000, path, false);
     }
     builder.set_kernel_cmdline(vec![
         "console=ttyS0",

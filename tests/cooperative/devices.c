@@ -3,6 +3,7 @@
 #include <glob.h>
 #include <fcntl.h>
 #include <linux/vm_sockets.h>
+#include <netinet/in.h>
 #include <pthread.h>
 #include <poll.h>
 #include <sys/wait.h>
@@ -43,7 +44,10 @@ static int connect_host(void)
     struct timeval timeout = { .tv_sec=2 };
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
-    if (fd < 0 || connect(fd, (void *)&address, sizeof(address))) fail("vsock connect");
+    if (fd < 0 || connect(fd, (void *)&address, sizeof(address))) {
+        printf("CLONE POLICY denied\n");
+        fail("vsock connect");
+    }
     return fd;
 }
 static void echo(int fd)
@@ -162,6 +166,11 @@ int main(void)
     int old_result=recv(old,&byte,1,0);
     if(old_result>0 || (old_result<0 && errno==EAGAIN)) fail("old vsock not dead");
     close(old);
+    int tcp=socket(AF_INET,SOCK_STREAM,0);
+    struct sockaddr_in endpoint={.sin_family=AF_INET,.sin_port=htons(18080),.sin_addr.s_addr=htonl(0x7f000001)};
+    if(tcp>=0 && !connect(tcp,(void *)&endpoint,sizeof(endpoint))) fail("internet forwarding unexpectedly enabled");
+    if(tcp>=0) close(tcp);
+    printf("CLONE FORWARDING disabled\n");
     int fresh=connect_host(); echo(fresh);
     uint64_t host_time;
     if(send(fresh,"time",4,MSG_NOSIGNAL)!=4 || recv(fresh,&host_time,8,MSG_WAITALL)!=8) fail("host time");

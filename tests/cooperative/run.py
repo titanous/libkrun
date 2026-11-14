@@ -27,6 +27,10 @@ args.output.mkdir(parents=True, exist_ok=False)
 launcher = Path("target/debug/examples/cooperative-console").resolve()
 peer_path = args.output / "echo.sock"
 peer = subprocess.Popen(["python3", str(Path(__file__).with_name("echo.py")), str(peer_path)])
+tcp_probe = socket.socket()
+tcp_probe.bind(("127.0.0.1", 18080))
+tcp_probe.listen(128)
+tcp_probe.setblocking(False)
 measurements = []
 template_fds = {}
 
@@ -81,6 +85,21 @@ def run_source(cpus, cycle):
     if result or b"result=Frozen" not in log or trigger is None or frozen is None:
         raise RuntimeError(f"source failed: {prefix}")
     return disk, image, (time.monotonic_ns() - start) / 1e6, (frozen-trigger)/1e6
+
+def run_denied_child(cpus, source_disk, image, name):
+    disk = args.output / f"{name}.deny.ext4"
+    subprocess.run(["cp", "--reflink=auto", str(source_disk), str(disk)], check=True)
+    env = environment(cpus, disk)
+    env["CLONE_DENY"] = "1"
+    fd = template_fd(image) if args.passed_fd else None
+    mode, source = ("resume-fd", str(fd)) if fd is not None else ("resume", str(image))
+    result = subprocess.run([str(launcher), mode, source, args.control], env=env,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30,
+                            pass_fds=(fd,) if fd is not None else ())
+    (args.output / f"{name}.deny.log").write_bytes(result.stdout)
+    if result.returncode or b"CLONE POLICY denied" not in result.stdout or b"CLONE PASS" in result.stdout:
+        raise RuntimeError(f"default-closed clone policy failed: {name}")
+    disk.unlink()
 
 def run_child(cpus, source_disk, image, name):
     disk = args.output / f"{name}.ext4"
@@ -142,6 +161,8 @@ try:
     for cpus in (1, 4, 8):
         for cycle in range(args.cycles):
             disk, image, source_ms, freeze_ms = run_source(cpus, cycle)
+            if cycle == 0:
+                run_denied_child(cpus, disk, image, f"cpu{cpus}-{cycle}")
             record = run_child(cpus, disk, image, f"cpu{cpus}-{cycle}-child")
             record["source_boot_freeze_export_ms"] = source_ms
             record["freeze_ms"] = freeze_ms
@@ -170,8 +191,16 @@ try:
         raise RuntimeError("duplicate guest random bytes")
     if len({m["pending_random"] for m in measurements}) != len(measurements):
         raise RuntimeError("duplicate independent-reader random bytes")
+    try:
+        unexpected, _ = tcp_probe.accept()
+    except BlockingIOError:
+        pass
+    else:
+        unexpected.close()
+        raise RuntimeError("disabled forwarding reached live host TCP listener")
     print("ACCEPTANCE PASS", flush=True)
 finally:
+    tcp_probe.close()
     for fd in template_fds.values():
         os.close(fd)
     peer.terminate()

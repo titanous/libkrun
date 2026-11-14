@@ -104,7 +104,9 @@ state are serialized. Child RAM writes cannot modify the source or other clones.
 
 ## Real-KVM tests
 
-Build the maintained shared kernel series plus patches 0100/0101 in holodeck.
+Build the maintained shared kernel series plus patches 0100–0102 in holodeck.
+0100 contains the generic PM core, 0101 the x86 context/port hooks, and 0102
+protects completed getrandom results still pending in syscall-exit work.
 Build a standalone initramfs containing `tests/cooperative/devices.c` as `/init`:
 
 ```
@@ -130,7 +132,16 @@ Defaults are 20 consecutive source-freeze/new-process-start cycles at each of
 independent ext4 disk, continuous writes across freeze, record readback,
 old-vsock failure/new echo, XMM15 preservation, monotonic/realtime checks,
 11 seconds idle for private-RSS sampling, orderly unmount/poweroff and read-only
-fsck. Any failed assertion stops the matrix; no automatic retries.
+fsck. An independent ptraced process is held at a completed getrandom syscall
+exit through freeze: each child must return different bytes and observe the
+pollable resume event. Fresh getrandom output and host generation identifiers
+must also differ across all children. A non-root trigger attempt must fail and
+the VMGENID platform device must have a driver bound. Closed-policy clones must
+be refused while children configured for their own mapped echo destination must
+reach it; Internet forwarding remains disabled against a live host TCP listener.
+Cached userspace entropy/DRBG state is not rewritten by the kernel: agents must
+use the event to invalidate/restart dependent application state.
+Any failed assertion stops the matrix; no automatic retries.
 Logs and measurements.json remain in the result directory. Freeze timing is
 host receipt of the flushed guest trigger marker to the synchronous frozen exit;
 resume timing is process invocation to the userspace marker, including file import.
