@@ -1,4 +1,38 @@
 //! Kernel terminal-reason byte with allocation-free virtio notification.
+
+fn consume_notification(fd: std::os::fd::RawFd) -> std::io::Result<()> {
+    let mut value = 0u64;
+    let result = unsafe { libc::read(fd, (&mut value as *mut u64).cast(), 8) };
+    if result == 8 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if result < 0 && error.kind() == std::io::ErrorKind::WouldBlock {
+        Ok(())
+    } else if result < 0 {
+        Err(error)
+    } else {
+        Err(std::io::Error::other("short stop notification read"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn notification_without_reason_does_not_remain_readable() {
+        let event = utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap();
+        event.write(1).unwrap();
+        consume_notification(event.as_raw_fd()).unwrap();
+        let mut poll = libc::pollfd {
+            fd: event.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        assert_eq!(unsafe { libc::poll(&mut poll, 1, 0) }, 0);
+        consume_notification(event.as_raw_fd()).unwrap();
+    }
+}
 use crate::host::{DeviceEvents, Sandbox};
 use std::io;
 use std::os::fd::{AsRawFd, RawFd};
@@ -23,6 +57,9 @@ impl StopReason {
     }
     pub fn fd(&self) -> RawFd {
         self.events.kicks[0].as_raw_fd()
+    }
+    pub fn consume_notification(&self) -> io::Result<()> {
+        consume_notification(self.events.kicks[0].as_raw_fd())
     }
     pub fn observation_micros(&self) -> Option<u64> {
         let mut time = libc::timespec {

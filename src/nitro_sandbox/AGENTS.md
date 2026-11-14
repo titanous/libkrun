@@ -11,8 +11,12 @@ stop queue access before Start or VM-fd close. Never reuse ring indices after re
 Vsock and console also require their existing Polly subscribers to be dispatched;
 activation alone does not service all queues. Drive lifecycle refresh before dispatch.
 
-Sandbox owns the VM fd and closes it under `/tmp/libkrun-nitro-teardown.lock`
-before releasing mappings. Memory exposed by unsafe `guest_memory()` does not own
+Sandbox closes its VM fd under the embedder-supplied, daemon-created lifecycle
+lock before releasing mappings; there is no fixed-path fallback. The daemon keeps
+a duplicate VM descriptor after acknowledged SCM_RIGHTS handoff and closes it
+under the same lock after reaping the VMM. StartAndTeardown holds one guard from
+creation through start. A reset refusal returns an error and retains mappings
+still reachable by a worker until the one-guest process exits. Memory exposed by unsafe `guest_memory()` does not own
 the driver mapping: drop all devices and memory clones before Sandbox. The first
 GiB starts at GPA 0x40000000; backing above it starts at GPA 0x400000000, leaving
 the intervening PCI/MMIO hole unmapped.

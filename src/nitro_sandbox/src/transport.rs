@@ -146,10 +146,12 @@ impl Transport {
 }
 impl Drop for Transport {
     fn drop(&mut self) {
-        // A device that cannot stop must not continue accessing memory after its
-        // VM is destroyed. Such a failure is fatal to this one-guest process.
-        if self.stop().is_err() {
-            std::process::abort();
+        // Runtime reports stop failures and retains the backing mappings before
+        // dropping transports. Retain a refusing backend rather than aborting
+        // (which could perform an unlocked final VM-descriptor close).
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.stop()));
+        if !matches!(result, Ok(Ok(()))) {
+            std::mem::forget(self.device.clone());
         }
     }
 }

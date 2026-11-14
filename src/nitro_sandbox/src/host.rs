@@ -24,6 +24,7 @@ fn request(direction: u64, nr: u64, size: u64) -> u64 {
     direction << 30 | size << 16 | 0xae00 | nr
 }
 fn call<T>(fd: &File, direction: u64, nr: u64, arg: &mut T) -> io::Result<i32> {
+    let started = Instant::now();
     let result = unsafe {
         ioctl(
             fd.as_raw_fd(),
@@ -31,8 +32,15 @@ fn call<T>(fd: &File, direction: u64, nr: u64, arg: &mut T) -> io::Result<i32> {
             arg as *mut T,
         )
     };
-    if result < 0 {
-        Err(io::Error::last_os_error())
+    let error = (result < 0).then(io::Error::last_os_error);
+    if std::env::var_os("NITRO_PROFILE").is_some() {
+        eprintln!(
+            "NITRO_PROFILE ioctl=0x{nr:02x} micros={} result={result}",
+            started.elapsed().as_micros()
+        );
+    }
+    if let Some(error) = error {
+        Err(error)
     } else {
         Ok(result)
     }
@@ -117,9 +125,16 @@ pub struct Mapping {
 }
 impl Mapping {
     fn new(fd: &File, len: usize) -> io::Result<Self> {
+        let started = Instant::now();
         let address = unsafe { mmap(std::ptr::null_mut(), len, 3, 1, fd.as_raw_fd(), 0) };
         if address as isize == -1 {
             return Err(io::Error::last_os_error());
+        }
+        if std::env::var_os("NITRO_PROFILE").is_some() {
+            eprintln!(
+                "NITRO_PROFILE mmap_bytes={len} micros={}",
+                started.elapsed().as_micros()
+            );
         }
         Ok(Self {
             address: NonNull::new(address).ok_or_else(|| io::Error::other("null mmap"))?,
@@ -164,6 +179,7 @@ pub struct Sandbox {
     _control: File,
     _info_file: File,
     lifecycle_lock: Option<crate::lifecycle::OpenLock>,
+    start_guard: std::sync::Mutex<Option<crate::lifecycle::Guard>>,
     console_at: std::collections::HashMap<usize, u32>,
     device_regions: Vec<SharedRegion>,
 }
@@ -237,7 +253,6 @@ impl Sandbox {
         };
         let raw = call(&control, 3, 0x30, &mut c)?;
         let vm = unsafe { File::from_raw_fd(raw) };
-        drop(creation_guard);
         let sb = Self {
             vm: Some(vm),
             ram,
@@ -245,6 +260,7 @@ impl Sandbox {
             _control: control,
             _info_file: info_file,
             lifecycle_lock,
+            start_guard: std::sync::Mutex::new(creation_guard),
             console_at: Default::default(),
             device_regions: Vec::new(),
         };
@@ -289,6 +305,7 @@ impl Sandbox {
             .map_err(|e| io::Error::other(format!("RAM table: {e:?}")))
     }
     pub fn load(&mut self, path: &str) -> io::Result<()> {
+        let started = Instant::now();
         let vm = self.vm.as_ref().unwrap();
         let mut load = Pair {
             first: 1,
@@ -319,6 +336,12 @@ impl Sandbox {
                 address: self.ram.address(),
             },
         )?;
+        if std::env::var_os("NITRO_PROFILE").is_some() {
+            eprintln!(
+                "NITRO_PROFILE image_load_bytes={size} micros={}",
+                started.elapsed().as_micros()
+            );
+        }
         Ok(())
     }
     pub fn allocate_region(&self, id: u8, size: usize) -> io::Result<SharedRegion> {
@@ -517,12 +540,7 @@ impl Sandbox {
         Ok(None)
     }
     pub fn start(&self, cid: u64) -> io::Result<()> {
-        let _guard = self
-            .lifecycle_lock
-            .as_ref()
-            .filter(|lock| lock.serialization == crate::lifecycle::Serialization::StartAndTeardown)
-            .map(|lock| lock.acquire())
-            .transpose()?;
+        let mut start_guard = self.start_guard.lock().unwrap_or_else(|e| e.into_inner());
         call(
             self.vm.as_ref().unwrap(),
             3,
@@ -532,6 +550,7 @@ impl Sandbox {
                 second: cid,
             },
         )?;
+        start_guard.take();
         Ok(())
     }
     pub fn drain_console(&mut self, output: &mut impl Write) -> io::Result<()> {
@@ -575,6 +594,11 @@ impl Sandbox {
             }
         }
         output.flush()
+    }
+    /// Duplicate the VM descriptor for a supervising daemon. The VM survives
+    /// until its last duplicate is closed; the daemon must close under its lock.
+    pub fn duplicate_vm_descriptor(&self) -> io::Result<std::os::fd::OwnedFd> {
+        Ok(self.vm.as_ref().unwrap().try_clone()?.into())
     }
     pub fn vm_fd(&self) -> std::os::fd::RawFd {
         self.vm.as_ref().unwrap().as_raw_fd()
@@ -626,23 +650,54 @@ impl Sandbox {
         };
         std::mem::replace(&mut self.ram, empty)
     }
+    #[cfg(feature = "devices")]
+    pub(crate) fn close_retaining_worker_mappings(&mut self) {
+        self.close_vm();
+        // A backend that refused reset may still access queues. Keep these
+        // process mappings valid until the supervising daemon reaps the VMM.
+        let empty_ram = Mapping {
+            address: NonNull::dangling(),
+            len: 0,
+        };
+        std::mem::forget(std::mem::replace(&mut self.ram, empty_ram));
+        let empty = Mapping {
+            address: NonNull::dangling(),
+            len: 0,
+        };
+        std::mem::forget(std::mem::replace(&mut self.info, empty));
+        std::mem::forget(std::mem::take(&mut self.device_regions));
+    }
     fn close_vm(&mut self) {
         if self.vm.is_none() {
             return;
         }
-        let _guard = self.lifecycle_lock.as_ref().map(|lock| {
-            loop {
-                match lock.acquire() {
-                    Ok(guard) => break guard,
-                    Err(_) => {
-                        // Keep VM and backing memory alive. The daemon must
-                        // repair its lock path or reap us under the same lock.
-                        std::thread::park_timeout(Duration::from_secs(1));
+        let start_guard = self
+            .start_guard
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        let _guard = start_guard.or_else(|| {
+            self.lifecycle_lock.as_ref().map(|lock| {
+                loop {
+                    match lock.acquire() {
+                        Ok(guard) => break guard,
+                        Err(_) => {
+                            // Keep VM and backing memory alive. The daemon must
+                            // repair its lock path or reap us under the same lock.
+                            std::thread::park_timeout(Duration::from_secs(1));
+                        }
                     }
                 }
-            }
+            })
         });
+        let started = Instant::now();
         drop(self.vm.take());
+        if std::env::var_os("NITRO_PROFILE").is_some() {
+            eprintln!(
+                "NITRO_PROFILE vm_close_micros={}",
+                started.elapsed().as_micros()
+            );
+        }
     }
 }
 impl Drop for Sandbox {

@@ -28,8 +28,18 @@ impl ExitObservers {
         self.0.lock().unwrap().push(observer);
     }
     fn notify(&mut self) {
-        for observer in self.0.get_mut().unwrap().drain(..) {
-            observer.lock().unwrap().on_vmm_exit();
+        for observer in self
+            .0
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
+        {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                observer
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .on_vmm_exit();
+            }));
         }
     }
 }
@@ -90,15 +100,24 @@ impl Runtime {
             stop_reason: None,
         })
     }
+    pub fn duplicate_vm_descriptor(&self) -> io::Result<std::os::fd::OwnedFd> {
+        self.sandbox.duplicate_vm_descriptor()
+    }
     pub fn enable_stop_reason(&mut self) -> io::Result<()> {
         self.stop_reason = Some(crate::stop_reason::StopReason::register(&mut self.sandbox)?);
         Ok(())
+    }
+    pub fn heartbeat_control(&self) -> Option<crate::heartbeat::DeadlineControl> {
+        self.heartbeat.as_ref().map(|heartbeat| heartbeat.control())
     }
     pub fn set_heartbeat(&mut self, heartbeat: crate::heartbeat::Heartbeat) {
         self.heartbeat = Some(heartbeat);
     }
     pub fn set_console(&mut self, console: crate::console::Console) {
         self.console = console;
+    }
+    pub fn set_stop_event(&mut self, stop: Arc<utils::eventfd::EventFd>) {
+        self.stop = stop;
     }
     pub fn stop_event(&self) -> Arc<utils::eventfd::EventFd> {
         self.stop.clone()
@@ -119,29 +138,18 @@ impl Runtime {
     }
     pub fn add_filesystem(
         &mut self,
-        mut device: devices::virtio::Fs,
+        device: devices::virtio::Fs,
         dax_size: Option<usize>,
     ) -> io::Result<()> {
-        let mut regions = Vec::new();
-        if let Some(size) = dax_size {
-            let region = self.sandbox.allocate_region(0, size)?;
-            let address = region.mapping.address();
-            device.set_shm_region(devices::virtio::VirtioShmRegion {
-                host_addr: address,
-                guest_addr: 0,
-                size,
-            });
-            // Sandbox retains the mapping until VM close; transports/workers
-            // stop before Sandbox is dropped.
-            device.set_dax_mapper(Arc::new(unsafe {
-                devices::virtio::fs::dax_mapper::CopyDaxMapper::new(address, size as u64)
-            }));
-            regions.push(region);
+        if dax_size.is_some_and(|size| size != 0) {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "virtio-fs DAX windows are not supported on Nitro",
+            ));
         }
-        self.transports.push(Transport::register_regions(
-            &mut self.sandbox,
+        self.transports.push(Transport::register(
+            &self.sandbox,
             Arc::new(Mutex::new(device)),
-            regions,
         )?);
         Ok(())
     }
@@ -185,10 +193,28 @@ impl Runtime {
                 transport.consume_info_event()?;
             }
         }
+        if let Some(reason) = &self.stop_reason {
+            if descriptors[3 + self.transports.len()].revents & libc::POLLIN != 0 {
+                reason.consume_notification()?;
+            }
+        }
         Ok(())
     }
 
     pub fn run(mut self) -> io::Result<Exit> {
+        let result = self.run_inner();
+        let cleanup = self.shutdown();
+        match (result, cleanup) {
+            (Err(error), _) | (_, Err(error)) => Err(error),
+            (Ok(exit), Ok(())) => Ok(exit),
+        }
+    }
+    fn run_inner(&mut self) -> io::Result<Exit> {
+        match self.stop.read() {
+            Ok(_) => return Ok(Exit::Stopped),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(error) => return Err(error),
+        }
         self.sandbox.start(self.cid)?;
         let start = Instant::now();
         if let Some(heartbeat) = &mut self.heartbeat {
@@ -196,16 +222,29 @@ impl Runtime {
         }
         let mut watchdog = Watchdog::new(Duration::ZERO, self.timeout);
         let mut active = 0usize;
+        let mut stated = None;
         loop {
-            if let Some(reason) = self.stop_reason.as_ref().and_then(|device| device.reason()) {
-                let observed_micros = self
-                    .stop_reason
-                    .as_ref()
-                    .and_then(|device| device.observation_micros());
-                return Ok(Exit::StatedReason {
-                    code: reason,
-                    observed_micros,
-                });
+            if stated.is_none() {
+                if let Some(device) = &self.stop_reason {
+                    if let Some(code) = device.reason() {
+                        stated = Some((
+                            Instant::now(),
+                            Exit::StatedReason {
+                                code,
+                                observed_micros: device.observation_micros(),
+                            },
+                        ));
+                    }
+                }
+            }
+            // Intent is reported before the kernel flushes panic/shutdown output.
+            // Continue servicing devices and draining until poweroff or a bounded
+            // grace period; preserve the timestamp of the first observation.
+            if let Some((observed, exit)) = stated {
+                if self.sandbox.powered_off(0)? || observed.elapsed() >= Duration::from_secs(1) {
+                    self.sandbox.drain_console(&mut self.console)?;
+                    return Ok(exit);
+                }
             }
             match self.stop.read() {
                 Ok(_) => return Ok(Exit::Stopped),
@@ -214,6 +253,9 @@ impl Runtime {
             }
             if self.sandbox.powered_off(0)? {
                 self.sandbox.drain_console(&mut self.console)?;
+                if let Some((_, exit)) = stated {
+                    return Ok(exit);
+                }
                 if let Some(device) = &self.stop_reason {
                     if let Some(code) = device.reason() {
                         let observed_micros = device.observation_micros();
@@ -251,16 +293,17 @@ impl Runtime {
             if self.stop_reason.is_none() && self.console.panic_seen() {
                 return Ok(Exit::Panic);
             }
-            if self
-                .heartbeat
-                .as_mut()
-                .map(|heartbeat| heartbeat.refresh(Instant::now()))
-                .transpose()?
-                .unwrap_or(false)
+            if stated.is_none()
+                && self
+                    .heartbeat
+                    .as_mut()
+                    .map(|heartbeat| heartbeat.refresh(Instant::now()))
+                    .transpose()?
+                    .unwrap_or(false)
             {
                 return Ok(Exit::LivenessExpired);
             }
-            if watchdog.expired(start.elapsed()) {
+            if stated.is_none() && watchdog.expired(start.elapsed()) {
                 return Ok(Exit::Watchdog);
             }
             self.wait_events()?;
@@ -269,20 +312,34 @@ impl Runtime {
                 .map_err(|e| io::Error::other(format!("dispatch: {e:?}")))?;
         }
     }
+    fn shutdown(&mut self) -> io::Result<()> {
+        let mut failure = None;
+        for transport in &mut self.transports {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                transport.prepare_exit();
+                transport.stop()
+            }));
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => failure = Some(error),
+                Err(_) => failure = Some(io::Error::other("device panicked during teardown")),
+            }
+        }
+        if let Some(error) = failure {
+            self.sandbox.close_retaining_worker_mappings();
+            std::mem::forget(std::mem::take(&mut self.transports));
+            std::mem::forget(self.memory.take());
+            return Err(error);
+        }
+        self.transports.clear();
+        self.observers.notify();
+        self.memory.take();
+        Ok(())
+    }
 }
 impl Drop for Runtime {
     fn drop(&mut self) {
-        for t in &mut self.transports {
-            t.prepare_exit();
-            if t.stop().is_err() {
-                std::process::abort();
-            }
-        }
-        self.transports.clear();
-        // Workers no longer touch guest queues or backend state. Notify on every
-        // exit path, including failed start and device-dispatch errors.
-        self.observers.notify();
-        self.memory.take();
+        let _ = self.shutdown();
     }
 }
 
@@ -291,6 +348,18 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    #[test]
+    fn panicking_observer_does_not_skip_later_observers_or_double_panic() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        let mut observers = ExitObservers::default();
+        observers.register(Arc::new(Mutex::new(|| panic!("observer failure"))));
+        observers.register(Arc::new(Mutex::new(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+        })));
+        observers.notify();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
     #[test]
     fn observers_notify_exactly_once_for_all_exit_results() {
         let outcomes = [

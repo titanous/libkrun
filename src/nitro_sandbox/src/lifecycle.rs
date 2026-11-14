@@ -16,10 +16,10 @@ pub struct LifecycleLock {
     pub serialization: Serialization,
 }
 pub struct OpenLock {
-    file: File,
+    file: std::sync::Arc<File>,
     pub serialization: Serialization,
 }
-pub struct Guard<'a>(&'a File);
+pub struct Guard(std::sync::Arc<File>);
 impl LifecycleLock {
     /// The daemon creates this file and must not replace its inode while VMMs
     /// exist. Retain the opened inode even if the pathname is later removed.
@@ -36,16 +36,26 @@ impl LifecycleLock {
             ));
         }
         Ok(OpenLock {
-            file,
+            file: std::sync::Arc::new(file),
             serialization: self.serialization,
         })
     }
 }
 impl OpenLock {
-    pub fn acquire(&self) -> io::Result<Guard<'_>> {
+    /// Close the daemon's retained VM descriptor under the lifecycle lock.
+    /// On lock failure the caller retains the descriptor and must retry.
+    pub fn close_vm_descriptor(
+        &self,
+        descriptor: &mut Option<std::os::fd::OwnedFd>,
+    ) -> io::Result<()> {
+        let _guard = self.acquire()?;
+        drop(descriptor.take());
+        Ok(())
+    }
+    pub fn acquire(&self) -> io::Result<Guard> {
         loop {
             if unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_EX) } == 0 {
-                return Ok(Guard(&self.file));
+                return Ok(Guard(self.file.clone()));
             }
             let error = io::Error::last_os_error();
             if error.kind() != io::ErrorKind::Interrupted {
@@ -81,6 +91,22 @@ mod tests {
         std::fs::remove_file(path).unwrap();
     }
     #[test]
+    fn daemon_close_consumes_descriptor_under_lock() {
+        let path =
+            std::env::temp_dir().join(format!("nitro-daemon-close-{}.lock", std::process::id()));
+        File::create(&path).unwrap();
+        let lock = LifecycleLock {
+            path: path.clone(),
+            serialization: Serialization::Teardown,
+        }
+        .open()
+        .unwrap();
+        let mut descriptor = Some(File::open("/dev/null").unwrap().into());
+        lock.close_vm_descriptor(&mut descriptor).unwrap();
+        assert!(descriptor.is_none());
+        std::fs::remove_file(path).unwrap();
+    }
+    #[test]
     fn missing_daemon_lock_is_not_created() {
         let path = std::env::temp_dir().join(format!("nitro-missing-{}.lock", std::process::id()));
         let config = LifecycleLock {
@@ -92,7 +118,7 @@ mod tests {
     }
 }
 
-impl Drop for Guard<'_> {
+impl Drop for Guard {
     fn drop(&mut self) {
         unsafe {
             libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);

@@ -19,7 +19,8 @@ impl Default for Console {
 }
 impl Console {
     /// Sink writes must be nonblocking. Budgets bound accepted bytes, not the
-    /// runtime of an arbitrary embedder callback.
+    /// runtime of an arbitrary embedder callback. Bytes are raw guest output:
+    /// the embedder must escape terminal controls and encode invalid UTF-8.
     pub fn new(sink: Option<Box<dyn Write + Send>>, total_limit: usize, rate_limit: usize) -> Self {
         Self {
             sink,
@@ -103,6 +104,18 @@ mod tests {
         }
     }
 
+    #[test]
+    fn sink_receives_raw_bytes_and_default_discards() {
+        let bytes = b"\x1b[2J\xffforged\n";
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let mut console = Console::new(Some(Box::new(Sink(captured.clone()))), 1024, 1024);
+        console.write_all(bytes).unwrap();
+        assert_eq!(&*captured.lock().unwrap(), bytes);
+        let mut discard = Console::default();
+        discard.write_all(bytes).unwrap();
+        assert!(discard.sink.is_none());
+        assert_eq!(discard.total, 0);
+    }
     #[test]
     fn flood_is_bounded_in_rate_and_total_without_buffering() {
         let captured = Arc::new(Mutex::new(Vec::new()));

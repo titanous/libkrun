@@ -492,7 +492,10 @@ pub struct ConsoleDeviceInfo {
 }
 
 #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
-pub use nitro_sandbox::lifecycle::Serialization as NitroSerialization;
+pub use nitro_sandbox::lifecycle::{
+    LifecycleLock as NitroLifecycleLock, OpenLock as NitroOpenLifecycleLock,
+    Serialization as NitroSerialization,
+};
 
 #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
 pub struct NitroBackendConfig {
@@ -515,6 +518,8 @@ pub struct Builder {
     nitro_image_cache: Option<PathBuf>,
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     nitro_stop_reason: bool,
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    nitro_precreated_stop: Option<Arc<EventFd>>,
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     nitro_console_base: Option<u32>,
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
@@ -1243,14 +1248,17 @@ impl Builder {
         }
         #[cfg(not(feature = "tee"))]
         for mount in &self.config.vmr.fs {
-            if mount.tag.len() > 36
-                || mount.tag.is_empty()
-                || mount.shm_size.is_some_and(|size| {
-                    size == 0 || size > 256 * 1024 * 1024 || !size.is_multiple_of(2 * 1024 * 1024)
-                })
-            {
-                return Err(StartError::Nitro(std::io::Error::new(std::io::ErrorKind::Unsupported,
-                    "unsupported on this backend: virtio-fs requires a 1..36 byte tag and an optional 2 MiB-aligned DAX window up to 256 MiB")));
+            if mount.shm_size.is_some_and(|size| size != 0) {
+                return Err(StartError::Nitro(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "unsupported on this backend: virtio-fs DAX windows are not supported; use no window",
+                )));
+            }
+            if mount.tag.len() > 36 || mount.tag.is_empty() {
+                return Err(StartError::Nitro(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "unsupported on this backend: virtio-fs requires a 1..36 byte tag",
+                )));
             }
         }
         #[cfg(feature = "net")]
@@ -1315,19 +1323,12 @@ impl Builder {
                     "unsupported on this backend: external_kernel requires an arm64 Raw Image",
                 )));
             }
-            let kernel_bytes = std::fs::read(&kernel.path).map_err(StartError::Nitro)?;
-            let initrd = kernel
-                .initramfs_path
-                .as_ref()
-                .map(std::fs::read)
-                .transpose()
-                .map_err(StartError::Nitro)?;
             let mut args = self.kernel_cmdline.clone();
             args.extend(self.extra_kernel_args.iter().cloned());
             let cmdline = args.join(" ");
-            let (file, _) = nitro_sandbox::image::cached_in(
-                &kernel_bytes,
-                initrd.as_deref(),
+            let (file, _) = nitro_sandbox::image::cached_files(
+                &kernel.path,
+                kernel.initramfs_path.as_deref(),
                 cmdline.as_bytes(),
                 memory_mib as u64 * 1024 * 1024,
                 u64::from(config.vcpu_count.unwrap_or(1)),
@@ -1361,6 +1362,10 @@ impl Builder {
             self.nitro_lifecycle_lock.take(),
         )
         .map_err(StartError::Nitro)?;
+        drop(packaged);
+        if let Some(stop) = self.nitro_precreated_stop.take() {
+            runtime.set_stop_event(stop);
+        }
         if let Some(heartbeat) = heartbeat {
             runtime.set_heartbeat(heartbeat);
         }
@@ -1454,6 +1459,17 @@ impl Builder {
         self.nitro_selected_after_consoles |= self.console_count != 0 && self.nitro.is_none();
         self.nitro = Some(config);
         self
+    }
+
+    /// Install SIGTERM handling before `build` creates a Nitro guest. Keep the
+    /// returned guard alive through build and run. A signal during build is
+    /// retained as a stop request. This explicitly changes process signal policy.
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    pub fn install_nitro_sigterm_handler(&mut self) -> Result<NitroSigtermGuard, StartError> {
+        let stop = Arc::new(EventFd::new(utils::eventfd::EFD_NONBLOCK).map_err(StartError::Nitro)?);
+        let guard = NitroSigtermGuard::for_stop_event(stop.clone())?;
+        self.nitro_precreated_stop = Some(stop);
+        Ok(guard)
     }
 
     /// Add the maintained guest kernel's privileged terminal-reason device.
@@ -1884,7 +1900,49 @@ pub enum StartError {
     EventManagerRun(polly::event_manager::Error),
 }
 
+#[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+fn nitro_stated_exit(code: u8, observed_micros: Option<u64>) -> VmExit {
+    // Keep raw-byte translation here until the shared exit contract is merged.
+    VmExit::Error {
+        message: format!("Nitro stated terminal reason {code} observed_micros={observed_micros:?}"),
+    }
+}
+
+#[cfg(all(test, target_os = "linux", feature = "nitro-sandbox"))]
+#[test]
+fn nitro_stated_exit_table() {
+    for (code, name) in [
+        (1, "power-off"),
+        (2, "reboot"),
+        (3, "halt"),
+        (4, "panic"),
+        (0, "unknown"),
+        (255, "unknown"),
+    ] {
+        let VmExit::Error { message } = nitro_stated_exit(code, Some(42)) else {
+            panic!("unexpected public value for {name}");
+        };
+        assert_eq!(
+            message,
+            format!("Nitro stated terminal reason {code} observed_micros=Some(42)"),
+            "{name}"
+        );
+    }
+}
+
 impl Context {
+    /// Duplicate a created Nitro VM descriptor before running it. Pass it to the
+    /// host daemon with SCM_RIGHTS before permitting this process to start.
+    /// The VM remains alive until the last duplicate is closed; after reaping the
+    /// VMM the daemon closes its duplicate under the same lifecycle lock.
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    pub fn duplicate_nitro_vm_descriptor(&self) -> std::io::Result<std::os::fd::OwnedFd> {
+        self.built_vm
+            .nitro
+            .as_ref()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Unsupported, "not a Nitro VM"))?
+            .duplicate_vm_descriptor()
+    }
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     fn from_nitro(
         runtime: nitro_sandbox::runtime::Runtime,
@@ -1920,6 +1978,11 @@ impl Context {
         if self.built_vm.nitro.is_some() {
             return VmHandle {
                 vmm: None,
+                heartbeat_control: self
+                    .built_vm
+                    .nitro
+                    .as_ref()
+                    .and_then(|runtime| runtime.heartbeat_control()),
                 shutdown_efd: self.shutdown_efd.clone(),
                 #[cfg(not(feature = "tee"))]
                 balloon: None,
@@ -1938,6 +2001,8 @@ impl Context {
 
         VmHandle {
             vmm: Some(self.built_vm.vmm().clone()),
+            #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+            heartbeat_control: None,
             shutdown_efd: self.shutdown_efd.clone(),
             #[cfg(not(feature = "tee"))]
             balloon: balloon_handle,
@@ -1976,11 +2041,7 @@ impl Context {
                     nitro_sandbox::runtime::Exit::StatedReason {
                         code,
                         observed_micros,
-                    } => vmm::vm_exit::VmExit::Error {
-                        message: format!(
-                            "Nitro stated terminal reason {code} observed_micros={observed_micros:?}"
-                        ),
-                    },
+                    } => nitro_stated_exit(code, observed_micros),
                     nitro_sandbox::runtime::Exit::Watchdog => vmm::vm_exit::VmExit::DeviceWatchdog,
                     nitro_sandbox::runtime::Exit::Panic => vmm::vm_exit::VmExit::GuestPanic,
                     nitro_sandbox::runtime::Exit::LivenessExpired => {
@@ -2059,6 +2120,8 @@ pub enum BalloonError {
 #[derive(Clone)]
 pub struct VmHandle {
     vmm: Option<Arc<Mutex<vmm::Vmm>>>,
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    heartbeat_control: Option<nitro_sandbox::heartbeat::DeadlineControl>,
     shutdown_efd: Option<Arc<EventFd>>,
     #[cfg(not(feature = "tee"))]
     balloon: Option<BalloonHandle>,
@@ -2193,6 +2256,20 @@ impl BalloonHandle {
 #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
 pub struct NitroSigtermGuard(signal_hook::SigId);
 #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+impl NitroSigtermGuard {
+    fn for_stop_event(stop: Arc<EventFd>) -> Result<Self, StartError> {
+        use std::os::fd::AsRawFd;
+        let id = unsafe {
+            signal_hook::low_level::register(libc::SIGTERM, move || {
+                let value = 1u64;
+                libc::write(stop.as_raw_fd(), (&value as *const u64).cast(), 8);
+            })
+        }
+        .map_err(StartError::Nitro)?;
+        Ok(Self(id))
+    }
+}
+#[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
 impl Drop for NitroSigtermGuard {
     fn drop(&mut self) {
         signal_hook::low_level::unregister(self.0);
@@ -2200,6 +2277,34 @@ impl Drop for NitroSigtermGuard {
 }
 
 impl VmHandle {
+    /// Suspend Nitro guest heartbeat expiry while the embedder freezes a guest.
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    pub fn suspend_liveness_deadline(&self) -> std::io::Result<()> {
+        self.heartbeat_control
+            .as_ref()
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "no Nitro liveness deadline",
+                )
+            })?
+            .suspend();
+        Ok(())
+    }
+    /// Resume with a fresh full deadline, excluding time spent suspended.
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    pub fn resume_liveness_deadline(&self) -> std::io::Result<()> {
+        self.heartbeat_control
+            .as_ref()
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "no Nitro liveness deadline",
+                )
+            })?
+            .resume();
+        Ok(())
+    }
     /// Route SIGTERM through the same orderly stop event as a handle request.
     /// Keep the returned guard alive while running the guest.
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
@@ -2382,6 +2487,7 @@ mod tests {
         let stop = Arc::new(EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap());
         let handle = VmHandle {
             vmm: None,
+            heartbeat_control: None,
             shutdown_efd: Some(stop.clone()),
             #[cfg(not(feature = "tee"))]
             balloon: None,
