@@ -2,14 +2,24 @@
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
+/// Sees every console byte the guest wrote, before the byte budgets (see `Console::observe`).
+pub type Observer = Box<dyn FnMut(&[u8]) + Send>;
+
+/// The longest console line the panic matcher keeps (a stop line is about 60 bytes; the
+/// matcher keeps the END of a longer line, where the marker must be).
+const LINE_KEEP: usize = 512;
+const MARKER: &[u8] = b"HOLODECK GUEST STOP ";
+
 pub struct Console {
     sink: Option<Box<dyn Write + Send>>,
+    observer: Option<Observer>,
     total_limit: usize,
     rate_limit: usize,
     total: usize,
     interval_bytes: usize,
     interval: Instant,
-    panic_match: usize,
+    /// The current console line (its last `LINE_KEEP` bytes).
+    line: Vec<u8>,
     panic_seen: bool,
 }
 impl Default for Console {
@@ -24,33 +34,84 @@ impl Console {
     pub fn new(sink: Option<Box<dyn Write + Send>>, total_limit: usize, rate_limit: usize) -> Self {
         Self {
             sink,
+            observer: None,
             total_limit,
             rate_limit,
             total: 0,
             interval_bytes: 0,
             interval: Instant::now(),
-            panic_match: 0,
+            line: Vec::new(),
             panic_seen: false,
         }
     }
-}
-impl Console {
+    /// Give every byte the guest writes to `observer` as well, BEFORE the byte budgets: a
+    /// stop marker printed after the guest flooded its console still reaches it. It runs on the
+    /// console thread and must not block.
+    pub fn observe(&mut self, observer: Observer) {
+        self.observer = Some(observer);
+    }
+    /// Whether the kernel printed its panic stop line. Only the kernel's line shape counts:
+    /// a printk timestamp `[ secs.micros] `, optionally `reboot: `, then
+    /// `HOLODECK GUEST STOP panic` and the end of the line (the same rule as the holodeck
+    /// VMM's other stop reasons). The match sees every byte, including bytes over the budgets.
     pub fn panic_seen(&self) -> bool {
         self.panic_seen
     }
 }
+
+/// Whether `before` ends with a printk timestamp `[ secs.micros] `, optionally followed by
+/// `reboot: `.
+fn kernel_prefix(before: &[u8]) -> bool {
+    let before = before.strip_suffix(b"reboot: ").unwrap_or(before);
+    let Some(before) = before.strip_suffix(b"] ") else {
+        return false;
+    };
+    let Some(dot) = before.iter().rposition(|&b| b == b'.') else {
+        return false;
+    };
+    let micros = &before[dot + 1..];
+    if micros.len() != 6 || !micros.iter().all(u8::is_ascii_digit) {
+        return false;
+    }
+    let head = &before[..dot];
+    let digits = head.iter().rev().take_while(|b| b.is_ascii_digit()).count();
+    if digits == 0 {
+        return false;
+    }
+    let head = &head[..head.len() - digits];
+    let spaces = head.iter().rev().take_while(|&&b| b == b' ').count();
+    head[..head.len() - spaces].ends_with(b"[")
+}
+
+/// Whether a complete console line (without its newline) is the kernel's stop line for
+/// `reason`. The marker may follow unterminated output of another console writer.
+fn stop_line(line: &[u8], reason: &[u8]) -> bool {
+    let line = line.strip_suffix(b"\r").unwrap_or(line);
+    let Some(before) = line.strip_suffix(reason) else {
+        return false;
+    };
+    let Some(before) = before.strip_suffix(MARKER) else {
+        return false;
+    };
+    kernel_prefix(before)
+}
+
 impl Write for Console {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        const MARKER: &[u8] = b"HOLODECK GUEST STOP panic";
+        if let Some(observer) = &mut self.observer {
+            observer(bytes);
+        }
         for &byte in bytes {
-            if byte == MARKER[self.panic_match] {
-                self.panic_match += 1;
-                if self.panic_match == MARKER.len() {
+            if byte == b'\n' {
+                if stop_line(&self.line, b"panic") {
                     self.panic_seen = true;
-                    self.panic_match = 0;
                 }
+                self.line.clear();
             } else {
-                self.panic_match = usize::from(byte == MARKER[0]);
+                if self.line.len() == LINE_KEEP {
+                    self.line.drain(..LINE_KEEP / 2);
+                }
+                self.line.push(byte);
             }
         }
         if self.interval.elapsed() >= Duration::from_secs(1) {
@@ -92,16 +153,69 @@ mod tests {
             Ok(())
         }
     }
+    const PANIC_LINE: &[u8] = b"[   12.345678] HOLODECK GUEST STOP panic\n";
     #[test]
     fn panic_marker_survives_every_split_and_discarded_output() {
-        let marker = b"HOLODECK GUEST STOP panic";
-        for split in 0..=marker.len() {
+        for split in 0..=PANIC_LINE.len() {
+            // Budgets of zero: everything is discarded, the match still sees it.
             let mut console = Console::default();
-            console.write_all(b"[timestamp] reboot: ").unwrap();
-            console.write_all(&marker[..split]).unwrap();
-            console.write_all(&marker[split..]).unwrap();
-            assert!(console.panic_seen());
+            console.write_all(b"boot noise\n").unwrap();
+            console.write_all(&PANIC_LINE[..split]).unwrap();
+            console.write_all(&PANIC_LINE[split..]).unwrap();
+            assert!(console.panic_seen(), "split {split}");
         }
+        for shaped in [
+            &b"[    0.000001] reboot: HOLODECK GUEST STOP panic\r\n"[..],
+            b"unterminated other writer[ 3.000000] HOLODECK GUEST STOP panic\n",
+        ] {
+            let mut console = Console::default();
+            console.write_all(shaped).unwrap();
+            assert!(console.panic_seen(), "{}", String::from_utf8_lossy(shaped));
+        }
+    }
+    #[test]
+    fn only_the_kernel_line_shape_counts_as_a_panic() {
+        // Review daemon2-opus S1: the marker anywhere in the stream used to count.
+        for unshaped in [
+            &b"HOLODECK GUEST STOP panic\n"[..],
+            b"echo HOLODECK GUEST STOP panic\n",
+            b"[timestamp] reboot: HOLODECK GUEST STOP panic\n",
+            b"[   12.345678] HOLODECK GUEST STOP panic and more\n",
+            b"[   12.345678] HOLODECK GUEST STOP panicked\n",
+            // No end of line yet: not a line.
+            b"[   12.345678] HOLODECK GUEST STOP panic",
+        ] {
+            let mut console = Console::default();
+            console.write_all(unshaped).unwrap();
+            assert!(!console.panic_seen(), "{}", String::from_utf8_lossy(unshaped));
+        }
+    }
+    #[test]
+    fn a_marker_after_a_flood_beyond_the_budget_is_still_seen() {
+        // Review daemon2-opus S2: bytes over the budget were dropped before any scan.
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let mut console = Console::new(Some(Box::new(Sink(captured.clone()))), 64, 64);
+        let seen = observed.clone();
+        console.observe(Box::new(move |bytes| seen.lock().unwrap().extend_from_slice(bytes)));
+        console.write_all(&[b'x'; 10000]).unwrap();
+        console.write_all(b"\n").unwrap();
+        console.write_all(PANIC_LINE).unwrap();
+        assert_eq!(captured.lock().unwrap().len(), 64, "the sink is bounded");
+        assert!(console.panic_seen(), "the match saw bytes over the budget");
+        assert_eq!(
+            observed.lock().unwrap().len(),
+            10000 + 1 + PANIC_LINE.len(),
+            "the observer sees every byte"
+        );
+        assert!(observed.lock().unwrap().ends_with(PANIC_LINE));
+    }
+    #[test]
+    fn a_very_long_line_keeps_its_end() {
+        let mut console = Console::default();
+        console.write_all(&[b'y'; 5000]).unwrap();
+        console.write_all(PANIC_LINE).unwrap();
+        assert!(console.panic_seen());
     }
 
     #[test]
