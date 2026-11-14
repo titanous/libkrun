@@ -10,6 +10,9 @@ pub enum VmExit {
     /// Contains the exit code set by the guest (0 = success).
     Shutdown { exit_code: i32 },
 
+    /// Guest cooperatively froze; its immutable template was written to this path.
+    Frozen { template_path: std::path::PathBuf },
+
     /// Guest requested a reboot (KVM_SYSTEM_EVENT_RESET).
     RebootRequested,
 

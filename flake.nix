@@ -269,6 +269,10 @@ KCONFIG_EOF
             # stress testing for flakiness investigation
             stress-ng
 
+            # Cooperative clone workload orchestration and ext4 verification.
+            python3
+            e2fsprogs
+
             # Task runner (replaces Makefile)
             just
 

@@ -3,7 +3,7 @@ From: libkrun <libkrun@libkrun.org>
 Date: Mon, 3 Mar 2026 00:00:00 +0000
 Subject: [PATCH] x86/vmgenid: add SETUP_VMGENID boot protocol support
 
-Add a new SETUP_VMGENID (type 10) setup_data entry that lets a
+Add a new SETUP_VMGENID (private type 0x10001) setup_data entry that lets a
 hypervisor communicate the vmgenid GUID page address and notification
 IRQ without requiring ACPI. The kernel registers a platform device from
 the setup_data node; the vmgenid driver probes it via its existing
@@ -29,7 +29,7 @@ index 50c45ead4..6e4132c3d 100644
  #define SETUP_IMA			8
  #define SETUP_RNG_SEED			9
 -#define SETUP_ENUM_MAX			SETUP_RNG_SEED
-+#define SETUP_VMGENID			10
++#define SETUP_VMGENID			0x10001
 +#define SETUP_ENUM_MAX			SETUP_VMGENID
 
  #define SETUP_INDIRECT			(1<<31)
