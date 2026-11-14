@@ -1804,6 +1804,14 @@ impl Builder {
         if self.nitro_stop_reason {
             runtime.enable_stop_reason().map_err(StartError::Nitro)?;
         }
+        // A copy has exactly its template's stop-reason setting: the setting is part of the
+        // compared device topology, so a receiver whose setting differs is refused (typed
+        // mismatch) before anything is written into it. The copy's reason byte starts at 0.
+        #[cfg(target_arch = "aarch64")]
+        if template_enabled {
+            template_topology.extend_from_slice(b"stop-reason");
+            template_topology.push(u8::from(self.nitro_stop_reason));
+        }
         #[cfg(target_arch = "aarch64")]
         let restored_copy =
             self.config.vmr.cooperative_template.is_some() || self.nitro_park.is_some();
