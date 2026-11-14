@@ -243,10 +243,10 @@ pub enum StartMicrovmError {
     #[cfg(feature = "vhost-user")]
     RegisterVhostUserVsockDevice(device_manager::mmio::Error),
     /// Cannot create the VMGENID device.
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     VmgenidCreation(vm_memory::GuestMemoryError),
     /// Cannot register the vmgenid IRQ with KVM.
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     RegisterIrqFd(kvm_ioctls::Error),
 }
 
@@ -564,11 +564,11 @@ impl Display for StartMicrovmError {
             RegisterVhostUserVsockDevice(ref err) => {
                 write!(f, "Failed to initialize vhost-user vsock device: {err}")
             }
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             VmgenidCreation(ref err) => {
                 write!(f, "Cannot create the VMGENID device: {err}")
             }
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             RegisterIrqFd(ref err) => {
                 write!(f, "Cannot register the vmgenid IRQ with KVM: {err}")
             }
@@ -1133,6 +1133,7 @@ pub fn build_microvm(
     #[cfg(target_arch = "aarch64")]
     {
         use arch::aarch64::layout::{VMGENID_GUID_OFFSET, VMGENID_GUID_PAGE, VMGENID_SPI};
+        use devices::DeviceType;
 
         let vmgenid = devices::vmgenid::Vmgenid::new(
             VMGENID_GUID_PAGE,

@@ -145,17 +145,50 @@ Every backend must honour each configured method, or fail build with a clear
   switch: preserve guest-local sockets and mapped ports while disabling host
   internet forwarding, or reject build.
 
-The separate Nitro branch currently needs integration work for external images,
-command line and socket controls. This lane does not modify that branch.
+The Nitro backend (`nitro-sandbox` feature) applies the same socket rule and
+forwarding switch to its shared userspace vsock device. It boots an EIF v4 image
+through `nitro_backend`: the image contains the arm64 Linux Image, initramfs and
+command line, with flags matching PCI virtio and CPU-overcommit mode. Separate
+`external_kernel` inputs, command-line replacement/append (including an empty
+replacement), virtio-fs and unsupported device/configuration methods fail build
+with `unsupported on this backend`; they are never silently discarded. Use the
+EIF builder to package the platform kernel/initramfs and exact command line before
+calling the Nitro builder. Caller-supplied block storage and its read-only setting
+are shared with KVM unchanged. Select Nitro and configure block/vsock devices
+before adding custom consoles, and call `disable_implicit_console()`. Returned
+console paths follow Nitro's actual block/vsock/console registration order; build
+rejects selecting the backend after console paths were returned or changing that
+layout afterward. An implicit console is rejected rather than silently omitted.
+When new `add_block_cfg` entries and legacy root/data setters are mixed, the new
+entries take precedence, matching KVM; console indices count only selected disks.
+
+`Context::device_info()` returns configured CPUs, RAM and actual console paths.
+`Context::vm_handle()` works without KVM state: `pause`, `resume` and
+`notify_vm_generation_change` return an Unsupported error, and `balloon` returns
+None. `trigger_shutdown_event` requests runtime teardown and `run` returns
+`VmExit::Stopped`; it is not a guest workload success report. Exit observers and
+caller-supplied block `on_exit` callbacks run once after workers stop, including
+runtime errors and watchdog exits. Queued custom-console output is drained before
+final shutdown, bounded to one queue of descriptors; guest-controlled device reset
+does not read invalidated rings. Callers must provide nonblocking output callbacks;
+a callback that itself blocks can prevent teardown.
+
+The connection rule and forwarding switch survive guest driver unbind/rebind and
+transport reset. The repeatable real-host regression is
+`python3 src/nitro_sandbox/examples/reset-policy.py IMAGE` (CID 210), after building
+the `nitro_reset` example and packaging `guest-reset.c` as `/init`.
+`port_map` requires `internet_socket_forwarding(true)` on both backends. The
+`nitro-sandbox` feature cannot be combined with `tee` or legacy `aws-nitro`.
+The current watchdog bounds device readiness/reset recovery, not a hung workload
+whose devices remain ready. General liveness and panic detection are not yet
+provided.
 `backend_must_enforce_configured_rule` is a public-API KVM conformance test using
 a live denied host listener; it fails if the configured rule is ignored. Backend
 integration must run that same semantic test or assert explicit unsupported
 build failure; merely retaining a setter field is not compliance.
 
-Recommend internet forwarding **off by default on both backends**, enabled only
-explicitly by the embedder. This branch retains KVM's existing on default for
-compatibility; changing the shared default belongs to backend integration.
-Current-default dependencies include `tsi-tcp-guest-connect`,
-`tsi-tcp-guest-listen`, the forwarding portions of `src/libkrun/tests/embed.rs`
-(TCP/UDP/IPv6 and deny-rule conformance), and host-daemon tests using implicit
-TSI networking. Mapped `vsock-guest-connect` does not require internet forwarding.
+Internet forwarding is **off by default on both backends**, enabled only by
+`internet_socket_forwarding(true)`. This switch is enforced for explicit proxy
+requests too, not only guest hijack flags. Forwarding tests and embedders requiring
+TSI TCP/UDP/IPv6 must opt in; mapped `vsock-guest-connect` does not require internet
+forwarding and remains subject to its Unix connection rule.

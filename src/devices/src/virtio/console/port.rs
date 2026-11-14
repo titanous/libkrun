@@ -64,6 +64,7 @@ enum PortState {
     Active {
         stopfd: utils::eventfd::EventFd,
         stop: Arc<AtomicBool>,
+        drain: Arc<AtomicBool>,
         rx_thread: Option<JoinHandle<()>>,
         tx_thread: Option<JoinHandle<()>>,
     },
@@ -139,6 +140,7 @@ impl Port {
         let stopfd = utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK)
             .expect("Failed to create EventFd for interrupt_evt");
         let stop = Arc::new(AtomicBool::new(false));
+        let drain = Arc::new(AtomicBool::new(false));
 
         let rx_thread = input.map(|input| {
             let mem = mem.clone();
@@ -158,16 +160,27 @@ impl Port {
 
         let tx_thread = output.map(|output| {
             let stop = stop.clone();
+            let drain = drain.clone();
             let port_id = self.port_id;
-            thread::spawn(move || process_tx(port_id, mem, tx_queue, interrupt, output, stop))
+            thread::spawn(move || {
+                process_tx(port_id, mem, tx_queue, interrupt, output, stop, drain)
+            })
         });
 
         self.state = PortState::Active {
             stopfd,
             stop,
+            drain,
             rx_thread,
             tx_thread,
         }
+    }
+
+    pub fn finish(&mut self) {
+        if let PortState::Active { drain, .. } = &self.state {
+            drain.store(true, Ordering::Release);
+        }
+        self.shutdown();
     }
 
     pub fn shutdown(&mut self) {
@@ -176,6 +189,7 @@ impl Port {
             stop,
             tx_thread,
             rx_thread,
+            ..
         } = &mut self.state
         {
             stop.store(true, Ordering::Release);

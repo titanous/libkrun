@@ -84,7 +84,8 @@ struct InterruptTransportInner {
     log_target: String,
     status: Arc<AtomicUsize>,
     event: EventFd,
-    intc: IrqChip,
+    intc: Option<IrqChip>,
+    direct_calls: Vec<EventFd>,
     irq_line: Option<u32>,
 }
 
@@ -97,7 +98,28 @@ impl InterruptTransport {
             log_target,
             status: Arc::new(AtomicUsize::new(0)),
             event: EventFd::new(0).map_err(CreateMmioTransportError::CreateInterruptEventFd)?,
-            intc,
+            intc: Some(intc),
+            direct_calls: Vec::new(),
+            irq_line: None,
+        })))
+    }
+
+    /// Nitro owns the guest-facing PCI transport. Signal its per-queue CALL
+    /// eventfds rather than a KVM interrupt controller. The device interface is
+    /// queue-agnostic, so notify every queue; unused notifications are harmless.
+    pub fn new_nitro(calls: Vec<EventFd>, log_target: String) -> std::io::Result<Self> {
+        if calls.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "no Nitro call fds",
+            ));
+        }
+        Ok(Self(Arc::new(InterruptTransportInner {
+            log_target,
+            status: Arc::new(AtomicUsize::new(0)),
+            event: EventFd::new(0)?,
+            intc: None,
+            direct_calls: calls,
             irq_line: None,
         })))
     }
@@ -115,7 +137,7 @@ impl InterruptTransport {
     }
 
     pub fn intc(&self) -> &IrqChip {
-        &self.0.intc
+        self.0.intc.as_ref().expect("MMIO interrupt controller")
     }
 
     pub fn irq_line(&self) -> Option<u32> {
@@ -135,6 +157,13 @@ impl InterruptTransport {
     }
 
     fn try_signal(&self, status: u32) -> Result<(), crate::Error> {
+        if self.0.intc.is_none() {
+            for call in &self.0.direct_calls {
+                call.write(1)
+                    .map_err(crate::Error::FailedSignalingUsedQueue)?;
+            }
+            return Ok(());
+        }
         self.status().fetch_or(status as usize, Ordering::SeqCst);
         // Always fire the GIC interrupt. Skipping when the ISR bit is
         // already set causes a race: if Thread A sets the bit and fires,

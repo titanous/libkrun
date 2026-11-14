@@ -185,6 +185,10 @@ pub trait VirtioDevice: AsAny + Send {
         false
     }
 
+    /// Finish queued output while guest memory is still mapped, before final reset.
+    /// Unlike reset, this is called only when the runtime is exiting.
+    fn prepare_exit(&mut self) {}
+
     /// Get base and size of the SHM region
     fn shm_region(&self) -> Option<&VirtioShmRegion> {
         None

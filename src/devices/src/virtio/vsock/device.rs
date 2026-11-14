@@ -100,6 +100,11 @@ impl Vsock {
         self.muxer.socket_policy = policy;
     }
 
+    /// Connection rule retained across guest-controlled transport resets.
+    pub fn socket_policy(&self) -> &super::policy::SocketPolicy {
+        &self.socket_policy
+    }
+
     pub fn id(&self) -> &str {
         defs::VSOCK_DEV_ID
     }

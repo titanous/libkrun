@@ -27,7 +27,9 @@ fn outbound_policy_and_disabled_forwarding() {
     denied.set_nonblocking(true).unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
     let mut builder = krun::Builder::new();
-    builder.outbound_policy(Arc::new(Policy(calls.clone())));
+    builder
+        .internet_socket_forwarding(true)
+        .outbound_policy(Arc::new(Policy(calls.clone())));
     let denied_path =
         std::env::temp_dir().join(format!("embed-denied-{}.sock", std::process::id()));
     let denied_unix = UnixListener::bind(&denied_path).unwrap();
@@ -156,7 +158,9 @@ fn backend_must_enforce_configured_rule() {
     let listener = std::net::TcpListener::bind("127.0.0.1:18080").unwrap();
     listener.set_nonblocking(true).unwrap();
     let mut builder = krun::Builder::new();
-    builder.outbound_policy(std::sync::Arc::new(krun::AllowlistPolicy::new([])));
+    builder
+        .internet_socket_forwarding(true)
+        .outbound_policy(std::sync::Arc::new(krun::AllowlistPolicy::new([])));
     assert!(run(builder, "embed_deny_all").contains("EMBED_DENY_ALL_OK"));
     assert!(matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
 }
@@ -185,7 +189,9 @@ fn udp_policy_delivery_and_refusal() {
     denied.set_nonblocking(true).unwrap();
     let calls = Arc::new(Mutex::new(Vec::new()));
     let mut builder = krun::Builder::new();
-    builder.outbound_policy(Arc::new(Policy(calls.clone())));
+    builder
+        .internet_socket_forwarding(true)
+        .outbound_policy(Arc::new(Policy(calls.clone())));
     let refused_source = denied.try_clone().unwrap();
     let peer = std::thread::spawn(move || {
         let mut data = [0; 32];
@@ -198,19 +204,21 @@ fn udp_policy_delivery_and_refusal() {
     peer.join().unwrap();
     let mut data = [0; 32];
     let mut ipv6_builder = krun::Builder::new();
-    ipv6_builder.outbound_policy(std::sync::Arc::new(krun::AllowlistPolicy::new([
-        (
-            krun::SocketOperation::Bind,
-            "[::]:0".parse::<std::net::SocketAddr>().unwrap().into(),
-        ),
-        (
-            krun::SocketOperation::UdpSend,
-            "[::1]:18083"
-                .parse::<std::net::SocketAddr>()
-                .unwrap()
-                .into(),
-        ),
-    ])));
+    ipv6_builder
+        .internet_socket_forwarding(true)
+        .outbound_policy(std::sync::Arc::new(krun::AllowlistPolicy::new([
+            (
+                krun::SocketOperation::Bind,
+                "[::]:0".parse::<std::net::SocketAddr>().unwrap().into(),
+            ),
+            (
+                krun::SocketOperation::UdpSend,
+                "[::1]:18083"
+                    .parse::<std::net::SocketAddr>()
+                    .unwrap()
+                    .into(),
+            ),
+        ])));
     assert!(run(ipv6_builder, "embed_dgram_families").contains("EMBED_DGRAM_FAMILIES_OK"));
     let (len, _) = ipv6.recv_from(&mut data).unwrap();
     assert_eq!(&data[..len], b"ipv6");

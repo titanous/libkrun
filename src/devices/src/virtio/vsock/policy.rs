@@ -67,19 +67,10 @@ fn normalize(destination: &SocketAddress) -> SocketAddress {
         .unwrap_or(*destination)
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct SocketPolicy {
     pub policy: Option<Arc<dyn OutboundPolicy>>,
     pub internet_enabled: bool,
-}
-
-impl Default for SocketPolicy {
-    fn default() -> Self {
-        Self {
-            policy: None,
-            internet_enabled: true,
-        }
-    }
 }
 
 impl SocketPolicy {
@@ -117,7 +108,7 @@ mod tests {
             std::net::SocketAddrV6::new(Ipv4Addr::LOCALHOST.to_ipv6_mapped(), 443, 0, 9).into();
         let policy = SocketPolicy {
             policy: Some(Arc::new(DenyPort)),
-            ..Default::default()
+            internet_enabled: true,
         };
         assert_eq!(
             policy.check(SocketOperation::TcpConnect, &mapped),
@@ -152,7 +143,7 @@ mod tests {
         let (entered, waiting) = std::sync::mpsc::channel();
         let policy = SocketPolicy {
             policy: Some(Arc::new(Slow(gate.clone(), entered))),
-            ..Default::default()
+            internet_enabled: true,
         };
         let other = policy.clone();
         let addr: SocketAddress = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 80).into();
@@ -180,7 +171,7 @@ mod tests {
     }
 
     #[test]
-    fn default_allows_and_policy_checks_destination() {
+    fn default_denies_internet_and_enabled_policy_checks_destination() {
         let denied: SockaddrStorage = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 443).into();
         let allowed: SockaddrStorage = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 80).into();
         let operations = [
@@ -192,10 +183,13 @@ mod tests {
         ];
         let policy = SocketPolicy {
             policy: Some(Arc::new(DenyPort)),
-            ..Default::default()
+            internet_enabled: true,
         };
         for op in operations {
-            assert!(SocketPolicy::default().check(op, &denied).is_ok());
+            assert_eq!(
+                SocketPolicy::default().check(op, &denied),
+                Err(Errno::EACCES)
+            );
             assert_eq!(policy.check(op, &denied), Err(Errno::EACCES));
             assert!(policy.check(op, &allowed).is_ok());
         }

@@ -919,6 +919,7 @@ dependencies = [
  "log",
  "mutants",
  "nitro-enclaves 0.5.0",
+ "nitro_sandbox",
  "polly",
  "proptest",
  "thiserror 1.0.69",
@@ -980,7 +981,6 @@ dependencies = [
 [[package]]
 name = "linux-loader"
 version = "0.13.2"
-source = "git+https://github.com/theoparis/linux-loader?rev=af90928dcfa1666d47a5269061ef77857eff46d3#af90928dcfa1666d47a5269061ef77857eff46d3"
 dependencies = [
  "vm-memory",
 ]
@@ -1101,6 +1101,16 @@ dependencies = [
  "libc",
  "nix 0.26.4",
  "vsock",
+]
+
+[[package]]
+name = "nitro_sandbox"
+version = "0.1.0"
+dependencies = [
+ "devices",
+ "polly",
+ "utils",
+ "vm-memory",
 ]
 
 [[package]]
