@@ -172,7 +172,7 @@ impl Sandbox {
         Self::with_mapping(memory, vcpus, None)
     }
     pub fn with_mapping(memory: usize, vcpus: u32, reused: Option<Mapping>) -> io::Result<Self> {
-        if memory < 64 * 1024 * 1024 || memory % INFO_PAGE_SIZE != 0 || vcpus == 0 {
+        if memory < 64 * 1024 * 1024 || !memory.is_multiple_of(INFO_PAGE_SIZE) || vcpus == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "memory/vCPU geometry",
@@ -304,7 +304,7 @@ impl Sandbox {
         Ok(())
     }
     pub fn allocate_region(&self, id: u8, size: usize) -> io::Result<SharedRegion> {
-        if size == 0 || size > 256 * 1024 * 1024 || size % INFO_PAGE_SIZE != 0 {
+        if size == 0 || size > 256 * 1024 * 1024 || !size.is_multiple_of(INFO_PAGE_SIZE) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "shared region geometry",

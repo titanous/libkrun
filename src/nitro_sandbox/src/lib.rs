@@ -56,9 +56,9 @@ impl Queue {
             || self.size == 0
             || !self.size.is_power_of_two()
             || self.size > maximum
-            || self.descriptor % 16 != 0
-            || self.available % 2 != 0
-            || self.used % 4 != 0
+            || !self.descriptor.is_multiple_of(16)
+            || !self.available.is_multiple_of(2)
+            || !self.used.is_multiple_of(4)
         {
             return Err(Error::InvalidQueue);
         }

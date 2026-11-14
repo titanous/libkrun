@@ -67,19 +67,10 @@ fn normalize(destination: &SocketAddress) -> SocketAddress {
         .unwrap_or(*destination)
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct SocketPolicy {
     pub policy: Option<Arc<dyn OutboundPolicy>>,
     pub internet_enabled: bool,
-}
-
-impl Default for SocketPolicy {
-    fn default() -> Self {
-        Self {
-            policy: None,
-            internet_enabled: false,
-        }
-    }
 }
 
 impl SocketPolicy {
