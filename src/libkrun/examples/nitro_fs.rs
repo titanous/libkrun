@@ -20,7 +20,10 @@ impl Write for Sink {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().collect();
     assert_eq!(args.len(), 4, "usage: nitro_fs Image INITRAMFS none|dax");
-    for trial in 0..2 {
+    let trials: usize = std::env::var("NITRO_FS_TRIALS")
+        .unwrap_or_else(|_| "2".into())
+        .parse()?;
+    for trial in 0..trials {
         let mut builder = Builder::new();
         builder.nitro_backend(NitroBackendConfig {
             image: "unused.eif".into(),
