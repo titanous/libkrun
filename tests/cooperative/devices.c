@@ -3,6 +3,7 @@
 #include <glob.h>
 #include <fcntl.h>
 #include <linux/vm_sockets.h>
+#include <linux/capability.h>
 #include <netinet/in.h>
 #include <pthread.h>
 #include <poll.h>
@@ -86,6 +87,19 @@ int main(void)
     }
     int denied_status;
     if(waitpid(denied,&denied_status,0)!=denied || !WIFEXITED(denied_status) || WEXITSTATUS(denied_status)) fail("non-root trigger accepted");
+    pid_t nocap=fork();
+    if(nocap<0) fail("capability fork");
+    if(!nocap) {
+        struct __user_cap_header_struct header={.version=_LINUX_CAPABILITY_VERSION_3,.pid=0};
+        struct __user_cap_data_struct caps[2]={{0},{0}};
+        if(syscall(SYS_capset,&header,caps)) _exit(23);
+        int trigger=open("/sys/power/nitro_freeze",O_WRONLY);
+        if(trigger<0) _exit(24);
+        ssize_t result=write(trigger,"1",1);
+        _exit(result==-1 && errno==EPERM ? 0 : 25);
+    }
+    if(waitpid(nocap,&denied_status,0)!=nocap || !WIFEXITED(denied_status) || WEXITSTATUS(denied_status)) fail("root without CAP_SYS_ADMIN");
+    puts("CLONE CAPABILITY root-without-admin refused");
     glob_t bindings;
     if(glob("/sys/bus/platform/devices/vmgenid*/driver",0,NULL,&bindings) || !bindings.gl_pathc) fail("vmgenid driver binding");
     globfree(&bindings);
