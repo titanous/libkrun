@@ -4,6 +4,9 @@ A template is a guest that froze itself, not a VMM snapshot. The source never
 runs again. New VMM processes construct fresh device backends in the same order
 and enter the kernel's saved continuation over private file-backed RAM.
 
+For AWS Nitro Sandboxes on arm64 (copied memory, parked receivers, the arm64
+kernel marker) see `cooperative-clone-nitro.md`.
+
 ## API and ordering
 
 1. Boot the maintained guest kernel with hibernation and CPU hotplug enabled;
