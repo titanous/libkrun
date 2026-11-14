@@ -37,11 +37,12 @@ and enter the kernel's saved continuation over private file-backed RAM.
 5. Configure the same vCPUs, RAM size and devices, using independent writable
    disk children and fresh vsock/console backends. Call
    `start_from_template_fd(sealed_file)` or `start_from_template_path(path)`.
-   Path import retains a read-only descriptor and maps the original file
-   privately without copying RAM. It refuses symlinks, foreign owners and
-   group/other permissions. The caller must prevent writes and truncation for
-   the lifetime of every template and child mapping; unlink is safe. Passed
-   descriptors must already have write/grow/shrink seals.
+   Path import copies once into independent sealed memory before parsing or
+   mapping. It refuses symlinks, foreign owners and group/other permissions.
+   Later writes or truncation of the path cannot affect a copy. Prefer importing
+   once and passing that descriptor to every child; passed descriptors must
+   already have write/grow/shrink seals. RAM extents must exactly match the
+   configured architecture memory layout.
 6. Build maps every RAM extent `MAP_PRIVATE`, registers KVM slots and creates
    fresh in-kernel irqchip/PIT and vCPUs. It does not load a payload or rewrite
    boot page tables, command line or boot parameters. It restores KVM clock,

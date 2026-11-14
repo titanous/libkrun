@@ -50,10 +50,11 @@ mod tests {
         let imported_inode = imported.file.metadata().unwrap().ino();
         let original_inode = std::fs::metadata(&path).unwrap().ino();
         std::fs::remove_file(&path).unwrap();
-        assert_eq!(
+        assert_ne!(
             imported_inode, original_inode,
-            "path import must retain the original file rather than copy RAM"
+            "path import must use independent sealed backing"
         );
+        Template::open(imported.file.try_clone().unwrap()).unwrap();
         let a = reopened.map_private().unwrap();
         let b = reopened.map_private().unwrap();
         a.write_slice(&[42], GuestAddress(0)).unwrap();
@@ -255,8 +256,7 @@ impl Template {
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(path)?;
         let metadata = source.metadata()?;
-        // Regular files cannot carry memfd seals. Their immutable lifetime is
-        // the trusted owner's responsibility; reject shared or foreign input.
+        // Validate ownership before importing into independent sealed backing.
         // SAFETY: geteuid has no preconditions.
         if !metadata.is_file()
             || metadata.mode() & 0o077 != 0
@@ -267,7 +267,23 @@ impl Template {
                 "template path must be an owner-only regular file owned by this user",
             ));
         }
-        Self::parse_file(source)
+        let backing = crate::template_memory::create(
+            usize::try_from(metadata.len()).map_err(|_| invalid())?,
+        )?;
+        let mut offset = 0;
+        let mut buffer = vec![0; 1024 * 1024];
+        while offset < metadata.len() {
+            let count = (metadata.len() - offset).min(buffer.len() as u64) as usize;
+            source.read_exact_at(&mut buffer[..count], offset)?;
+            for (index, page) in buffer[..count].chunks(4096).enumerate() {
+                if page.iter().any(|byte| *byte != 0) {
+                    backing.write_all_at(page, offset + (index * 4096) as u64)?;
+                }
+            }
+            offset += count as u64;
+        }
+        crate::template_memory::seal(&backing)?;
+        Self::open(backing)
     }
 
     pub fn open(file: File) -> io::Result<Self> {

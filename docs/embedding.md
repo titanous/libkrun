@@ -172,8 +172,10 @@ state has been resolved.
 For a new guest use its own builder: configure matching CPU/RAM and devices,
 independent disk copies, its CID, identifiers and connection policy, then call
 `start_from_template_fd(file)` or `start_from_template_path(path)` before build.
-Path input stays mapped read-only with private copy-on-write child mappings;
-the caller must prevent file mutation/truncation until all users release it.
+Path input is copied into sealed memory before use, so later path mutation or
+truncation cannot affect copies. For many copies, import once and pass the sealed
+descriptor to avoid repeating the scan/copy. RAM regions are checked against the
+configured architecture layout before mapping.
 Network devices are refused because guest MAC state is retained. Keep templates
 within one trust domain: kernel secrets and address layouts remain shared.
 The daemon must impose a separate start-to-valid-agent-Hello deadline and

@@ -2011,7 +2011,17 @@ pub fn create_guest_memory(
                 "incompatible template topology".into(),
             ));
         }
-        let (info, _) = arch::arch_memory_regions(mem_size << 20, None, 0, 0, None);
+        let (info, expected) = arch::arch_memory_regions(mem_size << 20, None, 0, 0, None);
+        if !template
+            .regions
+            .iter()
+            .map(|(gpa, size, _)| (GuestAddress(*gpa), *size))
+            .eq(expected.iter().copied())
+        {
+            return Err(StartMicrovmError::GuestMemoryMmap(
+                "template RAM regions do not match configured memory layout".into(),
+            ));
+        }
         let mut memory = template
             .map_private()
             .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
