@@ -896,11 +896,14 @@ impl Proxy for TsiStreamProxy {
                     Ok(accept_fd) => {
                         // Safe because we've just obtained the FD from the `accept` call above.
                         let new_fd = unsafe { OwnedFd::from_raw_fd(accept_fd) };
-                        if nix::sys::socket::getsockname::<SockaddrStorage>(accept_fd).map_or(true, |addr| {
-                            self.socket_policy
-                                .check(super::policy::SocketOperation::Accept, &addr)
-                                .is_err()
-                        }) {
+                        if nix::sys::socket::getsockname::<SockaddrStorage>(accept_fd).map_or(
+                            true,
+                            |addr| {
+                                self.socket_policy
+                                    .check(super::policy::SocketOperation::Accept, &addr)
+                                    .is_err()
+                            },
+                        ) {
                             return update;
                         }
                         update.new_proxy =
@@ -947,10 +950,17 @@ mod tests {
     fn refused_listen_returns_eperm_and_never_opens_host_socket() {
         let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
         let mut proxy = TsiStreamProxy::new(
-            1, 42, defs::LINUX_AF_INET, 1234, 5678, 9012, mem,
+            1,
+            42,
+            defs::LINUX_AF_INET,
+            1234,
+            5678,
+            9012,
+            mem,
             Arc::new(Mutex::new(VirtQueue::new(256))),
             Arc::new(Mutex::new(MuxerRxQ::new())),
-        ).unwrap();
+        )
+        .unwrap();
         let req = TsiListenReq {
             peer_port: 5678,
             vm_port: 1234,
