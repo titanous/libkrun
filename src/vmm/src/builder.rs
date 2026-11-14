@@ -1078,6 +1078,13 @@ pub fn build_microvm(
         arch_memory_info,
         kernel_cmdline,
         vcpus_handles: Vec::new(),
+        vcpus_running: false,
+        #[cfg(target_arch = "x86_64")]
+        cpu_states: Vec::new(),
+        #[cfg(target_arch = "x86_64")]
+        halt_timer: crate::stop_reason::halt_timer()
+            .map_err(Error::TimerFd)
+            .map_err(StartMicrovmError::Internal)?,
         exit_evt,
         exit_observers: Vec::new(),
         exit_code: exit_code.clone(),

@@ -72,7 +72,7 @@ mod tests {
     }
 
     /// A VM built via Builder::build() and run via Context::run() must return
-    /// VmExit::Shutdown when the guest workload exits.
+    /// VmExit::Fault for the bundled kernel's undeclared terminal fault.
     ///
     /// This kills mutants in Builder::build(), build_microvm(), and Context::run()
     /// that prevent the VM from starting or returning a result.
@@ -90,8 +90,8 @@ mod tests {
             builder.build().expect("build_vm failed").run()
         });
         assert!(
-            matches!(result, Ok(VmExit::Shutdown { .. })),
-            "expected Ok(VmExit::Shutdown), got: {result:?}"
+            matches!(result, Ok(VmExit::Fault)),
+            "expected Ok(VmExit::Fault) from undeclared bundled-kernel stop, got: {result:?}"
         );
     }
 
@@ -139,8 +139,8 @@ mod tests {
             builder.build().expect("build failed").run()
         });
         assert!(
-            matches!(result, Ok(VmExit::Shutdown { .. })),
-            "expected Ok(VmExit::Shutdown), got: {result:?}"
+            matches!(result, Ok(VmExit::Fault)),
+            "expected Ok(VmExit::Fault) from undeclared bundled-kernel stop, got: {result:?}"
         );
     }
 
@@ -269,8 +269,8 @@ mod tests {
             builder.build().expect("build_vm failed").run()
         });
         assert!(
-            matches!(result, Ok(VmExit::Shutdown { .. })),
-            "expected Ok(VmExit::Shutdown), got: {result:?}"
+            matches!(result, Ok(VmExit::Fault)),
+            "expected Ok(VmExit::Fault) from undeclared bundled-kernel stop, got: {result:?}"
         );
     }
 }

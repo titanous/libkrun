@@ -21,6 +21,8 @@ pub mod resources;
 /// Signal handling utilities.
 #[cfg(target_os = "linux")]
 pub mod signal_handler;
+#[cfg(target_arch = "x86_64")]
+mod stop_reason;
 /// VM exit reasons and shared exit state.
 pub mod vm_exit;
 /// Wrappers over structures used to configure the VMM.
@@ -66,6 +68,8 @@ pub const FC_EXIT_CODE_GENERIC_ERROR: u8 = 1;
 pub const FC_EXIT_CODE_UNEXPECTED_ERROR: u8 = 2;
 /// Guest requested a reboot (KVM_SYSTEM_EVENT_RESET).
 pub const FC_EXIT_CODE_REBOOT: u8 = 3;
+pub const FC_EXIT_CODE_FAULT: u8 = 4;
+pub const FC_EXIT_CODE_POWEROFF: u8 = 5;
 /// Firecracker was shut down after intercepting a restricted system call.
 pub const FC_EXIT_CODE_BAD_SYSCALL: u8 = 148;
 /// Firecracker was shut down after intercepting `SIGBUS`.
@@ -202,6 +206,11 @@ pub struct Vmm {
     kernel_cmdline: KernelCmdline,
 
     vcpus_handles: Vec<VcpuHandle>,
+    vcpus_running: bool,
+    #[cfg(target_arch = "x86_64")]
+    cpu_states: Vec<crate::stop_reason::CpuState>,
+    #[cfg(target_arch = "x86_64")]
+    halt_timer: std::os::fd::OwnedFd,
     exit_evt: EventFd,
     vm: Vm,
     exit_observers: Vec<Arc<Mutex<dyn VmmExitObserver>>>,
@@ -276,6 +285,9 @@ impl Vmm {
 
         for vcpu in vcpus.drain(..) {
             let mut vcpu = vcpu;
+            #[cfg(target_arch = "x86_64")]
+            self.cpu_states
+                .push(vcpu.state_descriptor().map_err(Error::EventFd)?);
             vcpu.set_mmio_bus(self.mmio_device_manager.bus.clone());
 
             self.vcpus_handles
@@ -301,6 +313,7 @@ impl Vmm {
                 _ => return Err(Error::VcpuPause),
             }
         }
+        self.vcpus_running = false;
         Ok(())
     }
 
@@ -320,6 +333,7 @@ impl Vmm {
                 _ => return Err(Error::VcpuResume),
             }
         }
+        self.vcpus_running = true;
         Ok(())
     }
 
@@ -452,6 +466,59 @@ impl Subscriber for Vmm {
         let source = event.fd();
         let event_set = event.event_set();
 
+        #[cfg(target_arch = "x86_64")]
+        if source == self.halt_timer.as_raw_fd() && event_set == EventSet::IN {
+            let mut expirations = 0u64;
+            // SAFETY: the buffer has exactly the eight bytes required by timerfd.
+            unsafe {
+                libc::read(source, (&mut expirations as *mut u64).cast(), 8);
+            }
+            if !self.vcpus_running || self.vcpus_handles.is_empty() {
+                return;
+            }
+            for handle in &self.vcpus_handles {
+                if let Err(error) = handle.send_event(VcpuEvent::Pause) {
+                    self.stop(crate::vm_exit::VmExit::Error {
+                        message: error.to_string(),
+                    });
+                    return;
+                }
+            }
+            for handle in &self.vcpus_handles {
+                match handle
+                    .response_receiver()
+                    .recv_timeout(Duration::from_secs(1))
+                {
+                    Ok(VcpuResponse::Paused) => (),
+                    Ok(VcpuResponse::Exited(code)) => {
+                        let exit = resolve_vm_exit(code, self.exit_code.load(Ordering::SeqCst));
+                        self.stop(self.pio_device_manager.stop_reason.classify(exit));
+                        return;
+                    }
+                    _ => {
+                        self.stop(crate::vm_exit::VmExit::Error {
+                            message: "vCPU did not acknowledge halt sample".into(),
+                        });
+                        return;
+                    }
+                }
+            }
+            let halted = !self.cpu_states.is_empty()
+                && self.cpu_states.iter().all(|cpu| cpu.terminally_halted());
+            if halted {
+                let reason = self
+                    .pio_device_manager
+                    .stop_reason
+                    .classify(crate::vm_exit::VmExit::Fault);
+                self.stop(reason);
+            } else if let Err(error) = self.resume_vcpus() {
+                self.stop(crate::vm_exit::VmExit::Error {
+                    message: error.to_string(),
+                });
+            }
+            return;
+        }
+
         if source == self.exit_evt.as_raw_fd() && event_set == EventSet::IN {
             debug!("Vmm: exit_evt fired, shutting down");
             let _ = self.exit_evt.read();
@@ -475,6 +542,8 @@ impl Subscriber for Vmm {
             }
 
             let vm_exit = resolve_vm_exit(vcpu_exit_code, vmm_exit_code);
+            #[cfg(target_arch = "x86_64")]
+            let vm_exit = self.pio_device_manager.stop_reason.classify(vm_exit);
             self.stop(vm_exit);
         } else {
             error!("Spurious EventManager event for handler: Vmm");
@@ -482,10 +551,20 @@ impl Subscriber for Vmm {
     }
 
     fn interest_list(&self) -> Vec<EpollEvent> {
-        vec![EpollEvent::new(
+        let events = vec![EpollEvent::new(
             EventSet::IN,
             self.exit_evt.as_raw_fd() as u64,
-        )]
+        )];
+        #[cfg(target_arch = "x86_64")]
+        let events = {
+            let mut events = events;
+            events.push(EpollEvent::new(
+                EventSet::IN,
+                self.halt_timer.as_raw_fd() as u64,
+            ));
+            events
+        };
+        events
     }
 }
 
@@ -494,7 +573,11 @@ impl Subscriber for Vmm {
 /// the correct VmExit variant based on vCPU exit code and VMM exit code.
 /// Tests call this same function to verify the dispatch logic.
 pub(crate) fn resolve_vm_exit(vcpu_exit_code: u8, vmm_exit_code: i32) -> crate::vm_exit::VmExit {
-    if vcpu_exit_code == FC_EXIT_CODE_REBOOT {
+    if vcpu_exit_code == FC_EXIT_CODE_FAULT {
+        crate::vm_exit::VmExit::Fault
+    } else if vcpu_exit_code == FC_EXIT_CODE_POWEROFF {
+        crate::vm_exit::VmExit::PowerOffRequested
+    } else if vcpu_exit_code == FC_EXIT_CODE_REBOOT {
         crate::vm_exit::VmExit::RebootRequested
     } else if vcpu_exit_code == FC_EXIT_CODE_GENERIC_ERROR {
         crate::vm_exit::VmExit::Error {

@@ -1218,6 +1218,16 @@ impl Vcpu {
 
     /// Moves the vcpu to its own thread and constructs a VcpuHandle.
     /// The handle can be used to control the remote vcpu.
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) fn state_descriptor(&self) -> io::Result<crate::stop_reason::CpuState> {
+        use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
+        // SAFETY: self owns the vCPU descriptor throughout duplication.
+        let fd = unsafe { BorrowedFd::borrow_raw(self.fd.as_raw_fd()) };
+        Ok(crate::stop_reason::CpuState(
+            fd.as_fd().try_clone_to_owned()?,
+        ))
+    }
+
     pub fn start_threaded(mut self) -> Result<VcpuHandle> {
         let event_sender = self.event_sender.take().unwrap();
         let response_receiver = self.response_receiver.take().unwrap();
@@ -1338,11 +1348,11 @@ impl Vcpu {
                 }
                 VcpuExit::Hlt => {
                     info!("Received KVM_EXIT_HLT signal");
-                    Ok(VcpuEmulation::Stopped)
+                    Ok(VcpuEmulation::Faulted)
                 }
                 VcpuExit::Shutdown => {
                     info!("Received KVM_EXIT_SHUTDOWN signal");
-                    Ok(VcpuEmulation::Stopped)
+                    Ok(VcpuEmulation::Faulted)
                 }
                 // Documentation specifies that below kvm exits are considered
                 // errors.
@@ -1357,7 +1367,7 @@ impl Vcpu {
                 VcpuExit::SystemEvent(event, _reason) => match event {
                     KVM_SYSTEM_EVENT_SHUTDOWN => {
                         info!("Received KVM_SYSTEM_EVENT_SHUTDOWN");
-                        Ok(VcpuEmulation::Stopped)
+                        Ok(VcpuEmulation::PoweredOff)
                     }
                     KVM_SYSTEM_EVENT_RESET => {
                         info!("Received KVM_SYSTEM_EVENT_RESET");
@@ -1365,7 +1375,7 @@ impl Vcpu {
                     }
                     _ => {
                         error!("Received an unexpected System Event: {event}");
-                        Ok(VcpuEmulation::Stopped)
+                        Ok(VcpuEmulation::Faulted)
                     }
                 },
                 r => {
@@ -1421,8 +1431,9 @@ impl Vcpu {
                 // Moreover if we allow the vCPU0 thread to finish execution, this might generate a
                 // seccomp failure because musl calls `sigprocmask` as part of `pthread_exit`.
                 // So we pause vCPU0 and send a signal to the emulation thread to stop the VMM.
-                Ok(VcpuEmulation::Stopped) => return self.exit(FC_EXIT_CODE_OK),
                 Ok(VcpuEmulation::Rebooted) => return self.exit(FC_EXIT_CODE_REBOOT),
+                Ok(VcpuEmulation::Faulted) => return self.exit(crate::FC_EXIT_CODE_FAULT),
+                Ok(VcpuEmulation::PoweredOff) => return self.exit(crate::FC_EXIT_CODE_POWEROFF),
                 // Emulation errors lead to vCPU exit.
                 Err(_) => return self.exit(FC_EXIT_CODE_GENERIC_ERROR),
             }
@@ -1634,7 +1645,8 @@ impl Drop for VcpuHandle {
 enum VcpuEmulation {
     Handled,
     Interrupted,
-    Stopped,
+    Faulted,
+    PoweredOff,
     Rebooted,
 }
 

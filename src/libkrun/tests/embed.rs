@@ -274,10 +274,12 @@ fn run(mut builder: krun::Builder, mode: &str) -> String {
         mode,
     ]);
     let result = builder.build().expect("build external guest").run();
-    assert!(
-        matches!(result, Ok(krun::VmExit::Shutdown { .. })),
-        "{result:?}"
-    );
+    let expected = if std::env::var_os("EMBED_STOP_PROTOCOL").is_some() {
+        krun::VmExit::RebootRequested
+    } else {
+        krun::VmExit::Shutdown { exit_code: 0 }
+    };
+    assert_eq!(result.unwrap(), expected);
     let log = std::fs::read_to_string(&console).unwrap();
     std::fs::remove_file(console).unwrap();
     assert!(

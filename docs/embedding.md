@@ -36,6 +36,51 @@ Named-console `KRUN_STDIN_DEV`, `KRUN_STDOUT_DEV`, and `KRUN_STDERR_DEV` additio
 are only used with bundled-init defaults, never explicit overrides. Without an
 override, bundled-kernel callers retain bundled-init defaults and arguments.
 
+## Guest stop reasons
+
+`Context::run()` returns `VmExit`. Handle `PowerOffRequested` as declared guest
+power-off, `RebootRequested` as requested replacement/reboot, `Halted` as a
+terminal halt, `Panic` as a kernel panic, and `Fault` as an undeclared terminal
+fault. Preserve `Shutdown { exit_code }` for legacy device/guest exit-code paths
+and `Error { message }` for VMM/KVM failures. Existing exhaustive matches must
+add the four new variants; do not treat every `Ok` result as clean power-off.
+Keep console collection for diagnostics, not classification.
+
+On x86 KVM, reserved I/O port **0xe8** accepts exactly one byte: 0 none,
+1 power-off, 2 reboot, 3 halt, 4 panic. Invalid values or non-byte writes are
+ignored. Reads return zero. This does not overlap emulated CMOS, serial or
+i8042 ports, or cooperative-copy ports 0xe6/0xe7. Only privileged guest code
+can issue the transaction. The last valid byte is retained until stop; writing
+it does not itself terminate execution. It takes precedence over the later
+terminal mechanism, but does not hide a host/VMM error. Guest kernels must write
+panic intent before console operations and preserve it through panic restart.
+No pvpanic device is required.
+
+Raw KVM shutdown/triple fault without a reason is `Fault`. A 10 ms event-loop
+timer pauses CPUs, samples KVM MP state and RFLAGS, then resumes them; only when
+all created CPUs are HALTED with IF clear does it stop the VM. Interruptible
+idle does not count. This bounded sampling also detects a no-reason halt as
+`Fault`; it adds periodic host sampling even for legacy guests. The maintained
+kernel halts rather than resetting after reporting reason 3. Older kernels
+still boot: their power-off terminal fault now returns `Fault`; i8042 reset
+without a reason retains legacy `Shutdown`. Never infer declared intent from
+a legacy result or console marker.
+
+arm64 KVM PSCI SYSTEM_OFF maps to `PowerOffRequested`, SYSTEM_RESET to
+`RebootRequested`. No arm64 panic/halt reason register is implemented: those
+remain fault/unknown-class, not declared power-off. ARM is compile-checked only;
+known baseline dependency/VMGENID errors may prevent a complete compile.
+The AWS backend must transport these same codes over its own privileged channel
+and combine them with its liveness signal; missing intent after confirmed loss
+of liveness is fault-class. This branch does not modify that backend.
+
+Real KVM tests are in `tests/stop.rs`. Build `tests/stop-fixture.S` with
+`-nostdlib -static -no-pie -Wl,-Ttext=0x100000,-e,_start` and respectively
+`-DSTOP_FAULT`, `-DSTOP_MISMATCH`, and `-DSTOP_HALT` to files `fault`, `mismatch`,
+`halt` in `STOP_FIXTURES`. Set `EMBED_KERNEL` to the protocol kernel and
+`EMBED_INITRAMFS` to the static embedding initramfs; run with an outer timeout
+and `--ignored --test-threads=1`.
+
 ## Caller-supplied block storage
 
 With `blk`:

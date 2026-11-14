@@ -38,6 +38,7 @@ type Result<T> = ::std::result::Result<T, Error>;
 /// on an I/O Bus. It currently manages the uart and i8042 devices.
 /// The `LegacyDeviceManger` should be initialized only by using the constructor.
 pub struct PortIODeviceManager {
+    pub stop_reason: Arc<crate::stop_reason::StopReason>,
     pub io_bus: devices::Bus,
     pub cmos: Arc<Mutex<devices::legacy::Cmos>>,
     pub stdio_serial: Vec<Arc<Mutex<devices::legacy::Serial>>>,
@@ -80,6 +81,7 @@ impl PortIODeviceManager {
         )));
 
         Ok(PortIODeviceManager {
+            stop_reason: Arc::default(),
             io_bus,
             cmos,
             stdio_serial,
@@ -94,6 +96,15 @@ impl PortIODeviceManager {
 
     /// Register supported legacy devices.
     pub fn register_devices(&mut self) -> Result<()> {
+        self.io_bus
+            .insert(
+                Arc::new(Mutex::new(crate::stop_reason::StopReasonDevice(
+                    self.stop_reason.clone(),
+                ))),
+                crate::stop_reason::STOP_REASON_PORT,
+                1,
+            )
+            .map_err(Error::BusError)?;
         self.io_bus
             .insert(self.cmos.clone(), 0x70, 0x8)
             .map_err(Error::BusError)?;

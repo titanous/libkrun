@@ -6,8 +6,17 @@ use std::sync::{Arc, Mutex};
 /// Reason the VM exited.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VmExit {
-    /// Guest initiated a clean shutdown (HLT or ACPI shutdown).
-    /// Contains the exit code set by the guest (0 = success).
+    /// Guest explicitly requested power-off through the stop-reason protocol.
+    PowerOffRequested,
+    /// Guest explicitly halted all CPUs with interrupts disabled.
+    Halted,
+    /// Guest kernel reported a panic before stopping.
+    Panic,
+    /// Guest stopped without a declared reason (including a triple fault).
+    Fault,
+
+    /// Legacy guest/device exit-code path, or host-requested shutdown.
+    /// This value alone is not proof of declared guest power-off.
     Shutdown { exit_code: i32 },
 
     /// Guest requested a reboot (KVM_SYSTEM_EVENT_RESET).
