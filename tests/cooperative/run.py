@@ -26,6 +26,8 @@ parser.add_argument("--concurrent", type=int, default=16)
 parser.add_argument("--single-template-copies", type=int, default=0,
                     help="instead of the matrix, run this many copies from one hashed 8-CPU template")
 parser.add_argument("--passed-fd", action="store_true", help="share one sealed memfd across new VMM processes")
+parser.add_argument("--require-blocked-random", action="store_true",
+                    help="fail unless every copy ran the userfaultfd-held random read (test-variant kernel)")
 args = parser.parse_args()
 args.output.mkdir(parents=True, exist_ok=False)
 launcher = Path("target/release/examples/cooperative-console").resolve()
@@ -172,6 +174,8 @@ def run_child(cpus, source_disk, image, name):
         raise RuntimeError(f"missing or ambiguous source check declaration: {name}")
     blocked = re.search(r"CLONE BLOCKED_RANDOM ([0-9a-f]{64})", data)
     blocked_required = available in source_data
+    if args.require_blocked_random and not blocked_required:
+        raise RuntimeError(f"held random-read check required but the source declared it skipped: {name}")
     skipped = "CLONE BLOCKED_RANDOM skipped userfaultfd=unavailable" in data
     if (blocked_required and (blocked is None or skipped)) or (not blocked_required and (blocked is not None or not skipped)):
         raise RuntimeError(f"blocked random-read coverage mismatch: {name}")
@@ -179,16 +183,28 @@ def run_child(cpus, source_disk, image, name):
             "private_kib_10s": private_kib, "generation": generation.group(1),
             "random": random.group(1), "pending_random": pending.group(1)}
 
+def check_tcp_listener_unreached():
+    try:
+        unexpected, _ = tcp_probe.accept()
+    except BlockingIOError:
+        return
+    unexpected.close()
+    raise RuntimeError("disabled forwarding reached live host TCP listener")
+
 def single_template_copies():
     disk, image, _, _ = run_source(8, 0)
     def digest():
+        # Hash what the copies map: the sealed memfd with --passed-fd, otherwise the template file.
+        if args.passed_fd:
+            fd, offset, sha = template_fd(image), 0, hashlib.sha256()
+            while chunk := os.pread(fd, 1 << 20, offset):
+                sha.update(chunk)
+                offset += len(chunk)
+            return sha.hexdigest()
         with image.open("rb") as template:
             return hashlib.file_digest(template, "sha256").hexdigest()
     before = digest()
-    source_data = userspace_bytes(image.with_suffix(".freeze.log").read_bytes()).decode(errors="replace")
-    source_random = re.search(r"CLONE SOURCE_RANDOM ([0-9a-f]{64})", source_data)
-    if source_random is None:
-        raise RuntimeError("missing source random sample")
+    run_denied_child(8, disk, image, "scale")
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(args.concurrent, 16))) as pool:
         results = list(pool.map(lambda i: run_child(8, disk, image, f"scale-{i}"), range(args.single_template_copies)))
     after = digest()
@@ -198,14 +214,13 @@ def single_template_copies():
     blocked = [m["blocked_random"] for m in results if m["blocked_random"] is not None]
     if len(set(blocked)) != len(blocked):
         raise RuntimeError("duplicate blocked-reader random bytes")
-    if any(m["random"] == source_random.group(1) for m in results):
-        raise RuntimeError("copy random bytes match source")
     if before != after:
         raise RuntimeError("template bytes changed")
+    check_tcp_listener_unreached()
+    hashed = "memfd" if args.passed_fd else "file"
     (args.output / "measurements.json").write_text(json.dumps({"copies": results,
-        "template_sha256_before": before, "template_sha256_after": after,
-        "source_random": source_random.group(1)}, indent=2))
-    print(f"ACCEPTANCE PASS copies={len(results)} template_sha256={before} source_random=distinct", flush=True)
+        "template_hashed": hashed, "template_sha256_before": before, "template_sha256_after": after}, indent=2))
+    print(f"ACCEPTANCE PASS copies={len(results)} template_{hashed}_sha256={before} policy=denied tcp=unreached", flush=True)
 
 try:
     ready()
@@ -249,13 +264,7 @@ try:
         raise RuntimeError("duplicate blocked-reader random bytes")
     if len({m["pending_random"] for m in measurements}) != len(measurements):
         raise RuntimeError("duplicate independent-reader random bytes")
-    try:
-        unexpected, _ = tcp_probe.accept()
-    except BlockingIOError:
-        pass
-    else:
-        unexpected.close()
-        raise RuntimeError("disabled forwarding reached live host TCP listener")
+    check_tcp_listener_unreached()
     print("ACCEPTANCE PASS", flush=True)
 finally:
     tcp_probe.close()

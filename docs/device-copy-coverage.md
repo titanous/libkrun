@@ -8,15 +8,44 @@ The regular matrix uses `tests/cooperative/run.py --cycles 20 --concurrent 16`.
 For 50 copies of one template, use the same required `--kernel`,
 `--initramfs`, `--control 0`, and fresh `--output` arguments, adding
 `--single-template-copies 50 --concurrent 10 --passed-fd`. This mode hashes
-the exported template before and after all copies, requires unchanged
-SHA-256, and requires each copy's fresh random bytes to differ from the
-source and all other copies. Results and hashes are in `measurements.json`.
-Concurrency is capped at 16 in this mode.
+the template bytes the copies actually map before and after all copies (the
+sealed memfd with `--passed-fd`, otherwise the exported file) and requires
+unchanged SHA-256. It requires each copy's random, pending-reader and
+generation values to differ from all other copies, runs the default-closed
+policy child, and checks that the host TCP listener was never reached.
+Results and hashes are in `measurements.json`. Concurrency is capped at 16 in
+this mode. Copies are compared only with each other: a source sample taken
+before the freeze differs from any later output even with no refresh, so it
+proves nothing.
+
+On the test-kernel variant, add `--require-blocked-random`: the host then
+fails the run unless every copy executed the userfaultfd-held random read
+(a declared skip is an error). Without it the host accepts the skip that the
+production kernel needs.
+
+### Random bytes of running threads
+
+`tests/cooperative/random.c` with `tests/cooperative/random-run.py` checks the
+running-thread case on the production kernel, with no debugger and no
+userfaultfd. Build the image with `--argstr workload random`, then run
+`random-run.py --kernel ... --initramfs ... --output ... --freezes 70`
+(70 source freezes on each of 1, 4 and 8 CPUs, 4 copies each). Sixteen threads
+loop on the getrandom system call, the vDSO getrandom, `/dev/urandom` and
+`/dev/random` with 8, 32, 4096 and 1 MiB requests while the source freezes.
+The host reads every thread's state from template RAM: whether it was inside
+a call, whether the kernel had already written bytes for that call, and
+whether user space had stored the result. A system call's result is stored by
+the instruction right after the call, so "returned after resume" is decidable.
+For every thread the first value returned after resume must differ across
+copies, the first three values of all copies must all differ, and no copy may
+return bytes generated before the freeze. The vDSO counts as returned before
+the freeze only when its state shows the final generation check passed.
 
 ## Coverage
 
-`tests/cooperative/devices.c` uses userfaultfd only in `block_random_read`
-and `unblock_random_read`. It registers a missing anonymous page, starts a
+`tests/cooperative/devices.c` uses userfaultfd only in `detect_random_fault`
+(which creates the descriptor, or declares the skip on ENOSYS),
+`block_random_read` and `unblock_random_read`. It registers a missing anonymous page, starts a
 thread reading 32 bytes from `/dev/random` into that page, and requires a
 userfaultfd page-fault event before freezing. After each copy resumes it
 resolves the fault, joins the thread, and prints `CLONE BLOCKED_RANDOM`.
@@ -32,8 +61,10 @@ Production coverage explicitly omits this check, rather than claiming a
 generic blocked operation is an equivalent substitute. The test-kernel
 variant retains the original stalled-read check. The fixture prints a
 `CLONE CHECKS` declaration before freeze; the host requires it and requires
-either the blocked-read result or the matching explicit skip. Missing or
-failed independent checks remain fatal.
+either the blocked-read result or the matching explicit skip. With
+`--require-blocked-random` (test variant) the skip itself fails the run, so a
+test kernel without the feature, or the production kernel passed by mistake,
+cannot pass. Missing or failed independent checks remain fatal.
 
 ## Stalled-read check and production applicability
 
