@@ -26,7 +26,10 @@ python3 "$here/embed-initramfs.py" "$out/flood-init" "$out/flood.cpio"
 raw() {
     local name=$1
     shift
-    "$host_cc" -nostdlib -static -no-pie -Wl,-Ttext=0x100000 -Wl,-e,_start "$@" \
+    # No property note: newer linkers place it right after the text, in guest memory the
+    # VMM uses at boot (the original fixtures had it at 0x400190).
+    "$host_cc" -nostdlib -static -no-pie -Wa,-mx86-used-note=no -Wl,--build-id=none \
+        -Wl,-Ttext=0x100000 -Wl,-e,_start "$@" \
         -o "$out/$name" "$here/stop-fixture.S"
 }
 raw fault
