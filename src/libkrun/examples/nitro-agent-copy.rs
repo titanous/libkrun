@@ -326,7 +326,21 @@ mod probe {
                 return Err(io::Error::other("source workload not quiescent"));
             }
             eprintln!("AGENT_SOURCE_QUIESCENT");
-            let unarmed = std::env::var_os("AGENT_UNARMED_RECOVERY").is_some();
+            let expired = std::env::var_os("AGENT_EXPIRED_RECOVERY").is_some();
+            let unarmed = std::env::var_os("AGENT_UNARMED_RECOVERY").is_some() || expired;
+            if expired {
+                arm_handle.arm_template_capture(Duration::from_millis(20))?;
+                let error = match arm_handle.wait_template_capture() {
+                    Err(error) => error,
+                    Ok(_) => {
+                        return Err(io::Error::other("capture succeeded without guest trigger"))
+                    }
+                };
+                if error.kind() != io::ErrorKind::TimedOut {
+                    return Err(error);
+                }
+                eprintln!("AGENT_CAPTURE_DEADLINE_EXPIRED typed_timeout=1");
+            }
             if !unarmed {
                 arm_handle.arm_template_capture(Duration::from_secs(12))?;
                 eprintln!("AGENT_SOURCE_ARMED");
@@ -374,7 +388,9 @@ mod probe {
             Ok(hello)
         });
         let source_exit = context.run()?;
-        if std::env::var_os("AGENT_UNARMED_RECOVERY").is_some() {
+        if std::env::var_os("AGENT_UNARMED_RECOVERY").is_some()
+            || std::env::var_os("AGENT_EXPIRED_RECOVERY").is_some()
+        {
             source_thread
                 .join()
                 .map_err(|_| "source recovery thread panicked")??;
