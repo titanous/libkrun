@@ -168,6 +168,11 @@ def classify(kind, t):
     full = t["first_written"] and t["last_written"]
     if kind == "vdso" and t["in_use"] is False and full:
         return "vdso-returned-before-freeze", t["seq"] + 1
+    if kind == "vdso" and full:
+        # The vDSO clears in_use one store after its final generation check passes, so "in use, buffer
+        # written" is either before the check (a copy retries) or in that gap (the bytes count as returned
+        # before the freeze). User memory cannot tell them apart: judge from the next value on.
+        return "vdso-at-final-check", t["seq"] + 1
     if full:
         return "kernel-finished-not-returned", t["seq"]
     if t["first_written"]:

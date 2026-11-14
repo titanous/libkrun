@@ -39,7 +39,12 @@ the instruction right after the call, so "returned after resume" is decidable.
 For every thread the first value returned after resume must differ across
 copies, the first three values of all copies must all differ, and no copy may
 return bytes generated before the freeze. The vDSO counts as returned before
-the freeze only when its state shows the final generation check passed.
+the freeze when its state shows the final generation check passed. Because the
+vDSO clears its in-use flag one store after that check, a vDSO thread found in
+use with its buffer already written may be in that gap; such a thread is judged
+from its next value on and reported as `vdso-at-final-check` (its retry after a
+copy is still checked whenever the template shows the buffer only partly or not
+yet written).
 
 ## Coverage
 
