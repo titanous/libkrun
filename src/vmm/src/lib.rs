@@ -427,16 +427,16 @@ impl Vmm {
     pub fn stop(&mut self, vm_exit: crate::vm_exit::VmExit) {
         info!("Vmm is stopping: {vm_exit:?}");
 
-        // Run exit observers first (AC3.1)
+        // Stop and join vCPUs before observers inspect the final guest rings.
+        self.vcpu_exit_flag.store(true, Ordering::Release);
+        self.vcpus_handles.clear();
+
         for observer in &self.exit_observers {
             observer
                 .lock()
                 .expect("Poisoned mutex for exit observer")
                 .on_vmm_exit();
         }
-
-        // Signal vCPU threads to exit their blocking state (AC3.2)
-        self.vcpu_exit_flag.store(true, Ordering::Release);
 
         // Store the exit reason for Context::run() to read
         *self.vm_exit.lock().expect("Poisoned vm_exit lock") = Some(vm_exit);

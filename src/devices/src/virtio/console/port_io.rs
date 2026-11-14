@@ -80,13 +80,15 @@ pub fn output_to_raw_fd_dup(fd: RawFd) -> Result<Box<dyn PortOutput + Send>, nix
     Ok(Box::new(PortOutputFd(fd)))
 }
 
-/// Like output_to_raw_fd_dup but keeps the fd in blocking mode.
-/// Use this for stdout/stderr to avoid making the caller's stdio non-blocking.
+/// Open an independent nonblocking description without changing caller stdio.
 pub fn output_to_raw_fd_dup_blocking(fd: RawFd) -> Result<Box<dyn PortOutput + Send>, nix::Error> {
-    let fd = dup_raw_fd_into_owned(fd)?;
-    // Don't set non-blocking - the dup'd fd shares the file description,
-    // so setting O_NONBLOCK would affect the original fd too.
-    Ok(Box::new(PortOutputFd(fd)))
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(O_NONBLOCK)
+        .open(format!("/proc/self/fd/{fd}"))
+        .map_err(|error| Errno::from_raw(error.raw_os_error().unwrap_or(libc::EIO)))?;
+    Ok(Box::new(PortOutputFd(file.into())))
 }
 
 pub fn output_to_log_as_err() -> Box<dyn PortOutput + Send> {
@@ -164,7 +166,8 @@ impl PortOutput for PortOutputFd {
 
     fn wait_until_writable(&self) {
         let mut poll_fds = [PollFd::new(self.0.as_fd(), PollFlags::POLLOUT)];
-        poll(&mut poll_fds, PollTimeout::NONE).expect("Failed to poll");
+        // Return periodically so the worker observes final stop even if a reader stalls.
+        poll(&mut poll_fds, PollTimeout::from(10u16)).expect("Failed to poll");
     }
 }
 

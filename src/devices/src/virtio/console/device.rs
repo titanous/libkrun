@@ -364,6 +364,10 @@ impl VirtioDevice for Console {
     }
 
     fn prepare_exit(&mut self) {
+        if self.device_state.is_activated() && !self.queues.is_empty() {
+            // Include ports opened immediately before the terminal event.
+            self.process_control_tx();
+        }
         for port in &mut self.ports {
             port.finish();
         }

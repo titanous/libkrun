@@ -36,6 +36,49 @@ Named-console `KRUN_STDIN_DEV`, `KRUN_STDOUT_DEV`, and `KRUN_STDERR_DEV` additio
 are only used with bundled-init defaults, never explicit overrides. Without an
 override, bundled-kernel callers retain bundled-init defaults and arguments.
 
+## Platform control ports and terminal outcomes
+
+The platform's x86 KVM control-port allocation is defined here:
+
+| Port | Direction and width | Meaning |
+|---|---|---|
+| `0xe5` | byte write | Cooperative freeze command (copy-enabled builds) |
+| `0xe6` | 32-bit read | Host realtime nanoseconds, low word |
+| `0xe7` | 32-bit read | Host realtime nanoseconds, high word |
+| `0xe8` | byte read | Host capture request |
+| `0xea` | byte write | Guest stop reason; reads return zero |
+
+Copy-related ports are implemented by the cooperative-copy branch, not by every
+build. `0xe9` is reserved for the conventional debug console. Stop reason bytes
+are 0 none/clear, 1 requested power-off, 2 requested reboot, 3 halt, 4 panic.
+Invalid widths/values are ignored; panic cannot be replaced or cleared. A write
+alone does not stop the VM. The x86 KVM builder supplies `holodeck.stop_port=1`
+so the maintained guest only writes the port on this platform.
+
+Both backends expose `VmExit`: `PowerOffRequested`, `RebootRequested`, `Halted`,
+`Panic`, `Fault`, `Stopped`, `Shutdown { exit_code }`, `LivenessExpired`,
+`DeviceWatchdog`, and `Error { message }`. Precedence is VMM error, host-requested
+stop, explicit device workload exit code, guest reason, then terminal fallback
+`Fault`. `Shutdown` is reachable only for an explicitly supplied workload code,
+never inferred from reset. Deadline outcomes remain distinct on the second
+backend. Guest reasons are untrusted privileged guest statements: they confer no
+privilege, template-reuse safety, billing treatment, or forensic exemption.
+
+Undeclared reset or terminal fault is a failure. Arm64 KVM has no reason transport:
+PSCI SYSTEM_OFF and SYSTEM_RESET both return `Fault`, so panic with the required
+`panic=-1` is not mistaken for reboot intent. An undeclared halt is a hang for the
+platform liveness checks; no VMM timer samples or periodically pauses CPUs.
+Reason state starts empty in each VMM and must be cleared if in-process restart
+is introduced. Copy/import must not serialize terminal reason state.
+
+Final stop joins KVM vCPUs before draining console output. Only final exit drains,
+not driver reset. Each port's drain is bounded by the published queue capacity,
+4 MiB and 100 ms of drain work, and stops rather than waiting for a slow reader.
+Output written before stop is delivered within those limits while the reader
+keeps up; forced process kill and host I/O errors cannot guarantee delivery.
+Custom output implementations must also honor nonblocking writes and bounded
+readiness waits. Error-path delivery is best effort.
+
 ## Caller-supplied block storage
 
 With `blk`:

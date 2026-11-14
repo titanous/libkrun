@@ -46,8 +46,16 @@ pub(crate) fn process_tx(
     drain: Arc<AtomicBool>,
 ) {
     let mut remaining = queue.size;
+    let mut drain_started = None;
+    let mut drain_bytes = 0usize;
     loop {
         if stop.load(Ordering::Acquire) {
+            let started = drain_started.get_or_insert_with(std::time::Instant::now);
+            if started.elapsed() >= std::time::Duration::from_millis(100)
+                || drain_bytes >= 4 * 1024 * 1024
+            {
+                return;
+            }
             if !drain.load(Ordering::Acquire) || remaining == 0 {
                 return;
             }
@@ -62,6 +70,15 @@ pub(crate) fn process_tx(
 
         for (desc_ordinal, desc) in head.into_iter().readable().enumerate() {
             let desc_len = desc.len as usize;
+            if stop.load(Ordering::Acquire) {
+                let started = drain_started.get_or_insert_with(std::time::Instant::now);
+                if started.elapsed() >= std::time::Duration::from_millis(100)
+                    || desc_len > (4 * 1024 * 1024usize).saturating_sub(drain_bytes)
+                {
+                    return;
+                }
+                drain_bytes += desc_len;
+            }
             match write_desc_to_output(
                 desc,
                 output.lock().unwrap().as_mut(),
@@ -132,6 +149,7 @@ fn write_desc_to_output(
     stop: &AtomicBool,
 ) -> Result<usize, io::Error> {
     let mut total = 0;
+    let mut stop_started = None;
     for slice_result in desc.mem.get_slices(desc.addr, desc.len as usize) {
         let src = slice_result.map_err(io::Error::other)?;
         let slice_len = src.len();
@@ -143,6 +161,14 @@ fn write_desc_to_output(
 
         let mut written_in_slice = 0;
         loop {
+            if stop.load(Ordering::Acquire)
+                && stop_started
+                    .get_or_insert_with(std::time::Instant::now)
+                    .elapsed()
+                    >= std::time::Duration::from_millis(100)
+            {
+                return Err(io::ErrorKind::TimedOut.into());
+            }
             let remaining = src.offset(written_in_slice).map_err(io::Error::other)?;
             log::trace!("Tx {remaining:?}, write_volatile {} bytes", remaining.len());
             match output.write_volatile(&remaining) {
