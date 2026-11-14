@@ -29,6 +29,9 @@ pub mod template_memory;
 
 #[cfg(target_arch = "x86_64")]
 pub mod cooperative;
+
+#[cfg(target_arch = "x86_64")]
+pub mod template;
 /// Wrappers over structures used to configure the VMM.
 pub mod vmm_config;
 
