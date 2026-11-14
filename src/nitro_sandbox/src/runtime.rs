@@ -136,6 +136,7 @@ impl Runtime {
 impl Drop for Runtime {
     fn drop(&mut self) {
         for t in &mut self.transports {
+            t.prepare_exit();
             if t.stop().is_err() {
                 std::process::abort();
             }

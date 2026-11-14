@@ -90,6 +90,9 @@ impl Transport {
         }
         Ok(action)
     }
+    pub fn prepare_exit(&mut self) {
+        self.device.lock().unwrap().prepare_exit();
+    }
     pub fn stop(&mut self) -> io::Result<()> {
         let mut device = self.device.lock().unwrap();
         if device.is_activated() && !device.reset() {

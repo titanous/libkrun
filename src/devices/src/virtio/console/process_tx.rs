@@ -43,9 +43,17 @@ pub(crate) fn process_tx(
     interrupt: InterruptTransport,
     output: Arc<Mutex<Box<dyn PortOutput + Send>>>,
     stop: Arc<AtomicBool>,
+    drain: Arc<AtomicBool>,
 ) {
+    let mut remaining = queue.size;
     loop {
-        let Some(head) = pop_head_blocking(&mut queue, &mem, &interrupt, &stop) else {
+        if stop.load(Ordering::Acquire) {
+            if !drain.load(Ordering::Acquire) || remaining == 0 {
+                return;
+            }
+            remaining -= 1;
+        }
+        let Some(head) = pop_head_blocking(&mut queue, &mem, &interrupt, &stop, &drain) else {
             return;
         };
 
@@ -61,6 +69,7 @@ pub(crate) fn process_tx(
                 port_id,
                 head_index,
                 desc_ordinal,
+                &stop,
             ) {
                 Ok(0) => {
                     break;
@@ -92,16 +101,19 @@ fn pop_head_blocking<'mem>(
     mem: &'mem GuestMemoryMmap,
     interrupt: &InterruptTransport,
     stop: &AtomicBool,
+    drain: &AtomicBool,
 ) -> Option<DescriptorChain<'mem>> {
     loop {
-        // Reset invalidates the old rings. Do not inspect them after shutdown
-        // has been requested, even if the guest left descriptors available.
-        if stop.load(Ordering::Acquire) {
+        // Driver reset invalidates rings; only final runtime exit may drain.
+        if stop.load(Ordering::Acquire) && !drain.load(Ordering::Acquire) {
             break None;
         }
         match queue.pop(mem) {
             Some(descriptor) => break Some(descriptor),
             None => {
+                if stop.load(Ordering::Acquire) {
+                    break None;
+                }
                 interrupt.signal_used_queue();
                 thread::park();
                 log::trace!("tx unparked, queue len {}", queue.len(mem))
@@ -117,6 +129,7 @@ fn write_desc_to_output(
     port_id: u32,
     head_index: u16,
     desc_ordinal: usize,
+    stop: &AtomicBool,
 ) -> Result<usize, io::Error> {
     let mut total = 0;
     for slice_result in desc.mem.get_slices(desc.addr, desc.len as usize) {
@@ -133,6 +146,7 @@ fn write_desc_to_output(
             let remaining = src.offset(written_in_slice).map_err(io::Error::other)?;
             log::trace!("Tx {remaining:?}, write_volatile {} bytes", remaining.len());
             match output.write_volatile(&remaining) {
+                Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
                 Ok(n) => {
                     if let Some(diag) = diagnostics.as_ref() {
                         let post_diag = if diag.suspicious() || n != remaining.len() {
@@ -183,6 +197,9 @@ fn write_desc_to_output(
                     // Partial write: retry with remaining bytes in this slice
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if stop.load(Ordering::Acquire) {
+                        return Err(e);
+                    }
                     log::trace!("Tx wait for output (would block)");
                     interrupt.signal_used_queue();
                     output.wait_until_writable();
@@ -437,6 +454,32 @@ mod tests {
     }
 
     #[test]
+    fn orderly_exit_drains_final_line_but_reset_does_not_read_queue() {
+        for drain in [false, true] {
+            let payload = b"final console line\n";
+            let (mem, queue, _) = make_mem_and_queue(payload);
+            let (recording, received) = RecordingPortOutput::new();
+            let output: Arc<Mutex<Box<dyn PortOutput + Send>>> =
+                Arc::new(Mutex::new(Box::new(recording)));
+            process_tx(
+                0,
+                mem,
+                queue,
+                make_interrupt(),
+                output,
+                Arc::new(AtomicBool::new(true)),
+                Arc::new(AtomicBool::new(drain)),
+            );
+            let bytes = received.lock().unwrap();
+            if drain {
+                assert_eq!(bytes.as_slice(), payload);
+            } else {
+                assert!(bytes.is_empty());
+            }
+        }
+    }
+
+    #[test]
     fn test_tx_data_forwarded_to_output() {
         let payload = b"hello console";
         let (mem, queue, _) = make_mem_and_queue(payload);
@@ -448,7 +491,15 @@ mod tests {
         let stop_clone = stop.clone();
 
         let handle = std::thread::spawn(move || {
-            process_tx(0, mem, queue, interrupt, output, stop_clone);
+            process_tx(
+                0,
+                mem,
+                queue,
+                interrupt,
+                output,
+                stop_clone,
+                Arc::new(AtomicBool::new(false)),
+            );
         });
 
         // Wait until the descriptor has been processed and data written to output.
@@ -504,6 +555,7 @@ mod tests {
             0, // port_id
             0, // head_index
             0, // desc_ordinal
+            &AtomicBool::new(false),
         );
 
         // The result should be an error (broken pipe)
@@ -540,6 +592,7 @@ mod tests {
             0, // port_id
             0, // head_index
             0, // desc_ordinal
+            &AtomicBool::new(false),
         );
 
         // Should succeed with 0 bytes written (zero-length descriptor)
@@ -597,7 +650,15 @@ mod tests {
             q.pop(&mem).unwrap()
         };
 
-        let result = write_desc_to_output(desc, &mut partial_output, &interrupt, 0, 0, 0);
+        let result = write_desc_to_output(
+            desc,
+            &mut partial_output,
+            &interrupt,
+            0,
+            0,
+            0,
+            &AtomicBool::new(false),
+        );
 
         assert_eq!(result.unwrap(), payload.len());
         assert_eq!(received.lock().unwrap().as_slice(), payload);
@@ -621,7 +682,15 @@ mod tests {
             q.pop(&mem).unwrap()
         };
 
-        let result = write_desc_to_output(desc, &mut partial_output, &interrupt, 0, 0, 0);
+        let result = write_desc_to_output(
+            desc,
+            &mut partial_output,
+            &interrupt,
+            0,
+            0,
+            0,
+            &AtomicBool::new(false),
+        );
 
         assert_eq!(result.unwrap(), payload.len());
         assert_eq!(received.lock().unwrap().as_slice(), payload);

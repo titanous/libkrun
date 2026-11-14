@@ -363,6 +363,12 @@ impl VirtioDevice for Console {
         self.device_state.is_activated()
     }
 
+    fn prepare_exit(&mut self) {
+        for port in &mut self.ports {
+            port.finish();
+        }
+    }
+
     fn reset(&mut self) -> bool {
         // Shutdown ports and clear queues.
         for port in &mut self.ports {
@@ -377,6 +383,7 @@ impl VirtioDevice for Console {
 
 impl VmmExitObserver for Console {
     fn on_vmm_exit(&mut self) {
+        self.prepare_exit();
         self.reset();
         log::trace!("Console on_vmm_exit finished");
     }
