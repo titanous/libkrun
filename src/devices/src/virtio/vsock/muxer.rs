@@ -106,12 +106,14 @@ pub struct VsockMuxer {
     queue: Option<Arc<Mutex<VirtQueue>>>,
     mem: Option<GuestMemoryMmap>,
     rxq: Arc<Mutex<MuxerRxQ>>,
-    epoll: Epoll,
+    epoll: Arc<Epoll>,
     interrupt: Option<InterruptTransport>,
     proxy_map: ProxyMap,
     reaper_sender: Option<Sender<u64>>,
     unix_ipc_port_map: Option<HashMap<u32, (PathBuf, bool)>>,
     tsi_flags: TsiFlags,
+    muxer_thread: Option<std::thread::JoinHandle<()>>,
+    reaper_thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl VsockMuxer {
@@ -127,12 +129,14 @@ impl VsockMuxer {
             queue: None,
             mem: None,
             rxq: Arc::new(Mutex::new(MuxerRxQ::new())),
-            epoll: Epoll::new().unwrap(),
+            epoll: Arc::new(Epoll::new().unwrap()),
             interrupt: None,
             proxy_map: Arc::new(RwLock::new(HashMap::new())),
             reaper_sender: None,
             unix_ipc_port_map,
             tsi_flags,
+            muxer_thread: None,
+            reaper_thread: None,
         }
     }
 
@@ -143,6 +147,7 @@ impl VsockMuxer {
         queue: Arc<Mutex<VirtQueue>>,
         interrupt: InterruptTransport,
         rxq_kick: EventFd,
+        stop: EventFd,
     ) {
         self.queue = Some(queue.clone());
         self.mem = Some(mem.clone());
@@ -165,11 +170,25 @@ impl VsockMuxer {
             sender.clone(),
             self.unix_ipc_port_map.clone().unwrap_or_default(),
         );
-        thread.run();
+        self.muxer_thread = Some(thread.run(stop));
 
         self.reaper_sender = Some(sender);
         let reaper = ReaperThread::new(receiver, self.proxy_map.clone());
-        reaper.run();
+        self.reaper_thread = Some(reaper.run());
+    }
+
+    pub(crate) fn stop(&mut self, stop: &EventFd) {
+        if let Some(thread) = self.muxer_thread.take() {
+            stop.write(1).expect("wake vsock muxer for shutdown");
+            thread.join().expect("vsock muxer panicked");
+        }
+        // Proxies may retain reaper senders; release them before joining.
+        self.proxy_map.write().unwrap().clear();
+        self.reaper_sender = None;
+        if let Some(thread) = self.reaper_thread.take() {
+            thread.join().expect("vsock reaper panicked");
+        }
+        let _ = stop.read();
     }
 
     pub(crate) fn has_pending_rx(&self) -> bool {

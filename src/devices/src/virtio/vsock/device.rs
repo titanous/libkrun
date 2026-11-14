@@ -49,6 +49,7 @@ pub struct Vsock {
     pub(crate) avail_features: u64,
     pub(crate) acked_features: u64,
     pub(crate) activate_evt: EventFd,
+    stop_evt: EventFd,
     pub(crate) device_state: DeviceState,
 }
 
@@ -78,6 +79,8 @@ impl Vsock {
             avail_features: AVAIL_FEATURES,
             acked_features: 0,
             activate_evt: EventFd::new(utils::eventfd::EFD_NONBLOCK)
+                .map_err(super::VsockError::EventFd)?,
+            stop_evt: EventFd::new(utils::eventfd::EFD_NONBLOCK)
                 .map_err(super::VsockError::EventFd)?,
             device_state: DeviceState::Inactive,
         })
@@ -223,6 +226,64 @@ impl Vsock {
     }
 }
 
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use crate::legacy::DummyIrqChip;
+    use vm_memory::GuestAddress;
+
+    fn worker_count() -> usize {
+        std::fs::read_dir("/proc/self/task")
+            .unwrap()
+            .filter_map(|entry| std::fs::read_to_string(entry.ok()?.path().join("comm")).ok())
+            .filter(|name| matches!(name.trim(), "vsock muxer" | "vsock reaper"))
+            .count()
+    }
+
+    fn assert_worker_count(expected: usize) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let count = worker_count();
+            if count == expected {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "expected {expected} vsock workers, found {count}"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn repeated_reset_joins_workers() {
+        let baseline = worker_count();
+        let mut device = Vsock::new(3, None, None, TsiFlags::empty()).unwrap();
+        for _ in 0..16 {
+            let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+            let interrupt =
+                InterruptTransport::new(DummyIrqChip::new().into(), "test-vsock".into()).unwrap();
+            let queues = defs::QUEUE_SIZES
+                .iter()
+                .map(|&size| DeviceQueue {
+                    queue: VirtQueue::new(size),
+                    event: Arc::new(EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap()),
+                })
+                .collect();
+            device.activate(mem, interrupt, queues).unwrap();
+            assert_worker_count(baseline + 2);
+            assert!(device.reset());
+            assert_worker_count(baseline);
+        }
+    }
+}
+
+impl Drop for Vsock {
+    fn drop(&mut self) {
+        self.muxer.stop(&self.stop_evt);
+    }
+}
+
 impl VirtioDevice for Vsock {
     fn avail_features(&self) -> u64 {
         self.avail_features
@@ -322,6 +383,9 @@ impl VirtioDevice for Vsock {
             self.queue_rx.clone().unwrap(),
             interrupt.clone(),
             rxq_kick,
+            self.stop_evt
+                .try_clone()
+                .map_err(|_| ActivateError::BadActivate)?,
         );
 
         self.device_state = DeviceState::Activated(mem, interrupt);
@@ -334,6 +398,7 @@ impl VirtioDevice for Vsock {
     }
 
     fn reset(&mut self) -> bool {
+        self.muxer.stop(&self.stop_evt);
         self.device_state = DeviceState::Inactive;
         self.queue_rx = None;
         self.queue_tx = None;

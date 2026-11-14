@@ -20,7 +20,7 @@ use vm_memory::GuestMemoryMmap;
 
 pub struct MuxerThread {
     cid: u64,
-    pub epoll: Epoll,
+    pub epoll: Arc<Epoll>,
     rxq: Arc<Mutex<MuxerRxQ>>,
     proxy_map: ProxyMap,
     mem: GuestMemoryMmap,
@@ -34,7 +34,7 @@ impl MuxerThread {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         cid: u64,
-        epoll: Epoll,
+        epoll: Arc<Epoll>,
         rxq: Arc<Mutex<MuxerRxQ>>,
         proxy_map: ProxyMap,
         mem: GuestMemoryMmap,
@@ -56,11 +56,23 @@ impl MuxerThread {
         }
     }
 
-    pub fn run(self) {
+    pub fn run(self, stop: utils::eventfd::EventFd) -> thread::JoinHandle<()> {
+        use std::os::fd::AsRawFd;
+        // Proxy identifiers contain nonzero ports; zero is reserved for shutdown.
+        self.epoll
+            .ctl(
+                ControlOperation::Add,
+                stop.as_raw_fd(),
+                &EpollEvent::new(EventSet::IN, 0),
+            )
+            .unwrap();
         thread::Builder::new()
             .name("vsock muxer".into())
-            .spawn(|| self.work())
-            .unwrap();
+            .spawn(move || {
+                self.work();
+                drop(stop);
+            })
+            .unwrap()
     }
 
     fn send_credit_request(&self, credit_rx: MuxerRx) {
@@ -185,6 +197,9 @@ impl MuxerThread {
                     for ev in &epoll_events[0..ev_cnt] {
                         let evset = EventSet::from_bits(ev.events).unwrap();
                         let id = ev.data();
+                        if id == 0 {
+                            return;
+                        }
                         debug!("vsock: muxer_thread event: id={id} evset={evset:?}");
 
                         let update = self.proxy_map.read().unwrap().get(&id).map(|proxy_lock| {
