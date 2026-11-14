@@ -2,6 +2,46 @@
 use crate::template::Template;
 use std::{io, os::unix::fs::FileExt};
 
+pub struct NitroRestore {
+    pub template: Template,
+    pub vcpus: u8,
+    pub ram_mib: u64,
+    pub topology: Vec<u8>,
+    pub compatibility: Vec<u8>,
+}
+impl nitro_sandbox::runtime::RestoreHandler for NitroRestore {
+    fn restore(self: Box<Self>, sandbox: &nitro_sandbox::host::Sandbox) -> io::Result<()> {
+        use std::io::Read;
+        if sandbox.memory_size() as u64 != self.ram_mib << 20 {
+            return Err(invalid());
+        }
+        validate(
+            &self.template,
+            self.vcpus,
+            self.ram_mib,
+            &self.topology,
+            &self.compatibility,
+        )?;
+        let mut seed = [0u8; 32];
+        std::fs::File::open("/dev/urandom")?.read_exact(&mut seed)?;
+        let realtime = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(io::Error::other)?
+            .as_nanos() as u64;
+        // SAFETY: runtime invokes this only after parked receiver READY; source
+        // manifest was validated and all fresh backends are idle before release.
+        unsafe {
+            copy_and_release(
+                &self.template,
+                sandbox.ram.address() as *mut u8,
+                self.ram_mib,
+                seed,
+                realtime,
+            )
+        }
+    }
+}
+
 /// Validate all refusable manifest checks before touching receiver memory.
 pub fn validate(
     template: &Template,

@@ -625,6 +625,10 @@ impl Sandbox {
     pub fn duplicate_vm_descriptor(&self) -> io::Result<std::os::fd::OwnedFd> {
         Ok(self.vm.as_ref().unwrap().try_clone()?.into())
     }
+    pub fn memory_size(&self) -> usize {
+        self.ram.len
+    }
+
     pub fn vm_fd(&self) -> std::os::fd::RawFd {
         self.vm.as_ref().unwrap().as_raw_fd()
     }

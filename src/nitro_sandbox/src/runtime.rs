@@ -8,6 +8,13 @@ use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// Internal one-shot template import after a parked receiver publishes READY.
+pub trait RestoreHandler: Send {
+    /// Validate the sealed template and perform private copy/release. No guest
+    /// instructions beyond the parked stub may run before validation succeeds.
+    fn restore(self: Box<Self>, sandbox: &Sandbox) -> io::Result<()>;
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Exit {
     PowerOff,
@@ -65,6 +72,8 @@ pub struct Runtime {
     stop_reason: Option<crate::stop_reason::StopReason>,
     capture: Option<Box<dyn crate::capture::CaptureHandler>>,
     accepted_capture: Option<crate::capture::AcceptedCapture>,
+    restore: Option<Box<dyn RestoreHandler>>,
+    memory_size: usize,
 }
 impl Runtime {
     pub fn new(
@@ -84,6 +93,7 @@ impl Runtime {
         timeout: Duration,
         lock: Option<crate::lifecycle::LifecycleLock>,
     ) -> io::Result<Self> {
+        let memory_size = memory;
         let mut sandbox = Sandbox::with_lifecycle_lock(memory, vcpus, None, lock)?;
         sandbox.load(image)?;
         let memory = Some(unsafe { sandbox.guest_memory()? });
@@ -103,6 +113,8 @@ impl Runtime {
             stop_reason: None,
             capture: None,
             accepted_capture: None,
+            restore: None,
+            memory_size,
         })
     }
     pub fn duplicate_vm_descriptor(&self) -> io::Result<std::os::fd::OwnedFd> {
@@ -117,6 +129,16 @@ impl Runtime {
     }
     pub fn set_heartbeat(&mut self, heartbeat: crate::heartbeat::Heartbeat) {
         self.heartbeat = Some(heartbeat);
+    }
+    pub fn set_restore_handler(&mut self, handler: Box<dyn RestoreHandler>) -> io::Result<()> {
+        if self.memory_size < 1 << 30 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "parked receiver requires at least1GiB",
+            ));
+        }
+        self.restore = Some(handler);
+        Ok(())
     }
     pub fn set_capture_handler(&mut self, handler: Box<dyn crate::capture::CaptureHandler>) {
         self.capture = Some(handler);
@@ -314,6 +336,15 @@ impl Runtime {
         let mut active = 0usize;
         let mut stated = None;
         loop {
+            if self.restore.is_some() {
+                let address = self.sandbox.ram.address() + crate::receiver::CONTROL_OFFSET as u64;
+                // SAFETY: restore is installed only for >=1GiB parked receiver
+                // shapes; the aligned control page is inside its reservation.
+                if unsafe { (address as *const u64).read_volatile() } == crate::receiver::READY {
+                    std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+                    self.restore.take().unwrap().restore(&self.sandbox)?;
+                }
+            }
             if stated.is_none() {
                 if let Some(device) = &self.stop_reason {
                     if let Some(code) = device.reason() {
