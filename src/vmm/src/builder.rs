@@ -1785,6 +1785,20 @@ fn load_payload(
                 }
                 #[cfg(not(feature = "vhost-user"))]
                 unreachable!()
+            } else if _vm_resources.cooperative_capture.is_none() {
+                // SAFETY: the validated kernel bundle owns this mapping and
+                // remains alive for the guest's lifetime, as on normal boots.
+                validate_bundle_range(kernel_host_addr, kernel_size as u64)
+                    .map_err(StartMicrovmError::InvalidBundleAddressRange)?;
+                unsafe {
+                    vm_memory::mmap::MmapRegion::build_raw(
+                        kernel_host_addr as *mut u8,
+                        kernel_size,
+                        0,
+                        0,
+                    )
+                    .map_err(StartMicrovmError::InvalidKernelBundle)?
+                }
             } else {
                 let file = crate::template_memory::create(kernel_size)
                     .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
@@ -2041,6 +2055,10 @@ pub fn create_guest_memory(
     // Add SHM regions before creating guest memory
     arch_mem_regions.extend(shm_manager.regions());
 
+    #[cfg(target_arch = "x86_64")]
+    let cooperative_capture = vm_resources.cooperative_capture.is_some();
+    #[cfg(not(target_arch = "x86_64"))]
+    let cooperative_capture = false;
     let guest_mem = if use_vhost_user {
         #[cfg(feature = "vhost-user")]
         {
@@ -2091,7 +2109,7 @@ pub fn create_guest_memory(
         }
         #[cfg(not(feature = "vhost-user"))]
         unreachable!()
-    } else {
+    } else if cooperative_capture {
         let regions = arch_mem_regions
             .iter()
             .map(|(addr, size)| {
@@ -2104,6 +2122,9 @@ pub fn create_guest_memory(
             .collect::<Result<Vec<_>, io::Error>>()
             .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
         GuestMemoryMmap::from_regions(regions)
+            .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?
+    } else {
+        GuestMemoryMmap::from_ranges(&arch_mem_regions)
             .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?
     };
 
@@ -3056,6 +3077,16 @@ pub mod tests {
         });
 
         create_guest_memory(mem_size_mib, &vm_resources, &Payload::Empty)
+    }
+
+    #[test]
+    fn ordinary_guest_memory_is_private_anonymous() {
+        let (memory, _, _, _) = default_guest_memory(128).unwrap();
+        for region in memory.iter() {
+            assert!(region.file_offset().is_none());
+            assert_ne!(region.flags() & libc::MAP_PRIVATE, 0);
+            assert_ne!(region.flags() & libc::MAP_ANONYMOUS, 0);
+        }
     }
 
     #[test]
