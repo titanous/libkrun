@@ -139,7 +139,11 @@ def run_child(cpus, source_disk, image, name):
             if process.poll() is None:
                 process.kill()
                 process.wait()
-    data = log_path.read_text(errors="replace")
+    data = userspace_bytes(log_path.read_bytes()).decode(errors="replace")
+    required = ("CLONE TSC nondecreasing", "CLONE VECTOR width=", "CLONE FORWARDING disabled",
+                "CLONE VMGENID irq=", "CLONE CLOCK error_ns=", "CLONE USERSPACE clock_error_ns=")
+    if any(marker not in data for marker in required):
+        raise RuntimeError(f"missing independent device check: {name}")
     if "CLONE PASS" not in data or "CLONE FAIL" in data or "SIMD=ok" not in data or f"cpus={cpus}" not in data:
         raise RuntimeError(f"child assertions failed: {name}")
     if userspace is None or private_kib is None:
@@ -153,15 +157,22 @@ def run_child(cpus, source_disk, image, name):
     if generation is None:
         raise RuntimeError(f"missing generation identifier: {name}")
     random = re.search(r"CLONE RANDOM ([0-9a-f]{64})", data)
-    if random is None or "crng reseeded due to virtual machine fork" not in data:
+    if random is None or b"crng reseeded due to virtual machine fork" not in log_path.read_bytes():
         raise RuntimeError(f"missing guest randomness/reseed proof: {name}")
     pending = re.search(r"CLONE PENDING_RANDOM ([0-9a-f]{64}) EVENT=ok", data)
     if pending is None:
         raise RuntimeError(f"missing independent reader/event proof: {name}")
+    source_data = userspace_bytes(image.with_suffix(".freeze.log").read_bytes()).decode(errors="replace")
+    available = "CLONE CHECKS userfaultfd=available blocked_random=required pending_random=required devices=required"
+    unavailable = "CLONE CHECKS userfaultfd=unavailable blocked_random=skipped pending_random=required devices=required"
+    if source_data.count(available) + source_data.count(unavailable) != 1:
+        raise RuntimeError(f"missing or ambiguous source check declaration: {name}")
     blocked = re.search(r"CLONE BLOCKED_RANDOM ([0-9a-f]{64})", data)
-    if blocked is None:
-        raise RuntimeError(f"missing blocked random-read proof: {name}")
-    return {"blocked_random": blocked.group(1), "cpus": cpus, "name": name, "resume_ms": (userspace-start)/1e6,
+    blocked_required = available in source_data
+    skipped = "CLONE BLOCKED_RANDOM skipped userfaultfd=unavailable" in data
+    if (blocked_required and (blocked is None or skipped)) or (not blocked_required and (blocked is not None or not skipped)):
+        raise RuntimeError(f"blocked random-read coverage mismatch: {name}")
+    return {"blocked_random": blocked.group(1) if blocked else None, "cpus": cpus, "name": name, "resume_ms": (userspace-start)/1e6,
             "private_kib_10s": private_kib, "generation": generation.group(1),
             "random": random.group(1), "pending_random": pending.group(1)}
 
@@ -199,7 +210,8 @@ try:
         raise RuntimeError("duplicate VM generation identifier")
     if len({m["random"] for m in measurements}) != len(measurements):
         raise RuntimeError("duplicate guest random bytes")
-    if len({m["blocked_random"] for m in measurements}) != len(measurements):
+    blocked_samples = [m["blocked_random"] for m in measurements if m["blocked_random"] is not None]
+    if len(set(blocked_samples)) != len(blocked_samples):
         raise RuntimeError("duplicate blocked-reader random bytes")
     if len({m["pending_random"] for m in measurements}) != len(measurements):
         raise RuntimeError("duplicate independent-reader random bytes")
