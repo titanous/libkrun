@@ -230,7 +230,9 @@ connect or silence returns `VmExit::LivenessExpired`. Reconnection is supported.
 The mapping remains subject to the embedder's Unix-connect policy; allow its exact
 socket path. Existing paths and port collisions are errors, not overwritten.
 
-The maintained kernel's `HOLODECK GUEST STOP panic` diagnostic marker returns
+The following console-marker classification is legacy compatibility only and is
+not the platform's privileged terminal-reason contract. The maintained kernel's
+`HOLODECK GUEST STOP panic` diagnostic marker returns
 `VmExit::GuestPanic` promptly, even when console output is discarded or its budget
 is exhausted. Marker matching handles split reads and kernel prefixes. This text
 is not an authenticated tenant status channel. Missing markers are not evidence
@@ -246,6 +248,33 @@ Internet forwarding is **off by default on both backends**, enabled only by
 requests too, not only guest hijack flags. Forwarding tests and embedders requiring
 TSI TCP/UDP/IPv6 must opt in; mapped `vsock-guest-connect` does not require internet
 forwarding and remains subject to its Unix connection rule.
+
+### Privileged terminal-reason channel (API alignment pending)
+
+`nitro_stop_reason(true)` adds a dedicated experimental virtio type 63 device,
+registered after ordinary devices so console indices stay stable. The matching
+kernel patch is 0400 on holodeck `nitro-backend-kernel`, based on kernel lane
+`b94b54c`. It maps private shared region ID 0, stores a one-byte terminal reason,
+orders the store and directly notifies one queue. Panic reporting allocates no
+descriptor, opens no socket, and waits for no interrupt. Panic is sticky across
+its following restart. The VMM wakes on the kick eventfd and reads the byte.
+Console text does not classify exits when this channel is enabled; poweroff
+without a stated byte is an error, not clean shutdown.
+
+Current provisional codes are 1 poweroff, 2 reboot, 3 halt, 4 panic. The KVM
+exit-kind worker must publish the shared codes and public exit variants before
+this is a stable embedding API. Until alignment, `run` deliberately returns an
+`Error` containing the raw stated reason and host observation timestamp; do not
+consume that diagnostic string as a permanent protocol. `nitro_terminal` retains
+the real-host acceptance probe.
+
+Observed m8g panic notification upper bounds: ten trials 0.784--0.845 ms from
+host sending a go byte to VMM observing the privileged reason, before teardown.
+The bound includes vsock delivery and the guest's panic path. Poweroff/reboot/halt
+were 0.360--0.383 ms. Both timestamps use host CLOCK_MONOTONIC. Guest/host virtual
+counter offsets differ and must not be subtracted. VM teardown adds substantial
+time after detection; a prior go-to-run-return sample was 109.33 ms, not the
+notification latency. Silent hangs remain bounded by the running heartbeat.
 
 ## Nitro public method support and limits
 
@@ -266,6 +295,7 @@ forwarding and remains subject to its Unix connection rule.
 | `add_virtio_console`, `add_virtio_console_with_ports`, `add_port`, `add_port_fd`, `add_port_console_fd`, `console_port_path` | Custom ports honored; select backend/configure preceding block/vsock/fs devices first. Incompatible late ordering rejected. |
 | `nitro_console_sink` | Bounded kernel diagnostics, discard by default; independent of custom console ports. |
 | `nitro_heartbeat` | Reserved guest-originated heartbeat mapping and running-guest deadline. |
+| `nitro_stop_reason` | Opt-in privileged byte channel; current raw diagnostic mapping awaits shared KVM exit API alignment. |
 | `nitro_lifecycle_lock` | Daemon-owned flock for teardown or creation/start plus teardown; no fixed-path fallback. |
 | `console_output` | KVM console convenience path rejected; use bounded Nitro sink/custom port. |
 | `workdir`, `exec_path`, `block_root`, `env`, `args`, `rlimits`, `vmm_uid`, `vmm_gid` | Rejected at build; guest agent owns execution and service owns VMM credentials. |
