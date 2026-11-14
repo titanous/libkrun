@@ -205,6 +205,20 @@ host receipt of the flushed guest trigger marker to the synchronous frozen exit;
 resume timing is process invocation to the userspace marker, including file import.
 Private RSS is Private_Clean + Private_Dirty in smaps_rollup at ten seconds idle.
 
+Forwarded guest sockets across a copy: the copy's VMM has none of the source's
+forwarding state, so the guest kernel (holodeck patch 0032) fails every forwarded
+socket that existed at the freeze on its next use (streams and pending connects with
+ECONNRESET, datagram sockets with ECONNRESET until connected again, or once if never
+connected); native guest-local sockets keep working. `CLONE_INTERNET=1` makes the
+example forward guest Internet sockets. Build `tests/cooperative/sockets.c` static
+(for example `x86_64-unknown-linux-musl-gcc -static -pthread`) and run:
+
+```
+nix develop --command just cooperative-sockets VMLINUX SOCKETS_BINARY NEW_RESULT_DIR
+```
+
+The host side binds TCP 29101/29102 and UDP 29103 on its own interface address.
+
 For the separate filesystem matrix, build a combined kernel with 0100-0107 plus
 0200/0201 using `tests/cooperative/fs-kernel.nix`, and build the initramfs with
 `--argstr workload fs`. Then run:
