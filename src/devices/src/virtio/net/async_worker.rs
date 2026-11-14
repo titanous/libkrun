@@ -324,7 +324,7 @@ fn drain_tx_queue(
         if queues[TX_INDEX].next_avail() == next_avail_before {
             // Queue made no progress; distinguish two cases:
             // 1) Guest advanced avail_idx concurrently -> retry without mutating next_avail.
-            // 2) next_avail drifted ahead of avail_idx (e.g. after restore) -> rewind.
+            // 2) next_avail drifted ahead of avail_idx -> rewind.
             if let Some(avail_idx_addr) = queues[TX_INDEX].avail_ring.checked_add(2) {
                 if let Ok(avail_idx) = mem.read_obj::<u16>(avail_idx_addr) {
                     let next_avail = queues[TX_INDEX].next_avail().0;

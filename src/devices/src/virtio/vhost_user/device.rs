@@ -271,14 +271,11 @@ impl VhostUserDevice {
     }
 
     /// Activate the vhost-user device by setting up memory and vrings.
-    /// `vring_bases`: if Some, use saved vring bases (restore mode).
-    ///                if None, use 0 (normal activation).
     pub(super) fn activate_vhost_user(
         &mut self,
         mem: &GuestMemoryMmap,
         interrupt: &InterruptTransport,
         queues: &[DeviceQueue],
-        vring_bases: Option<&[u16]>,
     ) -> IoResult<()> {
         // Clean up any previous interrupt monitor thread before spawning a new one
         self.stop_interrupt_monitor();
@@ -340,10 +337,7 @@ impl VhostUserDevice {
                 .set_vring_num(queue_index, queue.actual_size())
                 .map_err(io::Error::other)?;
 
-            // Set vring base - use saved value if in restore mode, otherwise 0
-            let base = vring_bases
-                .and_then(|bases| bases.get(queue_index).copied())
-                .unwrap_or(0);
+            let base = 0;
 
             frontend
                 .set_vring_base(queue_index, base)
@@ -577,7 +571,7 @@ impl VirtioDevice for VhostUserDevice {
         interrupt: InterruptTransport,
         queues: Vec<DeviceQueue>,
     ) -> ActivateResult {
-        if let Err(e) = self.activate_vhost_user(&mem, &interrupt, &queues, None) {
+        if let Err(e) = self.activate_vhost_user(&mem, &interrupt, &queues) {
             error!(
                 "{}: failed to activate vhost-user device: {}",
                 self.device_name, e

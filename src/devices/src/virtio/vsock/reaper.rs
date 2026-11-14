@@ -128,17 +128,21 @@ impl ReaperThread {
     fn work(&mut self) {
         loop {
             let timeout = self.check_expiration();
-            if let Ok(id) = self.receiver.recv_timeout(timeout) {
-                self.released_map.insert(id, Instant::now());
+            match self.receiver.recv_timeout(timeout) {
+                Ok(id) => {
+                    self.released_map.insert(id, Instant::now());
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
             }
         }
     }
 
-    pub fn run(mut self) {
+    pub fn run(mut self) -> thread::JoinHandle<()> {
         thread::Builder::new()
             .name("vsock reaper".into())
             .spawn(move || self.work())
-            .unwrap();
+            .unwrap()
     }
 }
 

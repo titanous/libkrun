@@ -387,12 +387,12 @@ impl Queue {
         self.next_used
     }
 
-    /// Set the next available descriptor index (for restore).
+    /// Set the next available descriptor index.
     pub fn set_next_avail(&mut self, idx: u16) {
         self.next_avail = Wrapping(idx);
     }
 
-    /// Set the next used descriptor index (for restore).
+    /// Set the next used descriptor index.
     pub fn set_next_used(&mut self, idx: u16) {
         self.next_used = Wrapping(idx);
     }

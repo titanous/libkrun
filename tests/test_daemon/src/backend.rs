@@ -1,9 +1,6 @@
 use std::cell::RefCell;
-use std::fs::File;
 
-use vhost::vhost_user::message::{
-    VhostTransferStateDirection, VhostTransferStatePhase, VhostUserProtocolFeatures,
-};
+use vhost::vhost_user::message::VhostUserProtocolFeatures;
 use vhost_user_backend::{VhostUserBackendMut, VringMutex, VringT};
 use virtio_queue::{QueueOwnedT, QueueT};
 use vm_memory::{
@@ -19,17 +16,12 @@ const QUEUE_SIZE: usize = 1024;
 
 pub struct FsBackend {
     /// Synthetic filesystem state.
-    /// RefCell because check_device_state(&self) must deserialize into it.
+    /// RefCell permits filesystem updates from request handlers taking &self.
     /// SAFETY: FsBackend is always behind a Mutex in vhost-user-backend, so
     /// the RefCell is only accessed from one thread at a time.
     fs: RefCell<SyntheticFs>,
     /// DAX window pointer (set when ADD_MEM_REGION shares the memfd)
     dax_window: Option<(*mut u8, usize)>,
-    /// Pending DEVICE_STATE transfer result
-    device_state_result: RefCell<Option<std::io::Result<()>>>,
-    /// Deferred LOAD fd: read_to_end must happen AFTER set_device_state_fd replies,
-    /// because the frontend writes to the pipe only after receiving our reply.
-    pending_load_fd: RefCell<Option<File>>,
     /// Guest memory reference (set by update_memory)
     mem: Option<GuestMemoryAtomic<GuestMemoryMmap>>,
     /// Number of memory regions seen (used to detect DAX window addition)
@@ -47,8 +39,6 @@ impl FsBackend {
         Self {
             fs: RefCell::new(fs),
             dax_window: None,
-            device_state_result: RefCell::new(None),
-            pending_load_fd: RefCell::new(None),
             mem: None,
             region_count: 0,
         }
@@ -78,7 +68,6 @@ impl VhostUserBackendMut for FsBackend {
         VhostUserProtocolFeatures::CONFIG
             | VhostUserProtocolFeatures::MQ
             | VhostUserProtocolFeatures::CONFIGURE_MEM_SLOTS
-            | VhostUserProtocolFeatures::DEVICE_STATE
     }
 
     fn get_config(&self, offset: u32, size: u32) -> Vec<u8> {
@@ -135,54 +124,6 @@ impl VhostUserBackendMut for FsBackend {
         let vring = &vrings[device_event as usize];
         self.process_queue(vring)?;
         Ok(())
-    }
-
-    // --- DEVICE_STATE support (built into crate since v0.14.0) ---
-
-    fn set_device_state_fd(
-        &mut self,
-        direction: VhostTransferStateDirection,
-        _phase: VhostTransferStatePhase,
-        fd: File,
-    ) -> std::io::Result<Option<File>> {
-        match direction {
-            VhostTransferStateDirection::SAVE => {
-                *self.device_state_result.get_mut() = Some(self.save_state_to_fd(&fd));
-            }
-            VhostTransferStateDirection::LOAD => {
-                // Defer read to check_device_state: the frontend writes to the
-                // pipe only AFTER receiving our reply, so reading here deadlocks.
-                *self.pending_load_fd.get_mut() = Some(fd);
-                *self.device_state_result.get_mut() = None;
-            }
-        }
-        Ok(None) // No fd to return
-    }
-
-    fn check_device_state(&self) -> std::io::Result<()> {
-        // Complete deferred LOAD if pending
-        if let Some(fd) = self.pending_load_fd.borrow_mut().take() {
-            use std::io::Read;
-            let mut buf = Vec::new();
-            let mut file = fd.try_clone()?;
-            file.read_to_end(&mut buf)?;
-            let result = SyntheticFs::deserialize(&buf);
-            match result {
-                Ok(fs) => {
-                    *self.fs.borrow_mut() = fs;
-                    *self.device_state_result.borrow_mut() = Some(Ok(()));
-                }
-                Err(e) => {
-                    *self.device_state_result.borrow_mut() = Some(Err(e));
-                }
-            }
-        }
-        let result = self.device_state_result.borrow();
-        match result.as_ref() {
-            Some(Ok(())) => Ok(()),
-            Some(Err(e)) => Err(std::io::Error::new(e.kind(), e.to_string())),
-            None => Err(std::io::Error::other("no state transfer in progress")),
-        }
     }
 }
 
@@ -538,59 +479,6 @@ impl FsBackend {
         // No-op, respond with success
         vec![]
     }
-
-    fn save_state_to_fd(&mut self, fd: &File) -> std::io::Result<()> {
-        use std::io::Write;
-
-        // Sync any guest DAX writes
-        self.sync_all_dax_writes();
-
-        let fs = self.fs.get_mut();
-
-        // Serialize filesystem state
-        // Simple format: number of inodes, then for each:
-        // nodeid(u64) + name_len(u32) + name + mode(u32) + size(u64) + nlink(u32) + data_len(u32) + data
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&(fs.inodes.len() as u32).to_le_bytes());
-
-        for (nodeid, inode) in &fs.inodes {
-            buf.extend_from_slice(&nodeid.to_le_bytes());
-            let name_bytes = inode.name.as_bytes();
-            buf.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
-            buf.extend_from_slice(name_bytes);
-            buf.extend_from_slice(&inode.mode.to_le_bytes());
-            buf.extend_from_slice(&inode.size.to_le_bytes());
-            buf.extend_from_slice(&inode.nlink.to_le_bytes());
-            buf.push(if inode.dax_enabled { 1 } else { 0 });
-            if let Some(data) = fs.file_data.get(nodeid) {
-                buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
-                buf.extend_from_slice(data);
-            } else {
-                buf.extend_from_slice(&0u32.to_le_bytes());
-            }
-        }
-
-        let mut file = fd.try_clone()?;
-        file.write_all(&buf)?;
-        Ok(())
-    }
-
-    fn sync_all_dax_writes(&mut self) {
-        // Sync guest DAX window writes to file_data.
-        // NOTE: This implementation copies the entire DAX window for all inodes.
-        // This approach only works for the single-file synthetic filesystem used in testing.
-        // A production implementation would track dirty ranges per inode and copy selectively.
-        if let Some((dax_ptr, dax_size)) = self.dax_window {
-            let fs = self.fs.get_mut();
-            for (nodeid, _) in fs.inodes.iter() {
-                let mut buf = vec![0u8; dax_size];
-                unsafe {
-                    std::ptr::copy_nonoverlapping(dax_ptr, buf.as_mut_ptr(), dax_size);
-                }
-                fs.dax_file_data.insert(*nodeid, buf);
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -641,85 +529,10 @@ mod tests {
     }
 
     #[test]
-    fn test_save_load_roundtrip() {
-        // Create initial filesystem
-        let original_fs = SyntheticFs::new();
-        let backend = FsBackend::new(original_fs);
-
-        // Save to buffer
-        // Manually serialize like save_state_to_fd does
-        let save_buffer = {
-            let fs = backend.fs.borrow();
-            let mut buf = Vec::new();
-            buf.extend_from_slice(&(fs.inodes.len() as u32).to_le_bytes());
-
-            for (nodeid, inode) in &fs.inodes {
-                buf.extend_from_slice(&nodeid.to_le_bytes());
-                let name_bytes = inode.name.as_bytes();
-                buf.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
-                buf.extend_from_slice(name_bytes);
-                buf.extend_from_slice(&inode.mode.to_le_bytes());
-                buf.extend_from_slice(&inode.size.to_le_bytes());
-                buf.extend_from_slice(&inode.nlink.to_le_bytes());
-                buf.push(if inode.dax_enabled { 1 } else { 0 });
-                if let Some(data) = fs.file_data.get(nodeid) {
-                    buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
-                    buf.extend_from_slice(data);
-                } else {
-                    buf.extend_from_slice(&0u32.to_le_bytes());
-                }
-            }
-            buf
-        };
-
-        // Create new backend and load
-        let mut fresh_backend = FsBackend::new(SyntheticFs::new());
-        *fresh_backend.fs.get_mut() =
-            SyntheticFs::deserialize(&save_buffer).expect("should deserialize");
-
-        // Verify inodes match
-        let orig_fs = backend.fs.borrow();
-        let loaded_fs = fresh_backend.fs.borrow();
-        assert_eq!(
-            orig_fs.inodes.len(),
-            loaded_fs.inodes.len(),
-            "inode count mismatch"
-        );
-
-        for (nodeid, original_inode) in &orig_fs.inodes {
-            let loaded_inode = loaded_fs
-                .inodes
-                .get(nodeid)
-                .expect(&format!("nodeid {} missing", nodeid));
-            assert_eq!(original_inode.name, loaded_inode.name, "name mismatch");
-            assert_eq!(original_inode.mode, loaded_inode.mode, "mode mismatch");
-            assert_eq!(original_inode.size, loaded_inode.size, "size mismatch");
-            assert_eq!(original_inode.nlink, loaded_inode.nlink, "nlink mismatch");
-        }
-
-        // Verify file data matches
-        assert_eq!(
-            orig_fs.file_data.len(),
-            loaded_fs.file_data.len(),
-            "file_data count mismatch"
-        );
-
-        for (nodeid, original_data) in &orig_fs.file_data {
-            let loaded_data = loaded_fs
-                .file_data
-                .get(nodeid)
-                .expect(&format!("nodeid {} data missing", nodeid));
-            assert_eq!(
-                original_data.len(),
-                loaded_data.len(),
-                "data len mismatch for nodeid {}",
-                nodeid
-            );
-            assert_eq!(
-                original_data, loaded_data,
-                "data content mismatch for nodeid {}",
-                nodeid
-            );
-        }
+    fn device_state_is_not_advertised() {
+        let backend = FsBackend::new(SyntheticFs::new());
+        assert!(!backend
+            .protocol_features()
+            .contains(VhostUserProtocolFeatures::DEVICE_STATE));
     }
 }
