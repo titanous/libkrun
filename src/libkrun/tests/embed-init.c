@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include <arpa/inet.h>
 #include <errno.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <linux/vm_sockets.h>
 #include <stdio.h>
@@ -24,12 +25,47 @@ static int tcp(int port) {
     struct sockaddr_in addr = {.sin_family=AF_INET, .sin_port=htons(port), .sin_addr.s_addr=htonl(INADDR_LOOPBACK)};
     int result = connect(fd, (void *)&addr, sizeof(addr)); int error=errno; close(fd); errno=error; return result;
 }
+static void reset_vsock(void) {
+    mkdir("/sys",0755); check(mount("sysfs","/sys","sysfs",0,NULL)==0,"sysfs mount");
+    DIR *dir=opendir("/sys/bus/virtio/devices"); check(dir!=NULL,"virtio devices");
+    char name[256]={0}; struct dirent *entry;
+    while ((entry=readdir(dir))) {
+        if (entry->d_name[0]=='.') continue;
+        char path[512], value[64]={0}; snprintf(path,sizeof(path),"/sys/bus/virtio/devices/%s/device",entry->d_name);
+        int fd=open(path,O_RDONLY); if (fd<0) continue; read(fd,value,sizeof(value)-1); close(fd);
+        if (strtoul(value,NULL,0)==19) { snprintf(name,sizeof(name),"%s",entry->d_name); break; }
+    }
+    closedir(dir); check(name[0]!=0,"find vsock device");
+    char path[512]; snprintf(path,sizeof(path),"/sys/bus/virtio/devices/%s/driver/unbind",name);
+    int fd=open(path,O_WRONLY); check(fd>=0,"open vsock unbind"); check(write(fd,name,strlen(name))==(ssize_t)strlen(name),"vsock unbind"); close(fd);
+    fd=open("/sys/bus/virtio/drivers/vmw_vsock_virtio_transport/bind",O_WRONLY); check(fd>=0,"open vsock bind"); check(write(fd,name,strlen(name))==(ssize_t)strlen(name),"vsock bind"); close(fd);
+    puts("EMBED_VSOCK_RESET_OK");
+}
+static void reset_connection_check(int allowed) {
+    int fd=socket(AF_VSOCK,SOCK_STREAM,0); check(fd>=0,"reset vsock socket");
+    struct sockaddr_vm addr={.svm_family=AF_VSOCK,.svm_cid=2,.svm_port=7000};
+    int rc=connect(fd,(void *)&addr,sizeof(addr));
+    if (!allowed) check(rc<0 && errno==ECONNRESET,"reset deny mapped ECONNRESET");
+    else {
+        check(rc==0,"reset allowed mapped"); check(write(fd,"ping",4)==4,"reset ping");
+        struct pollfd ready={.fd=fd,.events=POLLIN}; char reply[4];
+        check(poll(&ready,1,3000)>0 && read(fd,reply,4)==4 && !memcmp(reply,"pong",4),"reset pong");
+        check(write(fd,"\1",1)==1,"reset ack");
+    }
+    close(fd);
+    check(tcp(18080)<0,"reset internet forwarding disabled");
+}
 int main(void) {
     setbuf(stdout, NULL);
     mkdir("/dev",0755); mount("devtmpfs","/dev","devtmpfs",0,NULL);
     mkdir("/proc",0755); mount("proc","/proc","proc",0,NULL);
     char cmdline[4096]={0}; int c=open("/proc/cmdline",O_RDONLY); read(c,cmdline,sizeof(cmdline)-1); close(c);
     puts("EMBED_USERSPACE_OK");
+    if (strstr(cmdline,"embed_reset_")) {
+        int allowed=strstr(cmdline,"embed_reset_allow")!=NULL;
+        reset_connection_check(allowed); puts("EMBED_RESET_BEFORE_OK");
+        reset_vsock(); reset_connection_check(allowed); puts("EMBED_RESET_AFTER_OK");
+    }
     if (strstr(cmdline,"embed_devices")) {
         char pattern[512], result[512]; memset(pattern,0x5a,sizeof(pattern));
         int fd=open("/dev/vda",O_RDWR); check(fd>=0,"disk open");
