@@ -221,16 +221,19 @@ impl Sandbox {
             .as_ref()
             .map(|lock| lock.open())
             .transpose()?;
-        let mut creation_guard = lifecycle_lock
+        let teardown_only = lifecycle_lock
             .as_ref()
-            .map(|lock| lock.acquire())
-            .transpose()?;
-        if lifecycle_lock
-            .as_ref()
-            .is_some_and(|lock| lock.serialization == crate::lifecycle::Serialization::Teardown)
-        {
-            creation_guard.take();
-        }
+            .is_some_and(|lock| lock.serialization == crate::lifecycle::Serialization::Teardown);
+        // `StartAndTeardown`: the lock is held from here until the guest has started.
+        // `Teardown`: it is taken only around the create call and the handoff below.
+        let creation_guard = if teardown_only {
+            None
+        } else {
+            lifecycle_lock
+                .as_ref()
+                .map(|lock| lock.acquire())
+                .transpose()?
+        };
         let control = OpenOptions::new()
             .read(true)
             .write(true)
@@ -266,6 +269,21 @@ impl Sandbox {
             padding: 0,
             uid: 0,
         };
+        // `Teardown` (review nitrod-opus K4): hold the lock from just before the create call until
+        // the duplicate has been sent. A death of this process in between (SIGKILL, an
+        // out-of-memory kill) then releases the VM while the lock is still held: the exiting
+        // task's file releases run last-opened-first, and the lock file was opened before the VM
+        // existed (observed on the target kernel: see the holodeck daemon2 lane notes). Without a
+        // handoff the lock is held only around the create call (it then waits for a close in
+        // progress elsewhere, as before). This is microseconds and never waits for the daemon.
+        let window_guard = if teardown_only {
+            lifecycle_lock
+                .as_ref()
+                .map(|lock| lock.acquire())
+                .transpose()?
+        } else {
+            None
+        };
         let raw = call(&control, 3, 0x30, &mut c)?;
         let vm = unsafe { File::from_raw_fd(raw) };
         let sb = Self {
@@ -284,6 +302,7 @@ impl Sandbox {
         if let Some(socket) = handoff {
             crate::lifecycle::send_vm_descriptor(socket, sb.vm.as_ref().unwrap())?;
         }
+        drop(window_guard);
         for _ in 0..vcpus {
             call(sb.vm.as_ref().unwrap(), 1, 0x2d, &mut -1i32)?;
         }
@@ -729,6 +748,65 @@ impl Drop for Sandbox {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Two sandboxes created and torn down from one process, overlapping, 10 rounds each: both
+    /// take the host lifecycle lock (create window and final close) through the one holder this
+    /// process has for the file, so neither waits for itself. One of them hands its duplicate
+    /// over and the "daemon" thread makes the final close under the lock. Needs a Nitro host:
+    /// `NITRO_SANDBOX_TEST_LOCK=/run/holodeck/nitro-lifecycle.lock cargo test -p nitro_sandbox
+    /// two_sandboxes -- --ignored` (as root for /dev/nitro_enclaves). Fails after 120 s instead of
+    /// hanging.
+    #[test]
+    #[ignore = "needs /dev/nitro_enclaves and NITRO_SANDBOX_TEST_LOCK"]
+    fn two_sandboxes_in_one_process_overlap_without_deadlock() {
+        let path = std::path::PathBuf::from(std::env::var_os("NITRO_SANDBOX_TEST_LOCK").unwrap());
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let lock = crate::lifecycle::LifecycleLock {
+                path,
+                serialization: crate::lifecycle::Serialization::Teardown,
+            };
+            let workers: Vec<_> = (0..2)
+                .map(|index| {
+                    let lock = lock.clone();
+                    std::thread::spawn(move || {
+                        for _ in 0..10 {
+                            if index == 0 {
+                                let sandbox =
+                                    Sandbox::create(128 << 20, 1, None, Some(lock.clone()), None)
+                                        .unwrap();
+                                std::thread::sleep(Duration::from_millis(20));
+                                drop(sandbox);
+                            } else {
+                                let (vmm, daemon) = std::os::unix::net::UnixStream::pair().unwrap();
+                                let sandbox = Sandbox::create(
+                                    128 << 20,
+                                    1,
+                                    None,
+                                    Some(lock.clone()),
+                                    Some(&vmm),
+                                )
+                                .unwrap();
+                                let mut duplicate =
+                                    Some(crate::lifecycle::receive_vm_descriptor(&daemon).unwrap());
+                                drop(sandbox);
+                                lock.open()
+                                    .unwrap()
+                                    .close_vm_descriptor(&mut duplicate)
+                                    .unwrap();
+                            }
+                        }
+                    })
+                })
+                .collect();
+            for worker in workers {
+                worker.join().unwrap();
+            }
+            let _ = done.send(());
+        });
+        finished
+            .recv_timeout(Duration::from_secs(120))
+            .expect("two sandboxes in one process did not finish: lifecycle lock deadlock");
+    }
     #[test]
     fn uapi_structure_sizes() {
         assert_eq!(std::mem::size_of::<Create>(), 16);
