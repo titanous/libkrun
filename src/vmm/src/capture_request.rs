@@ -28,14 +28,28 @@ pub fn refusal_errno(error: &io::Error) -> i32 {
 struct State {
     deadline: Option<Instant>,
     accepted: bool,
+    timed_out: bool,
+    restored_copy: bool,
     marker_confirmed: bool,
     result: Option<io::Result<CaptureOutcome>>,
 }
+
+#[derive(Debug)]
+pub struct RestoredCopyCaptureUnsupported;
+impl std::fmt::Display for RestoredCopyCaptureUnsupported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("restored Nitro copies cannot become templates")
+    }
+}
+impl std::error::Error for RestoredCopyCaptureUnsupported {}
 
 #[derive(Clone, Default)]
 pub struct CaptureRequest(Arc<(Mutex<State>, Condvar)>);
 
 impl CaptureRequest {
+    pub fn refuse_restored_copy(&self) {
+        self.0 .0.lock().unwrap().restored_copy = true;
+    }
     pub fn require_marker(&self) -> io::Result<()> {
         if !self.0 .0.lock().unwrap().marker_confirmed {
             return Err(io::Error::new(
@@ -52,13 +66,19 @@ impl CaptureRequest {
 
     pub fn arm(&self, timeout: Duration) -> io::Result<()> {
         let mut state = self.0 .0.lock().unwrap();
+        if state.restored_copy {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                RestoredCopyCaptureUnsupported,
+            ));
+        }
         if !state.marker_confirmed {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 crate::cooperative::TemplateMarkerMissing,
             ));
         }
-        if state.deadline.is_some() || state.accepted {
+        if state.deadline.is_some() || state.accepted || state.timed_out {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 "capture already armed",
@@ -105,6 +125,11 @@ impl CaptureRequest {
 
     pub fn complete(&self, result: io::Result<CaptureOutcome>) {
         let mut state = self.0 .0.lock().unwrap();
+        if state.timed_out {
+            // The caller already observed a terminal timeout. Drop any sealed
+            // template here; it must never be returned by a later wait.
+            return;
+        }
         state.result = Some(result);
         state.deadline = None;
         self.0 .1.notify_all();
@@ -113,6 +138,9 @@ impl CaptureRequest {
     pub fn wait(&self) -> io::Result<CaptureOutcome> {
         let mut state = self.0 .0.lock().unwrap();
         loop {
+            if state.timed_out {
+                return Err(io::Error::from(io::ErrorKind::TimedOut));
+            }
             if let Some(result) = state.result.take() {
                 return result;
             }
@@ -124,6 +152,7 @@ impl CaptureRequest {
             };
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
+                state.timed_out = true;
                 state.deadline = None;
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
@@ -142,6 +171,34 @@ impl CaptureRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn restored_copy_capture_is_typed_unsupported() {
+        let request = CaptureRequest::default();
+        request.refuse_restored_copy();
+        let error = request.arm(Duration::from_secs(1)).unwrap_err();
+        assert!(error
+            .get_ref()
+            .unwrap()
+            .is::<RestoredCopyCaptureUnsupported>());
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+    }
+    #[test]
+    fn late_completion_after_timeout_is_discarded() {
+        let request = CaptureRequest::default();
+        request.confirm_marker(true);
+        request.arm(Duration::ZERO).unwrap();
+        assert_eq!(
+            request.wait().err().unwrap().kind(),
+            io::ErrorKind::TimedOut
+        );
+        request.complete(Err(io::Error::other("late completion")));
+        assert!(request.0 .0.lock().unwrap().result.is_none());
+        assert_eq!(
+            request.wait().err().unwrap().kind(),
+            io::ErrorKind::TimedOut
+        );
+    }
+
     #[test]
     fn guest_refusals_have_distinct_errno() {
         assert_eq!(

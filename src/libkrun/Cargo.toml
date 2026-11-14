@@ -37,6 +37,7 @@ krun_display = { path = "../krun_display", optional = true, features = ["bindgen
 krun_input = { path = "../krun_input", optional = true, features = ["bindgen_clang_runtime"] }
 
 devices = { path = "../devices" }
+kernel = { path = "../kernel" }
 mutants = "0.0.3"
 polly = { path = "../polly" }
 utils = { path = "../utils" }
@@ -53,6 +54,7 @@ vm-memory = { version = "0.18", features = ["backend-mmap"] }
 
 [dev-dependencies]
 proptest = "1.4"
+serde_json = "1"
 
 [lib]
 name = "krun"

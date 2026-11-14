@@ -24,6 +24,16 @@ check-aarch64:
     cargo build --workspace --target aarch64-unknown-linux-gnu --features embedded_init,net,blk,vhost-user
     cargo clippy --workspace --target aarch64-unknown-linux-gnu --features embedded_init,net,blk,vhost-user -- -D warnings
 
+# Execute architecture-specific Nitro tests on an arm64 Linux host (m8g).
+# Cross-building check-aarch64 is not a substitute for this gate.
+test-nitro-aarch64:
+    test "$(uname -m)" = aarch64
+    cargo test -p nitro_sandbox --features devices
+    cargo test -p vmm --features nitro-sandbox nitro_
+    cargo test -p vmm --features nitro-sandbox template_arm64
+    cargo test -p libkrun --lib --features nitro-sandbox arm64_template
+    python3 -m unittest discover -s src/nitro_sandbox/src/receiver_image -p 'test_*.py'
+
 # Build the release library
 build: build-init
     cargo build --release -p libkrun --features {{features}}
