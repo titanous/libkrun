@@ -11,6 +11,8 @@ import sys
 import threading
 import time
 root = pathlib.Path.cwd()
+binary = pathlib.Path(os.environ.get('NITRO_BINARY', str(root/'target/debug/examples/nitro_smoke')))
+image = pathlib.Path(os.environ.get('NITRO_IMAGE', str(root/'smoke-console.eif')))
 count, concurrency = int(sys.argv[1]), int(sys.argv[2])
 duration = int(sys.argv[3]) if len(sys.argv) > 3 else 0
 assert 1 <= concurrency <= 8
@@ -69,7 +71,7 @@ def launch(i):
         start = time.monotonic()
         with (logs / f'guest-{i}.log').open('wb') as output:
             try:
-                p = subprocess.run(['sudo', 'env', f'NITRO_CID={200+slot}', f'NITRO_CONSOLE_LOG={logs / f"console-{i}.log"}', str(root/'target/debug/examples/nitro_smoke'), str(root/'smoke-console.eif'), str(disk), path], stdout=output, stderr=subprocess.STDOUT, timeout=35)
+                p = subprocess.run(['sudo', 'env', f'NITRO_CID={200+slot}', f'NITRO_CONSOLE_LOG={logs / f"console-{i}.log"}', str(binary), str(image), str(disk), path], stdout=output, stderr=subprocess.STDOUT, timeout=35)
                 code = p.returncode
             except subprocess.TimeoutExpired:
                 code = 'timeout'

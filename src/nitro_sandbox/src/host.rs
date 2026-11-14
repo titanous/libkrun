@@ -493,34 +493,42 @@ impl Sandbox {
         Ok(())
     }
     pub fn drain_console(&mut self, output: &mut impl Write) -> io::Result<()> {
-        let p = self.info.copy();
-        if crate::u32_at(&p, 0).ok() != Some(0x5343494e) {
+        let header = self.info.copy_range(0, 16)?;
+        if crate::u32_at(&header, 0).ok() != Some(0x5343494e) {
             return Ok(());
         }
-        let count = crate::u32_at(&p, 8).unwrap_or(0) as usize;
-        if count > (p.len() - 16) / 48 {
+        let count = crate::u32_at(&header, 8).unwrap_or(0) as usize;
+        if count > (INFO_PAGE_SIZE - 16) / 48 {
             return Err(io::Error::other("bad console TOC"));
         }
-        for i in 0..count {
-            let at = 16 + i * 48;
-            if crate::u16_at(&p, at).unwrap_or(0) != 1 {
+        let toc = self.info.copy_range(16, count * 48)?;
+        for record in toc.chunks_exact(48) {
+            if crate::u16_at(record, 0).unwrap_or(0) != 1 {
                 continue;
             }
-            let off = crate::u32_at(&p, at + 4).unwrap_or(u32::MAX) as usize;
-            let Some(header) = p.get(off..).filter(|s| s.len() >= 8) else {
-                continue;
-            };
-            let end = crate::u32_at(header, 0).unwrap();
-            let cap = crate::u32_at(header, 4).unwrap();
-            if cap == 0 || cap as usize > header.len() - 8 {
-                continue;
+            let off = crate::u32_at(record, 4).unwrap_or(u32::MAX) as usize;
+            let size = crate::u64_at(record, 8).unwrap();
+            if size < 8 || off > INFO_PAGE_SIZE - 8 {
+                return Err(io::Error::other("bad console entry"));
             }
+            let ring = self.info.copy_range(off, 8)?;
+            let end = crate::u32_at(&ring, 0).unwrap();
+            let cap = crate::u32_at(&ring, 4).unwrap();
+            if cap == 0 || cap as usize > INFO_PAGE_SIZE - off - 8 || u64::from(cap) > size - 8 {
+                return Err(io::Error::other("bad console capacity"));
+            }
+            std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
             if end.wrapping_sub(self.console_at) > cap {
                 self.console_at = end.wrapping_sub(cap);
             }
             while self.console_at != end {
-                output.write_all(&[header[8 + (self.console_at % cap) as usize]])?;
-                self.console_at = self.console_at.wrapping_add(1);
+                let index = self.console_at % cap;
+                let length = end.wrapping_sub(self.console_at).min(cap - index);
+                let bytes = self
+                    .info
+                    .copy_range(off + 8 + index as usize, length as usize)?;
+                output.write_all(&bytes)?;
+                self.console_at = self.console_at.wrapping_add(length);
             }
         }
         output.flush()
