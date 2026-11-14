@@ -9,10 +9,14 @@ and enter the kernel's saved continuation over private file-backed RAM.
 1. Boot the maintained guest kernel with hibernation and CPU hotplug enabled;
    platform kernels disable virtio balloon and page reporting. Call
    `Builder::omit_balloon_device()` to omit the transport (default is unchanged).
-2. Obtain the physical control-page address from the kernel's
-   `NITRO_FREEZE_CONTROL phys=...` boot message. Configure
-   `capture_cooperative_template(control_gpa, new_path)` before `build()`.
-3. The guest writes `1` to `/sys/power/nitro_freeze`. The kernel freezes tasks,
+2. Configure `capture_cooperative_template(0, new_path)` before `build()`.
+   Zero selects control-page discovery from BSP RSI at the trapped frozen exit;
+   a nonzero GPA is an optional exact-match expectation. Console text is never
+   used for discovery or memory bounds.
+3. Root writes `1` to `/sys/power/nitro_freeze` (0600/CAP_SYS_ADMIN; an active
+   transition is refused). The generic core checks hibernation availability,
+   runs PM prepare notifiers, syncs and freezes configured filesystems, locks
+   device hotplug and restricts GFP allocations during device freeze. It freezes tasks,
    suspends consoles, invokes device FREEZE callbacks, offlines secondary CPUs,
    disables interrupts and suspends syscore devices. It saves processor context,
    publishes the page, then writes byte 1 to I/O port `0xe5`.
@@ -31,8 +35,13 @@ and enter the kernel's saved continuation over private file-backed RAM.
    boot page tables, command line or boot parameters. It restores KVM clock,
    fills realtime/tag/random seed, updates VMGENID and signals its interrupt.
 7. BSP enters the published continuation with IF clear. The kernel restores
-   processor context, syscore state, APs through normal hotplug startup, devices
-   through RESTORE, consoles and tasks. It applies wall clock and VM-fork entropy.
+   processor context and syscore state, enables interrupts, corrects wall time,
+   reseeds VM-fork entropy and explicitly wipes the seed before any task thaws.
+   APs start through normal hotplug startup, devices through RESTORE, then consoles
+   and tasks resume. A pending x86 getrandom syscall result frozen at signal return
+   is regenerated after a fork-generation change before returning to userspace.
+   The sysfs trigger retains `path= msg= err= seq=` status; agents can poll it for
+   POLLPRI, then seek/read the changed sequence independently of VMGENID.
    Old vsock connections are dead; userspace reconnects guest-to-host CID 2.
    On x86 the final post-RESTORE hook refreshes realtime through 32-bit I/O reads:
    port `0xe6` returns low 32 bits of host realtime nanoseconds since Unix epoch,

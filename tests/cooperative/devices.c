@@ -1,8 +1,14 @@
 #define _GNU_SOURCE
 #include <errno.h>
+#include <glob.h>
 #include <fcntl.h>
 #include <linux/vm_sockets.h>
 #include <pthread.h>
+#include <poll.h>
+#include <sys/wait.h>
+#include <sys/ptrace.h>
+#include <sys/user.h>
+#include <signal.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -66,7 +72,56 @@ int main(void)
     int console=open("/dev/ttyS0",O_RDWR);
     if(console>=0) { dup2(console,0); dup2(console,1); dup2(console,2); }
     setbuf(stdout,NULL);
+    pid_t denied=fork();
+    if(denied<0) fail("permission fork");
+    if(!denied) {
+        if(setuid(65534)) _exit(20);
+        int trigger=open("/sys/power/nitro_freeze",O_WRONLY);
+        if(trigger>=0) _exit(21);
+        _exit(errno==EACCES ? 0 : 22);
+    }
+    int denied_status;
+    if(waitpid(denied,&denied_status,0)!=denied || !WIFEXITED(denied_status) || WEXITSTATUS(denied_status)) fail("non-root trigger accepted");
+    glob_t bindings;
+    if(glob("/sys/bus/platform/devices/vmgenid*/driver",0,NULL,&bindings) || !bindings.gl_pathc) fail("vmgenid driver binding");
+    globfree(&bindings);
+    printf("CLONE VMGENID bound\n");
     if(mount("/dev/vda","/data","ext4",0,NULL)) fail("mount");
+    int random_pipe[2];
+    if(pipe(random_pipe)) fail("random pipe");
+    pid_t reader=fork();
+    if(reader<0) fail("random fork");
+    if(!reader) {
+        close(random_pipe[0]);
+        int event=open("/sys/power/nitro_freeze",O_RDONLY);
+        char state[128];
+        unsigned char sample[32];
+        if(event<0 || read(event,state,sizeof(state)-1)<=0) _exit(10);
+        if(ptrace(PTRACE_TRACEME,0,NULL,NULL)) _exit(15);
+        raise(SIGSTOP);
+        if(syscall(SYS_getrandom,sample,sizeof(sample),0)!=sizeof(sample)) _exit(11);
+        struct pollfd p={.fd=event,.events=POLLPRI};
+        if(poll(&p,1,3000)<=0 || !(p.revents&POLLPRI)) _exit(16);
+        lseek(event,0,SEEK_SET);
+        ssize_t n=read(event,state,sizeof(state)-1);
+        if(n<=0) _exit(12);
+        state[n]=0;
+        if(!strstr(state,"path=3") || !strstr(state,"seq=1")) _exit(13);
+        if(write(random_pipe[1],sample,sizeof(sample))!=sizeof(sample)) _exit(14);
+        _exit(0);
+    }
+    close(random_pipe[1]);
+    int trace_status;
+    if(waitpid(reader,&trace_status,0)!=reader || !WIFSTOPPED(trace_status)) fail("reader trace stop");
+    if(ptrace(PTRACE_SETOPTIONS,reader,NULL,(void *)(uintptr_t)PTRACE_O_TRACESYSGOOD)) fail("trace options");
+    for(;;) {
+        if(ptrace(PTRACE_SYSCALL,reader,NULL,NULL)) fail("trace syscall");
+        if(waitpid(reader,&trace_status,0)!=reader || !WIFSTOPPED(trace_status)) fail("reader syscall stop");
+        struct user_regs_struct regs;
+        if(ptrace(PTRACE_GETREGS,reader,NULL,&regs)) fail("reader regs");
+        if(regs.orig_rax==SYS_getrandom && regs.rax==32) break;
+    }
+    printf("CLONE PENDING_READ held-at-syscall-exit\n");
     int old=connect_host(); echo(old);
     pthread_t thread;
     if(pthread_create(&thread,NULL,writer,NULL)) fail("pthread");
@@ -83,6 +138,16 @@ int main(void)
         : "=a"(result), "=m"(restored) : "m"(sentinel), "0"(1L), "D"((long)freeze), "S"("1"), "d"(1L)
         : "rcx","r11","memory","xmm15");
     if(result!=1 || memcmp(sentinel,restored,sizeof(sentinel))) fail("freeze or SIMD");
+    if(ptrace(PTRACE_DETACH,reader,NULL,NULL)) fail("reader detach");
+    unsigned char pending_random[32];
+    struct pollfd random_ready={.fd=random_pipe[0],.events=POLLIN};
+    if(poll(&random_ready,1,3000)<=0 || read(random_pipe[0],pending_random,sizeof(pending_random))!=sizeof(pending_random)) fail("resume event/random reader");
+    int reader_status;
+    if(waitpid(reader,&reader_status,0)!=reader || !WIFEXITED(reader_status) || WEXITSTATUS(reader_status)) fail("random reader exit");
+    close(random_pipe[0]);
+    printf("CLONE PENDING_RANDOM ");
+    for(unsigned int i=0;i<sizeof(pending_random);i++) printf("%02x",pending_random[i]);
+    printf(" EVENT=ok\n");
     unsigned char random_bytes[32];
     int random_fd=open("/dev/hwrng",O_RDONLY);
     if(random_fd<0 || read(random_fd,random_bytes,sizeof(random_bytes))!=sizeof(random_bytes)) fail("entropy restore");

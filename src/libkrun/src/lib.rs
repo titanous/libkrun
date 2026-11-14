@@ -637,6 +637,8 @@ impl Builder {
 
     /// Capture a template only after the guest publishes its frozen control
     /// page and emits the cooperative freeze exit. The source never resumes.
+    /// Pass zero to discover the GPA from BSP RSI at that exit, or a nonzero
+    /// address to require an exact match with the reported GPA.
     #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
     pub fn capture_cooperative_template(
         &mut self,

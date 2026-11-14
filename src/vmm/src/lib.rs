@@ -467,14 +467,14 @@ impl Subscriber for Vmm {
             debug!("Vmm: exit_evt fired, shutting down");
             let _ = self.exit_evt.read();
 
-            let mut frozen = false;
+            let mut frozen = None;
             let vcpu_exit_code = self
                 .vcpus_handles
                 .iter()
                 .find_map(|handle| match handle.response_receiver().try_recv() {
                     Ok(VcpuResponse::Exited(exit_code)) => Some(exit_code),
-                    Ok(VcpuResponse::Frozen) => {
-                        frozen = true;
+                    Ok(VcpuResponse::Frozen(control)) => {
+                        frozen = Some(control);
                         Some(FC_EXIT_CODE_GENERIC_ERROR)
                     }
                     _ => None,
@@ -482,7 +482,7 @@ impl Subscriber for Vmm {
                 .unwrap_or(FC_EXIT_CODE_OK);
 
             #[cfg(target_arch = "x86_64")]
-            if frozen {
+            if let Some(reported_control) = frozen {
                 eprintln!(
                     "COOPERATIVE FROZEN host_ns={}",
                     std::time::SystemTime::now()
@@ -497,6 +497,9 @@ impl Subscriber for Vmm {
                         self.cooperative_capture.as_ref().ok_or_else(|| {
                             std::io::Error::other("cooperative capture not configured")
                         })?;
+                    if *control != 0 && *control != reported_control {
+                        return Err(std::io::Error::other("reported control GPA does not match expectation"));
+                    }
                     if !self.mmio_device_manager.all_virtio_reset() {
                         return Err(std::io::Error::other(
                             "guest froze with an active virtio device",
@@ -505,7 +508,7 @@ impl Subscriber for Vmm {
                     let clock = self.vm.fd().get_clock().map_err(std::io::Error::other)?;
                     let template = crate::template::Template::capture_with_clock(
                         &self.guest_memory,
-                        *control,
+                        reported_control,
                         *vcpus,
                         *ram_mib,
                         clock.clock,

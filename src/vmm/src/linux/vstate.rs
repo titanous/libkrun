@@ -1382,7 +1382,9 @@ impl Vcpu {
                         if self.id != 0 || data != [1] {
                             return Err(Error::VcpuUnhandledKvmExit);
                         }
-                        return Ok(VcpuEmulation::Frozen);
+                        let control = self.fd.get_regs()
+                            .map_err(|_| Error::VcpuUnhandledKvmExit)?.rsi;
+                        return Ok(VcpuEmulation::Frozen(control));
                     }
                     self.io_bus.write(0, u64::from(addr), data);
                     Ok(VcpuEmulation::Handled)
@@ -1508,9 +1510,9 @@ impl Vcpu {
                 // So we pause vCPU0 and send a signal to the emulation thread to stop the VMM.
                 Ok(VcpuEmulation::Stopped) => return self.exit(FC_EXIT_CODE_OK),
                 Ok(VcpuEmulation::Rebooted) => return self.exit(FC_EXIT_CODE_REBOOT),
-                Ok(VcpuEmulation::Frozen) => {
+                Ok(VcpuEmulation::Frozen(control)) => {
                     self.response_sender
-                        .send(VcpuResponse::Frozen)
+                        .send(VcpuResponse::Frozen(control))
                         .expect("failed to report cooperative freeze");
                     self.exit_evt
                         .write(1)
@@ -1661,7 +1663,7 @@ pub enum VcpuResponse {
     /// Vcpu is resumed.
     Resumed,
     /// Boot CPU has cooperatively frozen and will never enter KVM again.
-    Frozen,
+    Frozen(u64),
     /// Vcpu is stopped.
     Exited(u8),
 }
@@ -1737,7 +1739,7 @@ enum VcpuEmulation {
     Interrupted,
     Stopped,
     Rebooted,
-    Frozen,
+    Frozen(u64),
 }
 
 #[cfg(test)]
