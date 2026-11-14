@@ -79,14 +79,34 @@ pub fn output_file(file: File) -> Result<Box<dyn PortOutput + Send>, nix::Error>
 }
 
 pub fn output_to_raw_fd_dup(fd: RawFd) -> Result<Box<dyn PortOutput + Send>, nix::Error> {
-    let fd = dup_raw_fd_into_owned(fd)?;
-    make_non_blocking(&fd)?;
-    Ok(Box::new(PortOutputFd(fd)))
+    output_to_raw_fd_dup_blocking(fd)
 }
 
 /// Preserve the supplied open description, including offset and append semantics.
 pub fn output_to_raw_fd_dup_blocking(fd: RawFd) -> Result<Box<dyn PortOutput + Send>, nix::Error> {
-    Ok(Box::new(PortOutputFd(dup_raw_fd_into_owned(fd)?)))
+    Ok(Box::new(PortOutputFd(prepare_output_fd(fd)?)))
+}
+
+fn prepare_output_fd(fd: RawFd) -> Result<OwnedFd, nix::Error> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: fstat initializes stat on success; fd remains owned by caller.
+    if unsafe { libc::fstat(fd, stat.as_mut_ptr()) } < 0 {
+        return Err(Errno::last());
+    }
+    let mode = unsafe { stat.assume_init() }.st_mode & libc::S_IFMT;
+    if mode == libc::S_IFIFO || mode == libc::S_IFCHR {
+        // No regular-file offsets or socket identity are reopened. Pipe/tty flags
+        // belong to this private description, never the caller's shared one.
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(O_NONBLOCK)
+            .open(format!("/proc/self/fd/{fd}"))
+            .map_err(|error| Errno::from_raw(error.raw_os_error().unwrap_or(libc::EIO)))?;
+        Ok(file.into())
+    } else {
+        dup_raw_fd_into_owned(fd)
+    }
 }
 
 pub fn output_to_log_as_err() -> Box<dyn PortOutput + Send> {
@@ -171,26 +191,14 @@ impl PortOutput for PortOutputFd {
         if error.raw_os_error() != Some(libc::ENOTSOCK) {
             return Err(error);
         }
-        // Pipes have no per-write nonblocking flag. Keep the original open
-        // description (offset/O_APPEND), temporarily enabling nonblocking only
-        // around this write. Callers must serialize shared-description I/O.
-        let flags = unsafe { fcntl(fd, F_GETFL) };
-        if flags < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if unsafe { fcntl(fd, F_SETFL, flags | O_NONBLOCK) } < 0 {
-            return Err(io::Error::last_os_error());
-        }
+        // Regular files retain offset/O_APPEND; pipes/terminals already own a
+        // private nonblocking description. No caller flags are ever changed.
         let written = unsafe { libc::write(fd, guard.as_ptr().cast(), buf.len()) };
-        let result = if written < 0 {
+        if written < 0 {
             Err(io::Error::last_os_error())
         } else {
             Ok(written as usize)
-        };
-        if unsafe { fcntl(fd, F_SETFL, flags) } < 0 {
-            return Err(io::Error::last_os_error());
         }
-        result
     }
 
     fn wait_until_writable(&self) {
