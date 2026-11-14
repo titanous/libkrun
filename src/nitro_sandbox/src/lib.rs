@@ -1,6 +1,8 @@
 //! Host-side protocol primitives for the Nitro Sandbox hypervisor.
 //! This is distinct from running a workload inside a confidential enclave.
 
+#[cfg(all(target_os = "linux", feature = "devices"))]
+pub mod capture;
 pub mod console;
 pub mod cooperative;
 pub mod copy_memory;
