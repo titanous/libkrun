@@ -35,15 +35,20 @@ SIZES = (8, 32, 4096, 1 << 20)
 M64 = (1 << 64) - 1
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--kernel", required=True)
-parser.add_argument("--initramfs", required=True)
+parser.add_argument("--kernel")
+parser.add_argument("--initramfs")
 parser.add_argument("--output", required=True, type=Path)
+parser.add_argument("--nitro-results", type=Path,
+                    help="analyse arm64 Nitro runs instead of starting KVM guests: DIR holds, per freeze LABEL, "
+                         "LABEL.ram (exported template), LABEL.source.log and LABEL-copyN.log (copy consoles)")
 parser.add_argument("--freezes", type=int, default=70, help="source freezes per CPU count")
 parser.add_argument("--copies", type=int, default=4)
 parser.add_argument("--cpus", default="1,4,8")
 parser.add_argument("--memory", default="512")
 parser.add_argument("--keep-going", action="store_true", help="measure every freeze even after a failure")
 args = parser.parse_args()
+if not args.nitro_results and not (args.kernel and args.initramfs):
+    parser.error("--kernel and --initramfs are required unless --nitro-results is given")
 args.output.mkdir(parents=True, exist_ok=False)
 launcher = str(Path("target/release/examples/cooperative-console").resolve())
 
@@ -144,6 +149,16 @@ def same_tail(record, t):
     return record[3][-len(t["tail"]):] == t["tail"]
 
 
+def console_rings(log):
+    """Records printed by a copy without a disk: RANDCOPY REC thread seq ret hash head tail."""
+    rings = [{} for _ in range(THREADS)]
+    for m in re.finditer(rb"RANDCOPY REC (\d+) (\d+) (-?\d+) ([0-9a-f]{16}) ([0-9a-f]{32}) ([0-9a-f]{32})", log):
+        rings[int(m.group(1))][int(m.group(2))] = (int(m.group(3)), int(m.group(4), 16),
+                                                     bytes.fromhex(m.group(5).decode()),
+                                                     bytes.fromhex(m.group(6).decode()))
+    return rings
+
+
 def classify(kind, t):
     """Return (category, first sequence number that user space receives after resume)."""
     if t["state"] == 0:
@@ -212,7 +227,28 @@ def analyse(label, states, copies):
 
 cycle_count = 0
 try:
-    for cpus in (int(x) for x in args.cpus.split(",")):
+    for template_path in sorted(args.nitro_results.glob("*.ram")) if args.nitro_results else ():
+        label = template_path.stem
+        source_log = (args.nitro_results / f"{label}.source.log").read_bytes()
+        nonce = re.search(rb"RANDCOPY NONCE ([0-9a-f]{32})", source_log)
+        if nonce is None:
+            raise RuntimeError(f"no nonce in {label}.source.log")
+        states = find_markers(template_path, bytes.fromhex(nonce.group(1).decode()))
+        logs = sorted(args.nitro_results.glob(f"{label}-copy*.log"))
+        if len(logs) != args.copies:
+            raise RuntimeError(f"{label}: expected {args.copies} copy consoles, found {len(logs)}")
+        copies = []
+        for log in logs:
+            data = log.read_bytes()
+            if b"RANDCOPY DONE" not in data or b"RANDCOPY FAIL" in data:
+                raise RuntimeError(f"copy failed: {log.name}")
+            copies.append(console_rings(data))
+        bad = analyse(label, states, copies)
+        cycle_count += 1
+        caught = [f"{KINDS[i // 4]}-{SIZES[i % 4]}:{classify(KINDS[i // 4], s)[0]}"
+                  for i, s in enumerate(states) if classify(KINDS[i // 4], s)[0] != "outside-call"]
+        print(f"{'FAILED' if bad else 'PASS'} {label} threads_failed={bad} " + " ".join(caught), flush=True)
+    for cpus in (int(x) for x in args.cpus.split(",")) if not args.nitro_results else ():
         for cycle in range(args.freezes):
             label = f"cpu{cpus}-{cycle}"
             prefix = args.output / label

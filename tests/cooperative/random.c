@@ -56,7 +56,7 @@ struct control {
     uint64_t kind, size;
     volatile uint64_t recorded;   /* last sequence number with a ring record */
 };
-struct record { uint64_t seq; int64_t ret; uint64_t hash; uint64_t head[2]; uint64_t tail[2]; uint64_t pad; };
+struct record { uint64_t seq; int64_t ret; uint64_t hash; uint64_t head[2]; uint64_t tail[2]; uint64_t realtime_ns; };
 _Static_assert(sizeof(struct record) == 64, "record layout");
 
 struct worker {
@@ -109,10 +109,31 @@ static void mark(unsigned char *at, char tag, int thread)
 /* The store into *commit is the first user instruction executed after the system call. */
 static inline long syscall3_commit(long nr, long a, long b, long c, volatile int64_t *commit)
 {
+#if defined(__x86_64__)
     long ret;
     asm volatile("syscall\n\tmovq %%rax, (%5)"
                  : "=a"(ret) : "0"(nr), "D"(a), "S"(b), "d"(c), "r"(commit) : "rcx", "r11", "memory");
     return ret;
+#elif defined(__aarch64__)
+    register long x8 asm("x8") = nr, x0 asm("x0") = a, x1 asm("x1") = b, x2 asm("x2") = c;
+    asm volatile("svc #0\n\tstr x0, [%[commit]]"
+                 : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2), [commit] "r"(commit) : "memory");
+    return x0;
+#else
+#error "unsupported architecture"
+#endif
+}
+#if defined(__aarch64__)
+#define VDSO_GETRANDOM "__kernel_getrandom"
+#else
+#define VDSO_GETRANDOM "__vdso_getrandom"
+#endif
+
+static uint64_t realtime_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
 }
 
 static void *vdso_symbol(const char *name)
@@ -173,7 +194,7 @@ static void *worker_loop(void *argument)
         if (ret <= 0) fail("random call");
         struct record *r = &w->ring[seq % RING];
         r->seq = seq; r->ret = ret; r->hash = hash_words(w->buffer, n);
-        memcpy(r->head, w->buffer, 16); memcpy(r->tail, w->buffer + n - 16, 16);
+        memcpy(r->head, w->buffer, 16); memcpy(r->tail, w->buffer + n - 16, 16); r->realtime_ns = realtime_ns();
         c->recorded = seq;
         atomic_signal_fence(memory_order_seq_cst);
         c->state = 0;
@@ -200,11 +221,11 @@ int main(void)
     if (console >= 0) { dup2(console, 0); dup2(console, 1); dup2(console, 2); }
     setbuf(stdout, NULL);
     if (syscall(SYS_getrandom, nonce, sizeof(nonce), 0) != sizeof(nonce)) fail("nonce");
-    vgetrandom = (vgetrandom_t)vdso_symbol("__vdso_getrandom");
+    vgetrandom = (vgetrandom_t)vdso_symbol(VDSO_GETRANDOM);
     struct { uint32_t size, prot, flags, reserved[13]; } params;
     if (!vgetrandom || vgetrandom(NULL, 0, 0, &params, ~0UL)) fail("vDSO getrandom unavailable");
+    /* Without a disk (Nitro test harness) each copy prints a window of records instead. */
     int disk = open("/dev/vda", O_RDWR);
-    if (disk < 0) fail("disk");
     for (int i = 0; i < THREADS; i++) {
         struct worker *w = &workers[i];
         w->control_page = pages(4096);
@@ -261,14 +282,37 @@ int main(void)
         if (waited > 20000) fail("workers did not record after resume");
         usleep(1000);
     }
-    for (int i = 0; i < THREADS; i++) {
+    for (int i = 0; disk < 0 && i < THREADS; i++) {
+        /* The copy point is the largest wall-clock gap between consecutive records; print records
+         * around it. The host checks that the call in flight at the freeze lies in the window. */
+        struct worker *w = &workers[i];
+        uint64_t last = w->control->recorded, best = last, gap = 0;
+        for (uint64_t s = last; s > 1 && s + RING > last + 1; s--) {
+            struct record *a = &w->ring[s % RING], *b = &w->ring[(s - 1) % RING];
+            if (a->seq != s || b->seq != s - 1) break;
+            if (a->realtime_ns - b->realtime_ns > gap && a->realtime_ns > b->realtime_ns) {
+                gap = a->realtime_ns - b->realtime_ns; best = s;
+            }
+        }
+        for (uint64_t s = best > 8 ? best - 8 : 1; s <= last && s < best + 12; s++) {
+            struct record *r = &w->ring[s % RING];
+            if (r->seq != s) continue;
+            printf("RANDCOPY REC %d %llu %lld %016llx ", i, (unsigned long long)r->seq, (long long)r->ret,
+                   (unsigned long long)r->hash);
+            for (int k = 0; k < 16; k++) printf("%02x", ((unsigned char *)r->head)[k]);
+            printf(" ");
+            for (int k = 0; k < 16; k++) printf("%02x", ((unsigned char *)r->tail)[k]);
+            printf("\n");
+        }
+    }
+    for (int i = 0; disk >= 0 && i < THREADS; i++) {
         uint64_t header[4] = { RING_MAGIC, (uint64_t)i, workers[i].control->recorded, RING };
         off_t at = RING_OFFSET + (off_t)i * RING_STRIDE;
         if (pwrite(disk, header, sizeof(header), at) != sizeof(header) ||
             pwrite(disk, workers[i].ring, sizeof(struct record) * RING, at + 4096) != (ssize_t)(sizeof(struct record) * RING))
             fail("ring write");
     }
-    if (fsync(disk)) fail("ring sync");
+    if (disk >= 0 && fsync(disk)) fail("ring sync");
     atomic_store(&stop, 1);
     printf("RANDCOPY DONE cpus=%ld\n", sysconf(_SC_NPROCESSORS_ONLN));
     for (int i = 0; i < THREADS; i++) printf("RANDCOPY THREAD %d %s %zu last=%llu\n", i,
