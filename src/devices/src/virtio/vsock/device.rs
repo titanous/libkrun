@@ -251,6 +251,8 @@ mod lifecycle_tests {
     use crate::legacy::DummyIrqChip;
     use vm_memory::GuestAddress;
 
+    static WORKER_TEST_LOCK: Mutex<()> = Mutex::new(());
+
     fn worker_count() -> usize {
         std::fs::read_dir("/proc/self/task")
             .unwrap()
@@ -276,6 +278,7 @@ mod lifecycle_tests {
 
     #[test]
     fn configured_policy_survives_reset() {
+        let _guard = WORKER_TEST_LOCK.lock().unwrap();
         use super::super::policy::{AllowlistPolicy, SocketAddress, SocketOperation, SocketPolicy};
         use nix::errno::Errno;
         use std::os::fd::AsRawFd;
@@ -328,6 +331,7 @@ mod lifecycle_tests {
 
     #[test]
     fn repeated_reset_joins_workers() {
+        let _guard = WORKER_TEST_LOCK.lock().unwrap();
         let baseline = worker_count();
         let mut device = Vsock::new(3, None, None, TsiFlags::empty()).unwrap();
         for _ in 0..16 {
