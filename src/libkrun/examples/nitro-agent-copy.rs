@@ -193,6 +193,12 @@ mod probe {
             None
         };
         let mut receiver = builder(&args[2], cid, &socket)?;
+        if std::env::var_os("AGENT_DEVICES").is_some() {
+            let disk = directory.join(format!("disk-{cid}"));
+            std::fs::copy(directory.join("frozen-disk"), &disk)?;
+            let fs = super::nitro_copy_fs::Tree::new(std::fs::read(directory.join("frozen-fs"))?);
+            attach_devices(&mut receiver, &disk, fs);
+        }
         let _readiness = receiver.start_from_template(
             TemplateSource::Descriptor(file),
             Duration::from_secs(20),
@@ -368,6 +374,10 @@ mod probe {
             let directory =
                 std::env::current_dir()?.join(format!("agent-concurrent-{}", std::process::id()));
             std::fs::create_dir(&directory)?;
+            if let Some(disk) = frozen_disk.as_ref() {
+                std::fs::write(directory.join("frozen-disk"), disk)?;
+                std::fs::write(directory.join("frozen-fs"), &frozen_fs)?;
+            }
             let mut children = Vec::new();
             for cid in 740..744 {
                 let mut command = std::process::Command::new(std::env::current_exe()?);
