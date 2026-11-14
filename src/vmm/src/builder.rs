@@ -134,6 +134,10 @@ pub enum StartMicrovmError {
     TemplateTopologyMismatch,
     /// Template RAM extents differ from the configured architecture layout.
     TemplateMemoryLayoutMismatch,
+    /// Configured guest kernel build ID differs from the template.
+    TemplateKernelMismatch,
+    /// CPU features, xstate layout or TSC frequency differs from the template.
+    TemplateCpuMismatch,
     /// The BZIP2 decoder couldn't decompress the kernel.
     ImageBz2Decoder(io::Error),
     /// Cannot find compressed kernel in file.
@@ -293,6 +297,11 @@ impl Display for StartMicrovmError {
             FirmwareRead(ref err) => {
                 write!(f, "Cannot read firmware contents from file: {err}")
             }
+            TemplateKernelMismatch => write!(f, "template kernel build identifier mismatch"),
+            TemplateCpuMismatch => write!(
+                f,
+                "template CPU features, extended-state layout or TSC frequency mismatch"
+            ),
             TemplateTopologyMismatch => write!(f, "incompatible template topology"),
             TemplateMemoryLayoutMismatch => write!(f, "template RAM layout mismatch"),
             GuestMemoryMmap(ref err) => {
@@ -1020,14 +1029,10 @@ pub fn build_microvm(
                 && compatibility[compatibility.len() - 20..]
                     != template.compatibility[template.compatibility.len() - 20..]
             {
-                return Err(StartMicrovmError::GuestMemoryMmap(
-                    "template kernel build identifier mismatch".into(),
-                ));
+                return Err(StartMicrovmError::TemplateKernelMismatch);
             }
             if compatibility != template.compatibility {
-                return Err(StartMicrovmError::GuestMemoryMmap(
-                    "template CPU features, extended-state layout or TSC frequency mismatch".into(),
-                ));
+                return Err(StartMicrovmError::TemplateCpuMismatch);
             }
             vm.fd()
                 .set_clock(&kvm_bindings::kvm_clock_data {
@@ -2053,10 +2058,7 @@ pub fn create_guest_memory(
         let topology = crate::template_topology::encode(vm_resources, &shm)
             .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
         if topology != template.topology {
-            return Err(StartMicrovmError::GuestMemoryMmap(
-                "template device/filesystem topology mismatch (order, tag, queues or DAX range)"
-                    .into(),
-            ));
+            return Err(StartMicrovmError::TemplateTopologyMismatch);
         }
         return Ok((
             memory,
