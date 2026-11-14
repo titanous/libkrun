@@ -51,9 +51,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     builder.nitro_stop_reason(true);
     let capture = Capture::default();
     builder.nitro_console_sink(Box::new(capture.clone()), 1024 * 1024, 1024 * 1024);
+    use std::os::unix::fs::DirBuilderExt;
+    let heartbeat_directory =
+        std::env::current_dir()?.join(format!("terminal-private-{}", std::process::id()));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&heartbeat_directory)?;
     builder.nitro_heartbeat(
         7998,
-        std::env::current_dir()?.join("terminal-heartbeat.sock"),
+        heartbeat_directory.join("heartbeat.sock"),
         std::time::Duration::from_secs(3),
     );
     use std::io::Write;
@@ -118,6 +124,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let detection_ms = observed.checked_sub(go_at).expect("ordered host clocks") as f64 / 1000.;
     peer.join().unwrap();
     std::fs::remove_file(path)?;
+    std::fs::remove_dir(heartbeat_directory)?;
     assert!(
         std::env::var_os("NITRO_LONG_PANIC").is_some() || detection_ms < 100.0,
         "terminal reason detection too slow: {detection_ms}ms"

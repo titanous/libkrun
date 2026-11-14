@@ -240,8 +240,14 @@ serialized by the kernel's flock, not a process-local mutex.
 
 The device watchdog bounds readiness/reset recovery and returns
 `VmExit::DeviceWatchdog`. For workload liveness, configure
-`nitro_heartbeat(port, socket_path, deadline)`: the VMM binds a new Unix socket and
-reserves that mapped vsock port. The guest agent connects to host CID 2 at the port
+`nitro_heartbeat(port, socket_path, deadline)`: the embedder supplies a parent
+directory owned by the VMM uid with owner-only permissions (normally 0700).
+The VMM binds a new Unix socket before guest creation/start, refuses any existing
+path, and reserves that mapped vsock port. Normal teardown removes the socket;
+after SIGKILL/crash the daemon removes its stale socket inside the private
+directory after reaping the VMM. Call `VmHandle::suspend_liveness_deadline()`
+before an intentional freeze and `resume_liveness_deadline()` afterward; resume
+starts a fresh full deadline, excluding suspended time. The guest agent connects to host CID 2 at the port
 and sends ASCII `H` periodically (recommend at most one third of the deadline).
 The deadline starts after the guest starts and refreshes only on `H`; failure to
 connect or silence returns `VmExit::LivenessExpired`. Reconnection is supported.

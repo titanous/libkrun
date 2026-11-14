@@ -107,6 +107,9 @@ impl Runtime {
         self.stop_reason = Some(crate::stop_reason::StopReason::register(&mut self.sandbox)?);
         Ok(())
     }
+    pub fn heartbeat_control(&self) -> Option<crate::heartbeat::DeadlineControl> {
+        self.heartbeat.as_ref().map(|heartbeat| heartbeat.control())
+    }
     pub fn set_heartbeat(&mut self, heartbeat: crate::heartbeat::Heartbeat) {
         self.heartbeat = Some(heartbeat);
     }

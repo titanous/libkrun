@@ -1984,6 +1984,11 @@ impl Context {
         if self.built_vm.nitro.is_some() {
             return VmHandle {
                 vmm: None,
+                heartbeat_control: self
+                    .built_vm
+                    .nitro
+                    .as_ref()
+                    .and_then(|runtime| runtime.heartbeat_control()),
                 shutdown_efd: self.shutdown_efd.clone(),
                 #[cfg(not(feature = "tee"))]
                 balloon: None,
@@ -2002,6 +2007,8 @@ impl Context {
 
         VmHandle {
             vmm: Some(self.built_vm.vmm().clone()),
+            #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+            heartbeat_control: None,
             shutdown_efd: self.shutdown_efd.clone(),
             #[cfg(not(feature = "tee"))]
             balloon: balloon_handle,
@@ -2119,6 +2126,8 @@ pub enum BalloonError {
 #[derive(Clone)]
 pub struct VmHandle {
     vmm: Option<Arc<Mutex<vmm::Vmm>>>,
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    heartbeat_control: Option<nitro_sandbox::heartbeat::DeadlineControl>,
     shutdown_efd: Option<Arc<EventFd>>,
     #[cfg(not(feature = "tee"))]
     balloon: Option<BalloonHandle>,
@@ -2274,6 +2283,34 @@ impl Drop for NitroSigtermGuard {
 }
 
 impl VmHandle {
+    /// Suspend Nitro guest heartbeat expiry while the embedder freezes a guest.
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    pub fn suspend_liveness_deadline(&self) -> std::io::Result<()> {
+        self.heartbeat_control
+            .as_ref()
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "no Nitro liveness deadline",
+                )
+            })?
+            .suspend();
+        Ok(())
+    }
+    /// Resume with a fresh full deadline, excluding time spent suspended.
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    pub fn resume_liveness_deadline(&self) -> std::io::Result<()> {
+        self.heartbeat_control
+            .as_ref()
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "no Nitro liveness deadline",
+                )
+            })?
+            .resume();
+        Ok(())
+    }
     /// Route SIGTERM through the same orderly stop event as a handle request.
     /// Keep the returned guard alive while running the guest.
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
@@ -2456,6 +2493,7 @@ mod tests {
         let stop = Arc::new(EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap());
         let handle = VmHandle {
             vmm: None,
+            heartbeat_control: None,
             shutdown_efd: Some(stop.clone()),
             #[cfg(not(feature = "tee"))]
             balloon: None,
