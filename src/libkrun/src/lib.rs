@@ -516,6 +516,13 @@ pub use nitro_sandbox::lifecycle::{
 ))]
 pub use nitro_sandbox::runtime::ParkedReceiverError;
 
+#[cfg(all(
+    target_os = "linux",
+    target_arch = "aarch64",
+    feature = "nitro-sandbox"
+))]
+pub use vmm::capture_request::RestoredCopyCaptureUnsupported;
+
 /// Gives a parked Nitro receiver its template, once. See
 /// `Builder::park_for_template`.
 #[cfg(all(
@@ -1765,6 +1772,9 @@ impl Builder {
             runtime.enable_stop_reason().map_err(StartError::Nitro)?;
         }
         #[cfg(target_arch = "aarch64")]
+        let restored_copy =
+            self.config.vmr.cooperative_template.is_some() || self.nitro_park.is_some();
+        #[cfg(target_arch = "aarch64")]
         if let Some(template) = self.config.vmr.cooperative_template.take() {
             let topology = template_topology.clone();
             let compatibility = template.compatibility.clone();
@@ -1817,6 +1827,11 @@ impl Builder {
         let context = {
             let mut context = context;
             context.built_vm.nitro_capture = self.nitro_capture.take();
+            if restored_copy {
+                let request = vmm::capture_request::CaptureRequest::default();
+                request.refuse_restored_copy();
+                context.built_vm.nitro_capture = Some(request);
+            }
             context.built_vm.nitro_park = park;
             context
         };
