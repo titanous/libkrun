@@ -1650,7 +1650,10 @@ impl Builder {
     /// The callback must be nonblocking and keep bounded parser state. It must not
     /// retain guest memory; these bytes are valid only for the callback duration.
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
-    pub fn nitro_console_observer(&mut self, observer: Box<dyn FnMut(&[u8]) + Send>) -> &mut Self {
+    pub fn nitro_console_observer(
+        &mut self,
+        observer: nitro_sandbox::console::RawObserver,
+    ) -> &mut Self {
         self.nitro_console
             .get_or_insert_with(Default::default)
             .set_observer(observer);

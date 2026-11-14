@@ -2,9 +2,12 @@
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
+/// Nonblocking callback over raw console bytes, before diagnostic loss.
+pub type RawObserver = Box<dyn FnMut(&[u8]) + Send>;
+
 pub struct Console {
     sink: Option<Box<dyn Write + Send>>,
-    observer: Option<Box<dyn FnMut(&[u8]) + Send>>,
+    observer: Option<RawObserver>,
     total_limit: usize,
     rate_limit: usize,
     total: usize,
@@ -23,7 +26,7 @@ impl Console {
         self.total_limit = total_limit;
         self.rate_limit = rate_limit;
     }
-    pub fn set_observer(&mut self, observer: Box<dyn FnMut(&[u8]) + Send>) {
+    pub fn set_observer(&mut self, observer: RawObserver) {
         self.observer = Some(observer);
     }
     pub fn dropped_counter(&self) -> std::sync::Arc<std::sync::atomic::AtomicU64> {
