@@ -1884,6 +1884,36 @@ pub enum StartError {
     EventManagerRun(polly::event_manager::Error),
 }
 
+#[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+fn nitro_stated_exit(code: u8, observed_micros: Option<u64>) -> VmExit {
+    // Keep raw-byte translation here until the shared exit contract is merged.
+    VmExit::Error {
+        message: format!("Nitro stated terminal reason {code} observed_micros={observed_micros:?}"),
+    }
+}
+
+#[cfg(all(test, target_os = "linux", feature = "nitro-sandbox"))]
+#[test]
+fn nitro_stated_exit_table() {
+    for (code, name) in [
+        (1, "power-off"),
+        (2, "reboot"),
+        (3, "halt"),
+        (4, "panic"),
+        (0, "unknown"),
+        (255, "unknown"),
+    ] {
+        let VmExit::Error { message } = nitro_stated_exit(code, Some(42)) else {
+            panic!("unexpected public value for {name}");
+        };
+        assert_eq!(
+            message,
+            format!("Nitro stated terminal reason {code} observed_micros=Some(42)"),
+            "{name}"
+        );
+    }
+}
+
 impl Context {
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     fn from_nitro(
@@ -1976,11 +2006,7 @@ impl Context {
                     nitro_sandbox::runtime::Exit::StatedReason {
                         code,
                         observed_micros,
-                    } => vmm::vm_exit::VmExit::Error {
-                        message: format!(
-                            "Nitro stated terminal reason {code} observed_micros={observed_micros:?}"
-                        ),
-                    },
+                    } => nitro_stated_exit(code, observed_micros),
                     nitro_sandbox::runtime::Exit::Watchdog => vmm::vm_exit::VmExit::DeviceWatchdog,
                     nitro_sandbox::runtime::Exit::Panic => vmm::vm_exit::VmExit::GuestPanic,
                     nitro_sandbox::runtime::Exit::LivenessExpired => {

@@ -185,6 +185,11 @@ impl Runtime {
                 transport.consume_info_event()?;
             }
         }
+        if let Some(reason) = &self.stop_reason {
+            if descriptors[3 + self.transports.len()].revents & libc::POLLIN != 0 {
+                reason.consume_notification()?;
+            }
+        }
         Ok(())
     }
 
@@ -196,16 +201,29 @@ impl Runtime {
         }
         let mut watchdog = Watchdog::new(Duration::ZERO, self.timeout);
         let mut active = 0usize;
+        let mut stated = None;
         loop {
-            if let Some(reason) = self.stop_reason.as_ref().and_then(|device| device.reason()) {
-                let observed_micros = self
-                    .stop_reason
-                    .as_ref()
-                    .and_then(|device| device.observation_micros());
-                return Ok(Exit::StatedReason {
-                    code: reason,
-                    observed_micros,
-                });
+            if stated.is_none() {
+                if let Some(device) = &self.stop_reason {
+                    if let Some(code) = device.reason() {
+                        stated = Some((
+                            Instant::now(),
+                            Exit::StatedReason {
+                                code,
+                                observed_micros: device.observation_micros(),
+                            },
+                        ));
+                    }
+                }
+            }
+            // Intent is reported before the kernel flushes panic/shutdown output.
+            // Continue servicing devices and draining until poweroff or a bounded
+            // grace period; preserve the timestamp of the first observation.
+            if let Some((observed, exit)) = stated {
+                if self.sandbox.powered_off(0)? || observed.elapsed() >= Duration::from_secs(1) {
+                    self.sandbox.drain_console(&mut self.console)?;
+                    return Ok(exit);
+                }
             }
             match self.stop.read() {
                 Ok(_) => return Ok(Exit::Stopped),
@@ -214,6 +232,9 @@ impl Runtime {
             }
             if self.sandbox.powered_off(0)? {
                 self.sandbox.drain_console(&mut self.console)?;
+                if let Some((_, exit)) = stated {
+                    return Ok(exit);
+                }
                 if let Some(device) = &self.stop_reason {
                     if let Some(code) = device.reason() {
                         let observed_micros = device.observation_micros();
@@ -251,16 +272,17 @@ impl Runtime {
             if self.stop_reason.is_none() && self.console.panic_seen() {
                 return Ok(Exit::Panic);
             }
-            if self
-                .heartbeat
-                .as_mut()
-                .map(|heartbeat| heartbeat.refresh(Instant::now()))
-                .transpose()?
-                .unwrap_or(false)
+            if stated.is_none()
+                && self
+                    .heartbeat
+                    .as_mut()
+                    .map(|heartbeat| heartbeat.refresh(Instant::now()))
+                    .transpose()?
+                    .unwrap_or(false)
             {
                 return Ok(Exit::LivenessExpired);
             }
-            if watchdog.expired(start.elapsed()) {
+            if stated.is_none() && watchdog.expired(start.elapsed()) {
                 return Ok(Exit::Watchdog);
             }
             self.wait_events()?;

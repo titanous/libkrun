@@ -1,5 +1,16 @@
 //! Privileged terminal-byte channel acceptance; temporary raw-code diagnostics.
 use krun::{Builder, NitroBackendConfig, VmExit};
+#[derive(Clone, Default)]
+struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+impl std::io::Write for Capture {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 fn monotonic_micros() -> u64 {
     let mut time = libc::timespec {
         tv_sec: 0,
@@ -31,9 +42,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         krun::KernelFormat::Raw,
         Some(args[2].clone().into()),
     )?;
-    builder.set_kernel_cmdline(vec!["console=hvc0", "quiet", "panic=-1", "rdinit=/init"]);
+    let mut cmdline = vec!["console=hvc0", "quiet", "panic=-1", "rdinit=/init"];
+    if std::env::var_os("NITRO_LONG_PANIC").is_some() {
+        cmdline.push("ignore_loglevel");
+        cmdline.push("printk.devkmsg=on");
+    }
+    builder.set_kernel_cmdline(cmdline);
     builder.nitro_stop_reason(true);
-    builder.nitro_console_sink(Box::new(std::io::stdout()), 65536, 65536);
+    let capture = Capture::default();
+    builder.nitro_console_sink(Box::new(capture.clone()), 1024 * 1024, 1024 * 1024);
     builder.nitro_heartbeat(
         7998,
         std::env::current_dir()?.join("terminal-heartbeat.sock"),
@@ -70,6 +87,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let context = builder.build()?;
     let start = std::time::Instant::now();
     let exit = context.run()?;
+    if std::env::var_os("NITRO_LONG_PANIC").is_some() {
+        let bytes = capture.0.lock().unwrap();
+        std::fs::write("review-t2-console.log", &*bytes)?;
+        let text = String::from_utf8_lossy(&bytes);
+        for line in 0..1024 {
+            assert!(
+                text.contains(&format!(
+                    "PANIC_BURST_{line:04} retained kernel diagnostic line"
+                )),
+                "missing panic line {line}"
+            );
+        }
+        assert!(
+            text.contains("Kernel panic - not syncing"),
+            "missing panic diagnostic"
+        );
+        println!("PANIC_LINES_OK lines=1024 bytes={}", bytes.len());
+    }
     let go_at = go.lock().unwrap().expect("guest handshake occurred");
     let observed: u64 = match &exit {
         VmExit::Error { message } => message
@@ -84,7 +119,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     peer.join().unwrap();
     std::fs::remove_file(path)?;
     assert!(
-        detection_ms < 100.0,
+        std::env::var_os("NITRO_LONG_PANIC").is_some() || detection_ms < 100.0,
         "terminal reason detection too slow: {detection_ms}ms"
     );
     match &exit {
