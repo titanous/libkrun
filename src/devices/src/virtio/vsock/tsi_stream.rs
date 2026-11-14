@@ -31,6 +31,28 @@ use super::proxy::{
 use utils::epoll::EventSet;
 use vm_memory::GuestMemoryMmap;
 
+fn guest_local_listener(port: Option<u16>, host_port_map: &Option<HashMap<u16, u16>>) -> bool {
+    port.is_some_and(|port| {
+        !host_port_map
+            .as_ref()
+            .is_some_and(|ports| ports.contains_key(&port))
+    })
+}
+
+#[cfg(test)]
+mod listener_tests {
+    use super::*;
+    #[test]
+    fn only_explicit_port_mapping_exposes_a_listener() {
+        assert!(guest_local_listener(Some(8080), &None));
+        assert!(guest_local_listener(Some(8080), &Some(HashMap::new())));
+        let mappings = Some(HashMap::from([(8080, 18080)]));
+        assert!(!guest_local_listener(Some(8080), &mappings));
+        assert!(guest_local_listener(Some(8081), &mappings));
+        assert!(!guest_local_listener(None, &None));
+    }
+}
+
 pub struct TsiStreamProxy {
     pub(crate) socket_policy: super::policy::SocketPolicy,
     id: u64,
@@ -655,20 +677,38 @@ impl Proxy for TsiStreamProxy {
         );
         let mut update = ProxyUpdate::default();
 
-        let result = self.try_listen(&req, host_port_map);
+        let port = req
+            .addr
+            .as_sockaddr_in()
+            .map(|a| a.port())
+            .or_else(|| req.addr.as_sockaddr_in6().map(|a| a.port()));
+        let guest_local = guest_local_listener(port, host_port_map);
+        // An Internet listener belongs to the guest unless the embedding host
+        // explicitly maps its port. Never bind an unmapped guest address here.
+        let result = if guest_local {
+            0
+        } else {
+            self.try_listen(&req, host_port_map)
+        };
 
         // This packet goes to the control port (DGRAM).
         let rx = MuxerRx::ListenResponse {
             local_port: pkt.dst_port(),
             peer_port: pkt.src_port(),
-            result,
+            result: if result == 0 && port.is_some() && !guest_local {
+                1
+            } else {
+                result
+            },
         };
         self.push_pkt(rx);
 
         if result == 0 {
             self.peer_port = req.vm_port;
             self.status = ProxyStatus::Listening;
-            update.polling = Some((self.id, self.fd.as_raw_fd(), EventSet::IN));
+            if !guest_local {
+                update.polling = Some((self.id, self.fd.as_raw_fd(), EventSet::IN));
+            }
         }
 
         update

@@ -4,6 +4,10 @@ Configure `krun::Builder`, call `build()` for a `Context`, and consume it with
 `Context::run()`. The VM owns its device backends. A caller may retain an `Arc`
 to observe shared block storage after exit.
 
+## Guest-local Internet listeners
+
+Internet Listen requests create no host socket unless `host_port_map` explicitly maps the guest port. Unmapped requests receive result zero and are not registered for host polling. The guest kernel must interpret zero as native guest INET listen/accept (holodeck kernel patch `0013-vsock-guest-local-listeners.patch`). Mapped Internet listeners retain host bind/listen and return positive result one, which the paired kernel translates to userspace success while retaining vsock accept. Deploy the fork and guest-kernel changes together; the older kernel interprets zero as vsock-only and cannot accept guest-local connections. Unix listeners retain their separate policy checks. Outbound TCP/UDP policy is unchanged.
+
 ## External kernel, initramfs and command line
 
 `external_kernel(&mut self, path: PathBuf, format: KernelFormat, initramfs_path: Option<PathBuf>) -> std::io::Result<&mut Self>`
