@@ -273,7 +273,10 @@ impl Sandbox {
         // the duplicate has been sent. A death of this process in between (SIGKILL, an
         // out-of-memory kill) then releases the VM while the lock is still held: the exiting
         // task's file releases run last-opened-first, and the lock file was opened before the VM
-        // existed (observed on the target kernel: see the holodeck daemon2 lane notes). Without a
+        // existed (observed on the target kernel: see the holodeck daemon2 lane notes). That
+        // order is a kernel implementation detail, not a guarantee: examples/release_order.rs
+        // checks it, and holodeck's Nitro instance tests run it on every host (module
+        // nitro_release_order); rerun it on every new host kernel. Without a
         // handoff the lock is held only around the create call (it then waits for a close in
         // progress elsewhere, as before). This is microseconds and never waits for the daemon.
         let window_guard = if teardown_only {
