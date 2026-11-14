@@ -209,9 +209,22 @@ All cooperating VMMs and the daemon must resolve the path to the same inode,
 including across mount namespaces. Starts/stops in different processes are
 serialized by the kernel's flock, not a process-local mutex.
 
-The current watchdog bounds device readiness/reset recovery, not a hung workload
-whose devices remain ready. General liveness and panic detection are not yet
-provided.
+The device watchdog bounds readiness/reset recovery and returns
+`VmExit::DeviceWatchdog`. For workload liveness, configure
+`nitro_heartbeat(port, socket_path, deadline)`: the VMM binds a new Unix socket and
+reserves that mapped vsock port. The guest agent connects to host CID 2 at the port
+and sends ASCII `H` periodically (recommend at most one third of the deadline).
+The deadline starts after the guest starts and refreshes only on `H`; failure to
+connect or silence returns `VmExit::LivenessExpired`. Reconnection is supported.
+The mapping remains subject to the embedder's Unix-connect policy; allow its exact
+socket path. Existing paths and port collisions are errors, not overwritten.
+
+The maintained kernel's `HOLODECK GUEST STOP panic` diagnostic marker returns
+`VmExit::GuestPanic` promptly, even when console output is discarded or its budget
+is exhausted. Marker matching handles split reads and kernel prefixes. This text
+is not an authenticated tenant status channel. Missing markers are not evidence
+of clean shutdown; liveness still bounds a hung guest. Use the maintained kernel
+stop convention and `panic=-1` to avoid an indefinite panic halt.
 `backend_must_enforce_configured_rule` is a public-API KVM conformance test using
 a live denied host listener; it fails if the configured rule is ignored. Backend
 integration must run that same semantic test or assert explicit unsupported

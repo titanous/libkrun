@@ -3,6 +3,8 @@
 
 pub mod console;
 #[cfg(target_os = "linux")]
+pub mod heartbeat;
+#[cfg(target_os = "linux")]
 pub mod host;
 #[cfg(target_os = "linux")]
 pub mod lifecycle;

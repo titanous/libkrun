@@ -510,6 +510,8 @@ pub struct Builder {
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     nitro_console: Option<nitro_sandbox::console::Console>,
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    nitro_heartbeat: Option<(u32, PathBuf, std::time::Duration)>,
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     nitro_console_base: Option<u32>,
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     nitro_selected_after_consoles: bool,
@@ -1245,6 +1247,29 @@ impl Builder {
         if !self.config.vmr.disable_implicit_console {
             return Err(StartError::Nitro(std::io::Error::new(std::io::ErrorKind::Unsupported, "unsupported on this backend: disable the implicit console and configure custom Nitro console ports explicitly")));
         }
+        let heartbeat = if let Some((port, path, deadline)) = self.nitro_heartbeat.take() {
+            if matches!(self.config.vsock_config, VsockConfig::Disabled)
+                || self
+                    .config
+                    .unix_ipc_port_map
+                    .as_ref()
+                    .is_some_and(|ports| ports.contains_key(&port))
+            {
+                return Err(StartError::Nitro(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "unsupported on this backend: heartbeat requires an unused mapped vsock port",
+                )));
+            }
+            let heartbeat = nitro_sandbox::heartbeat::Heartbeat::bind(path.clone(), deadline)
+                .map_err(StartError::Nitro)?;
+            self.config
+                .unix_ipc_port_map
+                .get_or_insert_with(HashMap::new)
+                .insert(port, (path, false));
+            Some(heartbeat)
+        } else {
+            None
+        };
         let config = self.config.vmr.vm_config();
         let memory_mib = config.mem_size_mib.unwrap_or(1024);
         if memory_mib < 64 || !memory_mib.is_multiple_of(2) || options.watchdog.is_zero() {
@@ -1271,6 +1296,9 @@ impl Builder {
             self.nitro_lifecycle_lock.take(),
         )
         .map_err(StartError::Nitro)?;
+        if let Some(heartbeat) = heartbeat {
+            runtime.set_heartbeat(heartbeat);
+        }
         if let Some(console) = self.nitro_console.take() {
             runtime.set_console(console);
         }
@@ -1344,6 +1372,20 @@ impl Builder {
     pub fn nitro_backend(&mut self, config: NitroBackendConfig) -> &mut Self {
         self.nitro_selected_after_consoles |= self.console_count != 0 && self.nitro.is_none();
         self.nitro = Some(config);
+        self
+    }
+
+    /// Require guest-originated heartbeats at CID 2 and the supplied vsock port.
+    /// Guest sends ASCII H periodically; the deadline starts at guest start and
+    /// refreshes on H. The socket path must not exist and remains policy checked.
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    pub fn nitro_heartbeat(
+        &mut self,
+        port: u32,
+        path: PathBuf,
+        deadline: std::time::Duration,
+    ) -> &mut Self {
+        self.nitro_heartbeat = Some((port, path, deadline));
         self
     }
 
@@ -1829,9 +1871,11 @@ impl Context {
                         vmm::vm_exit::VmExit::Shutdown { exit_code: 0 }
                     }
                     nitro_sandbox::runtime::Exit::Stopped => vmm::vm_exit::VmExit::Stopped,
-                    nitro_sandbox::runtime::Exit::Watchdog => vmm::vm_exit::VmExit::Error {
-                        message: "Nitro guest watchdog expired".into(),
-                    },
+                    nitro_sandbox::runtime::Exit::Watchdog => vmm::vm_exit::VmExit::DeviceWatchdog,
+                    nitro_sandbox::runtime::Exit::Panic => vmm::vm_exit::VmExit::GuestPanic,
+                    nitro_sandbox::runtime::Exit::LivenessExpired => {
+                        vmm::vm_exit::VmExit::LivenessExpired
+                    }
                 })
                 .map_err(StartError::Nitro);
         }

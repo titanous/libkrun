@@ -13,6 +13,8 @@ pub enum Exit {
     PowerOff,
     Watchdog,
     Stopped,
+    Panic,
+    LivenessExpired,
 }
 
 #[derive(Default)]
@@ -44,6 +46,7 @@ pub struct Runtime {
     observers: ExitObservers,
     stop: Arc<utils::eventfd::EventFd>,
     console: crate::console::Console,
+    heartbeat: Option<crate::heartbeat::Heartbeat>,
 }
 impl Runtime {
     pub fn new(
@@ -78,7 +81,11 @@ impl Runtime {
             observers: ExitObservers::default(),
             stop: Arc::new(utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK)?),
             console: Default::default(),
+            heartbeat: None,
         })
+    }
+    pub fn set_heartbeat(&mut self, heartbeat: crate::heartbeat::Heartbeat) {
+        self.heartbeat = Some(heartbeat);
     }
     pub fn set_console(&mut self, console: crate::console::Console) {
         self.console = console;
@@ -111,6 +118,9 @@ impl Runtime {
     pub fn run(mut self) -> io::Result<Exit> {
         self.sandbox.start(self.cid)?;
         let start = Instant::now();
+        if let Some(heartbeat) = &mut self.heartbeat {
+            heartbeat.start(start);
+        }
         let mut watchdog = Watchdog::new(Duration::ZERO, self.timeout);
         let mut active = 0usize;
         loop {
@@ -121,7 +131,11 @@ impl Runtime {
             }
             if self.sandbox.powered_off(0)? {
                 self.sandbox.drain_console(&mut self.console)?;
-                return Ok(Exit::PowerOff);
+                return Ok(if self.console.panic_seen() {
+                    Exit::Panic
+                } else {
+                    Exit::PowerOff
+                });
             }
             for transport in &mut self.transports {
                 match transport.refresh(&self.sandbox, self.memory.as_ref().unwrap())? {
@@ -139,6 +153,18 @@ impl Runtime {
                 watchdog.devices_ready();
             }
             self.sandbox.drain_console(&mut self.console)?;
+            if self.console.panic_seen() {
+                return Ok(Exit::Panic);
+            }
+            if self
+                .heartbeat
+                .as_mut()
+                .map(|heartbeat| heartbeat.refresh(Instant::now()))
+                .transpose()?
+                .unwrap_or(false)
+            {
+                return Ok(Exit::LivenessExpired);
+            }
             if watchdog.expired(start.elapsed()) {
                 return Ok(Exit::Watchdog);
             }

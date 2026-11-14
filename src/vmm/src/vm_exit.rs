@@ -16,6 +16,13 @@ pub enum VmExit {
     /// Host requested an orderly stop through the VM handle.
     Stopped,
 
+    /// Maintained guest kernel emitted its panic stop marker.
+    GuestPanic,
+    /// Guest agent stopped sending configured liveness heartbeats.
+    LivenessExpired,
+    /// Guest failed to initialize or recover its device transports in time.
+    DeviceWatchdog,
+
     /// vCPU encountered a fatal error (triple fault, internal KVM error).
     Error { message: String },
 }
