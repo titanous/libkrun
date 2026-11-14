@@ -294,6 +294,7 @@ mod lifecycle_tests {
         device.set_socket_policy(SocketPolicy {
             policy: Some(Arc::new(AllowlistPolicy::new([]))),
             internet_enabled: false,
+            host_sockets: None,
         });
         for _ in 0..2 {
             let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();

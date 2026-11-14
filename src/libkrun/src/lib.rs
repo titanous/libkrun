@@ -653,6 +653,28 @@ impl Builder {
         self
     }
 
+    /// The most host sockets this guest's forwarded sockets may hold at once (stream and
+    /// datagram together, pending, connected and accepted). At the ceiling the guest's
+    /// connect gets ENOBUFS. Defaults to `DEFAULT_MAX_HOST_SOCKETS`.
+    pub fn max_host_sockets(&mut self, limit: usize) -> &mut Self {
+        self.socket_policy.host_sockets = Some(
+            devices::virtio::vsock::host_sockets::HostSocketBudget::new(limit),
+        );
+        self
+    }
+
+    /// The socket policy a guest device gets: always with a host-socket ceiling.
+    fn guest_socket_policy(configured: &SocketPolicy) -> SocketPolicy {
+        let mut policy = configured.clone();
+        if policy.host_sockets.is_none() {
+            policy.host_sockets =
+                Some(devices::virtio::vsock::host_sockets::HostSocketBudget::new(
+                    devices::virtio::vsock::host_sockets::DEFAULT_MAX_HOST_SOCKETS,
+                ));
+        }
+        policy
+    }
+
     /// Declare a block disk's frozen content identity (digest or snapshot token).
     /// A new guest must declare each disk as a copy of the source token.
     #[cfg(all(
@@ -1536,7 +1558,7 @@ impl Builder {
                 self.config.tsi_port_map,
                 self.config.unix_ipc_port_map,
                 flags,
-                self.socket_policy.clone(),
+                Self::guest_socket_policy(&self.socket_policy),
             )?;
             runtime
                 .add_device(Arc::new(Mutex::new(vsock)))
@@ -1875,7 +1897,10 @@ impl Builder {
         }
 
         if let Some(vsock) = ctx_cfg.vmr.vsock.get() {
-            vsock.lock().unwrap().set_socket_policy(self.socket_policy);
+            vsock
+                .lock()
+                .unwrap()
+                .set_socket_policy(Self::guest_socket_policy(&self.socket_policy));
         }
 
         if let Some(virgl_flags) = ctx_cfg.gpu_virgl_flags {
@@ -2723,6 +2748,7 @@ mod tests {
             SocketPolicy {
                 policy: Some(Arc::new(AllowlistPolicy::new([]))),
                 internet_enabled: true,
+                host_sockets: None,
             },
         )
         .unwrap();

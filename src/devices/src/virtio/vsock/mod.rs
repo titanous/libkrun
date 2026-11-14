@@ -7,6 +7,7 @@
 
 mod device;
 mod event_handler;
+pub mod host_sockets;
 mod muxer;
 mod muxer_rxq;
 mod muxer_thread;

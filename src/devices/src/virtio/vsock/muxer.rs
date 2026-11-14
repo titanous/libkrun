@@ -215,6 +215,27 @@ impl VsockMuxer {
         refused.push_back(peer_port);
     }
 
+    /// A proxy refused at the guest's host-socket ceiling: the request that follows gets
+    /// ENOBUFS, like a creation refused at the unallocated-proxy limit.
+    fn refuse_host_socket(&self, peer_port: u32) {
+        let total = self.refused_total.fetch_add(1, Ordering::Relaxed);
+        if total.is_power_of_two() || total == 0 {
+            warn!(
+                "refusing proxy creation ({} so far): guest at its ceiling of {} host sockets",
+                total + 1,
+                self.socket_policy
+                    .host_sockets
+                    .as_ref()
+                    .map_or(0, |budget| budget.limit())
+            );
+        }
+        let mut refused = self.refused_creates.lock().unwrap();
+        if refused.len() == REFUSED_CREATES_REMEMBERED {
+            refused.pop_front();
+        }
+        refused.push_back(peer_port);
+    }
+
     /// The error for a request naming a proxy that does not exist.
     fn missing_proxy_error(&self, peer_port: u32) -> i32 {
         if self.refused_creates.lock().unwrap().contains(&peer_port) {
@@ -456,6 +477,12 @@ impl VsockMuxer {
                         warn!("rejecting dgram inet proxy because HIJACK_INET is disabled");
                         return;
                     }
+                    // A datagram proxy opens its host socket at once: count it first.
+                    let Ok(permit) = super::host_sockets::acquire(&self.socket_policy.host_sockets)
+                    else {
+                        self.refuse_host_socket(req.peer_port);
+                        return;
+                    };
                     match TsiDgramProxy::new(
                         id,
                         self.cid,
@@ -467,6 +494,7 @@ impl VsockMuxer {
                     ) {
                         Ok(mut proxy) => {
                             proxy.socket_policy = self.socket_policy.clone();
+                            proxy.host_socket_permit = permit;
                             self.proxy_map
                                 .write()
                                 .unwrap()

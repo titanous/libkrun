@@ -90,6 +90,8 @@ pub struct TsiDgramProxy {
     tx_cnt: Wrapping<u32>,
     peer_buf_alloc: u32,
     peer_fwd_cnt: Wrapping<u32>,
+    /// Counts this proxy's host socket against the guest's ceiling while it exists.
+    pub(crate) host_socket_permit: Option<super::host_sockets::HostSocketPermit>,
 }
 
 impl TsiDgramProxy {
@@ -128,6 +130,7 @@ impl TsiDgramProxy {
 
         Ok(TsiDgramProxy {
             socket_policy: Default::default(),
+            host_socket_permit: None,
             family,
             id,
             cid,

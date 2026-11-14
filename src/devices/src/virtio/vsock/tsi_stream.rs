@@ -54,6 +54,8 @@ pub struct TsiStreamProxy {
     pending: super::stream_buffer::StreamBuffer,
     rx_paused: bool,
     created: std::time::Instant,
+    /// Counts this proxy's host socket against the guest's ceiling while it exists.
+    pub(crate) host_socket_permit: Option<super::host_sockets::HostSocketPermit>,
 }
 
 impl TsiStreamProxy {
@@ -101,6 +103,7 @@ impl TsiStreamProxy {
             pending: Default::default(),
             rx_paused: false,
             created: std::time::Instant::now(),
+            host_socket_permit: None,
         })
     }
 
@@ -143,6 +146,7 @@ impl TsiStreamProxy {
             pending: Default::default(),
             rx_paused: false,
             created: std::time::Instant::now(),
+            host_socket_permit: None,
         }
     }
 
@@ -150,7 +154,10 @@ impl TsiStreamProxy {
     // host socket until an authorized operation actually needs one.
     fn ensure_socket(&mut self) -> nix::Result<()> {
         if self.fd.is_none() {
+            // At the guest's ceiling the connect or listen fails with ENOBUFS.
+            let permit = super::host_sockets::acquire(&self.socket_policy.host_sockets)?;
             let fd = socket(self.family, SockType::Stream, SockFlag::SOCK_NONBLOCK, None)?;
+            self.host_socket_permit = permit;
             if self.family == AddressFamily::Unix {
                 setsockopt(&fd, sockopt::ReuseAddr, &true)?;
             } else {
@@ -828,10 +835,14 @@ impl Proxy for TsiStreamProxy {
             "release: id={}, tx_cnt={}, last_tx_cnt={}",
             self.id, self.tx_cnt, self.last_tx_cnt_sent
         );
-        let remove_proxy = if self.status == ProxyStatus::Listening {
-            ProxyRemoval::Immediate
-        } else {
-            ProxyRemoval::Deferred
+        // A proxy that never carried data (still connecting, or never connected) has nothing
+        // to flush: its host socket is closed at once instead of after the removal delay, so
+        // a guest opening and closing half-open connects does not pile up host sockets.
+        let remove_proxy = match self.status {
+            ProxyStatus::Listening | ProxyStatus::Connecting | ProxyStatus::Idle => {
+                ProxyRemoval::Immediate
+            }
+            _ => ProxyRemoval::Deferred,
         };
         ProxyUpdate {
             remove_proxy,
@@ -1081,6 +1092,44 @@ mod tests {
             update.new_proxy.is_some(),
             "Accept is authorized against the connecting peer"
         );
+    }
+
+    fn connect_req(port: u16) -> TsiConnectReq {
+        TsiConnectReq {
+            peer_port: 5678,
+            addr: SocketAddrV4::new(Ipv4Addr::LOCALHOST, port).into(),
+        }
+    }
+
+    #[test]
+    fn host_sockets_stop_at_the_guest_ceiling_and_return_on_drop() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let budget = super::super::host_sockets::HostSocketBudget::new(1);
+        let policy = super::super::policy::SocketPolicy {
+            internet_enabled: true,
+            host_sockets: Some(budget.clone()),
+            ..Default::default()
+        };
+        let mut header = [0u8; super::super::packet::VSOCK_PKT_HDR_SIZE];
+        let pkt = VsockPacket::header_only_for_test(&mut header);
+        let mut first = test_proxy();
+        first.socket_policy = policy.clone();
+        let mut second = test_proxy();
+        second.socket_policy = policy;
+        first.connect(&pkt, connect_req(port));
+        assert!(first.fd.is_some());
+        assert_eq!(budget.in_use(), 1);
+        second.connect(&pkt, connect_req(port));
+        assert!(second.fd.is_none(), "no host socket beyond the ceiling");
+        assert_eq!(budget.in_use(), 1);
+        // A proxy released while still connecting is removed at once, not after a delay.
+        first.status = ProxyStatus::Connecting;
+        assert_eq!(first.release().remove_proxy, ProxyRemoval::Immediate);
+        drop(first);
+        assert_eq!(budget.in_use(), 0);
+        second.connect(&pkt, connect_req(port));
+        assert!(second.fd.is_some());
     }
 
     #[test]
