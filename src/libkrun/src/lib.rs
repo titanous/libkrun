@@ -3992,7 +3992,7 @@ mod tests {
     #[cfg(not(feature = "tee"))]
     fn test_add_virtiofs_path_stores_root_dir() {
         let mut builder = Builder::new();
-        builder.add_virtiofs_path("tag", "/tmp/mydir", None, false);
+        builder.add_virtiofs_path("tag", std::env::temp_dir().to_str().unwrap(), None, false);
         assert_eq!(builder.config.vmr.fs.len(), 1);
         // Verify tag is stored
         assert_eq!(builder.config.vmr.fs[0].tag, "tag");
