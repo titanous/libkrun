@@ -1605,29 +1605,35 @@ impl VcpuHandle {
     pub fn response_receiver(&self) -> &Receiver<VcpuResponse> {
         &self.response_receiver
     }
+
+    pub fn request_shutdown(&mut self) {
+        if let Some(thread) = &self.vcpu_thread {
+            let _ = thread.kill(sigrtmin() + VCPU_RTSIG_OFFSET);
+        }
+        let (sender, _) = crossbeam_channel::unbounded();
+        self.event_sender = sender;
+    }
+
+    pub fn join_until(&mut self, deadline: std::time::Instant) -> bool {
+        let Some(thread) = self.vcpu_thread.take() else {
+            return true;
+        };
+        while !thread.is_finished() && std::time::Instant::now() < deadline {
+            std::thread::park_timeout(std::time::Duration::from_millis(1));
+        }
+        if !thread.is_finished() {
+            error!("vCPU join deadline expired; detached worker retains its owned state");
+            return false;
+        }
+        thread.join().is_ok()
+    }
 }
 
 #[cfg(not(test))]
 impl Drop for VcpuHandle {
     fn drop(&mut self) {
-        // Kick the vCPU thread out of KVM_RUN by sending it a signal.
-        // The signal causes KVM_RUN to return with -EINTR (Interrupted),
-        // and the running() handler will see should_exit and transition
-        // to the exit state.
-        if let Some(ref thread) = self.vcpu_thread {
-            let _ = thread.kill(sigrtmin() + VCPU_RTSIG_OFFSET);
-        }
-
-        // Disconnect the event channel so threads blocked in paused() recv()
-        // see the disconnect and transition through exit → exited → finish.
-        let (dummy_sender, _) = crossbeam_channel::unbounded();
-        self.event_sender = dummy_sender;
-
-        if let Some(thread) = self.vcpu_thread.take() {
-            if let Err(e) = thread.join() {
-                error!("Failed to join vCPU thread: {e:?}");
-            }
-        }
+        self.request_shutdown();
+        let _ = self.join_until(std::time::Instant::now() + std::time::Duration::from_secs(2));
     }
 }
 

@@ -70,7 +70,9 @@ encoded into Error or used as classification input. Nitro terminal/smoke example
 are host-free parser-tested and compiled; hardware execution remains required on
 a Nitro host. `Shutdown` is reachable only for an explicitly supplied workload code,
 never inferred from reset. Deadline outcomes remain distinct on the second
-backend. Guest reasons are untrusted privileged guest statements: they confer no
+backend. `Stopped` currently comes from the Nitro handle stop event; Linux KVM does not
+implement that public handle operation (the daemon supervises its process exit).
+Guest reasons are untrusted privileged guest statements: they confer no
 privilege, template-reuse safety, billing treatment, or forensic exemption.
 
 Undeclared reset or terminal fault is a failure. Arm64 KVM has no reason transport:
@@ -96,7 +98,13 @@ CPU starvation and unrelated blocking custom device handlers are outside that
 reader-independent bound. No repeated used-queue interrupts are emitted while a
 single descriptor waits for the reader.
 
-Final stop joins KVM vCPUs before draining console output. Only final exit drains,
+Final stop requests all KVM CPUs to stop and joins them against one shared
+two-second deadline before draining console output. All CPU responses are checked;
+a later fatal error cannot be hidden by an earlier guest terminal response. A
+missed join deadline returns Error and skips ring draining while detached CPU
+state remains owned by that worker. Each port drains sequentially, so the final
+drain budget scales with configured ports (100 ms plus at most 100 ms for an
+already-started descriptor write per port). Only final exit drains,
 not driver reset. Each port's drain is bounded by the published queue capacity,
 4 MiB and 100 ms of drain work, and stops rather than waiting for a slow reader.
 Output written before stop is delivered within those limits while the reader

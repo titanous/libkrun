@@ -429,9 +429,34 @@ impl Vmm {
 
         // Stop and join vCPUs before observers inspect the final guest rings.
         self.vcpu_exit_flag.store(true, Ordering::Release);
+        for handle in &mut self.vcpus_handles {
+            handle.request_shutdown();
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let mut joined = true;
+        for handle in &mut self.vcpus_handles {
+            joined &= handle.join_until(deadline);
+        }
+        let later_code = aggregate_vcpu_exits(self.vcpus_handles.iter().flat_map(|handle| {
+            handle
+                .response_receiver()
+                .try_iter()
+                .filter_map(|response| match response {
+                    VcpuResponse::Exited(code) => Some(code),
+                    _ => None,
+                })
+        }));
+        let vm_exit = if !joined || later_code == FC_EXIT_CODE_GENERIC_ERROR {
+            crate::vm_exit::VmExit::Error {
+                message: "vCPU failed or missed stop join deadline".into(),
+            }
+        } else {
+            vm_exit
+        };
         self.vcpus_handles.clear();
 
-        for observer in &self.exit_observers {
+        // A detached CPU may still access rings: final drain is unsafe in that case.
+        for observer in self.exit_observers.iter().filter(|_| joined) {
             observer
                 .lock()
                 .expect("Poisoned mutex for exit observer")
@@ -458,14 +483,16 @@ impl Subscriber for Vmm {
             debug!("Vmm: exit_evt fired, shutting down");
             let _ = self.exit_evt.read();
 
-            let vcpu_exit_code = self
-                .vcpus_handles
-                .iter()
-                .find_map(|handle| match handle.response_receiver().try_recv() {
-                    Ok(VcpuResponse::Exited(exit_code)) => Some(exit_code),
-                    _ => None,
-                })
-                .unwrap_or(FC_EXIT_CODE_OK);
+            let vcpu_exit_code =
+                aggregate_vcpu_exits(self.vcpus_handles.iter().flat_map(|handle| {
+                    handle
+                        .response_receiver()
+                        .try_iter()
+                        .filter_map(|response| match response {
+                            VcpuResponse::Exited(code) => Some(code),
+                            _ => None,
+                        })
+                }));
 
             let vmm_exit_code = self.exit_code.load(Ordering::SeqCst);
 
@@ -500,6 +527,18 @@ impl Subscriber for Vmm {
     }
 }
 
+fn aggregate_vcpu_exits(codes: impl IntoIterator<Item = u8>) -> u8 {
+    codes.into_iter().fold(FC_EXIT_CODE_OK, |old, code| {
+        if old == FC_EXIT_CODE_GENERIC_ERROR || code == FC_EXIT_CODE_GENERIC_ERROR {
+            FC_EXIT_CODE_GENERIC_ERROR
+        } else if code != FC_EXIT_CODE_OK {
+            code
+        } else {
+            old
+        }
+    })
+}
+
 /// Helper function to resolve VmExit variant from exit codes.
 /// This is the core logic used by Subscriber::process() to determine
 /// the correct VmExit variant based on vCPU exit code and VMM exit code.
@@ -523,6 +562,18 @@ pub(crate) fn resolve_vm_exit(vcpu_exit_code: u8, vmm_exit_code: i32) -> crate::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn later_cpu_error_wins() {
+        assert_eq!(
+            aggregate_vcpu_exits([FC_EXIT_CODE_OK, FC_EXIT_CODE_GENERIC_ERROR]),
+            FC_EXIT_CODE_GENERIC_ERROR
+        );
+        assert_eq!(
+            aggregate_vcpu_exits([FC_EXIT_CODE_GENERIC_ERROR, FC_EXIT_CODE_OK]),
+            FC_EXIT_CODE_GENERIC_ERROR
+        );
+    }
 
     /// Test VM exit enum variants and derives
     #[test]
