@@ -1,10 +1,11 @@
 # Combining stop reasons with Nitro memory copying
 
 This is merge guidance, not a claim that the Nitro memory-copy branch has been
-merged or tested with these changes. The reviewed overlap was
-`nitro-clone-nitro` at `e34ba088`, based on `b194fdf4`.
+merged or tested with these changes. The first reviewed overlap was
+`nitro-clone-nitro` at `e34ba088`, based on `b194fdf4`; that branch later also
+changed `src/vmm/src/capture_request.rs`, so ten files are shared.
 
-Preserve the following rules in the nine shared files (paths are repository
+Preserve the following rules in the ten shared files (paths are repository
 relative):
 
 | File | Required combination |
@@ -17,6 +18,7 @@ relative):
 | `src/nitro_sandbox/src/transport.rs` | Preserve raw reason bytes: 0 clears, 1--4 state intent, 5 and invalid bytes do not clear retained intent. Keep capture transport failures distinct from guest ends. |
 | `src/vmm/src/builder.rs` | Keep console counter snapshots and observer installation. Do not restore obsolete console-ending flag registration. Preserve copy setup and inherited stop-channel configuration. |
 | `src/vmm/src/lib.rs` | Preserve checked CPU joins with one shared deadline, sticky join failure, late CPU-error aggregation and post-join reason validation before template publication. Never clear unchecked CPU handles and then claim successful joins. |
+| `src/vmm/src/capture_request.rs` | Keep both: the copying branch's restored-copy refusal and `timed_out` state (a late result after the waiter timed out is dropped by `complete()`), and this branch's `validate_stopped_source`. Order: a capture that timed out never publishes later, even if its source then validates; a reason rejection (`GuestStoppedDuringCapture`) always reaches the caller that is still waiting, and is dropped like any late result only once that caller has timed out. |
 | `src/vmm/src/linux/vstate.rs` | Preserve checked CPU joins and sticky join failure while combining CPU parking/copy state. A detached or failed CPU must not be treated as successfully stopped or permit console ring draining. |
 
 ## Capture acceptance guard
@@ -29,6 +31,25 @@ publication. Propagate close/join errors before publication. Set
 `TerminalFacts::frozen` only after the source has actually closed successfully.
 The shared resolver makes a final reason outrank frozen state, but that resolver
 alone cannot undo an already-published template.
+
+The reason byte is only set on Nitro when the guest kernel has the reason-device
+driver and holodeck enables `Builder::nitro_stop_reason`. Until both are in the
+base, the byte stays 0 and this guard alone checks nothing on Nitro: the guard
+must then also reject (before accepting, and again before publishing) when the
+run's host stop event is pending, which is how holodeck's console stop watch
+ends a Nitro guest today.
+
+## Stop-channel inheritance for copies
+
+A copy has the same stop-channel configuration as its template. On KVM the copy
+resumes the template's kernel, which keeps `holodeck.stop_port=1`, and the VMM
+always registers port 0xea, so nothing extra is needed. On Nitro, a copy's VMM
+must enable the reason device exactly when its template's VMM did (holodeck
+passes the same `nitro_stop_reason` setting from the template's spec), and the
+reason region of the copy starts at 0: a template's retained reason is never
+inherited, because a template that stated a reason is never published (guard
+above). Test it: a copy of a template must report a typed reason for each ending
+kind.
 
 ## Console and daemon policy
 
