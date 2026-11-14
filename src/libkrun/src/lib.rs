@@ -2451,7 +2451,7 @@ impl VmHandle {
     pub fn freeze_template(
         &self,
         timeout: std::time::Duration,
-    ) -> std::io::Result<vmm::template::Template> {
+    ) -> std::io::Result<vmm::capture_request::CaptureOutcome> {
         let request = {
             let vmm = self
                 .vmm
@@ -2486,13 +2486,13 @@ impl VmHandle {
             .lock()
             .unwrap()
             .arm_template_capture(timeout)?;
-        request.take_request();
+        let _ = request;
         Ok(())
     }
 
     /// Wait for a previously armed capture using its original deadline.
     #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
-    pub fn wait_template_capture(&self) -> std::io::Result<vmm::template::Template> {
+    pub fn wait_template_capture(&self) -> std::io::Result<vmm::capture_request::CaptureOutcome> {
         let request = self
             .vmm
             .as_ref()

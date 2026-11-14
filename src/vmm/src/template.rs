@@ -75,6 +75,26 @@ mod tests {
         assert_eq!(value, [0]);
         assert_eq!(reopened.regions, [(0, 8192, HEADER as u64)]);
         assert_eq!(reopened.control, 4096);
+        let race_path =
+            std::env::temp_dir().join(format!("krun-export-race-{}", std::process::id()));
+        let prepared = reopened.prepare_path(&race_path).unwrap();
+        std::fs::File::create(&race_path).unwrap();
+        let outcome = crate::capture_request::CaptureOutcome {
+            template: reopened,
+            export: Some(prepared.publish().map(|()| race_path.clone())),
+        };
+        assert_eq!(
+            outcome
+                .export
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        Template::open(outcome.template.file.try_clone().unwrap()).unwrap();
+        std::fs::remove_file(race_path).unwrap();
     }
 
     #[test]

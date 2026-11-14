@@ -156,7 +156,21 @@ export path but does not arm capture. The existing `freeze_template(timeout)`
 convenience call arms and waits; it does not signal the agent or kernel and
 requires a separately coordinated agent trigger after arming.
 
-`wait_template_capture` returns a `vmm::template::Template` owning the sealed memory
+`wait_template_capture` returns `CaptureOutcome { template, export }`.
+`template` owns the sealed descriptor; `export` is `None` for descriptor-only
+capture or `Some(Result<PathBuf, io::Error>)` for requested publication. Acceptance
+is irreversible even when publication fails: retain the descriptor and inspect
+`export`, never assume the requested path exists. Guest trigger refusal returns
+EPERM when not armed, ETIMEDOUT when the deadline expired, or EINVAL for validation.
+The guest must reconnect its control channel after device freeze/refusal.
+
+Temporary exports are named `.krun-template-<pid>-<counter>` in the destination
+directory. Before accepting captures at daemon startup, exclusively own each
+trusted template directory and sweep `.krun-template-*` leftovers from dead VMMs.
+Never sweep while another publisher can be active. These files contain sensitive
+whole-guest memory; retain owner-only directory access.
+
+The outcome's `template` owns the sealed memory
 file only after source vCPU teardown. Its `file` can be duplicated or sent to
 another process with SCM_RIGHTS; `write_to_path` exports owner-only sensitive
 whole-guest memory. A freeze deadline returns `io::ErrorKind::TimedOut`, distinct
