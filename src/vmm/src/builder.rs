@@ -89,7 +89,12 @@ use nix::unistd::isatty;
 use polly::event_manager::{Error as EventManagerError, EventManager};
 use utils::eventfd::EventFd;
 use utils::worker_message::WorkerMessage;
-#[cfg(all(target_arch = "x86_64", not(feature = "efi"), not(feature = "tee")))]
+#[cfg(all(
+    target_arch = "x86_64",
+    feature = "vhost-user",
+    not(feature = "efi"),
+    not(feature = "tee")
+))]
 use vm_memory::mmap::MmapRegion;
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 use vm_memory::Address;
@@ -98,7 +103,6 @@ use vm_memory::Bytes;
 use vm_memory::FileOffset;
 #[cfg(not(feature = "aws-nitro"))]
 use vm_memory::GuestMemoryBackend;
-#[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
 use vm_memory::GuestRegionMmap;
 use vm_memory::{GuestAddress, GuestMemoryMmap};
 
@@ -1702,12 +1706,22 @@ fn load_payload(
                 #[cfg(not(feature = "vhost-user"))]
                 unreachable!()
             } else {
-                // SAFETY: kernel_host_addr points to valid kernel data of size kernel_size.
-                // The memory region is managed by the kernel bundle and remains valid.
+                let file = crate::template_memory::create(kernel_size)
+                    .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
+                let region = crate::template_memory::map(&file, 0, kernel_size, false)
+                    .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
+                validate_bundle_range(kernel_host_addr, kernel_size as u64)
+                    .map_err(StartMicrovmError::InvalidBundleAddressRange)?;
+                // SAFETY: bundle validation establishes a readable source;
+                // the independent owned mapping covers kernel_size bytes.
                 unsafe {
-                    MmapRegion::build_raw(kernel_host_addr as *mut u8, kernel_size, 0, 0)
-                        .map_err(StartMicrovmError::InvalidKernelBundle)?
+                    std::ptr::copy_nonoverlapping(
+                        kernel_host_addr as *const u8,
+                        region.as_ptr(),
+                        kernel_size,
+                    );
                 }
+                region
             };
 
             Ok((
@@ -1941,7 +1955,18 @@ pub fn create_guest_memory(
         #[cfg(not(feature = "vhost-user"))]
         unreachable!()
     } else {
-        GuestMemoryMmap::from_ranges(&arch_mem_regions)
+        let regions = arch_mem_regions
+            .iter()
+            .map(|(addr, size)| {
+                let file = crate::template_memory::create(*size)?;
+                let mapping = crate::template_memory::map(&file, 0, *size, false)?;
+                GuestRegionMmap::new(mapping, *addr).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "RAM region overflow")
+                })
+            })
+            .collect::<Result<Vec<_>, io::Error>>()
+            .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
+        GuestMemoryMmap::from_regions(regions)
             .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?
     };
 
