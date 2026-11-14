@@ -1323,19 +1323,12 @@ impl Builder {
                     "unsupported on this backend: external_kernel requires an arm64 Raw Image",
                 )));
             }
-            let kernel_bytes = std::fs::read(&kernel.path).map_err(StartError::Nitro)?;
-            let initrd = kernel
-                .initramfs_path
-                .as_ref()
-                .map(std::fs::read)
-                .transpose()
-                .map_err(StartError::Nitro)?;
             let mut args = self.kernel_cmdline.clone();
             args.extend(self.extra_kernel_args.iter().cloned());
             let cmdline = args.join(" ");
-            let (file, _) = nitro_sandbox::image::cached_in(
-                &kernel_bytes,
-                initrd.as_deref(),
+            let (file, _) = nitro_sandbox::image::cached_files(
+                &kernel.path,
+                kernel.initramfs_path.as_deref(),
                 cmdline.as_bytes(),
                 memory_mib as u64 * 1024 * 1024,
                 u64::from(config.vcpu_count.unwrap_or(1)),
@@ -1369,6 +1362,7 @@ impl Builder {
             self.nitro_lifecycle_lock.take(),
         )
         .map_err(StartError::Nitro)?;
+        drop(packaged);
         if let Some(stop) = self.nitro_precreated_stop.take() {
             runtime.set_stop_event(stop);
         }

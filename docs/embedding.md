@@ -155,16 +155,20 @@ internally. Packaged-image command lines cannot be overridden; other
 unsupported device/configuration methods fail build with
 `unsupported on this backend`, never silently discarded. The Rust packager is
 byte-for-byte tested against the kernel lane's deterministic Python builder.
-A SHA-256 content key includes all inputs, memory and CPUs; up to eight immutable
-sealed memfd images are cached per process. Cache hits still read/hash inputs to
-avoid stale path metadata but skip image packaging/CRC/copy. The packaged EIF path
-remains available and bypasses packaging. For one-VMM-per-process services, call
-`nitro_image_cache(directory)` with a pre-created daemon-owned directory that is
-not group/other-writable. Content-addressed EIF files are atomically published
-under an exclusive cache flock and reused across processes; killed writers leave
-no published partial image. The daemon owns disk-cache eviction and must not
-modify published files in place. The trusted cache directory is not a tenant
-input; symlink files are refused. Caller-supplied block storage and its read-only setting
+The external-kernel path streams opened inputs into a memfd with a 64 KiB buffer,
+without retaining full kernel/initramfs or packaged byte vectors. Without a disk
+cache that sealed image is released after load. Disk-cache entries are named by
+the final EIF SHA-256 and verified against the expected content on every hit;
+readers take no exclusive cache lock. Publication uses unique temporary files and
+atomic rename, so killed writers leave no published partial image. The current
+verification path regenerates one expected image even on hits; this costs CPU
+and memory bandwidth, but keeps transient userspace storage near one image size.
+The older byte-slice packaging API retains at most 64 MiB in its process cache;
+images larger than that are not retained there. The packaged EIF path bypasses
+packaging. For cross-process reuse call `nitro_image_cache(directory)` with a
+pre-created VMM-uid-owned directory that is not group/other-writable. The daemon
+owns disk-cache eviction and must not modify published files in place. The cache
+directory is not a tenant input; symlink entries are refused. Caller-supplied block storage and its read-only setting
 are shared with KVM unchanged. Select Nitro and configure block/vsock devices
 before adding custom consoles, and call `disable_implicit_console()`. Returned
 console paths follow Nitro's actual block/vsock/console registration order; build

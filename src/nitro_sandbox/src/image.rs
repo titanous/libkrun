@@ -3,8 +3,11 @@ use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{self, Write};
+#[path = "image_stream.rs"]
+mod stream;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::sync::{Arc, Mutex, OnceLock};
+pub use stream::cached_files;
 const HEADER: usize = 548;
 const META: &[u8] = br#"{"ImageName":"holodeck","ImageVersion":"1","BuildMetadata":{"BuildTime":"","BuildTool":"holodeck","BuildToolVersion":"1","OperatingSystem":"Linux","KernelVersion":""},"DockerInfo":{},"CustomMetadata":null}"#;
 
@@ -84,6 +87,79 @@ mod tests {
                 expected
             );
         }
+    }
+    #[test]
+    fn streamed_files_match_package_and_reject_corrupted_cache() {
+        use std::os::unix::fs::{FileExt, PermissionsExt};
+        let directory = std::env::temp_dir().join(format!("nitro-stream-{}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let kernel = directory.join("kernel");
+        let initrd = directory.join("initrd");
+        std::fs::write(&kernel, b"kernel bytes").unwrap();
+        std::fs::write(&initrd, b"initrd bytes").unwrap();
+        for init in [None, Some(initrd.as_path())] {
+            let (image, _) =
+                cached_files(&kernel, init, b"console=hvc0", 1024 << 20, 1, None).unwrap();
+            let expected = package(
+                b"kernel bytes",
+                init.map(|_| &b"initrd bytes"[..]),
+                b"console=hvc0",
+                1024 << 20,
+                1,
+            )
+            .unwrap();
+            let mut bytes = vec![0; expected.len()];
+            image.read_exact_at(&mut bytes, 0).unwrap();
+            assert_eq!(bytes, expected);
+        }
+        let (_, hit) = cached_files(&kernel, None, b"", 1024 << 20, 1, Some(&directory)).unwrap();
+        assert!(!hit);
+        assert!(
+            cached_files(&kernel, None, b"", 1024 << 20, 1, Some(&directory))
+                .unwrap()
+                .1
+        );
+        std::thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                cached_files(
+                    &kernel,
+                    None,
+                    b"concurrent",
+                    1024 << 20,
+                    1,
+                    Some(&directory),
+                )
+                .unwrap()
+            });
+            let second = scope.spawn(|| {
+                cached_files(
+                    &kernel,
+                    None,
+                    b"concurrent",
+                    1024 << 20,
+                    1,
+                    Some(&directory),
+                )
+                .unwrap()
+            });
+            first.join().unwrap();
+            second.join().unwrap();
+        });
+        for cached in std::fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|extension| extension == "eif"))
+        {
+            std::fs::write(cached, b"corrupted").unwrap();
+        }
+        assert_eq!(
+            cached_files(&kernel, None, b"", 1024 << 20, 1, Some(&directory))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        std::fs::remove_dir_all(directory).unwrap();
     }
     #[test]
     fn persistent_cache_reopens_identical_content() {
@@ -183,21 +259,10 @@ pub fn cached_in(
                 "image cache must be a daemon-owned directory not writable by group/other",
             ));
         }
-        let lock_file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(directory.join(".lock"))?;
-        let lock = crate::lifecycle::LifecycleLock {
-            path: directory.join(".lock"),
-            serialization: crate::lifecycle::Serialization::Teardown,
-        }
-        .open()?;
-        let _guard = lock.acquire()?;
-        drop(lock_file);
+        // Immutable entries are published by atomic rename. Readers neither
+        // acquire an exclusive lock nor trust the content-addressed filename.
+        let expected = package(kernel, initrd, cmdline, memory, cpus)?;
+        let expected_hash: [u8; 32] = Sha256::digest(&expected).into();
         let name: String = key.iter().map(|byte| format!("{byte:02x}")).collect();
         let destination = directory.join(format!("{name}.eif"));
         let open = || {
@@ -207,18 +272,33 @@ pub fn cached_in(
                 .open(&destination)
         };
         match open() {
-            Ok(file) => return Ok((Arc::new(file), true)),
+            Ok(mut file) => {
+                use std::io::Read;
+                let mut hash = Sha256::new();
+                let mut buffer = [0u8; 65536];
+                loop {
+                    let count = file.read(&mut buffer)?;
+                    if count == 0 {
+                        break;
+                    }
+                    hash.update(&buffer[..count]);
+                }
+                let actual: [u8; 32] = hash.finalize().into();
+                if actual != expected_hash {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "cached EIF content hash mismatch",
+                    ));
+                }
+                return Ok((Arc::new(file), true));
+            }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
-        let bytes = package(kernel, initrd, cmdline, memory, cpus)?;
-        let temporary = directory.join(format!(".{name}.tmp"));
-        // Exclusive cache lock proves no cooperating writer still owns this temp.
-        match std::fs::remove_file(&temporary) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
+        let bytes = expected;
+        static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let sequence = NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let temporary = directory.join(format!(".{name}.{}.{sequence}.tmp", std::process::id()));
         let mut output = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -265,9 +345,24 @@ pub fn cached_in(
     }
     let file = Arc::new(file);
     let mut cache = cache.lock().unwrap();
-    if cache.len() == 8 {
-        cache.pop_front();
+    const CACHE_BYTES: u64 = 64 * 1024 * 1024;
+    let size = file.metadata()?.len();
+    if size <= CACHE_BYTES {
+        let mut used: u64 = cache
+            .iter()
+            .map(|(_, file)| {
+                file.metadata()
+                    .map(|meta| meta.len())
+                    .unwrap_or(CACHE_BYTES)
+            })
+            .sum();
+        while used.saturating_add(size) > CACHE_BYTES {
+            let Some((_, old)) = cache.pop_front() else {
+                break;
+            };
+            used = used.saturating_sub(old.metadata()?.len());
+        }
+        cache.push_back((key, file.clone()));
     }
-    cache.push_back((key, file.clone()));
     Ok((file, false))
 }
