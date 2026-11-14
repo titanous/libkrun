@@ -102,7 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
     let context = builder.build()?;
-    if args[1] == "freeze" || args[1] == "refuse" {
+    if args[1] == "freeze" || args[1] == "refuse" || args[1] == "host-freeze" {
         context
             .vm_handle()
             .arm_template_capture(std::time::Duration::from_secs(30))?;
@@ -111,7 +111,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let handle = context.vm_handle();
         let path = PathBuf::from(&args[2]);
         Some(std::thread::spawn(move || -> std::io::Result<()> {
-            let template = handle.freeze_template(std::time::Duration::from_secs(30))?;
+            let template = handle.wait_template_capture()?;
             vmm::template::Template::open(template.file.try_clone()?)?;
             template.write_to_path(path)?;
             eprintln!("HOSTREQUEST SEALED TEMPLATE received");

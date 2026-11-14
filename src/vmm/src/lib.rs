@@ -266,6 +266,11 @@ impl Vmm {
         Ok(self.capture_request.clone())
     }
 
+    #[cfg(target_arch = "x86_64")]
+    pub fn wait_template_capture(&self) -> crate::capture_request::CaptureRequest {
+        self.capture_request.clone()
+    }
+
     /// Write a fresh generation identifier and notify the running guest.
     /// The guest driver reseeds its random pool when it handles this interrupt.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
