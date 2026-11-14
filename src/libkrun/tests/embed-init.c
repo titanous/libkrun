@@ -19,7 +19,7 @@ static void check(int ok, const char *what) {
 static int tcp(int port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     struct sockaddr_in addr = {.sin_family=AF_INET, .sin_port=htons(port), .sin_addr.s_addr=htonl(INADDR_LOOPBACK)};
-    int result = connect(fd, (void *)&addr, sizeof(addr)); close(fd); return result;
+    int result = connect(fd, (void *)&addr, sizeof(addr)); int error=errno; close(fd); errno=error; return result;
 }
 int main(void) {
     setbuf(stdout, NULL);
@@ -37,7 +37,9 @@ int main(void) {
         check(read(fd,result,sizeof(result))==13 && !memcmp(result,"embed-fs-data",13),"fs contents"); close(fd); puts("EMBED_FS_OK");
     }
     if (strstr(cmdline,"embed_policy")) {
-        check(tcp(18080)==0,"allowed tcp"); check(tcp(18081)<0,"denied tcp"); puts("EMBED_POLICY_OK");
+        check(tcp(18080)==0,"allowed tcp"); check(tcp(18081)<0 && errno==EACCES,"denied tcp EACCES");
+        int denied=socket(AF_VSOCK,SOCK_STREAM,0); struct sockaddr_vm addr={.svm_family=AF_VSOCK,.svm_cid=2,.svm_port=7001};
+        check(connect(denied,(void *)&addr,sizeof(addr))<0 && errno==ECONNRESET,"denied mapped ECONNRESET"); close(denied); puts("EMBED_POLICY_OK");
     }
     if (strstr(cmdline,"embed_disabled")) {
         check(tcp(18080)<0,"disabled tcp");

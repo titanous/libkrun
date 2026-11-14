@@ -3,7 +3,6 @@ use super::{
     proxy::{ProxyRemoval, RecvPkt},
 };
 
-use nix::errno::Errno;
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use nix::sys::socket::SockaddrLike;
 use nix::sys::socket::{
@@ -339,7 +338,7 @@ impl Proxy for UnixProxy {
             Err(e) => {
                 debug!("Error connecting: {e}");
                 #[cfg(target_os = "linux")]
-                let errno = -Errno::last_raw();
+                let errno = -(e as i32);
                 errno
             }
         };

@@ -545,8 +545,8 @@ impl Builder {
 
     /// Select an external kernel instead of the bundled firmware library.
     ///
-    /// On x86-64 use `Elf` for an uncompressed ELF vmlinux, or `ImageGz`,
-    /// `ImageBz2`, or `ImageZstd` for an image containing a compressed ELF.
+    /// On x86-64 use `Elf` for an uncompressed ELF vmlinux. Compressed
+    /// formats are unsupported by this setter.
     /// On arm64 use `Raw` for an uncompressed Linux Image or `PeGz` for a
     /// PE image containing a gzip-compressed Image. Other formats are rejected.
     /// Kernel and initramfs contents are copied into guest memory during build.
@@ -558,10 +558,7 @@ impl Builder {
     ) -> std::io::Result<&mut Self> {
         let supported = match format {
             #[cfg(target_arch = "x86_64")]
-            KernelFormat::Elf
-            | KernelFormat::ImageGz
-            | KernelFormat::ImageBz2
-            | KernelFormat::ImageZstd => true,
+            KernelFormat::Elf => true,
             #[cfg(target_arch = "aarch64")]
             KernelFormat::Raw | KernelFormat::PeGz => true,
             _ => false,
@@ -2323,9 +2320,16 @@ mod tests {
         assert_eq!(kernel.path, PathBuf::from("vmlinux"));
         assert_eq!(kernel.initramfs_size, 0);
         assert!(kernel.cmdline.is_none());
-        assert!(builder
-            .external_kernel(PathBuf::from("Image"), KernelFormat::Raw, None)
-            .is_err());
+        for format in [
+            KernelFormat::Raw,
+            KernelFormat::ImageGz,
+            KernelFormat::ImageBz2,
+            KernelFormat::ImageZstd,
+        ] {
+            assert!(builder
+                .external_kernel(PathBuf::from("Image"), format, None)
+                .is_err());
+        }
         assert_eq!(
             builder.config.vmr.external_kernel().unwrap().path,
             PathBuf::from("vmlinux")

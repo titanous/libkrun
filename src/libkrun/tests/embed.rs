@@ -15,8 +15,10 @@ fn outbound_policy_and_disabled_forwarding() {
     impl krun::OutboundPolicy for Policy {
         fn allow(&self, _: krun::SocketOperation, addr: &krun::SocketAddress) -> bool {
             self.0.fetch_add(1, Ordering::Relaxed);
-            addr.as_sockaddr_in()
-                .is_none_or(|addr| addr.port() != 18081)
+            addr.as_unix_addr().is_none()
+                && addr
+                    .as_sockaddr_in()
+                    .is_none_or(|addr| addr.port() != 18081)
         }
     }
     let allowed = TcpListener::bind("127.0.0.1:18080").unwrap();
@@ -26,8 +28,15 @@ fn outbound_policy_and_disabled_forwarding() {
     let calls = Arc::new(AtomicUsize::new(0));
     let mut builder = krun::Builder::new();
     builder.outbound_policy(Arc::new(Policy(calls.clone())));
+    let denied_path =
+        std::env::temp_dir().join(format!("embed-denied-{}.sock", std::process::id()));
+    let denied_unix = UnixListener::bind(&denied_path).unwrap();
+    denied_unix.set_nonblocking(true).unwrap();
+    builder.add_vsock_port(7001, denied_path.clone(), false);
     assert!(run(builder, "embed_policy").contains("EMBED_POLICY_OK"));
-    assert!(calls.load(Ordering::Relaxed) >= 2);
+    assert!(calls.load(Ordering::Relaxed) >= 3);
+    assert!(matches!(denied_unix.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
+    std::fs::remove_file(denied_path).unwrap();
     assert!(allowed.accept().is_ok());
     assert!(matches!(denied.accept(),Err(e) if e.kind()==std::io::ErrorKind::WouldBlock));
     let socket = std::env::temp_dir().join(format!("embed-vsock-{}.sock", std::process::id()));
@@ -61,7 +70,12 @@ mod backends;
 #[cfg(target_arch = "x86_64")]
 fn run(mut builder: krun::Builder, mode: &str) -> String {
     let console = std::env::temp_dir().join(format!("embed-{}-{mode}.log", std::process::id()));
-    builder.vm_config(1, 512).unwrap();
+    let ram = match mode {
+        "embed_4g" => 4096,
+        "embed_8g" => 8192,
+        _ => 512,
+    };
+    builder.vm_config(1, ram).unwrap();
     builder
         .external_kernel(
             std::env::var_os("EMBED_KERNEL")
@@ -105,6 +119,31 @@ fn run(mut builder: krun::Builder, mode: &str) -> String {
 #[ignore = "requires KVM and external artifacts"]
 fn external_initramfs_boot() {
     run(krun::Builder::new(), "embed_boot");
+    run(krun::Builder::new(), "embed_4g");
+    run(krun::Builder::new(), "embed_8g");
+}
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+#[ignore = "requires KVM and external artifacts"]
+fn oversized_changed_initramfs_returns_error() {
+    let file = utils::tempfile::TempFile::new().unwrap();
+    let mut builder = krun::Builder::new();
+    builder.vm_config(1, 128).unwrap();
+    builder
+        .external_kernel(
+            std::env::var_os("EMBED_KERNEL").unwrap().into(),
+            krun::KernelFormat::Elf,
+            Some(file.as_path().to_owned()),
+        )
+        .unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(file.as_path())
+        .unwrap()
+        .set_len(256 * 1024 * 1024)
+        .unwrap();
+    assert!(builder.build().is_err());
 }
 
 #[cfg(all(target_arch = "x86_64", feature = "blk"))]

@@ -576,6 +576,36 @@ impl VsockMuxer {
                     push_packet(self.cid, rx, &self.rxq, queue, mem);
                     return;
                 }
+                use nix::sys::socket::{SockaddrLike, UnixAddr};
+                let allowed = UnixAddr::new(path)
+                    .ok()
+                    .and_then(|addr| {
+                        // SAFETY: addr owns a valid sockaddr_un of the supplied length.
+                        unsafe {
+                            nix::sys::socket::SockaddrStorage::from_raw(
+                                addr.as_ptr().cast(),
+                                Some(addr.len()),
+                            )
+                        }
+                    })
+                    .is_some_and(|addr| {
+                        self.socket_policy
+                            .check(super::policy::SocketOperation::UnixConnect, &addr)
+                            .is_ok()
+                    });
+                if !allowed {
+                    push_packet(
+                        self.cid,
+                        MuxerRx::Reset {
+                            local_port: pkt.dst_port(),
+                            peer_port: pkt.src_port(),
+                        },
+                        &self.rxq,
+                        queue,
+                        mem,
+                    );
+                    return;
+                }
                 let rxq = self.rxq.clone();
 
                 let mut unix = UnixProxy::new(

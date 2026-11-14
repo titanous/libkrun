@@ -11,7 +11,6 @@ use std::sync::{Arc, Mutex};
 
 #[cfg(target_os = "linux")]
 use libc::EINVAL;
-use nix::errno::Errno;
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use nix::sys::socket::{
     accept, bind, connect, getpeername, listen, recv, send, setsockopt, shutdown, socket, sockopt,
@@ -492,7 +491,7 @@ impl Proxy for TsiStreamProxy {
             Err(e) => {
                 debug!("TcpProxy: Error connecting: {e}");
                 #[cfg(target_os = "linux")]
-                let errno = -Errno::last_raw();
+                let errno = -(e as i32);
                 errno
             }
         };

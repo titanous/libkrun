@@ -1389,15 +1389,21 @@ fn load_external_kernel(
     arch_mem_info: &ArchMemoryInfo,
     external_kernel: &ExternalKernel,
 ) -> std::result::Result<(GuestAddress, Option<InitrdConfig>, Option<String>), StartMicrovmError> {
+    let kernel_end: u64;
     let entry_addr = match external_kernel.format {
         // Raw images are treated as bundled kernels on x86_64
         #[cfg(target_arch = "x86_64")]
-        KernelFormat::Raw => unreachable!(),
+        KernelFormat::Raw => return Err(StartMicrovmError::KernelFormatUnsupported),
         #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
         KernelFormat::Raw => {
             let data: Vec<u8> = std::fs::read(external_kernel.path.clone())
                 .map_err(StartMicrovmError::RawOpenKernel)?;
-            guest_mem.write(&data, GuestAddress(0x8000_0000)).unwrap();
+            kernel_end = 0x8000_0000u64
+                .checked_add(data.len() as u64)
+                .ok_or(StartMicrovmError::InitrdLoad)?;
+            guest_mem
+                .write_slice(&data, GuestAddress(0x8000_0000))
+                .map_err(|_| StartMicrovmError::InitrdLoad)?;
             GuestAddress(0x8000_0000)
         }
         #[cfg(target_arch = "x86_64")]
@@ -1409,6 +1415,7 @@ fn load_external_kernel(
                 .map_err(StartMicrovmError::ElfOpenKernel)?;
             let load_result = loader::Elf::load(guest_mem, None, &mut file, None)
                 .map_err(StartMicrovmError::ElfLoadKernel)?;
+            kernel_end = load_result.kernel_end;
             load_result.kernel_load
         }
         #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
@@ -1425,9 +1432,12 @@ fn load_external_kernel(
                 let mut kernel_data: Vec<u8> = Vec::new();
                 gz.read_to_end(&mut kernel_data)
                     .map_err(StartMicrovmError::PeGzDecoder)?;
+                kernel_end = 0x8000_0000u64
+                    .checked_add(kernel_data.len() as u64)
+                    .ok_or(StartMicrovmError::InitrdLoad)?;
                 guest_mem
-                    .write(&kernel_data, GuestAddress(0x8000_0000))
-                    .unwrap();
+                    .write_slice(&kernel_data, GuestAddress(0x8000_0000))
+                    .map_err(|_| StartMicrovmError::InitrdLoad)?;
                 GuestAddress(0x8000_0000)
             } else {
                 return Err(StartMicrovmError::PeGzInvalid);
@@ -1454,6 +1464,7 @@ fn load_external_kernel(
                     None,
                 )
                 .map_err(StartMicrovmError::ImageBz2LoadKernel)?;
+                kernel_end = load_result.kernel_end;
                 load_result.kernel_load
             } else {
                 return Err(StartMicrovmError::ImageBz2Invalid);
@@ -1480,6 +1491,7 @@ fn load_external_kernel(
                     None,
                 )
                 .map_err(StartMicrovmError::ImageGzLoadKernel)?;
+                kernel_end = load_result.kernel_end;
                 load_result.kernel_load
             } else {
                 return Err(StartMicrovmError::ImageGzInvalid);
@@ -1504,6 +1516,7 @@ fn load_external_kernel(
                     None,
                 )
                 .map_err(StartMicrovmError::ImageZstdLoadKernel)?;
+                kernel_end = load_result.kernel_end;
                 load_result.kernel_load
             } else {
                 return Err(StartMicrovmError::ImageZstdInvalid);
@@ -1516,11 +1529,22 @@ fn load_external_kernel(
 
     let initrd_config = if let Some(initramfs_path) = &external_kernel.initramfs_path {
         let data = std::fs::read(initramfs_path).map_err(StartMicrovmError::InitrdRead)?;
+        #[cfg(target_arch = "x86_64")]
+        let limit = arch_mem_info.ram_below_gap;
+        #[cfg(not(target_arch = "x86_64"))]
+        let limit = arch_mem_info.initrd_addr;
+        let address = limit
+            .checked_sub(data.len() as u64)
+            .ok_or(StartMicrovmError::InitrdLoad)?
+            & !4095u64;
+        if address < kernel_end || address < 0x10_0000 {
+            return Err(StartMicrovmError::InitrdLoad);
+        }
         guest_mem
-            .write(&data, GuestAddress(arch_mem_info.initrd_addr))
-            .unwrap();
+            .write_slice(&data, GuestAddress(address))
+            .map_err(|_| StartMicrovmError::InitrdLoad)?;
         Some(InitrdConfig {
-            address: GuestAddress(arch_mem_info.initrd_addr),
+            address: GuestAddress(address),
             size: data.len(),
         })
     } else {
@@ -1794,13 +1818,9 @@ pub fn create_guest_memory(
                 };
             arch::arch_memory_regions(mem_size, Some(kernel_guest_addr), kernel_size, 0, None)
         }
-        Payload::ExternalKernel(external_kernel) => arch::arch_memory_regions(
-            mem_size,
-            None,
-            0,
-            external_kernel.initramfs_size,
-            firmware_size,
-        ),
+        Payload::ExternalKernel(_) => {
+            arch::arch_memory_regions(mem_size, None, 0, 0, firmware_size)
+        }
         #[cfg(feature = "tee")]
         Payload::Tee => {
             let (kernel_guest_addr, kernel_size) =
@@ -1817,9 +1837,7 @@ pub fn create_guest_memory(
     };
     #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
     let (arch_mem_info, mut arch_mem_regions) = match payload {
-        Payload::ExternalKernel(external_kernel) => {
-            arch::arch_memory_regions(mem_size, external_kernel.initramfs_size, None)
-        }
+        Payload::ExternalKernel(_) => arch::arch_memory_regions(mem_size, 0, None),
         _ => arch::arch_memory_regions(mem_size, 0, firmware_size),
     };
 

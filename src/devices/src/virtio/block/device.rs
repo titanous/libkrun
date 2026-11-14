@@ -436,6 +436,9 @@ impl Block {
 
         if is_disk_read_only {
             avail_features |= 1u64 << VIRTIO_BLK_F_RO;
+            avail_features &= !((1u64 << VIRTIO_BLK_F_DISCARD)
+                | (1u64 << VIRTIO_BLK_F_WRITE_ZEROES)
+                | (1u64 << VIRTIO_BLK_F_FLUSH));
         };
 
         let queues: Vec<Queue> = QUEUE_SIZES.iter().map(|&s| Queue::new(s)).collect();
@@ -573,20 +576,21 @@ impl VirtioDevice for Block {
                 // Put the backend back so on_exit can access it
                 self.disk = Some(BlockDeviceBackend::Sync(backend.clone()));
 
-                let worker = BlockWorker::new(
+                let mut worker = BlockWorker::new(
                     blk_q,
                     interrupt.clone(),
                     mem.clone(),
                     backend,
                     self.worker_stopfd.try_clone().unwrap(),
                 );
+                worker.read_only = self.is_read_only();
                 self.worker_thread = Some(worker.run());
             }
             BlockDeviceBackend::AsyncFactory(factory) => {
                 log::debug!("block: starting async worker with factory");
                 // Factory is consumed by the worker, don't put it back
                 let blk_evt = blk_q.event.as_ref().try_clone().unwrap();
-                let worker = AsyncBlockWorker::new(
+                let mut worker = AsyncBlockWorker::new(
                     blk_q.queue.clone(),
                     blk_evt,
                     interrupt.clone(),
@@ -594,6 +598,7 @@ impl VirtioDevice for Block {
                     factory,
                     self.worker_stopfd.try_clone().unwrap(),
                 );
+                worker.read_only = self.is_read_only();
                 self.worker_thread = Some(worker.run());
             }
         }

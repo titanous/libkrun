@@ -21,10 +21,11 @@ buffers or open files are required afterwards. External boot does not require
 `libkrunfw` on the library path.
 
 On x86-64, `Elf` accepts an uncompressed ELF64 Linux `vmlinux` with a physical
-64-bit entry point. `ImageGz`, `ImageBz2`, and `ImageZstd` accept images containing
-respectively gzip, bzip2, or zstd compressed ELF payloads; these loaders search
-for the compression signature. `Raw` is not accepted by this public setter on
-x86-64. On arm64, `Raw` accepts an uncompressed Linux `Image`, loaded at
+64-bit entry point. Compressed `ImageGz`, `ImageBz2`, `ImageZstd`, and `Raw` are
+unsupported by the public setter on x86-64. The initramfs is read during build;
+its actual length determines page-aligned placement below the MMIO gap and above
+the loaded kernel. Images that do not fit return a build error, including when
+the initramfs changed size after configuration. On arm64, `Raw` accepts an uncompressed Linux `Image`, loaded at
 0x80000000; `PeGz` accepts a PE image containing a gzip-compressed Linux Image.
 Other architecture/format combinations return `InvalidInput`.
 
@@ -39,7 +40,10 @@ With feature `blk`, use
 `add_block_backend(&mut self, id: String, backend: Arc<dyn BlockBackend + Send + Sync>, read_only: bool) -> &mut Self`.
 `BlockBackend`, `CacheType`, and volatile I/O slice types are re-exported from
 `krun`. The device identifier and read-only feature are guest-visible; the
-backend supplies its capacity, image identifier, cache behavior, and I/O.
+backend supplies its capacity, image identifier, cache behavior, and I/O. Read-only
+is enforced before backend dispatch in synchronous and asynchronous workers:
+writes, discard, write-zeroes and flush requests return virtio I/O errors and do
+not call the supplied object. These features are not advertised on read-only devices.
 `add_block_cfg(BlockDeviceConfig)` continues to accept file images and custom
 asynchronous backend factories.
 
@@ -67,7 +71,10 @@ fn allow(&self, operation: SocketOperation, destination: &SocketAddress) -> bool
 `SocketAddress` preserves IPv4/IPv6 addresses and ports and Unix paths/abstract
 names. `SocketOperation` distinguishes TCP connect, UDP connect/send, bind,
 listen, Unix connect/bind, and Unix path removal. Callbacks run on device threads
-and must return promptly. Connect/listen denial returns `EACCES`; UDP send denial
+and must return promptly. TSI connect/listen denial returns `EACCES`, taken from
+the policy result rather than host thread errno. Plain mapped AF_VSOCK ports use
+the vsock reset refusal (the supported guest kernel reports `ECONNRESET` from
+connect); no success confirmation is sent for a denied mapping. UDP send denial
 resets the guest socket because the forwarding protocol has no per-send error
 response. Connected UDP destinations are rechecked on every send.
 
