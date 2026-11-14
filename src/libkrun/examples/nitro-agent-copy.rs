@@ -249,10 +249,211 @@ mod probe {
         std::fs::remove_file(socket)?;
         Ok(())
     }
+    fn wait_until(what: &str, limit: Duration, done: impl Fn() -> bool) -> io::Result<()> {
+        let deadline = Instant::now() + limit;
+        while !done() {
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, what.to_string()));
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        Ok(())
+    }
+    /// One receiver parked before any template exists. PARK_MODE=assign (default)
+    /// waits for the parent's template, expire never assigns, drop releases the
+    /// handle unassigned. PARK_WAIT_SECS bounds the park (default 60).
+    fn parked_child(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::FileExt;
+        let cid = args[3].parse::<u64>()?;
+        if !(700..=899).contains(&cid) {
+            return Err("CID outside lane range".into());
+        }
+        let directory = std::path::PathBuf::from(&args[4]);
+        let socket = directory.join(format!("copy-{cid}.sock"));
+        let listener = UnixListener::bind(&socket)?;
+        listener.set_nonblocking(true)?;
+        let workload_listener = if std::env::var_os("AGENT_WORKLOAD").is_some() {
+            let l = UnixListener::bind(socket.with_extension("workload.sock"))?;
+            l.set_nonblocking(true)?;
+            Some(l)
+        } else {
+            None
+        };
+        let mode = std::env::var("PARK_MODE").unwrap_or_else(|_| "assign".into());
+        let wait = Duration::from_secs(
+            std::env::var("PARK_WAIT_SECS")
+                .unwrap_or_else(|_| "60".into())
+                .parse()?,
+        );
+        let devices = std::env::var_os("AGENT_DEVICES").is_some();
+        let disk = directory.join(format!("disk-{cid}"));
+        let fs = super::nitro_copy_fs::Tree::new(vec![0; 4096]);
+        let mut receiver = builder(&args[2], cid, &socket)?;
+        if devices {
+            std::fs::File::create(&disk)?.set_len(16 * 1024 * 1024)?;
+            attach_devices(&mut receiver, &disk, fs.clone());
+        }
+        receiver.park_for_template(wait);
+        let mut context = receiver.build()?;
+        let assignment = context
+            .take_template_assignment()
+            .ok_or("parked context has no assignment handle")?;
+        let parked_marker = directory.join(format!("parked-{cid}"));
+        if mode == "expire" || mode == "drop" {
+            let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+            let drop_it = mode == "drop";
+            let holder = std::thread::spawn(move || -> io::Result<()> {
+                wait_until("receiver READY", Duration::from_secs(15), || {
+                    assignment.receiver_ready()
+                })?;
+                std::fs::write(&parked_marker, b"parked")?;
+                if drop_it {
+                    std::thread::sleep(Duration::from_secs(1));
+                    drop(assignment);
+                } else {
+                    let _ = done_rx.recv_timeout(wait + Duration::from_secs(30));
+                    drop(assignment);
+                }
+                Ok(())
+            });
+            let ended = Instant::now();
+            let result = context.run();
+            let _ = done_tx.send(());
+            holder.join().map_err(|_| "holder panicked")??;
+            let (kind, expected) = if drop_it {
+                (
+                    io::ErrorKind::ConnectionAborted,
+                    krun::ParkedReceiverError::Abandoned,
+                )
+            } else {
+                (io::ErrorKind::TimedOut, krun::ParkedReceiverError::Expired)
+            };
+            match result {
+                Err(krun::StartError::Nitro(error))
+                    if error.kind() == kind
+                        && error
+                            .get_ref()
+                            .and_then(|e| e.downcast_ref::<krun::ParkedReceiverError>())
+                            == Some(&expected) =>
+                {
+                    println!(
+                        "PARKED_ENDED cid={cid} mode={mode} typed={expected:?} run_ms={}",
+                        ended.elapsed().as_millis()
+                    );
+                }
+                other => return Err(format!("parked {mode} ended unexpectedly: {other:?}").into()),
+            }
+            std::fs::remove_file(&socket)?;
+            return Ok(());
+        }
+        let worker = std::thread::spawn(move || -> io::Result<()> {
+            wait_until("receiver READY", Duration::from_secs(15), || {
+                assignment.receiver_ready()
+            })?;
+            std::fs::write(&parked_marker, b"parked")?;
+            let offer = directory.join("template-ready");
+            wait_until("template offer", Duration::from_secs(90), || offer.exists())?;
+            let offer = std::fs::read_to_string(offer)?;
+            let fields: Vec<_> = offer.lines().collect();
+            let [pid, fd, boot_id] = fields[..] else {
+                return Err(io::Error::other("malformed template offer"));
+            };
+            if devices {
+                let bytes = std::fs::read(directory.join("frozen-disk"))?;
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&disk)?
+                    .write_all_at(&bytes, 0)?;
+                *fs.0.lock().unwrap() = std::fs::read(directory.join("frozen-fs"))?;
+            }
+            let file = std::fs::File::open(format!("/proc/{pid}/fd/{fd}"))?;
+            let assigned = Instant::now();
+            assignment.assign(TemplateSource::Descriptor(file))?;
+            let mut connection = accept(&listener)?;
+            let hello = response(&mut connection, "hello")?;
+            println!(
+                "PARKED_ASSIGN_TO_HELLO cid={cid} us={}",
+                assigned.elapsed().as_micros()
+            );
+            if hello["boot_id"] != boot_id
+                || hello["token"] != "clone-test-token"
+                || hello["generation"] != 0
+            {
+                return Err(io::Error::other("copy identity mismatch"));
+            }
+            send(
+                &mut connection,
+                json!({"type":"welcome","version":3,"features":[]}),
+            )?;
+            send(
+                &mut connection,
+                json!({"type":"copied","request":3,"generation":1}),
+            )?;
+            response(&mut connection, "ack")?;
+            let result = if let Some(listener) = workload_listener {
+                verify_workload(&listener, cid)?
+            } else {
+                "ready".into()
+            };
+            std::fs::write(directory.join(format!("ready-{cid}")), result)?;
+            let release = directory.join("release");
+            wait_until("parked release", Duration::from_secs(30), || {
+                release.exists()
+            })?;
+            send(&mut connection, json!({"type":"power_off","request":4}))?;
+            response(&mut connection, "ack")?;
+            Ok(())
+        });
+        let run = context.run();
+        worker.join().map_err(|_| "parked worker panicked")??;
+        run?;
+        std::fs::remove_file(socket)?;
+        Ok(())
+    }
+    fn spawn_parked(receiver: &str, cid: u64, directory: &Path) -> io::Result<std::process::Child> {
+        std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--parked-child",
+                receiver,
+                &cid.to_string(),
+                directory
+                    .to_str()
+                    .ok_or_else(|| io::Error::other("nonutf8"))?,
+            ])
+            .spawn()
+    }
+    fn wait_parked(
+        directory: &Path,
+        cids: std::ops::Range<u64>,
+        children: &mut [std::process::Child],
+    ) -> io::Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !cids
+            .clone()
+            .all(|cid| directory.join(format!("parked-{cid}")).exists())
+        {
+            if Instant::now() >= deadline
+                || children
+                    .iter_mut()
+                    .any(|child| child.try_wait().ok().flatten().is_some())
+            {
+                for child in children.iter_mut() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                return Err(io::Error::other("parked receivers not READY in time"));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Ok(())
+    }
     pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         let args: Vec<_> = std::env::args().collect();
         if args.len() == 6 && args[1] == "--restore-child" {
             return restore_child(&args);
+        }
+        if args.len() == 5 && args[1] == "--parked-child" {
+            return parked_child(&args);
         }
         if args.len() != 3 {
             return Err("usage: nitro-agent-copy agent-source.eif receiver.eif".into());
@@ -273,6 +474,29 @@ mod probe {
             .map(UnixListener::try_clone)
             .transpose()?;
         let full_devices = std::env::var_os("AGENT_DEVICES").is_some();
+        // AGENT_PARKED=N parks receivers CIDs 760.. before the source exists. With
+        // the 4-guest limit, N=4 parks 3 before the source and the 4th after the
+        // source closes but before any template is assigned.
+        let parked = std::env::var("AGENT_PARKED")
+            .ok()
+            .map(|n| n.parse::<u64>())
+            .transpose()?
+            .unwrap_or(0);
+        if !(0..=4).contains(&parked) {
+            return Err("AGENT_PARKED must be0..4".into());
+        }
+        let park_directory =
+            std::env::current_dir()?.join(format!("agent-parked-{}", std::process::id()));
+        let early = parked.min(3);
+        let mut parked_children = Vec::new();
+        if parked > 0 {
+            std::fs::create_dir(&park_directory)?;
+            for cid in 760..760 + early {
+                parked_children.push(spawn_parked(&args[2], cid, &park_directory)?);
+            }
+            wait_parked(&park_directory, 760..760 + early, &mut parked_children)?;
+            eprintln!("AGENT_PARKED_BEFORE_SOURCE count={early}");
+        }
         let source_disk = socket.with_extension("source-disk");
         let source_fs = super::nitro_copy_fs::Tree::new(vec![b'A'; 4096]);
         let mut source = builder(&args[1], 711, &socket)?;
@@ -326,6 +550,56 @@ mod probe {
                 return Err(io::Error::other("source workload not quiescent"));
             }
             eprintln!("AGENT_SOURCE_QUIESCENT");
+            if std::env::var_os("AGENT_RECEIVER_FAIL").is_some() {
+                // A copy's receiver fails to start (corrupt image) while the source
+                // runs; the source must stay usable and still be capturable.
+                let directory =
+                    std::env::current_dir()?.join(format!("agent-recvfail-{}", std::process::id()));
+                std::fs::create_dir_all(&directory)?;
+                let bad = directory.join("corrupt-receiver.eif");
+                std::fs::write(&bad, vec![0u8; 4096])?;
+                let log = std::fs::File::create(directory.join("receiver-failure.log"))?;
+                let mut child = std::process::Command::new(std::env::current_exe()?)
+                    .args([
+                        "--parked-child",
+                        bad.to_str().ok_or_else(|| io::Error::other("nonutf8"))?,
+                        "765",
+                        directory
+                            .to_str()
+                            .ok_or_else(|| io::Error::other("nonutf8"))?,
+                    ])
+                    .env("PARK_MODE", "expire")
+                    .env("PARK_WAIT_SECS", "5")
+                    .stdout(std::process::Stdio::null())
+                    .stderr(log)
+                    .spawn()?;
+                let deadline = Instant::now() + Duration::from_secs(40);
+                let status = loop {
+                    if let Some(status) = child.try_wait()? {
+                        break status;
+                    }
+                    if Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(io::Error::other("failing receiver did not exit"));
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                };
+                let reason = std::fs::read_to_string(directory.join("receiver-failure.log"))?;
+                std::fs::remove_dir_all(&directory)?;
+                if status.success() {
+                    return Err(io::Error::other("corrupt receiver unexpectedly started"));
+                }
+                send(
+                    &mut connection,
+                    json!({"type":"list_processes","request":5}),
+                )?;
+                response(&mut connection, "processes")?;
+                eprintln!(
+                    "AGENT_SOURCE_USABLE_AFTER_RECEIVER_FAILURE receiver_exit={status} reason={}",
+                    reason.lines().last().unwrap_or("").trim()
+                );
+            }
             let expired = std::env::var_os("AGENT_EXPIRED_RECOVERY").is_some();
             let unarmed = std::env::var_os("AGENT_UNARMED_RECOVERY").is_some() || expired;
             if expired {
@@ -394,6 +668,20 @@ mod probe {
             source_thread
                 .join()
                 .map_err(|_| "source recovery thread panicked")??;
+            // A refused capture must leave no template: the wait reports an error
+            // and no sealed template descriptor exists in this process.
+            let waited = handle.wait_template_capture();
+            let template_fds = std::fs::read_dir("/proc/self/fd")?
+                .filter_map(|entry| std::fs::read_link(entry.ok()?.path()).ok())
+                .filter(|target| target.to_string_lossy().contains("guest-template"))
+                .count();
+            if waited.is_ok() || template_fds != 0 {
+                return Err("refused capture left a template behind".into());
+            }
+            println!(
+                "AGENT_REFUSAL_NO_TEMPLATE wait_error=1 template_fds={template_fds} error={}",
+                waited.err().map(|e| e.to_string()).unwrap_or_default()
+            );
             println!("AGENT_UNARMED_RECOVERY_PASS exit={source_exit:?}");
             return Ok(());
         }
@@ -417,6 +705,64 @@ mod probe {
                 .elapsed()
                 .as_micros()
         );
+        if parked > 0 {
+            use std::os::fd::AsRawFd;
+            let directory = &park_directory;
+            for cid in 760 + early..760 + parked {
+                parked_children.push(spawn_parked(&args[2], cid, directory)?);
+            }
+            wait_parked(directory, 760..760 + parked, &mut parked_children)?;
+            if let Some(disk) = frozen_disk.as_ref() {
+                std::fs::write(directory.join("frozen-disk"), disk)?;
+                std::fs::write(directory.join("frozen-fs"), &frozen_fs)?;
+            }
+            let offer = format!(
+                "{}\n{}\n{}",
+                std::process::id(),
+                template.file.as_raw_fd(),
+                hello["boot_id"].as_str().ok_or("missing boot_id")?
+            );
+            std::fs::write(directory.join("template-offer.tmp"), offer)?;
+            std::fs::rename(
+                directory.join("template-offer.tmp"),
+                directory.join("template-ready"),
+            )?;
+            eprintln!("AGENT_TEMPLATE_OFFERED parked={parked}");
+            let ready = wait_until("parked copies ready", Duration::from_secs(40), || {
+                (760..760 + parked).all(|cid| directory.join(format!("ready-{cid}")).exists())
+            });
+            if ready.is_err()
+                || parked_children
+                    .iter_mut()
+                    .any(|child| child.try_wait().ok().flatten().is_some())
+            {
+                for child in &mut parked_children {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                return Err("parked copies did not all become ready".into());
+            }
+            if std::env::var_os("AGENT_WORKLOAD").is_some() {
+                let values = (760..760 + parked)
+                    .map(|cid| std::fs::read_to_string(directory.join(format!("ready-{cid}"))))
+                    .collect::<io::Result<std::collections::HashSet<_>>>()?;
+                if values.len() as u64 != parked {
+                    return Err("duplicate parked random values".into());
+                }
+            }
+            println!("AGENT_PARKED_ALIVE count={parked}");
+            std::fs::write(directory.join("release"), b"release")?;
+            for child in &mut parked_children {
+                if !child.wait()?.success() {
+                    return Err("parked copy failed".into());
+                }
+            }
+            drop(template);
+            std::fs::remove_dir_all(directory)?;
+            std::fs::remove_file(socket)?;
+            println!("AGENT_PARKED_COMPLETED count={parked}");
+            return Ok(());
+        }
         if std::env::var_os("AGENT_CONCURRENT").is_some() {
             use std::os::{fd::AsRawFd, unix::process::CommandExt};
             let directory =
@@ -533,6 +879,12 @@ mod probe {
                     let mut connection = accept(&copy_listener)?;
                     let copied = response(&mut connection, "hello")?;
                     eprintln!("COPY_IO_HELLO copy={copy}");
+                    // No prestart: from choosing the template (backend files and
+                    // builder, fresh receiver boot, import, release) to agent Hello.
+                    println!(
+                        "AGENT_COPY_CHOSEN_TO_HELLO copy={copy} us={}",
+                        started.elapsed().as_micros()
+                    );
                     if std::env::var_os("NITRO_COPY_TIMINGS").is_some() {
                         eprintln!(
                             "NITRO_AGENT_HELLO_TIMING host_ns={}",
