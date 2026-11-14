@@ -201,18 +201,55 @@ impl PortOutput for PortOutputFd {
         }
         // Regular files retain offset/O_APPEND; pipes/terminals already own a
         // private nonblocking description. No caller flags are ever changed.
-        let written = unsafe { libc::write(fd, guard.as_ptr().cast(), buf.len()) };
-        if written < 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(written as usize)
-        }
+        write_without_sigpipe(fd, guard.as_ptr().cast(), buf.len())
     }
 
     fn wait_until_writable(&self) {
         let mut poll_fds = [PollFd::new(self.0.as_fd(), PollFlags::POLLOUT)];
         // Return periodically so the worker observes final stop even if a reader stalls.
         poll(&mut poll_fds, PollTimeout::from(10u16)).expect("Failed to poll");
+    }
+}
+
+// Unlike sockets, pipes have no MSG_NOSIGNAL. Keep the embedder's signal
+// disposition unchanged and preserve any SIGPIPE already pending on this thread.
+fn write_without_sigpipe(fd: RawFd, bytes: *const libc::c_void, len: usize) -> io::Result<usize> {
+    unsafe {
+        let mut blocked: libc::sigset_t = std::mem::zeroed();
+        let mut original: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut blocked);
+        libc::sigaddset(&mut blocked, libc::SIGPIPE);
+        let error = libc::pthread_sigmask(libc::SIG_BLOCK, &blocked, &mut original);
+        if error != 0 {
+            return Err(io::Error::from_raw_os_error(error));
+        }
+        let mut pending: libc::sigset_t = std::mem::zeroed();
+        if libc::sigpending(&mut pending) != 0 {
+            let error = io::Error::last_os_error();
+            libc::pthread_sigmask(libc::SIG_SETMASK, &original, std::ptr::null_mut());
+            return Err(error);
+        }
+        let already_pending = libc::sigismember(&pending, libc::SIGPIPE) == 1;
+        let written = libc::write(fd, bytes, len);
+        let result = if written < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(written as usize)
+        };
+        if !already_pending
+            && result.as_ref().err().and_then(io::Error::raw_os_error) == Some(libc::EPIPE)
+        {
+            // SIGPIPE is still blocked, so a confirmed pending signal stays
+            // pending until this thread consumes it. Ignored signals need no wait.
+            if libc::sigpending(&mut pending) == 0
+                && libc::sigismember(&pending, libc::SIGPIPE) == 1
+            {
+                let mut signal = 0;
+                libc::sigwait(&blocked, &mut signal);
+            }
+        }
+        libc::pthread_sigmask(libc::SIG_SETMASK, &original, std::ptr::null_mut());
+        result
     }
 }
 

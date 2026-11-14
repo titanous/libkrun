@@ -63,6 +63,69 @@ fn output_descriptor_socket() {
 }
 
 #[test]
+fn closed_pipe_returns_error_with_default_sigpipe() {
+    const CHILD: &str = "LIBKRUN_TEST_DEFAULT_SIGPIPE";
+    if std::env::var_os(CHILD).is_some() {
+        let (reader, writer) = std::io::pipe().unwrap();
+        let mut output = output_to_raw_fd_dup_blocking(writer.as_raw_fd()).unwrap();
+        drop(reader);
+        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+        let mut bytes = *b"console";
+        let slice = unsafe { VolatileSlice::new(bytes.as_mut_ptr(), bytes.len()) };
+        assert_eq!(
+            output.write_volatile(&slice).unwrap_err().kind(),
+            io::ErrorKind::BrokenPipe
+        );
+        unsafe {
+            let mut mask: libc::sigset_t = std::mem::zeroed();
+            assert_eq!(
+                libc::pthread_sigmask(libc::SIG_BLOCK, std::ptr::null(), &mut mask),
+                0
+            );
+            assert_eq!(libc::sigismember(&mask, libc::SIGPIPE), 0);
+            let mut disposition: libc::sigaction = std::mem::zeroed();
+            assert_eq!(
+                libc::sigaction(libc::SIGPIPE, std::ptr::null(), &mut disposition),
+                0
+            );
+            assert_eq!(disposition.sa_sigaction, libc::SIG_DFL);
+            let mut blocked: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut blocked);
+            libc::sigaddset(&mut blocked, libc::SIGPIPE);
+            assert_eq!(
+                libc::pthread_sigmask(libc::SIG_BLOCK, &blocked, std::ptr::null_mut()),
+                0
+            );
+            assert_eq!(libc::raise(libc::SIGPIPE), 0);
+            assert_eq!(
+                output.write_volatile(&slice).unwrap_err().kind(),
+                io::ErrorKind::BrokenPipe
+            );
+            let mut pending: libc::sigset_t = std::mem::zeroed();
+            assert_eq!(libc::sigpending(&mut pending), 0);
+            assert_eq!(libc::sigismember(&pending, libc::SIGPIPE), 1);
+            let mut signal = 0;
+            assert_eq!(libc::sigwait(&blocked, &mut signal), 0);
+            assert_eq!(signal, libc::SIGPIPE);
+            assert_eq!(
+                libc::pthread_sigmask(libc::SIG_SETMASK, &mask, std::ptr::null_mut()),
+                0
+            );
+        }
+        return;
+    }
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "virtio::console::port_io::descriptor_tests::closed_pipe_returns_error_with_default_sigpipe"])
+        .env(CHILD, "1")
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "closed pipe killed or failed child: {status}"
+    );
+}
+
+#[test]
 fn output_descriptor_pipe() {
     let (mut reader, writer) = std::io::pipe().unwrap();
     let flags = unsafe { fcntl(writer.as_raw_fd(), F_GETFL) };
