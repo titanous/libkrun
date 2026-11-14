@@ -212,6 +212,8 @@ pub struct Vmm {
 
     vcpus_handles: Vec<VcpuHandle>,
     exit_evt: EventFd,
+    #[cfg(target_arch = "x86_64")]
+    cooperative_capture: Option<(u64, std::path::PathBuf, u8, u64)>,
     vm: Vm,
     exit_observers: Vec<Arc<Mutex<dyn VmmExitObserver>>>,
     exit_code: Arc<AtomicI32>,
@@ -465,19 +467,55 @@ impl Subscriber for Vmm {
             debug!("Vmm: exit_evt fired, shutting down");
             let _ = self.exit_evt.read();
 
+            let mut frozen = false;
             let vcpu_exit_code = self
                 .vcpus_handles
                 .iter()
                 .find_map(|handle| match handle.response_receiver().try_recv() {
                     Ok(VcpuResponse::Exited(exit_code)) => Some(exit_code),
                     Ok(VcpuResponse::Frozen) => {
-                        // Capture is opt-in. Never turn an unconsumed frozen
-                        // notification into a successful ordinary shutdown.
+                        frozen = true;
                         Some(FC_EXIT_CODE_GENERIC_ERROR)
                     }
                     _ => None,
                 })
                 .unwrap_or(FC_EXIT_CODE_OK);
+
+            #[cfg(target_arch = "x86_64")]
+            if frozen {
+                self.vcpu_exit_flag.store(true, Ordering::Release);
+                self.vcpus_handles.clear(); // joins every vCPU before reading RAM
+                let result = (|| -> std::io::Result<std::path::PathBuf> {
+                    let (control, path, vcpus, ram_mib) =
+                        self.cooperative_capture.as_ref().ok_or_else(|| {
+                            std::io::Error::other("cooperative capture not configured")
+                        })?;
+                    if !self.mmio_device_manager.all_virtio_reset() {
+                        return Err(std::io::Error::other(
+                            "guest froze with an active virtio device",
+                        ));
+                    }
+                    let clock = self.vm.fd().get_clock().map_err(std::io::Error::other)?;
+                    let template = crate::template::Template::capture_with_clock(
+                        &self.guest_memory,
+                        *control,
+                        *vcpus,
+                        *ram_mib,
+                        clock.clock,
+                    )?;
+                    template.write_to_path(path)?;
+                    Ok(path.clone())
+                })();
+                self.stop(match result {
+                    Ok(template_path) => crate::vm_exit::VmExit::Frozen { template_path },
+                    Err(error) => crate::vm_exit::VmExit::Error {
+                        message: error.to_string(),
+                    },
+                });
+                return;
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            let _ = frozen;
 
             let vmm_exit_code = self.exit_code.load(Ordering::SeqCst);
 

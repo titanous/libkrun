@@ -193,6 +193,12 @@ pub struct VmResources {
     pub kernel_bundle: Option<KernelBundle>,
     /// The path to an external kernel, as an alternative to KernelBundle.
     pub external_kernel: Option<ExternalKernel>,
+    /// Sealed cooperative RAM image used instead of loading a boot payload.
+    #[cfg(target_arch = "x86_64")]
+    pub cooperative_template: Option<crate::template::Template>,
+    /// Physical control page and create-new output path for a frozen template.
+    #[cfg(target_arch = "x86_64")]
+    pub cooperative_capture: Option<(u64, PathBuf)>,
     /// The parameters for the qboot bundle to be loaded in this microVM.
     #[cfg(feature = "tee")]
     pub qboot_bundle: Option<QbootBundle>,
@@ -496,6 +502,10 @@ mod tests {
             kernel_cmdline: default_kernel_cmdline(),
             kernel_bundle: Default::default(),
             external_kernel: None,
+            #[cfg(target_arch = "x86_64")]
+            cooperative_template: None,
+            #[cfg(target_arch = "x86_64")]
+            cooperative_capture: None,
             fs: Default::default(),
             vsock: Default::default(),
             #[cfg(feature = "net")]

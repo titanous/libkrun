@@ -784,6 +784,16 @@ impl VirtioDevice for Balloon {
     fn is_activated(&self) -> bool {
         self.device_state.is_activated()
     }
+
+    fn reset(&mut self) -> bool {
+        // Queue processing shares this device mutex with MMIO reset. Once
+        // inactive, stale event-loop notifications cannot access guest RAM.
+        self.device_state = DeviceState::Inactive;
+        self.queues = None;
+        self.inflated_bitmap = None;
+        self.reported_free_bitmap = None;
+        true
+    }
 }
 
 #[cfg(test)]

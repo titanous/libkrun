@@ -635,6 +635,36 @@ impl Builder {
         self
     }
 
+    /// Capture a template only after the guest publishes its frozen control
+    /// page and emits the cooperative freeze exit. The source never resumes.
+    #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
+    pub fn capture_cooperative_template(
+        &mut self,
+        control_page: u64,
+        path: impl Into<std::path::PathBuf>,
+    ) -> &mut Self {
+        self.config.vmr.cooperative_capture = Some((control_page, path.into()));
+        self
+    }
+
+    /// Start a new VM over a sealed template descriptor. Configure the same
+    /// device list in the same order, with independent writable disk backends.
+    #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
+    pub fn start_from_template_fd(&mut self, file: std::fs::File) -> std::io::Result<&mut Self> {
+        self.config.vmr.cooperative_template = Some(vmm::template::Template::open(file)?);
+        Ok(self)
+    }
+
+    /// Load a persisted template into immutable backing before starting a VM.
+    #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
+    pub fn start_from_template_path(
+        &mut self,
+        path: impl AsRef<std::path::Path>,
+    ) -> std::io::Result<&mut Self> {
+        self.config.vmr.cooperative_template = Some(vmm::template::Template::from_path(path)?);
+        Ok(self)
+    }
+
     pub fn workdir(&mut self, workdir: String) -> &mut Self {
         self.config.workdir = Some(workdir);
         self

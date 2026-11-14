@@ -66,6 +66,7 @@ pub struct Template {
     pub control: u64,
     pub vcpus: u8,
     pub ram_mib: u64,
+    pub clock_ns: u64,
     pub regions: Vec<(u64, usize, u64)>,
 }
 
@@ -159,6 +160,7 @@ impl Template {
             control,
             vcpus: get(3) as u8,
             ram_mib: get(4),
+            clock_ns: get(6),
             regions,
         })
     }
@@ -183,6 +185,16 @@ impl Template {
         vcpus: u8,
         ram_mib: u64,
     ) -> io::Result<Self> {
+        Self::capture_with_clock(memory, control, vcpus, ram_mib, 0)
+    }
+
+    pub fn capture_with_clock(
+        memory: &GuestMemoryMmap,
+        control: u64,
+        vcpus: u8,
+        ram_mib: u64,
+        clock_ns: u64,
+    ) -> io::Result<Self> {
         let mut page = [0; 4096];
         memory
             .read_slice(&mut page, GuestAddress(control))
@@ -204,6 +216,7 @@ impl Template {
         put(3, vcpus as u64);
         put(4, ram_mib);
         put(5, memory.num_regions() as u64);
+        put(6, clock_ns);
         let mut offset = HEADER as u64;
         let mut buffer = vec![0; 1024 * 1024];
         for (i, region) in memory.iter().enumerate() {
