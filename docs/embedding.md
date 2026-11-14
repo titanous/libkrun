@@ -45,17 +45,14 @@ The platform's x86 KVM control-port allocation is defined here:
 | `0xe5` | byte write | Cooperative freeze command (copy-enabled builds) |
 | `0xe6` | 32-bit read | Host realtime nanoseconds, low word |
 | `0xe7` | 32-bit read | Host realtime nanoseconds, high word |
-| `0xe8` | byte read | Host capture request |
+| `0xe9` | byte read/write | Cooperative capture request and frozen-control notification |
 | `0xea` | byte write | Guest stop reason; reads return zero |
 
 Copy-related ports are implemented by the cooperative-copy branch, not by every
-build. `0xe9` is reserved for the conventional debug console. Stop reason bytes
-are 0 none/clear, 1 requested power-off, 2 requested reboot, 3 halt, 4 panic.
-Byte 5 announces shutdown preparation only: it allows bounded console discard
-before device teardown, never sets a terminal reason or stops a guest. During
-normal operation virtio-console output retains backpressure without a time-based
-discard. Once ending, an unwritable descriptor has a 100 ms discard budget;
-`Console::tx_state().dropped_bytes()` exposes discarded bytes.
+build. Stop reason bytes are 0 none/clear, 1 requested power-off, 2 requested
+reboot, 3 halt, 4 panic. Byte 5 announces shutdown preparation only; it never
+sets a terminal reason or stops a guest. Console buffering is bounded in normal
+operation as well as at exit, independently of this notification.
 Invalid widths/values are ignored; panic cannot be replaced or cleared. A write
 alone does not stop the VM. The x86 KVM builder supplies `holodeck.stop_port=1`
 so the maintained guest only writes the port on this platform.
@@ -75,7 +72,10 @@ encoded into Error or used as classification input. Nitro terminal/smoke example
 are host-free parser-tested and compiled; hardware execution remains required on
 a Nitro host. `Shutdown` is reachable only for an explicitly supplied workload code,
 never inferred from reset. Deadline outcomes remain distinct on the second
-backend. `Stopped` currently comes from the Nitro handle stop event; Linux KVM does not
+backend. Nitro additionally validates guest-owned console/transport data: a typed
+validation fault overrides workload code, deadlines and stated reason, but a pending
+host stop still wins. This validation rule is Nitro-specific, not a second terminal
+reason classifier. `Stopped` currently comes from the Nitro handle stop event; Linux KVM does not
 implement that public handle operation (the daemon supervises its process exit).
 Guest reasons are untrusted privileged guest statements: they confer no
 privilege, template-reuse safety, billing treatment, or forensic exemption.
@@ -90,19 +90,28 @@ is introduced. Copy/import must not serialize terminal reason state.
 Regular-file output descriptors are duplicated: file position and append semantics
 are preserved, and files are written directly. Socket writes use MSG_DONTWAIT.
 Pipe and terminal outputs obtain private nonblocking descriptions through the
-original descriptor, never changing caller flags; preparing one fails explicitly
-if the OS refuses a private description. Two console workers may safely share
+original descriptor with O_NOCTTY, never changing caller flags. Pipe/terminal
+input follows the same private-description policy; sockets use per-call nonblocking
+reads. If /proc reopening is unavailable or denied, construction fails with a clear
+error rather than changing shared flags or risking a blocking fallback. Two console workers may safely share
 one caller pipe without changing its blocking mode.
 
-Console backpressure never retains a guest TX descriptor for more than 100 ms:
-if a host reader does not keep up, the unwritable remainder is discarded and the
-descriptor completed. This also applies before terminal exit: guest console close
-can wait for TX completion, so bounding only the final drain cannot bound shutdown.
-The eight-vCPU continuous-output/unread-pipe power-off regression must return from
-`run` within five seconds including its deliberate one-second guest delay; host
-CPU starvation and unrelated blocking custom device handlers are outside that
-reader-independent bound. No repeated used-queue interrupts are emitted while a
-single descriptor waits for the reader.
+Each console port copies guest bytes into at most 4 MiB of host-owned queued and
+in-flight data; a separate joined writer drains the host descriptor. Guest buffers
+are completed after copying, not after host I/O. A full buffer applies at most
+10 ms of backpressure per congestion interval, then discards incoming bytes,
+preserving accepted bytes. Pending loss is reported before later bytes are
+accepted, as one line `[console: N bytes dropped]`. `VmHandle::console_dropped_bytes()`
+returns the cumulative discarded guest-byte count across console ports and remains
+readable after `Context::run` returns. Below the bound, output is lossless. A
+permanently unread descriptor cannot receive a marker; its counter is authoritative.
+At reset or final exit, the writer drains for at most 100 ms, then counts and drops
+remaining bytes and joins. No buffer survives the device-reset boundary required
+before a guest-copy template is captured, and no bytes are inherited by copies.
+Guests keep the upstream console driver; no guest console patch is required.
+The eight-vCPU continuous-output/unread-pipe regression must return within five
+seconds including its deliberate one-second delay, excluding host CPU starvation
+and unrelated blocking custom output implementations.
 
 Final stop requests all KVM CPUs to stop and joins them against one shared
 two-second deadline before draining console output. All CPU responses are checked;
