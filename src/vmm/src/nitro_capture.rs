@@ -112,6 +112,9 @@ impl CaptureHandler for NitroCapture {
         }
         let mut compatibility = self.compatibility.clone();
         compatibility.extend_from_slice(&identity);
+        if let Some(path) = std::env::var_os("NITRO_CAPTURE_PHASE_FILE") {
+            std::fs::write(path, std::process::id().to_string())?;
+        }
         let capture_started = std::time::Instant::now();
         let template = Template::capture_with_manifest(
             memory,

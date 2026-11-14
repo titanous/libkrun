@@ -103,6 +103,17 @@ mod probe {
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(io::Error::other)?
             .as_nanos() as u64;
+        if std::env::var_os("AGENT_TIMER_SECS").is_some()
+            && (number("timers")? != 1
+                || number("expirations")? != 1
+                || number("counter")? != 42
+                || number("timer_late_ns")? > 2_000_000_000
+                || number("sleep_late_ns")? > 2_000_000_000)
+        {
+            return Err(io::Error::other(format!(
+                "timer continuation failed: {report}"
+            )));
+        }
         if !report.starts_with("VERIFIED ")
             || fields.get("random") == fields.get("nonce")
             || number("bad")? != 0
@@ -152,6 +163,11 @@ mod probe {
             nitro_sandbox::lifecycle::LIFECYCLE_LOCK_PATH.into(),
             NitroSerialization::StartAndTeardown,
         );
+        if let Some(path) = std::env::var_os("AGENT_DESCRIPTOR_HANDOFF") {
+            let stream = UnixStream::connect(path)?;
+            builder.nitro_descriptor_handoff(stream);
+            eprintln!("AGENT_DESCRIPTOR_HANDOFF_CONFIGURED cid={cid}");
+        }
         let cpus = std::env::var("COPY_CPUS")
             .unwrap_or_else(|_| "1".into())
             .parse::<u8>()
@@ -489,7 +505,11 @@ mod probe {
         }
         let park_directory =
             std::env::current_dir()?.join(format!("agent-parked-{}", std::process::id()));
-        let early = parked.min(3);
+        let early = if std::env::var_os("AGENT_PARKED_AFTER_SOURCE").is_some() {
+            0
+        } else {
+            parked.min(3)
+        };
         let mut parked_children = Vec::new();
         if parked > 0 {
             std::fs::create_dir(&park_directory)?;
@@ -501,7 +521,13 @@ mod probe {
         }
         let source_disk = socket.with_extension("source-disk");
         let source_fs = super::nitro_copy_fs::Tree::new(vec![b'A'; 4096]);
-        let mut source = builder(&args[1], 711, &socket)?;
+        let source_cid = std::env::var("AGENT_SOURCE_CID")
+            .unwrap_or_else(|_| "711".into())
+            .parse::<u64>()?;
+        if !(700..=899).contains(&source_cid) {
+            return Err("source CID outside lane range".into());
+        }
+        let mut source = builder(&args[1], source_cid, &socket)?;
         if full_devices {
             std::fs::File::create(&source_disk)?.set_len(16 * 1024 * 1024)?;
             attach_devices(&mut source, &source_disk, source_fs.clone());
@@ -529,7 +555,7 @@ mod probe {
             if let Some(listener) = source_workload {
                 send(
                     &mut connection,
-                    json!({"type":"exec","request":9,"process":1,"command":{"argv":if std::env::var_os("AGENT_CONSOLE_INJECT").is_some() {vec!["/clone-workload","devices","inject"]}else if full_devices {vec!["/clone-workload","devices"]}else{vec!["/clone-workload"]}}}),
+                    json!({"type":"exec","request":9,"process":1,"command":{"argv":if let Ok(seconds)=std::env::var("AGENT_TIMER_SECS") {vec!["/clone-workload".to_string(),"devices".into(),"timers".into(),seconds]}else if std::env::var_os("AGENT_CONSOLE_INJECT").is_some() {vec!["/clone-workload".into(),"devices".into(),"inject".into()]}else if full_devices {vec!["/clone-workload".into(),"devices".into()]}else{vec!["/clone-workload".to_string()]}}}),
                 )?;
                 response(&mut connection, "ack")?;
                 let mut stream = accept(&listener)?;
@@ -602,6 +628,23 @@ mod probe {
                     reason.lines().last().unwrap_or("").trim()
                 );
             }
+            if let Ok(seconds) = std::env::var("AGENT_SOURCE_AGE_SECS") {
+                let seconds: u64 = seconds.parse().map_err(io::Error::other)?;
+                if !(1800..=3600).contains(&seconds) {
+                    return Err(io::Error::other("source age must be1800..3600seconds"));
+                }
+                let age_started = Instant::now();
+                while age_started.elapsed() < Duration::from_secs(seconds) {
+                    let value = receive(&mut connection)?;
+                    if value["type"] != "heartbeat" {
+                        return Err(io::Error::other("unexpected warm-source message"));
+                    }
+                }
+                eprintln!(
+                    "AGENT_LONG_UPTIME_SOURCE elapsed_ms={}",
+                    age_started.elapsed().as_millis()
+                );
+            }
             let expired = std::env::var_os("AGENT_EXPIRED_RECOVERY").is_some();
             let unarmed = std::env::var_os("AGENT_UNARMED_RECOVERY").is_some() || expired;
             if expired {
@@ -637,6 +680,22 @@ mod probe {
                 )?;
                 send(&mut recovered, json!({"type":"list_processes","request":3}))?;
                 response(&mut recovered, "processes")?;
+                if std::env::var_os("AGENT_FREEZE_TWICE").is_some() {
+                    send(&mut recovered, json!({"type":"freeze","request":6}))?;
+                    drop(recovered);
+                    recovered = accept(&source_listener)?;
+                    let again = response(&mut recovered, "hello")?;
+                    if again["boot_id"] != hello["boot_id"] {
+                        return Err(io::Error::other("second freeze changed identity"));
+                    }
+                    send(
+                        &mut recovered,
+                        json!({"type":"welcome","version":3,"features":[]}),
+                    )?;
+                    send(&mut recovered, json!({"type":"list_processes","request":7}))?;
+                    response(&mut recovered, "processes")?;
+                    eprintln!("AGENT_TWO_FREEZES_RECOVERED running=1");
+                }
                 send(&mut recovered, json!({"type":"power_off","request":4}))?;
                 response(&mut recovered, "ack")?;
                 eprintln!("AGENT_UNARMED_SOURCE_RECOVERED running=1");
@@ -873,6 +932,19 @@ mod probe {
                 |_| Ok(()),
             )?;
             let context = receiver.build()?;
+            if std::env::var_os("AGENT_COPY_FREEZE").is_some() {
+                let error = context
+                    .vm_handle()
+                    .arm_template_capture(Duration::from_secs(1))
+                    .unwrap_err();
+                if !error
+                    .get_ref()
+                    .is_some_and(|e| e.is::<krun::RestoredCopyCaptureUnsupported>())
+                {
+                    return Err(format!("wrong copy capture refusal: {error}").into());
+                }
+                eprintln!("AGENT_COPY_CAPTURE_REFUSED typed=RestoredCopyCaptureUnsupported");
+            }
             let hello = hello.clone();
             let (random_tx, random_rx) = std::sync::mpsc::sync_channel(1);
             let receiver_thread = std::thread::spawn(move || -> io::Result<()> {
@@ -912,6 +984,16 @@ mod probe {
                     )?;
                     response(&mut connection, "ack")?;
                     eprintln!("COPY_IO_GENERATION_ACK copy={copy}");
+                    if std::env::var_os("AGENT_COPY_FREEZE").is_some() {
+                        send(&mut connection, json!({"type":"freeze","request":8}))?;
+                        let refused = response(&mut connection, "error")?;
+                        send(
+                            &mut connection,
+                            json!({"type":"list_processes","request":9}),
+                        )?;
+                        response(&mut connection, "processes")?;
+                        eprintln!("AGENT_COPY_KERNEL_FREEZE_REFUSED running=1 response={refused}");
+                    }
                     if let Some(listener) = copy_workload {
                         eprintln!("COPY_IO_WORKLOAD_WAIT copy={copy}");
                         random_tx

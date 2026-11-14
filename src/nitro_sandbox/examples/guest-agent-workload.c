@@ -11,6 +11,7 @@
 #include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
+#include <sys/timerfd.h>
 #include <string.h>
 #include <sys/random.h>
 #include <sys/socket.h>
@@ -49,6 +50,23 @@ static void *traffic_load(void *arg) {
     }
     return NULL;
 }
+struct timer_state { int fd; uint64_t deadline, fired_at, sleep_at, expirations, counter; };
+static void *timer_wait(void *arg) {
+    struct timer_state *state=arg;
+    uint64_t count=0;
+    if(read(state->fd,&count,sizeof(count))!=sizeof(count)) return (void *)1;
+    state->expirations=count;
+    state->fired_at=ns(CLOCK_MONOTONIC);
+    state->counter++;
+    return NULL;
+}
+static void *sleep_wait(void *arg) {
+    struct timer_state *state=arg;
+    struct timespec deadline={.tv_sec=(time_t)(state->deadline/1000000000ULL),.tv_nsec=(long)(state->deadline%1000000000ULL)};
+    if(clock_nanosleep(CLOCK_MONOTONIC,TIMER_ABSTIME,&deadline,NULL)) return (void *)1;
+    state->sleep_at=ns(CLOCK_MONOTONIC);
+    return NULL;
+}
 int main(int argc, char **argv) {
     if(argc>2 && !strcmp(argv[2],"inject")) {
         const char *paths[]={"/dev/console","/dev/kmsg"};
@@ -83,6 +101,17 @@ int main(int argc, char **argv) {
     if (memory==MAP_FAILED) return 23;
     for(size_t i=0;i<count;i++) memory[i]=nonce^(i*0x9e3779b97f4a7c15ULL);
     uint64_t monotonic=ns(CLOCK_MONOTONIC),realtime=ns(CLOCK_REALTIME);
+    struct timer_state timers={.fd=-1,.counter=41};
+    pthread_t timer_thread,sleep_thread;
+    int timers_enabled=argc>3;
+    if(timers_enabled) {
+        unsigned long seconds=strtoul(argv[3],NULL,10);
+        if(seconds<2 || seconds>3700) return 38;
+        timers.fd=timerfd_create(CLOCK_MONOTONIC,TFD_CLOEXEC);
+        timers.deadline=monotonic+(uint64_t)seconds*1000000000ULL;
+        struct itimerspec spec={.it_value={.tv_sec=(time_t)(timers.deadline/1000000000ULL),.tv_nsec=(long)(timers.deadline%1000000000ULL)}};
+        if(timers.fd<0 || timerfd_settime(timers.fd,TFD_TIMER_ABSTIME,&spec,NULL) || pthread_create(&timer_thread,NULL,timer_wait,&timers) || pthread_create(&sleep_thread,NULL,sleep_wait,&timers)) return 39;
+    }
     int old=connect_host();
     struct load_state load={.fs=fs,.disk=disk,.stream=old};
     pthread_t writer,traffic;
@@ -115,6 +144,13 @@ int main(int argc, char **argv) {
         if(pread(fs,actual,sizeof(actual),0)!=sizeof(actual) || memcmp(actual,expected,sizeof(actual))) device_bad++;
         if(pread(disk,actual,sizeof(actual),0)!=sizeof(actual) || memcmp(actual,expected,sizeof(actual))) device_bad++;
     }
+    if(timers_enabled) {
+        void *timer_error=NULL,*sleep_error=NULL;
+        pthread_join(timer_thread,&timer_error);
+        pthread_join(sleep_thread,&sleep_error);
+        close(timers.fd);
+        if(timer_error || sleep_error || timers.expirations!=1 || timers.counter!=42 || timers.fired_at<timers.deadline || timers.sleep_at<timers.deadline) return 40;
+    }
     size_t bad=0;
     for(size_t i=0;i<count;i++) if(memory[i]!=(nonce^(i*0x9e3779b97f4a7c15ULL))) bad++;
     if(getrandom(&fresh,sizeof(fresh),0)!=sizeof(fresh)) return 24;
@@ -123,7 +159,7 @@ int main(int argc, char **argv) {
     if(device<0 || ioctl(device,IOCTL_VM_SOCKETS_GET_LOCAL_CID,&cid)) return 25;
     close(device);
     int report=connect_host();
-    dprintf(report,"VERIFIED bad=%zu device_bad=%d writes=%lu traffic=%lu nonce=%016lx random=%016lx cid=%u old_result=%ld old_errno=%d monotonic_before=%lu monotonic_after=%lu realtime_before=%lu realtime_after=%lu\n",bad,device_bad,load.writes,load.traffic,nonce,fresh,cid,(long)result,read_errno,monotonic,ns(CLOCK_MONOTONIC),realtime,ns(CLOCK_REALTIME));
+    dprintf(report,"VERIFIED timers=%d expirations=%lu counter=%lu timer_late_ns=%lu sleep_late_ns=%lu bad=%zu device_bad=%d writes=%lu traffic=%lu nonce=%016lx random=%016lx cid=%u old_result=%ld old_errno=%d monotonic_before=%lu monotonic_after=%lu realtime_before=%lu realtime_after=%lu\n",timers_enabled,timers.expirations,timers.counter,timers_enabled?timers.fired_at-timers.deadline:0,timers_enabled?timers.sleep_at-timers.deadline:0,bad,device_bad,load.writes,load.traffic,nonce,fresh,cid,(long)result,read_errno,monotonic,ns(CLOCK_MONOTONIC),realtime,ns(CLOCK_REALTIME));
     close(report);
     return bad || device_bad || result>0 ? 26 : 0;
 }
