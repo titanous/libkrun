@@ -252,14 +252,7 @@ impl Runtime {
         let result = self
             .run_inner()
             .or_else(|error| {
-                if crate::is_guest_data_error(&error) {
-                    Ok(TerminalFacts {
-                        guest_fault: true,
-                        ..Default::default()
-                    })
-                } else {
-                    Err(error)
-                }
+                guest_error_facts(error, &self.stop)
             })
             .map(|mut facts| {
                 let code = self.exit_code.load(std::sync::atomic::Ordering::Acquire);
@@ -386,8 +379,28 @@ impl Drop for Runtime {
     }
 }
 
+fn guest_error_facts(error: io::Error, stop: &utils::eventfd::EventFd) -> io::Result<TerminalFacts> {
+    if !crate::is_guest_data_error(&error) {
+        return Err(error);
+    }
+    let host_stop = match stop.read() {
+        Ok(_) => true,
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => false,
+        Err(error) => return Err(error),
+    };
+    Ok(TerminalFacts { guest_fault: true, host_stop, ..Default::default() })
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pending_host_stop_survives_guest_data_fault() {
+        let stop = utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap();
+        stop.write(1).unwrap();
+        let facts = super::guest_error_facts(crate::guest_data_error("bad guest data"), &stop).unwrap();
+        assert!(facts.guest_fault);
+        assert!(facts.host_stop);
+    }
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
