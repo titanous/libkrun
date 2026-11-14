@@ -13,11 +13,13 @@ and enter the kernel's saved continuation over private file-backed RAM.
    Zero selects control-page discovery from BSP RSI at the trapped frozen exit;
    a nonzero GPA is an optional exact-match expectation. Console text is never
    used for discovery or memory bounds.
-3. The embedder explicitly arms the test trigger with
-   `VmHandle::arm_template_capture(timeout)`, or requests a host-driven freeze
-   with `VmHandle::freeze_template(timeout)` (see embedding.md). Without arming,
-   capture is refused and the source recovers. For the test trigger, root
-   writes `1` to `/sys/power/nitro_freeze` (0600/CAP_SYS_ADMIN; an active
+3. The daemon asks the guest agent over its control channel to quiesce the
+   workload and waits for acknowledgement. It then calls
+   `VmHandle::arm_template_capture(timeout)`, authorizes the agent to write
+   `1` to `/sys/power/nitro_freeze`, and collects the sealed descriptor with
+   `VmHandle::wait_template_capture()` (see embedding.md). There is no kernel
+   polling worker or host-request port. Without arming, capture is refused and
+   the source recovers. The agent needs root and CAP_SYS_ADMIN (0600; an active
    transition is refused). The generic core checks hibernation availability,
    runs PM prepare notifiers, syncs and freezes configured filesystems, locks
    device hotplug and restricts GFP allocations during device freeze. It freezes tasks,
@@ -35,11 +37,15 @@ and enter the kernel's saved continuation over private file-backed RAM.
 5. Configure the same vCPUs, RAM size and devices, using independent writable
    disk children and fresh vsock/console backends. Call
    `start_from_template_fd(sealed_file)` or `start_from_template_path(path)`.
-   Path import retains a read-only descriptor and maps the original file
-   privately without copying RAM. It refuses symlinks, foreign owners and
-   group/other permissions. The caller must prevent writes and truncation for
-   the lifetime of every template and child mapping; unlink is safe. Passed
-   descriptors must already have write/grow/shrink seals.
+   Path import copies once into independent sealed memory before parsing or
+   mapping. It refuses symlinks, foreign owners and group/other permissions.
+   Later writes or truncation of the path cannot affect a copy. Prefer importing
+   once and passing that descriptor to every child; passed descriptors must
+   already have write/grow/shrink seals. RAM extents must exactly match the
+   configured architecture memory layout. Path exports append the 16-byte
+   `KRUNEXPORTDONE01` completion trailer after all template bytes; path import
+   requires it and strips it before sealing. Interrupted/old unmarked exports
+   are refused. Sealed descriptor format 3 is unchanged.
 6. Build maps every RAM extent `MAP_PRIVATE`, registers KVM slots and creates
    fresh in-kernel irqchip/PIT and vCPUs. It does not load a payload or rewrite
    boot page tables, command line or boot parameters. It restores KVM clock,
@@ -68,9 +74,10 @@ manifest are checked. The manifest records console structure, block/net/vsock
 features and queues, and ordered filesystem tags, queues and DAX GPA ranges.
 Backend paths, connection policy and server objects are deliberately excluded:
 new guests receive their own configuration and fresh backends. This format is
-same-host/same-kernel only, not a portable or hostile-input migration format.
-Full CPUID/kernel-build compatibility fencing is required before accepting
-untrusted templates. GPU and vhost-user backends are unsupported. Network
+restricted to trusted same-kernel templates, not a portable or hostile-input
+migration format. The configured CPUID/xstate layout, TSC frequency and kernel
+build ID are fenced before execution. Feature MSRs and host-kernel/microcode
+identity are not yet fenced. GPU and vhost-user backends are unsupported. Network
 devices are refused for both capture and template starts: virtio-net restore
 does not re-read the MAC address, so a fresh backend cannot safely supply a new
 identity. Use guest-initiated vsock with each new guest's own connection policy.

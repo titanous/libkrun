@@ -2538,9 +2538,11 @@ impl VmHandle {
             }
         })
     }
-    /// Arm capture and request cooperative freeze from the guest kernel.
-    /// The returned template owns a sealed descriptor and may be exported or
-    /// passed to another process. TimedOut is distinct from refusal/failure.
+    /// Arm capture and wait for an independently coordinated guest-agent trigger.
+    /// This does not request a freeze from the kernel. The daemon must quiesce
+    /// the workload through the agent and authorize its trigger after arming.
+    /// The returned template owns a sealed descriptor. For a sequential agent
+    /// handshake, use arm_template_capture followed by wait_template_capture.
     #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
     pub fn freeze_template(
         &self,
@@ -2563,7 +2565,9 @@ impl VmHandle {
         request.wait()
     }
 
-    /// Authorize a test-triggered capture without requesting it from the guest.
+    /// Authorize capture after the agent has quiesced the workload.
+    /// After this returns, authorize the agent to write the kernel trigger.
+    /// Receive the sealed descriptor with wait_template_capture.
     #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
     pub fn arm_template_capture(&self, timeout: std::time::Duration) -> std::io::Result<()> {
         let request = self
@@ -2617,6 +2621,24 @@ impl VmHandle {
                 )
             })?
             .wait()
+    }
+
+    /// Wait for a previously armed capture using its original deadline.
+    #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
+    pub fn wait_template_capture(&self) -> std::io::Result<vmm::template::Template> {
+        let request = self
+            .vmm
+            .as_ref()
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "cooperative capture requires Linux KVM",
+                )
+            })?
+            .lock()
+            .unwrap()
+            .wait_template_capture();
+        request.wait()
     }
 
     /// Give a running guest a fresh generation identifier and raise its notification interrupt.

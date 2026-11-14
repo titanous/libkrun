@@ -6,6 +6,31 @@ pub const FROZEN_MAGIC: u64 = 0x4652_4f5a_454e_3031;
 pub const FREEZE_PORT: u16 = 0xe5;
 pub const CONTROL_SIZE: usize = 4096;
 
+/// Word offsets shared with the carried cooperative kernel protocol.
+pub mod word {
+    pub const MAGIC: usize = 0;
+    pub const STATUS: usize = 1;
+    pub const STACK: usize = 2;
+    pub const CR3: usize = 3;
+    pub const CR4: usize = 4;
+    pub const RIP: usize = 5;
+    pub const REALTIME: usize = 8;
+    pub const RANDOM_START: usize = 9;
+    pub const RANDOM_END: usize = 14;
+    pub const SEED_READY: usize = 14;
+    pub const VERSION: usize = 19;
+    pub const CR0: usize = 20;
+    pub const EFER: usize = 21;
+    pub const GS_BASE: usize = 22;
+    pub const GDT_BASE: usize = 23;
+    pub const GDT_LIMIT: usize = 24;
+    pub const IDT_BASE: usize = 25;
+    pub const IDT_LIMIT: usize = 26;
+    pub const KERNEL_BUILD_ID: usize = 27;
+    pub const KERNEL_BUILD_ID_LEN: usize = 30;
+    pub const TSC: usize = 31;
+}
+
 /// State required before the guest's x86 continuation can execute.
 #[derive(Clone, Debug)]
 pub struct ResumeEntry {
@@ -34,39 +59,40 @@ impl ResumeEntry {
                 "invalid frozen x86 control page",
             )
         };
-        if word(0) != FROZEN_MAGIC || word(1) != 0 || word(19) != 1 {
+        if word(word::MAGIC) != FROZEN_MAGIC || word(word::STATUS) != 0 || word(word::VERSION) != 1
+        {
             return Err(invalid());
         }
         let canonical = |v: u64| (v as i64 >> 47) == 0 || (v as i64 >> 47) == -1;
-        if word(2) == 0
-            || word(5) == 0
-            || !canonical(word(2))
-            || !canonical(word(5))
-            || word(3) == 0
+        if word(word::STACK) == 0
+            || word(word::RIP) == 0
+            || !canonical(word(word::STACK))
+            || !canonical(word(word::RIP))
+            || word(word::CR3) == 0
             // CR3 carries a PCID in bits 11:0 when CR4.PCIDE is set.
             // Preserve it: the continuation restores the same address space.
-            || (word(4) & (1 << 17) == 0 && word(3) & 4095 != 0)
-            || word(20) & 0x8000_0001 != 0x8000_0001
-            || word(4) & (1 << 5) == 0
-            || word(21) & 0x500 != 0x500
-            || word(24) > u16::MAX as u64
-            || word(26) > u16::MAX as u64
+            || (word(word::CR4) & (1 << 17) == 0 && word(word::CR3) & 4095 != 0)
+            || word(word::CR0) & 0x8000_0001 != 0x8000_0001
+            || word(word::CR4) & (1 << 5) == 0
+            || word(word::EFER) & 0x500 != 0x500
+            || word(word::GDT_LIMIT) > u16::MAX as u64
+            || word(word::IDT_LIMIT) > u16::MAX as u64
         {
             return Err(invalid());
         }
         Ok(Self {
-            stack: word(2),
-            cr3: word(3),
-            cr4: word(4),
-            rip: word(5),
-            cr0: word(20),
-            efer: word(21),
-            gs_base: word(22),
-            gdt_base: word(23),
-            gdt_limit: word(24) as u16,
-            idt_base: word(25),
-            idt_limit: word(26) as u16,
-            tsc: word(31),
+            stack: word(word::STACK),
+            cr3: word(word::CR3),
+            cr4: word(word::CR4),
+            rip: word(word::RIP),
+            cr0: word(word::CR0),
+            efer: word(word::EFER),
+            gs_base: word(word::GS_BASE),
+            gdt_base: word(word::GDT_BASE),
+            gdt_limit: word(word::GDT_LIMIT) as u16,
+            idt_base: word(word::IDT_BASE),
+            idt_limit: word(word::IDT_LIMIT) as u16,
+            tsc: word(word::TSC),
         })
     }
 }

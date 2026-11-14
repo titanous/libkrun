@@ -130,6 +130,14 @@ pub enum StartMicrovmError {
     FirmwareRead(io::Error),
     /// Memory regions are overlapping or mmap fails.
     GuestMemoryMmap(String),
+    /// Template CPU count, RAM size, or device configuration is incompatible.
+    TemplateTopologyMismatch,
+    /// Template RAM extents differ from the configured architecture layout.
+    TemplateMemoryLayoutMismatch,
+    /// Configured guest kernel build ID differs from the template.
+    TemplateKernelMismatch,
+    /// CPU features, xstate layout or TSC frequency differs from the template.
+    TemplateCpuMismatch,
     /// The BZIP2 decoder couldn't decompress the kernel.
     ImageBz2Decoder(io::Error),
     /// Cannot find compressed kernel in file.
@@ -289,6 +297,13 @@ impl Display for StartMicrovmError {
             FirmwareRead(ref err) => {
                 write!(f, "Cannot read firmware contents from file: {err}")
             }
+            TemplateKernelMismatch => write!(f, "template kernel build identifier mismatch"),
+            TemplateCpuMismatch => write!(
+                f,
+                "template CPU features, extended-state layout or TSC frequency mismatch"
+            ),
+            TemplateTopologyMismatch => write!(f, "incompatible template topology"),
+            TemplateMemoryLayoutMismatch => write!(f, "template RAM layout mismatch"),
             GuestMemoryMmap(ref err) => {
                 // Remove imbricated quotes from error message.
                 let mut err_msg = format!("{err:?}");
@@ -735,6 +750,11 @@ pub fn build_microvm(
         kernel_cmdline.insert_str(DEFAULT_KERNEL_CMDLINE)?;
     }
 
+    #[cfg(target_arch = "x86_64")]
+    if vm_resources.cooperative_capture.is_some() {
+        kernel_cmdline.insert_str("cooperative_template")?;
+    }
+
     // if let Some(cmdline) = &vm_resources.kernel_cmdline.krun_env {
     //     kernel_cmdline.insert_str(cmdline.as_str()).unwrap();
     // }
@@ -1009,14 +1029,10 @@ pub fn build_microvm(
                 && compatibility[compatibility.len() - 20..]
                     != template.compatibility[template.compatibility.len() - 20..]
             {
-                return Err(StartMicrovmError::GuestMemoryMmap(
-                    "template kernel build identifier mismatch".into(),
-                ));
+                return Err(StartMicrovmError::TemplateKernelMismatch);
             }
             if compatibility != template.compatibility {
-                return Err(StartMicrovmError::GuestMemoryMmap(
-                    "template CPU features, extended-state layout or TSC frequency mismatch".into(),
-                ));
+                return Err(StartMicrovmError::TemplateCpuMismatch);
             }
             vm.fd()
                 .set_clock(&kvm_bindings::kvm_clock_data {
@@ -1047,12 +1063,17 @@ pub fn build_microvm(
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?
                 .as_nanos() as u64;
-            page[64..72].copy_from_slice(&now.to_le_bytes());
+            use crate::cooperative::word;
+            page[word::REALTIME * 8..(word::REALTIME + 1) * 8].copy_from_slice(&now.to_le_bytes());
             let mut random = std::fs::File::open("/dev/urandom")
                 .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
-            std::io::Read::read_exact(&mut random, &mut page[72..112])
-                .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
-            page[112..120].copy_from_slice(&1u64.to_le_bytes());
+            std::io::Read::read_exact(
+                &mut random,
+                &mut page[word::RANDOM_START * 8..word::RANDOM_END * 8],
+            )
+            .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
+            page[word::SEED_READY * 8..(word::SEED_READY + 1) * 8]
+                .copy_from_slice(&1u64.to_le_bytes());
             guest_memory
                 .write_slice(&page, GuestAddress(template.control))
                 .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
@@ -2002,11 +2023,17 @@ pub fn create_guest_memory(
             || vm_resources.split_irqchip
             || vm_resources.gpu_virgl_flags.is_some()
         {
-            return Err(StartMicrovmError::GuestMemoryMmap(
-                "incompatible template topology".into(),
-            ));
+            return Err(StartMicrovmError::TemplateTopologyMismatch);
         }
-        let (info, _) = arch::arch_memory_regions(mem_size << 20, None, 0, 0, None);
+        let (info, expected) = arch::arch_memory_regions(mem_size << 20, None, 0, 0, None);
+        if !template
+            .regions
+            .iter()
+            .map(|(gpa, size, _)| (GuestAddress(*gpa), *size))
+            .eq(expected.iter().copied())
+        {
+            return Err(StartMicrovmError::TemplateMemoryLayoutMismatch);
+        }
         let mut memory = template
             .map_private()
             .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
@@ -2036,10 +2063,7 @@ pub fn create_guest_memory(
         let topology = crate::template_topology::encode(vm_resources, &shm)
             .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
         if topology != template.topology {
-            return Err(StartMicrovmError::GuestMemoryMmap(
-                "template device/filesystem topology mismatch (order, tag, queues or DAX range)"
-                    .into(),
-            ));
+            return Err(StartMicrovmError::TemplateTopologyMismatch);
         }
         return Ok((
             memory,

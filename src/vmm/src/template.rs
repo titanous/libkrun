@@ -42,15 +42,35 @@ mod tests {
         assert_eq!(reopened.compatibility, b"cpu-xstate-tsc");
         assert_eq!(reopened.clock_ns, 123);
         let path = std::env::temp_dir().join(format!("krun-template-path-{}", std::process::id()));
+        let staged = reopened.prepare_path(&path).unwrap();
+        assert!(!path.exists());
+        drop(staged);
+        assert!(
+            !path.exists(),
+            "cancelled capture must not publish a template"
+        );
         reopened.write_to_path(&path).unwrap();
+        let exported = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        let exported_len = exported.metadata().unwrap().len();
+        exported
+            .set_len(exported_len - EXPORT_COMPLETE.len() as u64)
+            .unwrap();
+        assert!(
+            Template::from_path(&path).is_err(),
+            "partial export must be refused"
+        );
+        exported
+            .write_all_at(EXPORT_COMPLETE, exported_len - EXPORT_COMPLETE.len() as u64)
+            .unwrap();
         let imported = Template::from_path(&path).unwrap();
         let imported_inode = imported.file.metadata().unwrap().ino();
         let original_inode = std::fs::metadata(&path).unwrap().ino();
         std::fs::remove_file(&path).unwrap();
-        assert_eq!(
+        assert_ne!(
             imported_inode, original_inode,
-            "path import must retain the original file rather than copy RAM"
+            "path import must use independent sealed backing"
         );
+        Template::open(imported.file.try_clone().unwrap()).unwrap();
         let a = reopened.map_private().unwrap();
         let b = reopened.map_private().unwrap();
         a.write_slice(&[42], GuestAddress(0)).unwrap();
@@ -90,6 +110,41 @@ mod tests {
     }
 
     #[test]
+    fn failed_export_removes_staged_and_final_paths() {
+        let directory =
+            std::env::temp_dir().join(format!("krun-export-failure-{}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("guest.ram");
+        let file = crate::template_memory::create(4096).unwrap();
+        let template = Template {
+            file,
+            control: 0,
+            vcpus: 1,
+            ram_mib: 1,
+            clock_ns: 0,
+            regions: Vec::new(),
+            topology: Vec::new(),
+            compatibility: Vec::new(),
+        };
+        // Inject failure after one chunk, before publication.
+        let source = directory.join("source");
+        let mut template = template;
+        template.file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&source)
+            .unwrap();
+        template.file.set_len(2 * 1024 * 1024).unwrap();
+        FAIL_EXPORT.with(|fail| fail.set(true));
+        assert!(template.write_to_path(&path).is_err());
+        assert!(!path.exists());
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+        std::fs::remove_file(source).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
     fn rejects_bad_header_and_truncated_file() {
         let file = crate::template_memory::create(4096).unwrap();
         assert!(Template::open(file.try_clone().unwrap()).is_err());
@@ -112,7 +167,13 @@ use vm_memory::{
     GuestRegionMmap,
 };
 
+#[cfg(test)]
+thread_local! {
+    static FAIL_EXPORT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 const MAGIC: &[u8; 8] = b"KRUNFRZ1";
+const EXPORT_COMPLETE: &[u8; 16] = b"KRUNEXPORTDONE01";
 const HEADER: usize = 24576;
 const COMPATIBILITY_START: usize = 8192;
 const EXTENT_HEADER: usize = 4096;
@@ -133,13 +194,70 @@ fn invalid() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, "invalid cooperative template")
 }
 
+pub struct PreparedTemplatePath {
+    temporary: std::path::PathBuf,
+    destination: std::path::PathBuf,
+}
+
+impl Drop for PreparedTemplatePath {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.temporary);
+    }
+}
+
+impl PreparedTemplatePath {
+    pub fn publish(self) -> io::Result<()> {
+        std::fs::hard_link(&self.temporary, &self.destination)?;
+        let result = File::open(
+            self.destination
+                .parent()
+                .unwrap_or(std::path::Path::new(".")),
+        )
+        .and_then(|directory| directory.sync_all());
+        if result.is_err() {
+            let _ = std::fs::remove_file(&self.destination);
+        }
+        result
+    }
+}
+
 impl Template {
     pub fn write_to_path(&self, path: impl AsRef<std::path::Path>) -> io::Result<()> {
+        self.prepare_path(path)?.publish()
+    }
+
+    pub fn prepare_path(
+        &self,
+        path: impl AsRef<std::path::Path>,
+    ) -> io::Result<PreparedTemplatePath> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let path = path.as_ref();
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "template destination exists",
+                ))
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        let parent = path.parent().unwrap_or(std::path::Path::new("."));
+        let temporary = parent.join(format!(
+            ".krun-template-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
         let destination = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
-            .open(path)?;
+            .open(&temporary)?;
+        let prepared = PreparedTemplatePath {
+            temporary,
+            destination: path.to_path_buf(),
+        };
         let mut offset = 0;
         let mut buffer = vec![0; 1024 * 1024];
         let len = self.file.metadata()?.len();
@@ -153,8 +271,14 @@ impl Template {
                 }
             }
             offset += count as u64;
+            #[cfg(test)]
+            if FAIL_EXPORT.with(|fail| fail.replace(false)) {
+                return Err(io::Error::other("injected mid-export failure"));
+            }
         }
-        destination.sync_all()
+        destination.write_all_at(EXPORT_COMPLETE, len)?;
+        destination.sync_all()?;
+        Ok(prepared)
     }
 
     pub fn from_path(path: impl AsRef<std::path::Path>) -> io::Result<Self> {
@@ -164,8 +288,7 @@ impl Template {
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(path)?;
         let metadata = source.metadata()?;
-        // Regular files cannot carry memfd seals. Their immutable lifetime is
-        // the trusted owner's responsibility; reject shared or foreign input.
+        // Validate ownership before importing into independent sealed backing.
         // SAFETY: geteuid has no preconditions.
         if !metadata.is_file()
             || metadata.mode() & 0o077 != 0
@@ -176,7 +299,31 @@ impl Template {
                 "template path must be an owner-only regular file owned by this user",
             ));
         }
-        Self::parse_file(source)
+        let data_len = metadata
+            .len()
+            .checked_sub(EXPORT_COMPLETE.len() as u64)
+            .ok_or_else(invalid)?;
+        let mut completion = [0; EXPORT_COMPLETE.len()];
+        source.read_exact_at(&mut completion, data_len)?;
+        if &completion != EXPORT_COMPLETE {
+            return Err(invalid());
+        }
+        let backing =
+            crate::template_memory::create(usize::try_from(data_len).map_err(|_| invalid())?)?;
+        let mut offset = 0;
+        let mut buffer = vec![0; 1024 * 1024];
+        while offset < data_len {
+            let count = (data_len - offset).min(buffer.len() as u64) as usize;
+            source.read_exact_at(&mut buffer[..count], offset)?;
+            for (index, page) in buffer[..count].chunks(4096).enumerate() {
+                if page.iter().any(|byte| *byte != 0) {
+                    backing.write_all_at(page, offset + (index * 4096) as u64)?;
+                }
+            }
+            offset += count as u64;
+        }
+        crate::template_memory::seal(&backing)?;
+        Self::open(backing)
     }
 
     pub fn open(file: File) -> io::Result<Self> {

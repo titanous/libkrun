@@ -86,6 +86,10 @@ pub fn encode(resources: &VmResources, shm: &ShmManager) -> std::io::Result<Vec<
             encode_device(&mut data, &*device.lock().unwrap());
         }
     }
+    // Entropy is always attached; custom backends use the same transport.
+    let entropy = devices::virtio::Rng::new()
+        .map_err(|error| std::io::Error::other(format!("entropy manifest: {error:?}")))?;
+    encode_device(&mut data, &entropy);
     put(&mut data, resources.vsock.get().is_some() as u64);
     if let Some(device) = resources.vsock.get() {
         encode_device(&mut data, &*device.lock().unwrap());

@@ -278,6 +278,11 @@ impl Vmm {
         Ok(self.capture_request.clone())
     }
 
+    #[cfg(target_arch = "x86_64")]
+    pub fn wait_template_capture(&self) -> crate::capture_request::CaptureRequest {
+        self.capture_request.clone()
+    }
+
     /// Write a fresh generation identifier and notify the running guest.
     /// The guest driver reseeds its random pool when it handles this interrupt.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -576,9 +581,16 @@ impl Subscriber for Vmm {
                         vm_memory::GuestAddress(reported_control),
                     )
                     .map_err(std::io::Error::other)?;
-                    if u64::from_le_bytes(control_page[240..248].try_into().unwrap()) != 20
+                    use crate::cooperative::word;
+                    let build_id_start = word::KERNEL_BUILD_ID * 8;
+                    let build_id_len = word::KERNEL_BUILD_ID_LEN * 8;
+                    if u64::from_le_bytes(
+                        control_page[build_id_len..build_id_len + 8]
+                            .try_into()
+                            .unwrap(),
+                    ) != 20
                         || self.cooperative_compatibility.len() < 20
-                        || control_page[216..236]
+                        || control_page[build_id_start..build_id_start + 20]
                             != self.cooperative_compatibility
                                 [self.cooperative_compatibility.len() - 20..]
                     {
@@ -595,14 +607,23 @@ impl Subscriber for Vmm {
                         &self.cooperative_topology,
                         &self.cooperative_compatibility,
                     )?;
-                    if !path.as_os_str().is_empty() {
-                        template.write_to_path(path)?;
-                    }
+                    let prepared_path = if path.as_os_str().is_empty() {
+                        None
+                    } else {
+                        Some(template.prepare_path(path)?)
+                    };
                     if !self.capture_request.accept() {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::TimedOut,
                             "cooperative freeze timed out during preparation",
                         ));
+                    }
+                    if let Some(prepared) = prepared_path {
+                        if let Err(error) = prepared.publish() {
+                            // Acceptance is irreversible. Preserve the sealed descriptor
+                            // instead of incorrectly resuming an accepted source.
+                            eprintln!("accepted template export failed: {error}");
+                        }
                     }
                     captured_template = Some(template);
                     Ok(path.clone())

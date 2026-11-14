@@ -144,16 +144,19 @@ External vhost-user-vsock plus these controls fails build with
 Mark a source with `Builder::future_template()` before build; ordinary guests
 retain anonymous private RAM. This is a capability reservation, not permission
 for a guest to capture itself. Obtain `Context::vm_handle()` and run the context
-on its event-loop thread. From another thread call
-`handle.freeze_template(Duration::from_secs(30))`. The host arms capture and
-signals the maintained guest kernel through its request port. The kernel
-quiesces itself; the host validates and prepares capture before accepting the
-source's terminal freeze. An unsolicited sysfs trigger is refused and recovers.
-`arm_template_capture(timeout)` authorizes only the test sysfs trigger without
-sending a request. `capture_cooperative_template(control, path)` reserves an
-optional caller-chosen export path but likewise does not arm capture.
+on its event-loop thread. Ask the guest agent over its control channel to quiesce
+the workload, and wait for its acknowledgement. Call
+`handle.arm_template_capture(Duration::from_secs(30))`, then authorize the agent
+to write `1` to `/sys/power/nitro_freeze`. Receive the result with
+`handle.wait_template_capture()`. The kernel does not poll a host-request port.
+An unsolicited sysfs trigger is refused and recovers. The host validates and
+prepares capture before accepting the source's terminal freeze.
+`capture_cooperative_template(control, path)` reserves an optional caller-chosen
+export path but does not arm capture. The existing `freeze_template(timeout)`
+convenience call arms and waits; it does not signal the agent or kernel and
+requires a separately coordinated agent trigger after arming.
 
-`freeze_template` returns a `vmm::template::Template` owning the sealed memory
+`wait_template_capture` returns a `vmm::template::Template` owning the sealed memory
 file only after source vCPU teardown. Its `file` can be duplicated or sent to
 another process with SCM_RIGHTS; `write_to_path` exports owner-only sensitive
 whole-guest memory. A freeze deadline returns `io::ErrorKind::TimedOut`, distinct
@@ -169,8 +172,10 @@ state has been resolved.
 For a new guest use its own builder: configure matching CPU/RAM and devices,
 independent disk copies, its CID, identifiers and connection policy, then call
 `start_from_template_fd(file)` or `start_from_template_path(path)` before build.
-Path input stays mapped read-only with private copy-on-write child mappings;
-the caller must prevent file mutation/truncation until all users release it.
+Path input is copied into sealed memory before use, so later path mutation or
+truncation cannot affect copies. For many copies, import once and pass the sealed
+descriptor to avoid repeating the scan/copy. RAM regions are checked against the
+configured architecture layout before mapping.
 Network devices are refused because guest MAC state is retained. Keep templates
 within one trust domain: kernel secrets and address layouts remain shared.
 The daemon must impose a separate start-to-valid-agent-Hello deadline and

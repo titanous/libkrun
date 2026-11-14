@@ -78,6 +78,8 @@ mod echo_host {
             let mut proxy = host_helpers::start_proxy(&socket_path, 3);
 
             let mut builder = krun::Builder::new();
+            // This fixture's external proxy owns its socket policy.
+            builder.internet_socket_forwarding(true);
             builder.vm_config(1, 512)?;
             setup_fs_builder(&mut builder, &test_setup)?;
             builder.add_vsock_vhost_user(socket_path.to_str().unwrap())?;
@@ -148,6 +150,8 @@ mod fd_host {
             let stream = UnixStream::connect(&socket_path)?;
 
             let mut builder = krun::Builder::new();
+            // This fixture's external proxy owns its socket policy.
+            builder.internet_socket_forwarding(true);
             builder.vm_config(1, 512)?;
             setup_fs_builder(&mut builder, &test_setup)?;
             builder.add_vsock_vhost_user_fd(stream)?;
