@@ -12,6 +12,7 @@ import threading
 import time
 root = pathlib.Path.cwd()
 count, concurrency = int(sys.argv[1]), int(sys.argv[2])
+duration = int(sys.argv[3]) if len(sys.argv) > 3 else 0
 assert 1 <= concurrency <= 8
 logs = root / ('acceptance-' + str(int(time.time())))
 logs.mkdir()
@@ -85,13 +86,17 @@ start = time.monotonic()
 results = []
 # Each worker keeps its own CID; batches avoid modulo-CID overlap when one guest
 # is slower than another. No shared writable disk or Unix listener is reused.
-for at in range(0, count, concurrency):
+at = 0
+while (time.monotonic()-start < duration) if duration else (at < count):
+    end = at+concurrency if duration else min(at+concurrency, count)
     with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
-        batch = list(pool.map(launch, range(at, min(at+concurrency, count))))
+        batch = list(pool.map(launch, range(at, end)))
     results.extend(batch)
+    at = end
     if not all(r['passed'] for r in batch): break
 elapsed = time.monotonic()-start
-summary = {'requested': count, 'completed': len(results), 'passed': sum(r['passed'] for r in results), 'seconds': elapsed, 'launches_per_second': len(results)/elapsed, 'before': before, 'after': accounting()}
+summary = {'requested': count, 'duration_requested': duration, 'concurrency': concurrency, 'completed': len(results), 'passed': sum(r['passed'] for r in results), 'seconds': elapsed, 'launches_per_second': len(results)/elapsed, 'before': before, 'after': accounting()}
 (logs/'summary.json').write_text(json.dumps(summary, indent=2))
 print(json.dumps(summary), flush=True)
-sys.exit(0 if len(results)==count and all(r['passed'] for r in results) else 1)
+complete = elapsed >= duration if duration else len(results) == count
+sys.exit(0 if complete and all(r['passed'] for r in results) else 1)

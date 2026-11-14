@@ -33,6 +33,10 @@ struct AddDevice {
 }
 #[repr(C)] struct Vring { uid: u64, fd: i32, value: u16, reserved: u16 }
 #[repr(C)] struct InfoEvent { fd: i32, vector: u16, reserved: u16 }
+#[repr(C)] struct ShmRegion { id: u8, reserved: [u8; 7], address: u64, size: u64 }
+/// A device region owned by the caller, never concurrently shared with guests.
+/// Keep it alive until the Sandbox is closed. Registration clears all bytes.
+pub struct SharedRegion { pub id: u8, pub mapping: Mapping }
 pub struct DeviceEvents { pub uid: u64, pub kicks: Vec<File>, pub calls: Vec<File>, pub info: File }
 fn new_event() -> io::Result<File> {
     let fd = unsafe { eventfd(0, 0x800 | 0x80000) };
@@ -133,7 +137,22 @@ impl Sandbox {
         call(vm, 1, 0x23, &mut Region { flags: 0, size: self.ram.len as u64, address: self.ram.address() })?;
         Ok(())
     }
+    pub fn allocate_region(&self, id: u8, size: usize) -> io::Result<SharedRegion> {
+        if size == 0 || size > 256 * 1024 * 1024 || size % INFO_PAGE_SIZE != 0 {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "shared region geometry"));
+        }
+        let mut mapping = Mapping::new(&self._control, size)?;
+        mapping.zero();
+        Ok(SharedRegion { id, mapping })
+    }
     pub fn add_device(&self, kind: u32, queues: usize, features: u64, config: &[u8]) -> io::Result<DeviceEvents> {
+        unsafe { self.add_device_with_regions(kind, queues, features, config, &mut []) }
+    }
+    /// # Safety
+    /// Regions must remain mapped and exclusively assigned to this guest until
+    /// the VM fd has closed. Do not call while any previous guest uses them.
+    pub unsafe fn add_device_with_regions(&self, kind: u32, queues: usize, features: u64, config: &[u8], regions: &mut [SharedRegion]) -> io::Result<DeviceEvents> {
+        if regions.len() > 4 { return Err(io::Error::new(io::ErrorKind::InvalidInput, "too many device backing ranges")); }
         if queues == 0 || queues > 64 || config.len() > 64 {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "device geometry"));
         }
@@ -143,6 +162,16 @@ impl Sandbox {
         req.config_size = config.len() as u32;
         req.features[..8].copy_from_slice(&features.to_le_bytes());
         req.config[..config.len()].copy_from_slice(config);
+        let mut descriptors = Vec::with_capacity(regions.len());
+        for region in regions {
+            if region.mapping.len == 0 || region.mapping.len > 256 * 1024 * 1024 || region.mapping.len % INFO_PAGE_SIZE != 0 {
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, "shared region geometry"));
+            }
+            region.mapping.zero();
+            descriptors.push(ShmRegion { id: region.id, reserved: [0; 7], address: region.mapping.address(), size: region.mapping.len as u64 });
+        }
+        req.shm_count = descriptors.len() as u32;
+        req.shm_pointer = if descriptors.is_empty() { 0 } else { descriptors.as_ptr() as u64 };
         let vm = self.vm.as_ref().unwrap();
         call(vm, 3, 0x26, &mut req)?;
         let mut kicks = Vec::new();
@@ -268,4 +297,30 @@ impl Sandbox {
 }
 impl Drop for Sandbox {
     fn drop(&mut self) { self.close_vm(); }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn uapi_structure_sizes() {
+        assert_eq!(std::mem::size_of::<Create>(), 16);
+        assert_eq!(std::mem::size_of::<Region>(), 24);
+        assert_eq!(std::mem::size_of::<AddDevice>(), 872);
+        assert_eq!(std::mem::size_of::<Vring>(), 16);
+        assert_eq!(std::mem::size_of::<InfoEvent>(), 8);
+        assert_eq!(std::mem::size_of::<ShmRegion>(), 24);
+    }
+    #[test]
+    fn mapping_zero_erases_previous_bytes() {
+        let fd = unsafe { memfd_create(c"zero-test".as_ptr().cast(), 1) };
+        assert!(fd >= 0);
+        let file = unsafe { File::from_raw_fd(fd) };
+        file.set_len(4096).unwrap();
+        let mut mapping = Mapping::new(&file, 4096).unwrap();
+        unsafe { std::ptr::write_bytes(mapping.address.as_ptr(), 0xa5, mapping.len); }
+        assert!(mapping.copy().iter().all(|b| *b == 0xa5));
+        mapping.zero();
+        assert!(mapping.copy().iter().all(|b| *b == 0));
+    }
 }
