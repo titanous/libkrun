@@ -290,7 +290,7 @@ notification latency. Silent hangs remain bounded by the running heartbeat.
 | `add_vsock_port` | Guest-originated mapped Unix connections/listens, subject to policy. |
 | `port_map` | Honored only with internet forwarding enabled; otherwise build rejects nonempty map. |
 | `add_block_cfg`, `add_block_backend`, `root_block_cfg`, `data_block_cfg` | Shared block backend/read-only semantics and exit callbacks; new list takes precedence over legacy setters. |
-| `add_virtiofs`, `add_virtiofs_path`, `set_root` | In-process FileSystem or passthrough served over virtio-fs; missing host paths are build errors. Tags 1..36 bytes. Optional copy-backed DAX described below. |
+| `add_virtiofs`, `add_virtiofs_path`, `set_root` | In-process FileSystem or passthrough served over virtio-fs; missing host paths are build errors. Tags 1..36 bytes. Nonzero DAX windows are rejected before guest allocation. |
 | `disable_implicit_console` | Required; cannot omit an already-configured implicit console silently. |
 | `add_virtio_console`, `add_virtio_console_with_ports`, `add_port`, `add_port_fd`, `add_port_console_fd`, `console_port_path` | Custom ports honored; select backend/configure preceding block/vsock/fs devices first. Incompatible late ordering rejected. |
 | `nitro_console_sink` | Bounded kernel diagnostics, discard by default; independent of custom console ports. |
@@ -307,23 +307,18 @@ notification latency. Silent hangs remain bounded by the running heartbeat.
 | `VmHandle::pause`, `resume`, `notify_vm_generation_change` | Clear Unsupported error. No running-guest copy support in this backend. |
 | `VmHandle::balloon` | None; therefore BalloonHandle operations are unavailable on Nitro. |
 
-Virtio-fs DAX uses a private pool window per guest, not shared host-cache pages.
-The VMM zeroes every device region before registration and copies file data into
-it; removal zeroes the requested range without replacing its registered mapping.
-One optional window is supported per mount: 2 MiB-aligned, 2..256 MiB. No-DAX
-mounts have no device-region cost. Read-only `map_file`/`map_data` work; writable
-file-backed DAX mapping returns Unsupported instead of silently losing writes.
-Writable filesystem operations use ordinary FUSE requests. Workers stop before
-VM close; window backing remains mapped until VM close, including error paths.
+Nitro virtio-fs has no DAX window. Set `shm_size` to `None` (or zero);
+`build` rejects every nonzero value before creating a guest. The runtime also
+rejects nonzero windows, and never installs the copying mapper. Reads, writes,
+and guest page-cache mappings use ordinary FUSE requests. A copied file window
+cannot provide coherent DAX semantics when a file changes. KVM DAX is unchanged.
+Filesystem mounts incur no device-region allocation. Every other device region
+is still zeroed before registration, and workers stop before VM close.
 
-Observed m8g coverage includes mount by tag, correct contents, create/write/rename/
-delete, 1,000 files, complete 64 MiB reads and DAX mmap, and 100 mounted lifecycles
-with unchanged slot/pool accounting. The real treefs read-only/writable adapters
-pass the corresponding no-DAX checks plus 3,000 writable operations and live tree
-replacement. At treefs `c70edfb`, explicit DAX fails because its adapter rejects
-Linux's `fh=u64::MAX` no-handle setupmapping; see `examples/treefs-nitro` for the
-retained reproduction. This is not claimed to pass until the adapter contract is
-resolved.
+Observed m8g no-DAX coverage includes mount by tag, correct contents,
+create/write/rename/delete, 1,000 files and complete 64 MiB reads. The real treefs
+read-only/writable adapters also pass 3,000 writable operations and live tree
+replacement. Historical copying-window experiments are not supported behavior.
 
 Limits: memory is bounded by the host's configured pool, CPU admission and guest
 slots by the driver; requested CPU count fits `u8` (1..255) but host capacity can

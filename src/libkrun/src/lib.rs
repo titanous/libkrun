@@ -1243,14 +1243,17 @@ impl Builder {
         }
         #[cfg(not(feature = "tee"))]
         for mount in &self.config.vmr.fs {
-            if mount.tag.len() > 36
-                || mount.tag.is_empty()
-                || mount.shm_size.is_some_and(|size| {
-                    size == 0 || size > 256 * 1024 * 1024 || !size.is_multiple_of(2 * 1024 * 1024)
-                })
-            {
-                return Err(StartError::Nitro(std::io::Error::new(std::io::ErrorKind::Unsupported,
-                    "unsupported on this backend: virtio-fs requires a 1..36 byte tag and an optional 2 MiB-aligned DAX window up to 256 MiB")));
+            if mount.shm_size.is_some_and(|size| size != 0) {
+                return Err(StartError::Nitro(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "unsupported on this backend: virtio-fs DAX windows are not supported; use no window",
+                )));
+            }
+            if mount.tag.len() > 36 || mount.tag.is_empty() {
+                return Err(StartError::Nitro(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "unsupported on this backend: virtio-fs requires a 1..36 byte tag",
+                )));
             }
         }
         #[cfg(feature = "net")]
