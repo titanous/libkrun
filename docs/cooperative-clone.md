@@ -42,7 +42,10 @@ and enter the kernel's saved continuation over private file-backed RAM.
    Later writes or truncation of the path cannot affect a copy. Prefer importing
    once and passing that descriptor to every child; passed descriptors must
    already have write/grow/shrink seals. RAM extents must exactly match the
-   configured architecture memory layout.
+   configured architecture memory layout. Path exports append the 16-byte
+   `KRUNEXPORTDONE01` completion trailer after all template bytes; path import
+   requires it and strips it before sealing. Interrupted/old unmarked exports
+   are refused. Sealed descriptor format 3 is unchanged.
 6. Build maps every RAM extent `MAP_PRIVATE`, registers KVM slots and creates
    fresh in-kernel irqchip/PIT and vCPUs. It does not load a payload or rewrite
    boot page tables, command line or boot parameters. It restores KVM clock,

@@ -46,6 +46,18 @@ mod tests {
             "cancelled capture must not publish a template"
         );
         reopened.write_to_path(&path).unwrap();
+        let exported = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        let exported_len = exported.metadata().unwrap().len();
+        exported
+            .set_len(exported_len - EXPORT_COMPLETE.len() as u64)
+            .unwrap();
+        assert!(
+            Template::from_path(&path).is_err(),
+            "partial export must be refused"
+        );
+        exported
+            .write_all_at(EXPORT_COMPLETE, exported_len - EXPORT_COMPLETE.len() as u64)
+            .unwrap();
         let imported = Template::from_path(&path).unwrap();
         let imported_inode = imported.file.metadata().unwrap().ino();
         let original_inode = std::fs::metadata(&path).unwrap().ino();
@@ -157,6 +169,7 @@ thread_local! {
 }
 
 const MAGIC: &[u8; 8] = b"KRUNFRZ1";
+const EXPORT_COMPLETE: &[u8; 16] = b"KRUNEXPORTDONE01";
 const HEADER: usize = 24576;
 const COMPATIBILITY_START: usize = 8192;
 const EXTENT_HEADER: usize = 4096;
@@ -259,6 +272,7 @@ impl Template {
                 return Err(io::Error::other("injected mid-export failure"));
             }
         }
+        destination.write_all_at(EXPORT_COMPLETE, len)?;
         destination.sync_all()?;
         Ok(prepared)
     }
@@ -281,13 +295,21 @@ impl Template {
                 "template path must be an owner-only regular file owned by this user",
             ));
         }
-        let backing = crate::template_memory::create(
-            usize::try_from(metadata.len()).map_err(|_| invalid())?,
-        )?;
+        let data_len = metadata
+            .len()
+            .checked_sub(EXPORT_COMPLETE.len() as u64)
+            .ok_or_else(invalid)?;
+        let mut completion = [0; EXPORT_COMPLETE.len()];
+        source.read_exact_at(&mut completion, data_len)?;
+        if &completion != EXPORT_COMPLETE {
+            return Err(invalid());
+        }
+        let backing =
+            crate::template_memory::create(usize::try_from(data_len).map_err(|_| invalid())?)?;
         let mut offset = 0;
         let mut buffer = vec![0; 1024 * 1024];
-        while offset < metadata.len() {
-            let count = (metadata.len() - offset).min(buffer.len() as u64) as usize;
+        while offset < data_len {
+            let count = (data_len - offset).min(buffer.len() as u64) as usize;
             source.read_exact_at(&mut buffer[..count], offset)?;
             for (index, page) in buffer[..count].chunks(4096).enumerate() {
                 if page.iter().any(|byte| *byte != 0) {
