@@ -2,6 +2,7 @@
 //! This is distinct from running a workload inside a confidential enclave.
 
 pub mod console;
+pub mod cooperative;
 #[cfg(target_os = "linux")]
 pub mod heartbeat;
 #[cfg(target_os = "linux")]
