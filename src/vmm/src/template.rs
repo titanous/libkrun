@@ -71,10 +71,14 @@ mod tests {
             topology: Vec::new(),
         };
         template.write_to_path(&path).unwrap();
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        let metadata = std::fs::metadata(&path).unwrap();
+        let mode = metadata.permissions().mode() & 0o777;
+        use std::os::unix::fs::MetadataExt;
+        let sparse = metadata.blocks() * 512 < metadata.len();
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir(&directory).unwrap();
         assert_eq!(mode, 0o600);
+        assert!(sparse, "export must preserve zero pages as holes");
     }
 
     #[test]
@@ -121,7 +125,7 @@ fn invalid() -> io::Error {
 
 impl Template {
     pub fn write_to_path(&self, path: impl AsRef<std::path::Path>) -> io::Result<()> {
-        let mut destination = std::fs::OpenOptions::new()
+        let destination = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
@@ -129,10 +133,15 @@ impl Template {
         let mut offset = 0;
         let mut buffer = vec![0; 1024 * 1024];
         let len = self.file.metadata()?.len();
+        destination.set_len(len)?;
         while offset < len {
             let count = (len - offset).min(buffer.len() as u64) as usize;
             self.file.read_exact_at(&mut buffer[..count], offset)?;
-            std::io::Write::write_all(&mut destination, &buffer[..count])?;
+            for (index, page) in buffer[..count].chunks(4096).enumerate() {
+                if page.iter().any(|byte| *byte != 0) {
+                    destination.write_all_at(page, offset + (index * 4096) as u64)?;
+                }
+            }
             offset += count as u64;
         }
         destination.sync_all()
