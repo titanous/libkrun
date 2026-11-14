@@ -352,6 +352,12 @@ create/write/rename/delete, 1,000 files and complete 64 MiB reads. The real tree
 read-only/writable adapters also pass 3,000 writable operations and live tree
 replacement. Historical copying-window experiments are not supported behavior.
 
+Set `NITRO_PROFILE=1` to emit ASCII timings for each hypervisor ioctl, mapping,
+image load and VM close to stderr. This is opt-in diagnostic output; route it to
+a file. `nitro_agent_timing` measures build, first guest protocol byte and total
+run separately. Image-load timing includes its registration ioctls and must not
+be added to them twice.
+
 Limits: memory is bounded by the host's configured pool, CPU admission and guest
 slots by the driver; requested CPU count fits `u8` (1..255) but host capacity can
 reject it. RAM above 1 GiB uses a second GPA range at 0x400000000; both sides of

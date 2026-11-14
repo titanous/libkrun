@@ -24,6 +24,7 @@ fn request(direction: u64, nr: u64, size: u64) -> u64 {
     direction << 30 | size << 16 | 0xae00 | nr
 }
 fn call<T>(fd: &File, direction: u64, nr: u64, arg: &mut T) -> io::Result<i32> {
+    let started = Instant::now();
     let result = unsafe {
         ioctl(
             fd.as_raw_fd(),
@@ -31,8 +32,15 @@ fn call<T>(fd: &File, direction: u64, nr: u64, arg: &mut T) -> io::Result<i32> {
             arg as *mut T,
         )
     };
-    if result < 0 {
-        Err(io::Error::last_os_error())
+    let error = (result < 0).then(io::Error::last_os_error);
+    if std::env::var_os("NITRO_PROFILE").is_some() {
+        eprintln!(
+            "NITRO_PROFILE ioctl=0x{nr:02x} micros={} result={result}",
+            started.elapsed().as_micros()
+        );
+    }
+    if let Some(error) = error {
+        Err(error)
     } else {
         Ok(result)
     }
@@ -117,9 +125,16 @@ pub struct Mapping {
 }
 impl Mapping {
     fn new(fd: &File, len: usize) -> io::Result<Self> {
+        let started = Instant::now();
         let address = unsafe { mmap(std::ptr::null_mut(), len, 3, 1, fd.as_raw_fd(), 0) };
         if address as isize == -1 {
             return Err(io::Error::last_os_error());
+        }
+        if std::env::var_os("NITRO_PROFILE").is_some() {
+            eprintln!(
+                "NITRO_PROFILE mmap_bytes={len} micros={}",
+                started.elapsed().as_micros()
+            );
         }
         Ok(Self {
             address: NonNull::new(address).ok_or_else(|| io::Error::other("null mmap"))?,
@@ -290,6 +305,7 @@ impl Sandbox {
             .map_err(|e| io::Error::other(format!("RAM table: {e:?}")))
     }
     pub fn load(&mut self, path: &str) -> io::Result<()> {
+        let started = Instant::now();
         let vm = self.vm.as_ref().unwrap();
         let mut load = Pair {
             first: 1,
@@ -320,6 +336,12 @@ impl Sandbox {
                 address: self.ram.address(),
             },
         )?;
+        if std::env::var_os("NITRO_PROFILE").is_some() {
+            eprintln!(
+                "NITRO_PROFILE image_load_bytes={size} micros={}",
+                started.elapsed().as_micros()
+            );
+        }
         Ok(())
     }
     pub fn allocate_region(&self, id: u8, size: usize) -> io::Result<SharedRegion> {
@@ -667,7 +689,14 @@ impl Sandbox {
                 }
             })
         });
+        let started = Instant::now();
         drop(self.vm.take());
+        if std::env::var_os("NITRO_PROFILE").is_some() {
+            eprintln!(
+                "NITRO_PROFILE vm_close_micros={}",
+                started.elapsed().as_micros()
+            );
+        }
     }
 }
 impl Drop for Sandbox {
