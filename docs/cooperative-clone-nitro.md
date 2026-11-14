@@ -31,7 +31,22 @@ memory, written into a fresh VM that has booted a small parked stub.
 4. The runtime validates the frozen state, captures guest-owned memory into a
    sealed descriptor, closes the source VM under the lifecycle lock, and only
    then delivers the template: `VmHandle::wait_template_capture()` returns the
-   `CaptureOutcome`. The source is gone after an accepted capture.
+   `CaptureOutcome`. The VMM has closed its descriptor after acceptance; a
+   daemon-held duplicate keeps the frozen source alive until the daemon closes
+   that duplicate under the same lock.
+
+The arm timeout must cover kernel freeze, the complete sealed-memory copy, and
+waiting for source close under the lifecycle lock. A timeout before acceptance
+leaves the source resumable; after acceptance the source must be discarded. A
+wait timeout is terminal: a late result is dropped, including its template, and
+no later wait can retrieve it.
+
+The host parses bounded boot-console publications before the kernel's template
+marker, which precedes userspace. Repeated or malformed publications disable
+capture without stopping the source. After boot discovery ends, console text
+cannot change the captured memory ranges or marker. Patch 0120 reserves the
+receiver range only for marked guests and only when it is otherwise unused;
+an overlap prints a clear disabled line and leaves the source usable.
 
 ## What is refused
 
@@ -49,7 +64,8 @@ memory, written into a fresh VM that has booted a small parked stub.
 ## Receiving VMs and the parked receiver
 
 A receiving VM boots the same kernel Image with a parked stub injected
-(`src/nitro_sandbox/examples/receiver.S` and `receiver-image.py`). The stub
+(`src/nitro_sandbox/src/receiver_image/receiver.S` and `receiver-image.py`;
+the example paths are compatibility wrappers). The stub
 parks in the reserved range `[0x70000000, 0x70200000)`, publishes READY and
 its own kernel build ID, and waits. The host then validates, copies the
 template's memory privately (skipping the reservation), writes fresh entropy
@@ -82,7 +98,14 @@ Parked receiver contract:
   stop request ends it with `VmExit` stopped.
 - A second `assign`, or an `assign` after expiry or end, fails with
   `ParkedReceiverError::Closed`.
-- The boot watchdog is suspended while parked and restarts at release.
+- The boot watchdog and heartbeat are suspended while parked and restart at
+  release. `assign` returning `Ok` means handoff, not successful import: a race
+  with the park deadline can still end with `Expired`. A kernel mismatch ends
+  and consumes the receiver with the typed `vmm::nitro_restore::RestoreMismatch::KernelIdentity`
+  error (the module is internal to the VMM crate).
+- Until pre-run expiry is implemented, a built but unrun parked context holds
+  its slot, pool memory, and (with start-and-teardown serialization) the lock
+  without a deadline. Run it immediately; never retain an unrun parked context.
 - Configure the parked VM with the same device list, in the same order, as
   the template's source. Backends may receive their contents (for example a
   disk snapshot written in place into the already-open file) at any time
@@ -96,9 +119,11 @@ Parked receiver contract:
 - Copying is serial through a 1 MiB buffer (about 60–70 ms per GiB measured);
   receiver boot to READY is about 213 ms; both are paid per copy unless the
   receiver is parked in advance.
-- Every final close of a Nitro VM descriptor, including receivers that
-  expire, are dropped, or fail to start, happens under the one host-wide
-  lifecycle lock (`nitro_sandbox::lifecycle::LIFECYCLE_LOCK_PATH`).
+- Fork-owned VM descriptor closes, including receiver expiry, drop and failed
+  import, take the configured lifecycle lock. Configure the one host-wide
+  lock (`nitro_sandbox::lifecycle::LIFECYCLE_LOCK_PATH`). Process termination
+  bypasses Rust teardown: safety then requires a daemon-held duplicate whose
+  final close the daemon performs under that same lock.
 - The guest kernel must carry holodeck patches 0120–0123. The consolidated
   series without them cannot produce or receive copies on arm64.
 
@@ -115,6 +140,21 @@ Parked receiver contract:
   boot; bound each park with `wait` and reap on expiry.
 - Accept a copy as ready only after the agent reconnects with the expected
   boot ID and token and acknowledges the new generation.
+- Receive and retain the acknowledged duplicate VM descriptor for every source
+  and receiver before allowing it to run. After reaping a terminated VMM,
+  close the duplicate under the host-wide lock. For accepted capture, close
+  the source duplicate promptly once the VMM has closed its descriptor;
+  until then the frozen guest still holds its slot and pool memory. The fork
+  cannot serialize a descriptor close performed by process termination.
+- Pass a separately owned template descriptor to each receiver. Template
+  reads are positioned; imports may run concurrently. Charge the sealed
+  template's RAM-sized allocation to daemon memory, separately from guest
+  pool memory. Receivers close their template after import; dropping the
+  daemon's template does not stop copies already running.
+- Refresh per-copy credentials and notify retained userspace random generators
+  after the generation changes. Boot ID, agent token, secrets and userspace
+  generator state are inherited; kernel reseeding alone does not refresh them.
+  Do not call `notify_vm_generation_change` on Nitro (it is unsupported).
 
 Differences from KVM: memory is copied, not mapped; the receiver must boot a
 parked stub of the identical kernel; interrupt-controller state is replayed by
@@ -137,7 +177,11 @@ a template exists; DAX is refused.
   offset between VMs is not known to the host.
 - Memory import is serial through one buffer; a parallel import would cut the
   roughly 250 ms spent on a 4 GiB copy.
-- The consolidated kernel series does not yet include patches 0120–0123.
+- Current-image acceptance must use the consolidated kernel series plus
+  patches 0120–0124. Patch 0124 refuses a restored copy's freeze trigger before
+  stopping tasks; the host also refuses arming that copy with
+  `RestoredCopyCaptureUnsupported`. Historical runs without 0124 do not prove
+  this refusal.
 - Not tested: four parked 4 GiB receivers at once (host limits), parked
   receivers with 4 or 8 CPUs, more than one block and one filesystem device.
 - The image loader accepted a 4 KiB image of zeros; that receiver booted,
