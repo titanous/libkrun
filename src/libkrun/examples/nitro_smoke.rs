@@ -9,7 +9,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut builder = Builder::new();
     builder.vm_config(2, 1024)?;
     builder.disable_implicit_console()?;
-    builder.add_virtio_console_with_ports(vec![PortDescription::output_pipe("smoke", devices::virtio::port_io::stdout()?)]);
+    let console_path = std::env::var("NITRO_CONSOLE_LOG").unwrap_or_else(|_| "virtio-console.log".into());
+    let output = devices::virtio::port_io::output_file(std::fs::File::create(console_path)?)?;
+    builder.add_virtio_console_with_ports(vec![PortDescription::output_pipe("smoke", output)]);
     builder.add_block_cfg(BlockDeviceConfig {
         block_id: "disk".into(), cache_type: CacheType::Writeback,
         disk_type: BlockDeviceType::Image { path: args[2].clone(), format: ImageType::Raw, sync_mode: SyncMode::Full },

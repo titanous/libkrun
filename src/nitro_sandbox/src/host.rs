@@ -59,7 +59,7 @@ impl Mapping {
         Ok((offset..offset + length).map(|i| unsafe { self.address.as_ptr().add(i).read_volatile() }).collect())
     }
 }
-impl Drop for Mapping { fn drop(&mut self) { unsafe { munmap(self.address.as_ptr(), self.len); } } }
+impl Drop for Mapping { fn drop(&mut self) { if self.len != 0 { unsafe { munmap(self.address.as_ptr(), self.len); } } } }
 
 /// Field order is not used for teardown: the VM is explicitly closed under the
 /// host-wide lock before any backing mapping can be released.
@@ -74,6 +74,9 @@ pub struct Sandbox {
 }
 impl Sandbox {
     pub fn new(memory: usize, vcpus: u32) -> io::Result<Self> {
+        Self::with_mapping(memory, vcpus, None)
+    }
+    pub fn with_mapping(memory: usize, vcpus: u32, reused: Option<Mapping>) -> io::Result<Self> {
         if memory < 64 * 1024 * 1024 || memory % INFO_PAGE_SIZE != 0 || vcpus == 0 {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "memory/vCPU geometry"));
         }
@@ -82,7 +85,12 @@ impl Sandbox {
         let control = OpenOptions::new().read(true).write(true).open("/dev/nitro_enclaves")?;
         // Allocate backing before creating a slot: allocation failures cannot
         // drop a live VM fd outside the host teardown lock.
-        let ram = Mapping::new(&control, memory)?;
+        let mut ram = match reused {
+            Some(mapping) if mapping.len == memory => mapping,
+            Some(_) => return Err(io::Error::new(io::ErrorKind::InvalidInput, "reused mapping size mismatch")),
+            None => Mapping::new(&control, memory)?,
+        };
+        ram.zero();
         let raw = unsafe { memfd_create(c"libkrun-nitro-info".as_ptr().cast(), 1 | 4 | (21 << 26)) };
         if raw < 0 { return Err(io::Error::last_os_error()); }
         let info_file = unsafe { File::from_raw_fd(raw) };
@@ -229,8 +237,16 @@ impl Sandbox {
         }
     }
 }
-impl Drop for Sandbox {
-    fn drop(&mut self) {
+impl Sandbox {
+    /// Return RAM for a later guest after the VM has been synchronously closed.
+    /// All device transports and guest-memory views must already be dropped.
+    pub fn into_mapping(mut self) -> Mapping {
+        self.close_vm();
+        let empty = Mapping { address: NonNull::dangling(), len: 0 };
+        std::mem::replace(&mut self.ram, empty)
+    }
+    fn close_vm(&mut self) {
+        if self.vm.is_none() { return; }
         // EINTR must not allow an unlocked close.
         loop {
             if unsafe { flock(self.teardown_lock.as_raw_fd(), 2) } == 0 { break; }
@@ -242,4 +258,7 @@ impl Drop for Sandbox {
         drop(self.vm.take());
         unsafe { flock(self.teardown_lock.as_raw_fd(), 8); }
     }
+}
+impl Drop for Sandbox {
+    fn drop(&mut self) { self.close_vm(); }
 }

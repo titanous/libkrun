@@ -15,14 +15,25 @@ count, concurrency = int(sys.argv[1]), int(sys.argv[2])
 assert 1 <= concurrency <= 8
 logs = root / ('acceptance-' + str(int(time.time())))
 logs.mkdir()
-markers = [b'NITRO_DISK_OK', b'NITRO_VSOCK_OK', b'NITRO_VIRTIO_CONSOLE_OK', b'NITRO_SMOKE_OK']
+markers = [b'NITRO_DISK_OK', b'NITRO_VSOCK_OK', b'NITRO_SMOKE_OK']
 def accounting():
     result = {}
-    for name in ['pcie_slots', 'memory_size', 'memory_pool_size', 'enclaves']:
+    for name in ['pcie_slots', 'pcie_slots_in_use', 'mem_pool/total', 'mem_pool/in_use', 'mem_pool/free']:
         p = pathlib.Path('/sys/class/misc/nitro_enclaves') / name
         if p.is_file():
             try: result[name] = p.read_text().strip()
             except OSError: pass
+    result['harness_fds'] = len(list(pathlib.Path('/proc/self/fd').iterdir()))
+    result['harness_threads'] = len(list(pathlib.Path('/proc/self/task').iterdir()))
+    survivors = []
+    for proc in pathlib.Path('/proc').iterdir():
+        if not proc.name.isdigit(): continue
+        try:
+            command = (proc / 'cmdline').read_bytes()
+            if b'nitro_smoke' in command and str(root).encode() in command:
+                survivors.append(int(proc.name))
+        except (OSError, PermissionError): pass
+    result['lane_vmm_processes'] = survivors
     result['file_nr'] = pathlib.Path('/proc/sys/fs/file-nr').read_text().strip()
     result['loadavg'] = pathlib.Path('/proc/loadavg').read_text().strip()
     return result
@@ -57,13 +68,14 @@ def launch(i):
         start = time.monotonic()
         with (logs / f'guest-{i}.log').open('wb') as output:
             try:
-                p = subprocess.run(['sudo', 'env', f'NITRO_CID={200+slot}', str(root/'target/debug/examples/nitro_smoke'), str(root/'smoke-console.eif'), str(disk), path], stdout=output, stderr=subprocess.STDOUT, timeout=35)
+                p = subprocess.run(['sudo', 'env', f'NITRO_CID={200+slot}', f'NITRO_CONSOLE_LOG={logs / f"console-{i}.log"}', str(root/'target/debug/examples/nitro_smoke'), str(root/'smoke-console.eif'), str(disk), path], stdout=output, stderr=subprocess.STDOUT, timeout=35)
                 code = p.returncode
             except subprocess.TimeoutExpired:
                 code = 'timeout'
         thread.join(30)
     data = (logs / f'guest-{i}.log').read_bytes()
-    passed = code == 0 and echo_result == [True] and all(m in data for m in markers) and b'NITRO_SMOKE_FAIL' not in data
+    console = (logs / f'console-{i}.log').read_bytes() if (logs / f'console-{i}.log').exists() else b''
+    passed = code == 0 and echo_result == [True] and all(m in data for m in markers) and b'NITRO_VIRTIO_CONSOLE_OK' in console and b'NITRO_SMOKE_FAIL' not in data
     disk.unlink()
     pathlib.Path(path).unlink(missing_ok=True)
     result = {'guest': i, 'passed': passed, 'exit': code, 'seconds': time.monotonic()-start, 'echo': echo_result}
