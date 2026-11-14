@@ -184,11 +184,13 @@ pub struct TsiReleaseReq {
 
 /// The vsock packet, implemented as a wrapper over a virtq descriptor chain:
 /// - the chain head, holding the packet header; and
-/// - (an optional) data/buffer descriptor, only present for data packets (VSOCK_OP_RW).
+/// - optional payload descriptors, present for data packets (VSOCK_OP_RW).
 pub struct VsockPacket {
     hdr: *mut u8,
     buf: Option<*mut u8>,
     buf_size: usize,
+    // Keeps gathered TX scatter-gather payload storage alive for buf.
+    owned_buf: Option<Vec<u8>>,
 }
 
 fn get_host_address<T: GuestMemoryBackend>(
@@ -222,6 +224,7 @@ impl VsockPacket {
                 .map_err(VsockError::GuestMemoryMmap)?,
             buf: None,
             buf_size: 0,
+            owned_buf: None,
         };
 
         // No point looking for a data/buffer descriptor, if the packet is zero-lengthed.
@@ -246,7 +249,25 @@ impl VsockPacket {
         // The data buffer should be large enough to fit the size of the data, as described by
         // the header descriptor.
         if buf_desc.len < pkt.len() {
-            return Err(VsockError::BufDescTooSmall);
+            let wanted = pkt.len() as usize;
+            let mut data = Vec::with_capacity(wanted);
+            let mut descriptor = Some(buf_desc);
+            while data.len() < wanted {
+                let desc = descriptor.ok_or(VsockError::BufDescTooSmall)?;
+                if desc.is_write_only() {
+                    return Err(VsockError::UnreadableDescriptor);
+                }
+                let count = (desc.len as usize).min(wanted - data.len());
+                let ptr = get_host_address(desc.mem, desc.addr, count)
+                    .map_err(VsockError::GuestMemoryMmap)?;
+                // SAFETY: get_host_address validates the entire readable guest range.
+                data.extend_from_slice(unsafe { std::slice::from_raw_parts(ptr, count) });
+                descriptor = desc.next_descriptor();
+            }
+            pkt.buf_size = wanted;
+            pkt.buf = Some(data.as_mut_ptr());
+            pkt.owned_buf = Some(data);
+            return Ok(pkt);
         }
 
         pkt.buf_size = buf_desc.len as usize;
@@ -279,6 +300,7 @@ impl VsockPacket {
                 .map_err(VsockError::GuestMemoryMmap)?,
             buf: None,
             buf_size: 0,
+            owned_buf: None,
         };
 
         // Starting from Linux 6.2 the virtio-vsock driver can use a single descriptor for both
@@ -701,6 +723,7 @@ impl VsockPacket {
             hdr: hdr_buf.as_mut_ptr(),
             buf: None,
             buf_size: 0,
+            owned_buf: None,
         };
         (pkt, hdr_buf)
     }

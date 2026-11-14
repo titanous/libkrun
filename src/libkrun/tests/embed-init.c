@@ -55,12 +55,14 @@ static void reset_connection_check(int allowed) {
     close(fd);
     check(tcp(18080)<0,"reset internet forwarding disabled");
 }
+#include "embed-large.h"
 int main(void) {
     setbuf(stdout, NULL);
     mkdir("/dev",0755); mount("devtmpfs","/dev","devtmpfs",0,NULL);
     mkdir("/proc",0755); mount("proc","/proc","proc",0,NULL);
     char cmdline[4096]={0}; int c=open("/proc/cmdline",O_RDONLY); read(c,cmdline,sizeof(cmdline)-1); close(c);
     puts("EMBED_USERSPACE_OK");
+    char *large=strstr(cmdline,"embed_large_"); if (large) large_test(large);
     if (strstr(cmdline,"embed_reset_")) {
         int allowed=strstr(cmdline,"embed_reset_allow")!=NULL;
         reset_connection_check(allowed); puts("EMBED_RESET_BEFORE_OK");
