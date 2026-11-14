@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 struct State {
     deadline: Option<Instant>,
     requested: bool,
+    accepted: bool,
     result: Option<io::Result<crate::template::Template>>,
 }
 
@@ -16,7 +17,7 @@ pub struct CaptureRequest(Arc<(Mutex<State>, Condvar)>);
 impl CaptureRequest {
     pub fn arm(&self, timeout: Duration) -> io::Result<()> {
         let mut state = self.0 .0.lock().unwrap();
-        if state.deadline.is_some() {
+        if state.deadline.is_some() || state.accepted {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 "capture already armed",
@@ -50,6 +51,21 @@ impl CaptureRequest {
             .is_some_and(|deadline| Instant::now() < deadline)
     }
 
+    /// Atomically choose irreversible acceptance against deadline cancellation.
+    pub fn accept(&self) -> bool {
+        let mut state = self.0 .0.lock().unwrap();
+        if state.accepted
+            || state
+                .deadline
+                .is_none_or(|deadline| Instant::now() >= deadline)
+        {
+            return false;
+        }
+        state.accepted = true;
+        state.requested = false;
+        true
+    }
+
     pub fn complete(&self, result: io::Result<crate::template::Template>) {
         let mut state = self.0 .0.lock().unwrap();
         state.result = Some(result);
@@ -76,7 +92,11 @@ impl CaptureRequest {
                 state.requested = false;
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
-                    "cooperative freeze timed out",
+                    if state.accepted {
+                        "cooperative freeze timed out after acceptance; source must be discarded"
+                    } else {
+                        "cooperative freeze timed out before acceptance; source remains resumable"
+                    },
                 ));
             }
             state = self.0 .1.wait_timeout(state, remaining).unwrap().0;
@@ -87,6 +107,33 @@ impl CaptureRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn acceptance_and_timeout_have_one_terminal_decision() {
+        let expired = CaptureRequest::default();
+        expired.arm(Duration::ZERO).unwrap();
+        assert!(!expired.accept());
+        assert!(expired
+            .wait()
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("before acceptance"));
+        assert!(!expired.accept());
+
+        let accepted = CaptureRequest::default();
+        accepted.arm(Duration::from_secs(30)).unwrap();
+        assert!(accepted.accept());
+        assert!(!accepted.accept());
+        accepted.0 .0.lock().unwrap().deadline = Some(Instant::now());
+        assert!(accepted
+            .wait()
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("after acceptance"));
+        assert!(accepted.arm(Duration::from_secs(1)).is_err());
+    }
+
     #[test]
     fn timeout_disarms_and_requests_are_consumed_once() {
         let request = CaptureRequest::default();

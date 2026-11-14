@@ -586,7 +586,7 @@ impl Subscriber for Vmm {
                     if !path.as_os_str().is_empty() {
                         template.write_to_path(path)?;
                     }
-                    if !self.capture_request.is_armed() {
+                    if !self.capture_request.accept() {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::TimedOut,
                             "cooperative freeze timed out during preparation",

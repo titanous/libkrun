@@ -157,8 +157,12 @@ optional caller-chosen export path but likewise does not arm capture.
 file only after source vCPU teardown. Its `file` can be duplicated or sent to
 another process with SCM_RIGHTS; `write_to_path` exports owner-only sensitive
 whole-guest memory. A freeze deadline returns `io::ErrorKind::TimedOut`, distinct
-from unsupported capture and validation failures. The daemon must destroy a
-source that does not recover promptly after timeout; kernel device callbacks
+from unsupported capture and validation failures. Acceptance and deadline
+cancellation are serialized: a timeout before acceptance prevents later
+acceptance, allowing kernel recovery. A timeout after acceptance explicitly
+reports that the source must be discarded; acceptance is irreversible even if
+vCPU teardown misses the deadline. The daemon must destroy a source that does
+not recover promptly after a pre-acceptance timeout; kernel device callbacks
 can block indefinitely. Do not retry a timed-out request until the source's
 state has been resolved.
 
