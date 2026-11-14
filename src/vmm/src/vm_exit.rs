@@ -13,6 +13,9 @@ pub enum VmExit {
     /// Guest requested a reboot (KVM_SYSTEM_EVENT_RESET).
     RebootRequested,
 
+    /// Host requested an orderly stop through the VM handle.
+    Stopped,
+
     /// vCPU encountered a fatal error (triple fault, internal KVM error).
     Error { message: String },
 }

@@ -2,7 +2,7 @@
 use crate::host::Sandbox;
 use crate::transport::Transport;
 use crate::{Action, Watchdog};
-use devices::virtio::VirtioDevice;
+use devices::virtio::{VirtioDevice, VmmExitObserver};
 use polly::event_manager::{EventManager, Subscriber};
 use std::io;
 use std::sync::{Arc, Mutex};
@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 pub enum Exit {
     PowerOff,
     Watchdog,
+    Stopped,
 }
 
 pub struct Runtime {
@@ -22,6 +23,8 @@ pub struct Runtime {
     sandbox: Sandbox,
     timeout: Duration,
     cid: u64,
+    observers: Mutex<Vec<Arc<Mutex<dyn VmmExitObserver>>>>,
+    stop: Arc<utils::eventfd::EventFd>,
 }
 impl Runtime {
     pub fn new(
@@ -43,7 +46,15 @@ impl Runtime {
             sandbox,
             timeout,
             cid,
+            observers: Mutex::new(Vec::new()),
+            stop: Arc::new(utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK)?),
         })
+    }
+    pub fn stop_event(&self) -> Arc<utils::eventfd::EventFd> {
+        self.stop.clone()
+    }
+    pub fn register_exit_observer(&self, observer: Arc<Mutex<dyn VmmExitObserver>>) {
+        self.observers.lock().unwrap().push(observer);
     }
     pub fn add_device<D: VirtioDevice + Subscriber + 'static>(
         &mut self,
@@ -70,6 +81,11 @@ impl Runtime {
         let mut watchdog = Watchdog::new(Duration::ZERO, self.timeout);
         let mut active = 0usize;
         loop {
+            match self.stop.read() {
+                Ok(_) => return Ok(Exit::Stopped),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(error) => return Err(error),
+            }
             if self.sandbox.powered_off(0)? {
                 self.sandbox.drain_console(&mut io::stdout())?;
                 return Ok(Exit::PowerOff);
@@ -107,6 +123,11 @@ impl Drop for Runtime {
             }
         }
         self.transports.clear();
+        // Workers no longer touch guest queues or backend state. Notify on every
+        // exit path, including failed start and device-dispatch errors.
+        for observer in self.observers.get_mut().unwrap().drain(..) {
+            observer.lock().unwrap().on_vmm_exit();
+        }
         self.memory.take();
     }
 }

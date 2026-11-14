@@ -1214,6 +1214,12 @@ impl Builder {
             return Err(StartError::Nitro(std::io::Error::new(std::io::ErrorKind::Unsupported, "unsupported on this backend: disable the implicit console and configure custom Nitro console ports explicitly")));
         }
         let config = self.config.vmr.vm_config();
+        let mut device_info = vmm::resources::VmDeviceInfo {
+            console_ports: Vec::new(),
+            vcpu_count: config.vcpu_count.unwrap_or(1),
+            ram_mib: config.mem_size_mib.unwrap_or(1024) as u32,
+        };
+        let mut console_id = self.nitro_device_count_before_consoles() as u32;
         let mut runtime = nitro_sandbox::runtime::Runtime::new(
             options
                 .image
@@ -1226,9 +1232,12 @@ impl Builder {
         )
         .map_err(StartError::Nitro)?;
         for cfg in self.config.take_block_cfg() {
-            let block = vmm::vmm_config::block::BlockBuilder::create_block(cfg)?;
+            let block = Arc::new(Mutex::new(
+                vmm::vmm_config::block::BlockBuilder::create_block(cfg)?,
+            ));
+            runtime.register_exit_observer(block.clone());
             runtime
-                .add_worker_device(Arc::new(Mutex::new(block)))
+                .add_worker_device(block)
                 .map_err(StartError::Nitro)?;
         }
         if !matches!(self.config.vsock_config, VsockConfig::Disabled) {
@@ -1263,13 +1272,24 @@ impl Builder {
                     )))
                 }
             };
+            for (port_id, port) in ports.iter().enumerate() {
+                device_info
+                    .console_ports
+                    .push(vmm::resources::ConsolePortInfo {
+                        console_id,
+                        port_id: port_id as u32,
+                        device_path: format!("/dev/vport{console_id}p{port_id}"),
+                        name: (!port.name.is_empty()).then(|| port.name.to_string()),
+                    });
+            }
+            console_id += 1;
             let console = devices::virtio::Console::new(ports)
                 .map_err(|e| StartError::Nitro(std::io::Error::other(format!("console: {e:?}"))))?;
             runtime
                 .add_device(Arc::new(Mutex::new(console)))
                 .map_err(StartError::Nitro)?;
         }
-        Context::from_nitro(runtime)
+        Context::from_nitro(runtime, device_info)
     }
 
     /// Select Nitro direct mode using an EIF image. Configured block devices,
@@ -1555,6 +1575,8 @@ struct ContextVm {
     kvm: Option<vmm::builder::BuiltVm>,
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     nitro: Option<nitro_sandbox::runtime::Runtime>,
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    nitro_device_info: vmm::resources::VmDeviceInfo,
 }
 impl Deref for ContextVm {
     type Target = vmm::builder::BuiltVm;
@@ -1577,6 +1599,8 @@ impl From<vmm::builder::BuiltVm> for ContextVm {
             kvm: Some(vm),
             #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
             nitro: None,
+            #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+            nitro_device_info: Default::default(),
         }
     }
 }
@@ -1630,14 +1654,19 @@ pub enum StartError {
 
 impl Context {
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
-    fn from_nitro(runtime: nitro_sandbox::runtime::Runtime) -> Result<Self, StartError> {
+    fn from_nitro(
+        runtime: nitro_sandbox::runtime::Runtime,
+        device_info: vmm::resources::VmDeviceInfo,
+    ) -> Result<Self, StartError> {
+        let runtime_stop = runtime.stop_event();
         Ok(Self {
             built_vm: ContextVm {
                 kvm: None,
                 nitro: Some(runtime),
+                nitro_device_info: device_info,
             },
             event_manager: EventManager::new().map_err(StartError::EventManager)?,
-            shutdown_efd: None,
+            shutdown_efd: Some(runtime_stop),
             vm_exit: Arc::new(Mutex::new(None)),
         })
     }
@@ -1645,12 +1674,25 @@ impl Context {
     ///
     /// This returns the actual device paths from the built VM.
     pub fn device_info(&self) -> &vmm::resources::VmDeviceInfo {
+        #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+        if self.built_vm.nitro.is_some() {
+            return &self.built_vm.nitro_device_info;
+        }
         &self.built_vm.device_info
     }
 
     /// Returns a `VmHandle` that can be used to pause/resume the VM from another thread.
     /// Must be called before `run()`, since `run()` consumes `self`.
     pub fn vm_handle(&self) -> VmHandle {
+        #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+        if self.built_vm.nitro.is_some() {
+            return VmHandle {
+                vmm: None,
+                shutdown_efd: self.shutdown_efd.clone(),
+                #[cfg(not(feature = "tee"))]
+                balloon: None,
+            };
+        }
         #[cfg(not(feature = "tee"))]
         let balloon_handle = if self.built_vm.balloon_enabled {
             let vmm = self.built_vm.vmm().lock().unwrap();
@@ -1663,7 +1705,7 @@ impl Context {
         };
 
         VmHandle {
-            vmm: self.built_vm.vmm().clone(),
+            vmm: Some(self.built_vm.vmm().clone()),
             shutdown_efd: self.shutdown_efd.clone(),
             #[cfg(not(feature = "tee"))]
             balloon: balloon_handle,
@@ -1676,6 +1718,11 @@ impl Context {
         &self,
         observer: std::sync::Arc<std::sync::Mutex<dyn devices::virtio::VmmExitObserver>>,
     ) {
+        #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+        if let Some(runtime) = &self.built_vm.nitro {
+            runtime.register_exit_observer(observer);
+            return;
+        }
         self.built_vm
             .vmm()
             .lock()
@@ -1693,6 +1740,7 @@ impl Context {
                     nitro_sandbox::runtime::Exit::PowerOff => {
                         vmm::vm_exit::VmExit::Shutdown { exit_code: 0 }
                     }
+                    nitro_sandbox::runtime::Exit::Stopped => vmm::vm_exit::VmExit::Stopped,
                     nitro_sandbox::runtime::Exit::Watchdog => vmm::vm_exit::VmExit::Error {
                         message: "Nitro guest watchdog expired".into(),
                     },
@@ -1768,7 +1816,7 @@ pub enum BalloonError {
 /// Obtain via `Context::vm_handle()` before calling `Context::run()`.
 #[derive(Clone)]
 pub struct VmHandle {
-    vmm: Arc<Mutex<vmm::Vmm>>,
+    vmm: Option<Arc<Mutex<vmm::Vmm>>>,
     shutdown_efd: Option<Arc<EventFd>>,
     #[cfg(not(feature = "tee"))]
     balloon: Option<BalloonHandle>,
@@ -1900,11 +1948,26 @@ impl BalloonHandle {
 }
 
 impl VmHandle {
+    fn kvm(&self) -> Result<&Arc<Mutex<vmm::Vmm>>, StartError> {
+        self.vmm.as_ref().ok_or_else(|| {
+            #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+            {
+                StartError::Nitro(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "unsupported on this backend: KVM control operation",
+                ))
+            }
+            #[cfg(not(all(target_os = "linux", feature = "nitro-sandbox")))]
+            {
+                unreachable!("KVM handles always contain a VMM")
+            }
+        })
+    }
     /// Give a running guest a fresh generation identifier and raise its notification interrupt.
     /// Call after copying guest memory and starting the copy, so its kernel reseeds randomness.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     pub fn notify_vm_generation_change(&self) -> Result<[u8; 16], StartError> {
-        self.vmm
+        self.kvm()?
             .lock()
             .expect("Poisoned vmm lock")
             .notify_vm_generation_change()
@@ -1914,7 +1977,7 @@ impl VmHandle {
     /// Pause all vCPUs. Blocks until all vCPUs have acknowledged the pause.
     #[mutants::skip] // races with VM exit in mutation tests; tested by integration tests
     pub fn pause(&self) -> Result<(), StartError> {
-        self.vmm
+        self.kvm()?
             .lock()
             .expect("Poisoned vmm lock")
             .pause_vcpus()
@@ -1924,7 +1987,7 @@ impl VmHandle {
     /// Resume all vCPUs. Blocks until all vCPUs have acknowledged the resume.
     #[mutants::skip] // races with VM exit in mutation tests; tested by integration tests
     pub fn resume(&self) -> Result<(), StartError> {
-        self.vmm
+        self.kvm()?
             .lock()
             .expect("Poisoned vmm lock")
             .resume_vcpus()
@@ -1962,6 +2025,35 @@ impl VmHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    fn nitro_handle_controls_without_hardware() {
+        let stop = Arc::new(EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap());
+        let handle = VmHandle {
+            vmm: None,
+            shutdown_efd: Some(stop.clone()),
+            #[cfg(not(feature = "tee"))]
+            balloon: None,
+        };
+        for result in [
+            handle.pause(),
+            handle.resume(),
+            handle.notify_vm_generation_change().map(|_| ()),
+        ] {
+            match result {
+                Err(StartError::Nitro(error)) => {
+                    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+                    assert!(error.to_string().contains("unsupported on this backend"));
+                }
+                other => panic!("unexpected control result: {other:?}"),
+            }
+        }
+        #[cfg(not(feature = "tee"))]
+        assert!(handle.balloon().is_none());
+        handle.trigger_shutdown_event().unwrap();
+        assert_eq!(stop.read().unwrap(), 1);
+    }
 
     #[test]
     #[cfg(feature = "vhost-user")]
