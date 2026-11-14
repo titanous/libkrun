@@ -39,6 +39,31 @@ impl Transport {
             offered,
         })
     }
+    pub fn register_regions(
+        sandbox: &mut Sandbox,
+        device: Arc<Mutex<dyn VirtioDevice>>,
+        regions: Vec<crate::host::SharedRegion>,
+    ) -> io::Result<Self> {
+        let guard = device.lock().unwrap();
+        let offered =
+            (guard.avail_features() | (1 << 32)) & !((1 << 28) | (1 << 29) | (1 << 34) | (1 << 40));
+        let mut config = [0u8; 64];
+        guard.read_config(0, &mut config);
+        let events = sandbox.add_owned_device_regions(
+            guard.device_type(),
+            guard.queue_config().len(),
+            offered,
+            &config,
+            regions,
+        )?;
+        drop(guard);
+        Ok(Self {
+            device,
+            events,
+            lifecycle: DeviceLifecycle::default(),
+            offered,
+        })
+    }
     pub fn refresh(&mut self, sandbox: &Sandbox, memory: &GuestMemoryMmap) -> io::Result<Action> {
         let Some(snapshot) = sandbox.snapshot(self.events.uid)? else {
             return Ok(Action::None);

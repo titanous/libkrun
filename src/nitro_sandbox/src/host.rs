@@ -165,6 +165,7 @@ pub struct Sandbox {
     _info_file: File,
     lifecycle_lock: Option<crate::lifecycle::OpenLock>,
     console_at: std::collections::HashMap<usize, u32>,
+    device_regions: Vec<SharedRegion>,
 }
 impl Sandbox {
     pub fn new(memory: usize, vcpus: u32) -> io::Result<Self> {
@@ -245,6 +246,7 @@ impl Sandbox {
             _info_file: info_file,
             lifecycle_lock,
             console_at: Default::default(),
+            device_regions: Vec::new(),
         };
         for _ in 0..vcpus {
             call(sb.vm.as_ref().unwrap(), 1, 0x2d, &mut -1i32)?;
@@ -329,6 +331,20 @@ impl Sandbox {
         let mut mapping = Mapping::new(&self._control, size)?;
         mapping.zero();
         Ok(SharedRegion { id, mapping })
+    }
+    pub fn add_owned_device_regions(
+        &mut self,
+        kind: u32,
+        queues: usize,
+        features: u64,
+        config: &[u8],
+        mut regions: Vec<SharedRegion>,
+    ) -> io::Result<DeviceEvents> {
+        // Retain mappings even when registration fails after a partial ioctl.
+        let result =
+            unsafe { self.add_device_with_regions(kind, queues, features, config, &mut regions) };
+        self.device_regions.extend(regions);
+        result
     }
     pub fn add_device(
         &self,

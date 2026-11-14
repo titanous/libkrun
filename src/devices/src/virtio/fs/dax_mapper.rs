@@ -21,6 +21,94 @@ pub trait DaxMapper: Send + Sync {
     fn unmap(&self, dax_offset: u64, len: u64) -> io::Result<()>;
 }
 
+/// Copy-based mapper for a hypervisor-registered, private per-guest window.
+/// The caller must retain the backing mapping until all filesystem workers stop.
+pub struct CopyDaxMapper {
+    host_addr: u64,
+    size: u64,
+}
+impl CopyDaxMapper {
+    /// # Safety
+    /// The address must identify a writable registered window of `size` bytes
+    /// that outlives this mapper and every operation performed through it.
+    pub unsafe fn new(host_addr: u64, size: u64) -> Self {
+        Self { host_addr, size }
+    }
+    fn address(&self, offset: u64, len: u64) -> io::Result<*mut u8> {
+        if offset.checked_add(len).is_none_or(|end| end > self.size) {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        self.host_addr
+            .checked_add(offset)
+            .map(|address| address as *mut u8)
+            .ok_or_else(|| io::ErrorKind::InvalidInput.into())
+    }
+}
+impl DaxMapper for CopyDaxMapper {
+    fn map_file(
+        &self,
+        dax_offset: u64,
+        len: u64,
+        fd: RawFd,
+        file_offset: u64,
+        writable: bool,
+    ) -> io::Result<()> {
+        if writable {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "writable file-backed DAX is unsupported on this backend; use filesystem writes",
+            ));
+        }
+        let address = self.address(dax_offset, len)?;
+        if file_offset
+            .checked_add(len)
+            .is_none_or(|end| end > i64::MAX as u64)
+        {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        unsafe {
+            std::ptr::write_bytes(address, 0, len as usize);
+        }
+        let mut read = 0usize;
+        while read < len as usize {
+            let result = unsafe {
+                libc::pread(
+                    fd,
+                    address.add(read).cast(),
+                    len as usize - read,
+                    (file_offset + read as u64) as libc::off_t,
+                )
+            };
+            if result < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(error);
+            }
+            if result == 0 {
+                break;
+            }
+            read += result as usize;
+        }
+        Ok(())
+    }
+    fn map_data(&self, dax_offset: u64, data: &[u8]) -> io::Result<()> {
+        let address = self.address(dax_offset, data.len() as u64)?;
+        unsafe {
+            std::ptr::copy_nonoverlapping(data.as_ptr(), address, data.len());
+        }
+        Ok(())
+    }
+    fn unmap(&self, dax_offset: u64, len: u64) -> io::Result<()> {
+        let address = self.address(dax_offset, len)?;
+        unsafe {
+            std::ptr::write_bytes(address, 0, len as usize);
+        }
+        Ok(())
+    }
+}
+
 /// Linux implementation of DaxMapper using mmap(MAP_FIXED).
 ///
 /// Created from a VirtioShmRegion's host_addr and size. Performs
@@ -143,6 +231,23 @@ impl DaxMapper for LinuxDaxMapper {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copy_window_maps_data_and_zeroes_without_replacing_backing() {
+        let mut backing = vec![0xa5u8; 4096];
+        let mapper =
+            unsafe { CopyDaxMapper::new(backing.as_mut_ptr() as u64, backing.len() as u64) };
+        mapper.map_data(128, b"guest file bytes").unwrap();
+        assert_eq!(&backing[128..144], b"guest file bytes");
+        mapper.unmap(128, 16).unwrap();
+        assert!(backing[128..144].iter().all(|byte| *byte == 0));
+        assert!(mapper.map_data(4095, b"xx").is_err());
+        assert!(mapper.unmap(u64::MAX, 2).is_err());
+        assert_eq!(
+            mapper.map_file(0, 4096, -1, 0, true).unwrap_err().kind(),
+            io::ErrorKind::Unsupported
+        );
+    }
 
     #[test]
     fn test_map_file_bounds_at_exact_boundary() {

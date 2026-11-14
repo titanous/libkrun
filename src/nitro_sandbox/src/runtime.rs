@@ -107,6 +107,34 @@ impl Runtime {
             .push(Transport::register(&self.sandbox, device)?);
         Ok(())
     }
+    pub fn add_filesystem(
+        &mut self,
+        mut device: devices::virtio::Fs,
+        dax_size: Option<usize>,
+    ) -> io::Result<()> {
+        let mut regions = Vec::new();
+        if let Some(size) = dax_size {
+            let region = self.sandbox.allocate_region(0, size)?;
+            let address = region.mapping.address();
+            device.set_shm_region(devices::virtio::VirtioShmRegion {
+                host_addr: address,
+                guest_addr: 0,
+                size,
+            });
+            // Sandbox retains the mapping until VM close; transports/workers
+            // stop before Sandbox is dropped.
+            device.set_dax_mapper(Arc::new(unsafe {
+                devices::virtio::fs::dax_mapper::CopyDaxMapper::new(address, size as u64)
+            }));
+            regions.push(region);
+        }
+        self.transports.push(Transport::register_regions(
+            &mut self.sandbox,
+            Arc::new(Mutex::new(device)),
+            regions,
+        )?);
+        Ok(())
+    }
     pub fn add_worker_device<D: VirtioDevice + 'static>(
         &mut self,
         device: Arc<Mutex<D>>,

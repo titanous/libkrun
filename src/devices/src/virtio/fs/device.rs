@@ -42,6 +42,7 @@ pub struct Fs {
     device_state: DeviceState,
     config: VirtioFsConfig,
     shm_region: Option<VirtioShmRegion>,
+    dax_mapper: Option<Arc<dyn super::dax_mapper::DaxMapper>>,
     fs_backend: Option<Box<dyn FileSystem + Send + Sync>>,
     worker_thread: Option<JoinHandle<Box<dyn FileSystem + Send + Sync>>>,
     worker_stopfd: EventFd,
@@ -67,6 +68,7 @@ impl Fs {
             device_state: DeviceState::Inactive,
             config,
             shm_region: None,
+            dax_mapper: None,
             fs_backend: Some(fs_backend),
             worker_thread: None,
             worker_stopfd: EventFd::new(EFD_NONBLOCK).map_err(FsError::EventFd)?,
@@ -78,6 +80,9 @@ impl Fs {
         defs::FS_DEV_ID
     }
 
+    pub fn set_dax_mapper(&mut self, mapper: Arc<dyn super::dax_mapper::DaxMapper>) {
+        self.dax_mapper = Some(mapper);
+    }
     pub fn set_shm_region(&mut self, shm_region: VirtioShmRegion) {
         self.shm_region = Some(shm_region);
     }
@@ -157,7 +162,7 @@ impl VirtioDevice for Fs {
 
         let fs_backend = self.fs_backend.take().expect("fs_backend already taken");
 
-        let worker = FsWorker::new(
+        let mut worker = FsWorker::new(
             worker_queues,
             queue_evts,
             interrupt.clone(),
@@ -167,6 +172,7 @@ impl VirtioDevice for Fs {
             self.worker_stopfd.try_clone().unwrap(),
             self.exit_code.clone(),
         );
+        worker.set_dax_mapper(self.dax_mapper.clone());
         self.worker_thread = Some(worker.run());
 
         self.device_state = DeviceState::Activated(mem, interrupt);

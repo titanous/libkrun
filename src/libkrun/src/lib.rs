@@ -843,7 +843,9 @@ impl Builder {
         } else {
             self.config.block_cfgs.len() as u32
         };
-        blocks + u32::from(!matches!(self.config.vsock_config, VsockConfig::Disabled))
+        blocks
+            + u32::from(!matches!(self.config.vsock_config, VsockConfig::Disabled))
+            + self.config.vmr.fs.len() as u32
     }
 
     fn next_console_device_index(&self) -> u32 {
@@ -1217,8 +1219,16 @@ impl Builder {
             return Err(unsupported());
         }
         #[cfg(not(feature = "tee"))]
-        if !self.config.vmr.fs.is_empty() {
-            return Err(unsupported());
+        for mount in &self.config.vmr.fs {
+            if mount.tag.len() > 36
+                || mount.tag.is_empty()
+                || mount.shm_size.is_some_and(|size| {
+                    size == 0 || size > 256 * 1024 * 1024 || !size.is_multiple_of(2 * 1024 * 1024)
+                })
+            {
+                return Err(StartError::Nitro(std::io::Error::new(std::io::ErrorKind::Unsupported,
+                    "unsupported on this backend: virtio-fs requires a 1..36 byte tag and an optional 2 MiB-aligned DAX window up to 256 MiB")));
+            }
         }
         #[cfg(feature = "net")]
         if !self.config.vmr.net.list.is_empty()
@@ -1362,6 +1372,19 @@ impl Builder {
             )?;
             runtime
                 .add_device(Arc::new(Mutex::new(vsock)))
+                .map_err(StartError::Nitro)?;
+        }
+        for mount in self.config.vmr.fs.drain(..) {
+            let device = devices::virtio::Fs::new(
+                mount.tag,
+                mount.fs,
+                Arc::new(std::sync::atomic::AtomicI32::new(0)),
+            )
+            .map_err(|error| {
+                StartError::Nitro(std::io::Error::other(format!("virtio-fs: {error:?}")))
+            })?;
+            runtime
+                .add_filesystem(device, mount.shm_size)
                 .map_err(StartError::Nitro)?;
         }
         for console in self.config.vmr.virtio_consoles {

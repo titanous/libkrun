@@ -49,6 +49,9 @@ impl FsWorker {
         }
     }
 
+    pub fn set_dax_mapper(&mut self, mapper: Option<Arc<dyn super::dax_mapper::DaxMapper>>) {
+        self.server.set_dax_mapper(mapper);
+    }
     pub fn run(self) -> thread::JoinHandle<Box<dyn FileSystem + Send + Sync>> {
         thread::Builder::new()
             .name("fs worker".into())
