@@ -3,6 +3,7 @@
 
 pub mod console;
 pub mod cooperative;
+pub mod copy_memory;
 #[cfg(target_os = "linux")]
 pub mod heartbeat;
 #[cfg(target_os = "linux")]
