@@ -41,8 +41,8 @@ def accounting():
     result['loadavg'] = pathlib.Path('/proc/loadavg').read_text().strip()
     return result
 before = accounting()
-def launch(i):
-    slot = i % concurrency
+def launch(i, slot=None):
+    slot = i % concurrency if slot is None else slot
     disk = logs / f'disk-{i}.ext4'
     shutil.copyfile(root / 'smoke.ext4', disk)
     path = str(logs / f'v-{i}.sock')
@@ -86,16 +86,19 @@ def launch(i):
     return result
 start = time.monotonic()
 results = []
-# Each worker keeps its own CID; batches avoid modulo-CID overlap when one guest
-# is slower than another. No shared writable disk or Unix listener is reused.
-at = 0
-while (time.monotonic()-start < duration) if duration else (at < count):
-    end = at+concurrency if duration else min(at+concurrency, count)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
-        batch = list(pool.map(launch, range(at, end)))
-    results.extend(batch)
-    at = end
-    if not all(r['passed'] for r in batch): break
+# Each worker retains one CID and refills only after its previous VMM exits.
+# No more than concurrency guests or writable disks are alive at once.
+stop = threading.Event()
+result_lock = threading.Lock()
+def worker(slot):
+    i = slot
+    while not stop.is_set() and ((time.monotonic()-start < duration) if duration else (i < count)):
+        result = launch(i, slot)
+        with result_lock: results.append(result)
+        if not result['passed']: stop.set()
+        i += concurrency
+with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
+    list(pool.map(worker, range(concurrency)))
 elapsed = time.monotonic()-start
 summary = {'requested': count, 'duration_requested': duration, 'concurrency': concurrency, 'completed': len(results), 'passed': sum(r['passed'] for r in results), 'seconds': elapsed, 'launches_per_second': len(results)/elapsed, 'before': before, 'after': accounting()}
 (logs/'summary.json').write_text(json.dumps(summary, indent=2))

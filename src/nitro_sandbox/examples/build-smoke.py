@@ -22,7 +22,7 @@ def cpio(name, data, mode, ino):
     result += b'\0'*(-len(data)%4)
     return result
 initrd = cpio('init', program, 0o100755, 1)+cpio('TRAILER!!!', b'', 0, 2)
-sections = [(1,kernel),(2,b'console=ttyS0 panic=-1 reboot=k rdinit=/init'),(3,initrd),(5,b'{}')]
+sections = [(1,kernel),(2,b'console=ttyS0 quiet panic=-1 reboot=k rdinit=/init'),(3,initrd),(5,b'{}')]
 body = bytearray(); offsets=[0]*32; sizes=[0]*32
 for i,(kind,data) in enumerate(sections):
     offsets[i]=548+len(body); sizes[i]=len(data)
