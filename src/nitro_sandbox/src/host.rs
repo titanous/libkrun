@@ -196,6 +196,21 @@ impl Sandbox {
         reused: Option<Mapping>,
         lifecycle_lock: Option<crate::lifecycle::LifecycleLock>,
     ) -> io::Result<Self> {
+        Self::create(memory, vcpus, reused, lifecycle_lock, None)
+    }
+    /// As `with_lifecycle_lock`; with `handoff`, a duplicate of the VM descriptor is sent over
+    /// that socket (`lifecycle::send_vm_descriptor`) immediately after the create ioctl
+    /// returns, before any other VM ioctl. From then on this process's close of the VM is not
+    /// final: the receiver (the host daemon) performs the final close under the lifecycle lock.
+    /// If the send fails, creation fails and the VM is closed here (under the lock if
+    /// configured).
+    pub fn create(
+        memory: usize,
+        vcpus: u32,
+        reused: Option<Mapping>,
+        lifecycle_lock: Option<crate::lifecycle::LifecycleLock>,
+        handoff: Option<&std::os::unix::net::UnixStream>,
+    ) -> io::Result<Self> {
         if memory < 64 * 1024 * 1024 || !memory.is_multiple_of(INFO_PAGE_SIZE) || vcpus == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -264,6 +279,11 @@ impl Sandbox {
             console_at: Default::default(),
             device_regions: Vec::new(),
         };
+        // Hand the duplicate over before anything else is done with the VM (review backend4
+        // N2): a death of this process after this point cannot make the final close.
+        if let Some(socket) = handoff {
+            crate::lifecycle::send_vm_descriptor(socket, sb.vm.as_ref().unwrap())?;
+        }
         for _ in 0..vcpus {
             call(sb.vm.as_ref().unwrap(), 1, 0x2d, &mut -1i32)?;
         }

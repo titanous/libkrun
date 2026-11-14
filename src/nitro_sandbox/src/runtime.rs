@@ -94,8 +94,21 @@ impl Runtime {
         timeout: Duration,
         lock: Option<crate::lifecycle::LifecycleLock>,
     ) -> io::Result<Self> {
+        Self::create(image, memory, vcpus, cid, timeout, lock, None)
+    }
+    /// As `with_lifecycle_lock`, sending the duplicate VM descriptor over `handoff` right
+    /// after the create ioctl (see `Sandbox::create`).
+    pub fn create(
+        image: &str,
+        memory: usize,
+        vcpus: u32,
+        cid: u64,
+        timeout: Duration,
+        lock: Option<crate::lifecycle::LifecycleLock>,
+        handoff: Option<&std::os::unix::net::UnixStream>,
+    ) -> io::Result<Self> {
         let memory_size = memory;
-        let mut sandbox = Sandbox::with_lifecycle_lock(memory, vcpus, None, lock)?;
+        let mut sandbox = Sandbox::create(memory, vcpus, None, lock, handoff)?;
         sandbox.load(image)?;
         let memory = Some(unsafe { sandbox.guest_memory()? });
         let manager =
