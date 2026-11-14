@@ -187,7 +187,12 @@ pub struct Sandbox {
     start_guard: std::sync::Mutex<Option<crate::lifecycle::Guard>>,
     console_at: std::collections::HashMap<usize, u32>,
     device_regions: Vec<SharedRegion>,
+    /// Per-process VM number for the optional teardown trace.
+    trace_id: u64,
+    /// A duplicate was handed to a daemon: this process's close is not final.
+    handed_off: bool,
 }
+static NEXT_TRACE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 impl Sandbox {
     pub fn new(memory: usize, vcpus: u32) -> io::Result<Self> {
         Self::with_mapping(memory, vcpus, None)
@@ -273,6 +278,14 @@ impl Sandbox {
         };
         let raw = call(&control, 3, 0x30, &mut c)?;
         let vm = unsafe { File::from_raw_fd(raw) };
+        let trace_id = NEXT_TRACE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        crate::lifecycle::trace(format_args!(
+            "CREATE pid={} vm={}:{trace_id} memory={memory} handoff={} ns={}",
+            std::process::id(),
+            std::process::id(),
+            u8::from(handoff.is_some()),
+            crate::lifecycle::monotonic_ns()
+        ));
         let sb = Self {
             vm: Some(vm),
             ram,
@@ -283,6 +296,8 @@ impl Sandbox {
             start_guard: std::sync::Mutex::new(creation_guard),
             console_at: Default::default(),
             device_regions: Vec::new(),
+            trace_id,
+            handed_off: handoff.is_some(),
         };
         // Hand the duplicate over before anything else is done with the VM (review backend4
         // N2): a death of this process after this point cannot make the final close.
@@ -730,7 +745,7 @@ impl Sandbox {
             .get_mut()
             .unwrap_or_else(|e| e.into_inner())
             .take();
-        let _guard = start_guard.or_else(|| {
+        let guard = start_guard.or_else(|| {
             self.lifecycle_lock.as_ref().map(|lock| {
                 loop {
                     match lock.acquire() {
@@ -744,14 +759,27 @@ impl Sandbox {
                 }
             })
         });
+        let locked = guard.is_some();
+        let lock_ns = crate::lifecycle::monotonic_ns();
         let started = Instant::now();
         drop(self.vm.take());
+        let close_end_ns = crate::lifecycle::monotonic_ns();
         if std::env::var_os("NITRO_PROFILE").is_some() {
             eprintln!(
                 "NITRO_PROFILE vm_close_micros={}",
                 started.elapsed().as_micros()
             );
         }
+        drop(guard);
+        crate::lifecycle::trace(format_args!(
+            "TEARDOWN holder=vmm pid={} vm={}:{} final={} locked={} lock_ns={lock_ns} close_start_ns={lock_ns} close_end_ns={close_end_ns} unlock_ns={}",
+            std::process::id(),
+            std::process::id(),
+            self.trace_id,
+            u8::from(!self.handed_off),
+            u8::from(locked),
+            crate::lifecycle::monotonic_ns()
+        ));
     }
 }
 impl Drop for Sandbox {

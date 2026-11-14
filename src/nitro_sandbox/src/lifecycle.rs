@@ -51,8 +51,17 @@ impl OpenLock {
         &self,
         descriptor: &mut Option<std::os::fd::OwnedFd>,
     ) -> io::Result<()> {
-        let _guard = self.acquire()?;
+        let guard = self.acquire()?;
+        let lock_ns = monotonic_ns();
+        let close_start_ns = monotonic_ns();
         drop(descriptor.take());
+        let close_end_ns = monotonic_ns();
+        drop(guard);
+        trace(format_args!(
+            "TEARDOWN holder=daemon pid={} vm=- locked=1 lock_ns={lock_ns} close_start_ns={close_start_ns} close_end_ns={close_end_ns} unlock_ns={}",
+            std::process::id(),
+            monotonic_ns()
+        ));
         Ok(())
     }
     pub fn acquire(&self) -> io::Result<Guard> {
@@ -72,6 +81,31 @@ impl Drop for Guard {
         unsafe {
             libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
         }
+    }
+}
+
+/// System-wide monotonic clock (CLOCK_MONOTONIC) in nanoseconds, comparable
+/// between processes on one host.
+pub fn monotonic_ns() -> u64 {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: valid pointer to a timespec; CLOCK_MONOTONIC always exists.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
+    now.tv_sec as u64 * 1_000_000_000 + now.tv_nsec as u64
+}
+
+/// Append one line to the teardown trace named by `NITRO_TEARDOWN_TRACE`, if
+/// set. Acceptance runs use it to check, from the lock holder's side, that no
+/// two teardowns overlapped. One `write` per line on an `O_APPEND` file.
+pub fn trace(line: std::fmt::Arguments<'_>) {
+    use std::io::Write;
+    let Some(path) = std::env::var_os("NITRO_TEARDOWN_TRACE") else {
+        return;
+    };
+    if let Ok(mut file) = OpenOptions::new().append(true).create(true).open(path) {
+        let _ = file.write_all(format!("{line}\n").as_bytes());
     }
 }
 
