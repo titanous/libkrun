@@ -10,14 +10,18 @@ and enter the kernel's saved continuation over private file-backed RAM.
    platform kernels disable virtio balloon and page reporting. Call
    `Builder::omit_balloon_device()` to omit the transport (default is unchanged).
 2. Configure `capture_cooperative_template(0, new_path)` before `build()`.
-   Zero selects control-page discovery from BSP RSI at the trapped frozen exit;
+   Zero selects architecture-owned control-page discovery (x86 KVM uses BSP RSI);
    a nonzero GPA is an optional exact-match expectation. Console text is never
    used for discovery or memory bounds.
 3. The daemon asks the guest agent over its control channel to quiesce the
    workload and waits for acknowledgement. It then calls
    `VmHandle::arm_template_capture(timeout)`, authorizes the agent to write
    `1` to `/sys/power/nitro_freeze`, and collects the sealed descriptor with
-   `VmHandle::wait_template_capture()` (see embedding.md). There is no kernel
+   `VmHandle::wait_template_capture()` (see embedding.md). It returns
+   CaptureOutcome with the sealed template and an explicit optional export result;
+   check publication independently of acceptance. Arming requires the kernel's
+   boot marker confirmation; control-page word 32 confirms it at capture too.
+   There is no kernel
    polling worker or host-request port. Without arming, capture is refused and
    the source recovers. The agent needs root and CAP_SYS_ADMIN (0600; an active
    transition is refused). The generic core checks hibernation availability,
@@ -45,7 +49,10 @@ and enter the kernel's saved continuation over private file-backed RAM.
    configured architecture memory layout. Path exports append the 16-byte
    `KRUNEXPORTDONE01` completion trailer after all template bytes; path import
    requires it and strips it before sealing. Interrupted/old unmarked exports
-   are refused. Sealed descriptor format 3 is unchanged.
+   are refused. Sealed descriptor format 4 requires an architecture tag at
+   header word 393 (1=x86-64, 2=aarch64); old format 3 is refused. Public
+   control_page_address and clock_state fields are architecture-neutral; the
+   compatibility record is opaque and owned by the tagged architecture.
 6. Build maps every RAM extent `MAP_PRIVATE`, registers KVM slots and creates
    fresh in-kernel irqchip/PIT and vCPUs. It does not load a payload or rewrite
    boot page tables, command line or boot parameters. It restores KVM clock,
