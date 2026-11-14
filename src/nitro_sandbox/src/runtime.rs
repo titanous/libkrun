@@ -310,7 +310,18 @@ impl Runtime {
                 Err(error) => return Err(error),
             }
             if self.sandbox.powered_off(0)? {
+                // The terminal status can become visible just after the loop's
+                // first sample. Read the final ordered byte, including a clear.
+                if let Some(device) = &self.stop_reason {
+                    facts.observe_reason(device.reason().unwrap_or(0), device.observation_micros());
+                    *self.observation.lock().unwrap() = facts.observed_micros;
+                }
                 self.sandbox.drain_console(&mut self.console)?;
+                match self.stop.read() {
+                    Ok(_) => facts.host_stop = true,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                    Err(error) => return Err(error),
+                }
                 return Ok(facts);
             }
             for transport in &mut self.transports {
