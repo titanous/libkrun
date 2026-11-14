@@ -25,6 +25,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse()?;
     for trial in 0..trials {
         let mut builder = Builder::new();
+        if let Some(directory) = std::env::var_os("NITRO_IMAGE_CACHE") {
+            builder.nitro_image_cache(directory.into());
+        }
         builder.nitro_backend(NitroBackendConfig {
             image: "unused.eif".into(),
             cid: 214,

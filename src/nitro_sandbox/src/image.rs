@@ -86,6 +86,44 @@ mod tests {
         }
     }
     #[test]
+    fn persistent_cache_reopens_identical_content() {
+        use std::os::unix::fs::FileExt;
+        use std::os::unix::fs::PermissionsExt;
+        let directory =
+            std::env::temp_dir().join(format!("nitro-image-cache-{}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (first, hit) = cached_in(
+            b"disk-cache-kernel",
+            None,
+            b"",
+            1024 << 20,
+            1,
+            Some(&directory),
+        )
+        .unwrap();
+        assert!(!hit);
+        drop(first);
+        let (second, hit) = cached_in(
+            b"disk-cache-kernel",
+            None,
+            b"",
+            1024 << 20,
+            1,
+            Some(&directory),
+        )
+        .unwrap();
+        assert!(hit);
+        let expected = package(b"disk-cache-kernel", None, b"", 1024 << 20, 1).unwrap();
+        let mut bytes = vec![0; expected.len()];
+        second.read_exact_at(&mut bytes, 0).unwrap();
+        assert_eq!(bytes, expected);
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(cached_in(b"k", None, b"", 1, 1, Some(&directory)).is_err());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn identical_content_hits_cache_and_images_are_sealed() {
         let (first, _) = cached(b"cache-kernel", None, b"", 1024 << 20, 1).unwrap();
         let (second, hit) = cached(b"cache-kernel", None, b"", 1024 << 20, 1).unwrap();
@@ -111,6 +149,17 @@ pub fn cached(
     memory: u64,
     cpus: u64,
 ) -> io::Result<(Arc<File>, bool)> {
+    cached_in(kernel, initrd, cmdline, memory, cpus, None)
+}
+
+pub fn cached_in(
+    kernel: &[u8],
+    initrd: Option<&[u8]>,
+    cmdline: &[u8],
+    memory: u64,
+    cpus: u64,
+    directory: Option<&std::path::Path>,
+) -> io::Result<(Arc<File>, bool)> {
     let mut hash = Sha256::new();
     hash.update(b"holodeck-eif-v4-arm64-1");
     for bytes in [kernel, cmdline] {
@@ -125,6 +174,64 @@ pub fn cached(
     hash.update(memory.to_be_bytes());
     hash.update(cpus.to_be_bytes());
     let key: [u8; 32] = hash.finalize().into();
+    if let Some(directory) = directory {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let metadata = std::fs::symlink_metadata(directory)?;
+        if !metadata.is_dir() || metadata.permissions().mode() & 0o022 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "image cache must be a daemon-owned directory not writable by group/other",
+            ));
+        }
+        let lock_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(directory.join(".lock"))?;
+        let lock = crate::lifecycle::LifecycleLock {
+            path: directory.join(".lock"),
+            serialization: crate::lifecycle::Serialization::Teardown,
+        }
+        .open()?;
+        let _guard = lock.acquire()?;
+        drop(lock_file);
+        let name: String = key.iter().map(|byte| format!("{byte:02x}")).collect();
+        let destination = directory.join(format!("{name}.eif"));
+        let open = || {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&destination)
+        };
+        match open() {
+            Ok(file) => return Ok((Arc::new(file), true)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        let bytes = package(kernel, initrd, cmdline, memory, cpus)?;
+        let temporary = directory.join(format!(".{name}.tmp"));
+        // Exclusive cache lock proves no cooperating writer still owns this temp.
+        match std::fs::remove_file(&temporary) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&temporary)?;
+        if let Err(error) = output.write_all(&bytes).and_then(|_| output.sync_all()) {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(error);
+        }
+        std::fs::rename(&temporary, &destination)?;
+        return Ok((Arc::new(open()?), false));
+    }
     let cache = CACHE.get_or_init(Default::default);
     if let Some((_, file)) = cache
         .lock()

@@ -512,6 +512,8 @@ pub struct Builder {
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     nitro_heartbeat: Option<(u32, PathBuf, std::time::Duration)>,
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    nitro_image_cache: Option<PathBuf>,
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     nitro_console_base: Option<u32>,
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     nitro_selected_after_consoles: bool,
@@ -1302,12 +1304,13 @@ impl Builder {
             let mut args = self.kernel_cmdline.clone();
             args.extend(self.extra_kernel_args.iter().cloned());
             let cmdline = args.join(" ");
-            let (file, _) = nitro_sandbox::image::cached(
+            let (file, _) = nitro_sandbox::image::cached_in(
                 &kernel_bytes,
                 initrd.as_deref(),
                 cmdline.as_bytes(),
                 memory_mib as u64 * 1024 * 1024,
                 u64::from(config.vcpu_count.unwrap_or(1)),
+                self.nitro_image_cache.as_deref(),
             )
             .map_err(StartError::Nitro)?;
             Some(file)
@@ -1426,6 +1429,15 @@ impl Builder {
     pub fn nitro_backend(&mut self, config: NitroBackendConfig) -> &mut Self {
         self.nitro_selected_after_consoles |= self.console_count != 0 && self.nitro.is_none();
         self.nitro = Some(config);
+        self
+    }
+
+    /// Reuse content-addressed packaged kernels across VMM processes. Directory
+    /// must already exist and be daemon-owned, not group/other-writable. The
+    /// daemon controls eviction; published images are never modified in place.
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    pub fn nitro_image_cache(&mut self, directory: PathBuf) -> &mut Self {
+        self.nitro_image_cache = Some(directory);
         self
     }
 
