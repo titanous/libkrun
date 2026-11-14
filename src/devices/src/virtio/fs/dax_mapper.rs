@@ -250,6 +250,23 @@ mod tests {
     }
 
     #[test]
+    fn copy_file_zero_fills_past_eof() {
+        use std::io::Write;
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let raw = unsafe { libc::memfd_create(c"copy-dax-test".as_ptr(), libc::MFD_CLOEXEC) };
+        assert!(raw >= 0);
+        let mut file = unsafe { std::fs::File::from_raw_fd(raw) };
+        file.write_all(b"file content").unwrap();
+        let mut backing = vec![0xa5u8; 4096];
+        let mapper = unsafe { CopyDaxMapper::new(backing.as_mut_ptr() as u64, 4096) };
+        mapper
+            .map_file(0, 4096, file.as_raw_fd(), 0, false)
+            .unwrap();
+        assert_eq!(&backing[..12], b"file content");
+        assert!(backing[12..].iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
     fn test_map_file_bounds_at_exact_boundary() {
         let mapper = LinuxDaxMapper::new(0, 4096);
         // Mapping that goes just beyond the boundary should fail bounds check
