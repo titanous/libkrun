@@ -72,7 +72,18 @@ mod probe {
             "/run/holodeck/nitro-lifecycle.lock".into(),
             NitroSerialization::StartAndTeardown,
         );
-        builder.vm_config(1, 1024).map_err(io::Error::other)?;
+        let cpus = std::env::var("COPY_CPUS")
+            .unwrap_or_else(|_| "1".into())
+            .parse::<u8>()
+            .map_err(io::Error::other)?;
+        let ram = std::env::var("COPY_MEMORY_MIB")
+            .unwrap_or_else(|_| "1024".into())
+            .parse::<u32>()
+            .map_err(io::Error::other)?;
+        if ![1, 4, 8].contains(&cpus) || ![1024, 4096].contains(&ram) {
+            return Err(io::Error::other("unsupported acceptance shape"));
+        }
+        builder.vm_config(cpus, ram).map_err(io::Error::other)?;
         builder
             .disable_implicit_console()
             .map_err(io::Error::other)?;
@@ -158,6 +169,7 @@ mod probe {
         eprintln!("AGENT_SOURCE_RUN");
         let handle = context.vm_handle();
         let arm_handle = context.vm_handle();
+        let (freeze_tx, freeze_rx) = std::sync::mpsc::sync_channel(1);
         let source_listener = listener.try_clone()?;
         let source_thread = std::thread::spawn(move || -> io::Result<Value> {
             let mut connection = accept(&source_listener)?;
@@ -184,6 +196,7 @@ mod probe {
             eprintln!("AGENT_SOURCE_QUIESCENT");
             arm_handle.arm_template_capture(Duration::from_secs(12))?;
             eprintln!("AGENT_SOURCE_ARMED");
+            freeze_tx.send(Instant::now()).map_err(io::Error::other)?;
             send(&mut connection, json!({"type":"freeze","request":2}))?;
             eprintln!("AGENT_FREEZE_SENT");
             // Keep the source session alive until capture closes its backend.
@@ -213,7 +226,13 @@ mod probe {
             .join()
             .map_err(|_| "source I/O thread panicked")??;
         let template = handle.wait_template_capture()?;
-        eprintln!("AGENT_TEMPLATE_CAPTURED");
+        eprintln!(
+            "AGENT_TEMPLATE_CAPTURED freeze_request_to_template_us={}",
+            freeze_rx
+                .recv_timeout(Duration::from_secs(1))?
+                .elapsed()
+                .as_micros()
+        );
         if std::env::var_os("AGENT_CONCURRENT").is_some() {
             use std::os::{fd::AsRawFd, unix::process::CommandExt};
             let directory =
@@ -308,6 +327,11 @@ mod probe {
                     json!({"type":"copied","request":3,"generation":1}),
                 )?;
                 response(&mut connection, "ack")?;
+                println!(
+                    "AGENT_COPY_READY copy={} create_to_agent_ready_us={}",
+                    copy,
+                    started.elapsed().as_micros()
+                );
                 send(&mut connection, json!({"type":"power_off","request":4}))?;
                 response(&mut connection, "ack")?;
                 Ok(())
