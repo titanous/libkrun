@@ -52,6 +52,10 @@ pub use devices::virtio::port_io::{self, PortInput, PortOutput};
 #[cfg(not(feature = "tee"))]
 pub use devices::virtio::rng::{OsRngBackend, RngBackend};
 use devices::virtio::vsock::policy::SocketPolicy;
+/// Unmapped or policy-denied TSI listeners return EPERM for native fallback,
+/// without allocating a host socket. Successful host listeners still return zero.
+pub const TSI_UNMAPPED_LISTEN_NATIVE_FALLBACK: bool = true;
+
 pub use devices::virtio::vsock::policy::{
     AllowlistPolicy, OutboundPolicy, SocketAddress, SocketOperation,
 };
