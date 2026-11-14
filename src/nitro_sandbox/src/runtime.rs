@@ -99,6 +99,7 @@ pub struct Runtime {
     heartbeat: Option<crate::heartbeat::Heartbeat>,
     stop_reason: Option<crate::stop_reason::StopReason>,
     exit_code: Arc<std::sync::atomic::AtomicI32>,
+    observation: Arc<Mutex<Option<u64>>>,
 }
 impl Runtime {
     pub fn new(
@@ -136,6 +137,7 @@ impl Runtime {
             heartbeat: None,
             stop_reason: None,
             exit_code: Arc::new(std::sync::atomic::AtomicI32::new(i32::MAX)),
+            observation: Arc::new(Mutex::new(None)),
         })
     }
     pub fn duplicate_vm_descriptor(&self) -> io::Result<std::os::fd::OwnedFd> {
@@ -239,6 +241,9 @@ impl Runtime {
         Ok(())
     }
 
+    pub fn observation_state(&self) -> Arc<Mutex<Option<u64>>> {
+        self.observation.clone()
+    }
     pub fn exit_code_state(&self) -> Arc<std::sync::atomic::AtomicI32> {
         self.exit_code.clone()
     }
@@ -294,6 +299,7 @@ impl Runtime {
         loop {
             if let Some(device) = &self.stop_reason {
                 facts.observe_reason(device.reason().unwrap_or(0), device.observation_micros());
+                *self.observation.lock().unwrap() = facts.observed_micros;
             }
             match self.stop.read() {
                 Ok(_) => {

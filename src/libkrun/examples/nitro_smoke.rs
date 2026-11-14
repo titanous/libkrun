@@ -1,3 +1,5 @@
+#[allow(dead_code)]
+mod terminal_result;
 #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use devices::virtio::block::{BlockDeviceType, ImageType, SyncMode};
@@ -46,14 +48,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let paths =
         builder.add_virtio_console_with_ports(vec![PortDescription::output_pipe("smoke", output)]);
     assert_eq!(paths, ["/dev/vport2p0"]);
-    match builder.build()?.run()? {
-        VmExit::DeviceWatchdog if expected_watchdog => {
-            eprintln!("REBOOT_WATCHDOG_OK");
-            Ok(())
-        }
-        VmExit::Shutdown { .. } if !expected_watchdog => Ok(()),
-        other => Err(format!("unexpected exit: {other:?}").into()),
+    let exit = builder.build()?.run()?;
+    if !terminal_result::smoke_matches(&exit, expected_watchdog) {
+        return Err(format!("unexpected exit: {exit:?}").into());
     }
+    if matches!(exit, VmExit::DeviceWatchdog) {
+        eprintln!("REBOOT_WATCHDOG_OK");
+    }
+    Ok(())
 }
 #[cfg(not(all(target_os = "linux", feature = "nitro-sandbox")))]
 fn main() {

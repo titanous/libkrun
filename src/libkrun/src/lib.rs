@@ -2071,6 +2071,17 @@ impl Context {
             .register_exit_observer(observer);
     }
 
+    /// Retain Nitro's CLOCK_MONOTONIC reason-observation time across consuming run.
+    /// None means this backend has no observation channel. The shared value is
+    /// cleared for byte 0 and retains the first panic observation.
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    pub fn stop_observation(&self) -> Option<Arc<Mutex<Option<u64>>>> {
+        self.built_vm
+            .nitro
+            .as_ref()
+            .map(|runtime| runtime.observation_state())
+    }
+
     /// Start the VM and run the event loop. This blocks until the VM exits.
     pub fn run(mut self) -> Result<vmm::vm_exit::VmExit, StartError> {
         #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]

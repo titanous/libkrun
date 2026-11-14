@@ -1,5 +1,7 @@
-//! Privileged terminal-byte channel acceptance; temporary raw-code diagnostics.
-use krun::{Builder, NitroBackendConfig, VmExit};
+//! Privileged terminal-byte channel acceptance using shared public outcomes.
+#[allow(dead_code)]
+mod terminal_result;
+use krun::{Builder, NitroBackendConfig};
 #[derive(Clone, Default)]
 struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 impl std::io::Write for Capture {
@@ -91,6 +93,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
     let context = builder.build()?;
+    let observation = context
+        .stop_observation()
+        .expect("Nitro observation channel");
     let start = std::time::Instant::now();
     let exit = context.run()?;
     if std::env::var_os("NITRO_LONG_PANIC").is_some() {
@@ -112,15 +117,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("PANIC_LINES_OK lines=1024 bytes={}", bytes.len());
     }
     let go_at = go.lock().unwrap().expect("guest handshake occurred");
-    let observed: u64 = match &exit {
-        VmExit::Error { message } => message
-            .split("observed_micros=Some(")
-            .nth(1)
-            .and_then(|value| value.strip_suffix(')'))
-            .expect("observation timestamp")
-            .parse()?,
-        _ => panic!("unexpected {exit:?}"),
-    };
+    let observed = observation.lock().unwrap().expect("observation timestamp");
     let detection_ms = observed.checked_sub(go_at).expect("ordered host clocks") as f64 / 1000.;
     peer.join().unwrap();
     std::fs::remove_file(path)?;
@@ -129,13 +126,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::var_os("NITRO_LONG_PANIC").is_some() || detection_ms < 100.0,
         "terminal reason detection too slow: {detection_ms}ms"
     );
-    match &exit {
-        VmExit::Error { message } => assert!(
-            message.starts_with(&format!("Nitro stated terminal reason {} ", args[3])),
-            "{exit:?}"
-        ),
-        _ => panic!("unexpected {exit:?}"),
-    };
+    assert!(
+        terminal_result::terminal_matches(&exit, args[3].parse()?),
+        "{exit:?}"
+    );
     println!(
         "TERMINAL_OK reason={} seconds={:.6} detection_upper_ms={detection_ms:.3} exit={exit:?}",
         args[3],

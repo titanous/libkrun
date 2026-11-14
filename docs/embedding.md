@@ -62,7 +62,13 @@ stop, explicit device workload exit code, expired backend liveness/device deadli
 guest reason, then terminal fallback `Fault`. The backend returns observed facts
 and the public adapter calls the same resolver as KVM. A reason byte alone never
 terminates the backend; its liveness/device deadlines remain active. Console
-markers never classify a terminal outcome. `Shutdown` is reachable only for an explicitly supplied workload code,
+markers never classify a terminal outcome. Before consuming `Context::run`, callers
+may retain `Context::stop_observation()` on Nitro: its shared optional u64 is the
+host CLOCK_MONOTONIC microsecond timestamp of the current stated reason's first
+observation. Zero clears it; panic preserves it. This diagnostic timestamp is not
+encoded into Error or used as classification input. Nitro terminal/smoke examples
+are host-free parser-tested and compiled; hardware execution remains required on
+a Nitro host. `Shutdown` is reachable only for an explicitly supplied workload code,
 never inferred from reset. Deadline outcomes remain distinct on the second
 backend. Guest reasons are untrusted privileged guest statements: they confer no
 privilege, template-reuse safety, billing treatment, or forensic exemption.
