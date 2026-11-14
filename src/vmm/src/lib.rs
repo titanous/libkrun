@@ -23,6 +23,9 @@ pub mod resources;
 pub mod signal_handler;
 /// VM exit reasons and shared exit state.
 pub mod vm_exit;
+
+#[cfg(target_os = "linux")]
+pub mod template_memory;
 /// Wrappers over structures used to configure the VMM.
 pub mod vmm_config;
 
