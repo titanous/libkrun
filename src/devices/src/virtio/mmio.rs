@@ -269,6 +269,13 @@ impl MmioTransport {
     }
 
     // Gets the encapsulated VirtioDevice.
+    /// Whether the guest reset this transport and returned queues to it.
+    pub fn is_reset(&self) -> bool {
+        self.device_status & device_status::DRIVER_OK == 0
+            && self.queues.is_some()
+            && !self.locked_device().is_activated()
+    }
+
     pub fn device(&self) -> Arc<Mutex<dyn VirtioDevice>> {
         self.device.clone()
     }
