@@ -1,6 +1,10 @@
 //! Persistent RAM extent format for cooperatively frozen guests.
 
-#[cfg(test)]
+#[cfg(all(test, target_arch = "aarch64"))]
+#[path = "template_arm64_tests.rs"]
+mod arm64_tests;
+
+#[cfg(all(test, target_arch = "x86_64"))]
 mod tests {
     use super::*;
 
@@ -311,7 +315,22 @@ impl Template {
         memory
             .read_slice(&mut page, GuestAddress(control))
             .map_err(io::Error::other)?;
+        #[cfg(target_arch = "x86_64")]
         crate::cooperative::ResumeEntry::parse(&page)?;
+        #[cfg(target_arch = "aarch64")]
+        nitro_sandbox::cooperative::ResumeEntry::parse(&page, |address, size| {
+            memory.iter().any(|region| {
+                address >= region.start_addr().raw_value()
+                    && address
+                        .checked_add(size)
+                        .is_some_and(|end| end <= region.start_addr().raw_value() + region.len())
+            })
+        })?;
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "cooperative capture is unsupported on this architecture",
+        ));
         if memory.num_regions() > MAX_REGIONS || vcpus == 0 {
             return Err(invalid());
         }

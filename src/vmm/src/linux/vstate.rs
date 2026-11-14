@@ -22,6 +22,7 @@ use std::result;
 use std::sync::atomic::{fence, AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
+#[cfg(any(target_arch = "x86_64", not(test)))]
 use std::time::Duration;
 
 use super::super::{FC_EXIT_CODE_GENERIC_ERROR, FC_EXIT_CODE_OK, FC_EXIT_CODE_REBOOT};
@@ -2012,6 +2013,7 @@ mod tests {
             0,
             vm.fd(),
             EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
+            Arc::new(AtomicBool::new(false)),
         )
         .unwrap();
 
@@ -2024,6 +2026,7 @@ mod tests {
             1,
             vm.fd(),
             EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
+            Arc::new(AtomicBool::new(false)),
         )
         .unwrap();
 

@@ -27,14 +27,14 @@ pub mod vm_exit;
 #[cfg(target_os = "linux")]
 pub mod template_memory;
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_os = "linux")]
 pub mod capture_request;
 #[cfg(target_arch = "x86_64")]
 pub mod cooperative;
 #[cfg(target_arch = "x86_64")]
 mod kernel_identity;
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_os = "linux")]
 pub mod template;
 #[cfg(target_arch = "x86_64")]
 mod template_topology;
