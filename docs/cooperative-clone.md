@@ -71,9 +71,10 @@ manifest are checked. The manifest records console structure, block/net/vsock
 features and queues, and ordered filesystem tags, queues and DAX GPA ranges.
 Backend paths, connection policy and server objects are deliberately excluded:
 new guests receive their own configuration and fresh backends. This format is
-same-host/same-kernel only, not a portable or hostile-input migration format.
-Full CPUID/kernel-build compatibility fencing is required before accepting
-untrusted templates. GPU and vhost-user backends are unsupported. Network
+restricted to trusted same-kernel templates, not a portable or hostile-input
+migration format. The configured CPUID/xstate layout, TSC frequency and kernel
+build ID are fenced before execution. Feature MSRs and host-kernel/microcode
+identity are not yet fenced. GPU and vhost-user backends are unsupported. Network
 devices are refused for both capture and template starts: virtio-net restore
 does not re-read the MAC address, so a fresh backend cannot safely supply a new
 identity. Use guest-initiated vsock with each new guest's own connection policy.

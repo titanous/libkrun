@@ -130,6 +130,10 @@ pub enum StartMicrovmError {
     FirmwareRead(io::Error),
     /// Memory regions are overlapping or mmap fails.
     GuestMemoryMmap(String),
+    /// Template CPU count, RAM size, or device configuration is incompatible.
+    TemplateTopologyMismatch,
+    /// Template RAM extents differ from the configured architecture layout.
+    TemplateMemoryLayoutMismatch,
     /// The BZIP2 decoder couldn't decompress the kernel.
     ImageBz2Decoder(io::Error),
     /// Cannot find compressed kernel in file.
@@ -289,6 +293,8 @@ impl Display for StartMicrovmError {
             FirmwareRead(ref err) => {
                 write!(f, "Cannot read firmware contents from file: {err}")
             }
+            TemplateTopologyMismatch => write!(f, "incompatible template topology"),
+            TemplateMemoryLayoutMismatch => write!(f, "template RAM layout mismatch"),
             GuestMemoryMmap(ref err) => {
                 // Remove imbricated quotes from error message.
                 let mut err_msg = format!("{err:?}");
@@ -2007,9 +2013,7 @@ pub fn create_guest_memory(
             || vm_resources.split_irqchip
             || vm_resources.gpu_virgl_flags.is_some()
         {
-            return Err(StartMicrovmError::GuestMemoryMmap(
-                "incompatible template topology".into(),
-            ));
+            return Err(StartMicrovmError::TemplateTopologyMismatch);
         }
         let (info, expected) = arch::arch_memory_regions(mem_size << 20, None, 0, 0, None);
         if !template
@@ -2018,9 +2022,7 @@ pub fn create_guest_memory(
             .map(|(gpa, size, _)| (GuestAddress(*gpa), *size))
             .eq(expected.iter().copied())
         {
-            return Err(StartMicrovmError::GuestMemoryMmap(
-                "template RAM regions do not match configured memory layout".into(),
-            ));
+            return Err(StartMicrovmError::TemplateMemoryLayoutMismatch);
         }
         let mut memory = template
             .map_private()
