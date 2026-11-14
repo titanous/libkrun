@@ -115,6 +115,14 @@ impl Transport {
         }
         Ok(action)
     }
+    /// Capture is safe only after synchronous reset stopped host queue access.
+    pub fn is_reset(&self, sandbox: &Sandbox) -> io::Result<bool> {
+        Ok(!self.lifecycle.is_active()
+            && sandbox
+                .snapshot(self.events.uid)?
+                .is_some_and(|snapshot| snapshot.status == 0))
+    }
+
     pub fn info_fd(&self) -> std::os::fd::RawFd {
         use std::os::fd::AsRawFd;
         self.events.info.as_raw_fd()

@@ -24,6 +24,18 @@ pub mod signal_handler;
 /// VM exit reasons and shared exit state.
 pub mod vm_exit;
 
+#[cfg(all(
+    target_os = "linux",
+    target_arch = "aarch64",
+    feature = "nitro-sandbox"
+))]
+pub mod nitro_capture;
+#[cfg(all(
+    target_os = "linux",
+    target_arch = "aarch64",
+    feature = "nitro-sandbox"
+))]
+pub mod nitro_restore;
 #[cfg(target_os = "linux")]
 pub mod template_memory;
 
@@ -36,8 +48,15 @@ mod kernel_identity;
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub mod template;
-#[cfg(target_arch = "x86_64")]
-mod template_topology;
+#[cfg(any(
+    target_arch = "x86_64",
+    all(
+        target_os = "linux",
+        target_arch = "aarch64",
+        feature = "nitro-sandbox"
+    )
+))]
+pub mod template_topology;
 /// Wrappers over structures used to configure the VMM.
 pub mod vmm_config;
 

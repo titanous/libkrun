@@ -1,9 +1,12 @@
 //! Host configuration contract for fresh backends over frozen guest memory.
+#[cfg(target_arch = "x86_64")]
 use crate::device_manager::shm::ShmManager;
+#[cfg(target_arch = "x86_64")]
 use crate::resources::VmResources;
+#[cfg(target_arch = "x86_64")]
 use vm_memory::Address;
 
-fn encode_device(data: &mut Vec<u8>, device: &dyn devices::virtio::VirtioDevice) {
+pub fn encode_device(data: &mut Vec<u8>, device: &dyn devices::virtio::VirtioDevice) {
     data.extend_from_slice(&device.device_type().to_le_bytes());
     data.extend_from_slice(&device.avail_features().to_le_bytes());
     data.extend_from_slice(&(device.queue_config().len() as u64).to_le_bytes());
@@ -12,6 +15,25 @@ fn encode_device(data: &mut Vec<u8>, device: &dyn devices::virtio::VirtioDevice)
     }
 }
 
+#[cfg(feature = "blk")]
+pub fn encode_block(
+    data: &mut Vec<u8>,
+    device: &devices::virtio::Block,
+    identities: &std::collections::BTreeMap<String, String>,
+) -> std::io::Result<()> {
+    encode_device(data, device);
+    let identity = identities
+        .get(device.id())
+        .filter(|id| !id.is_empty() && id.len() <= 1024)
+        .ok_or_else(|| std::io::Error::other("template disk content identity is required"))?;
+    data.extend_from_slice(&(identity.len() as u64).to_le_bytes());
+    data.extend_from_slice(identity.as_bytes());
+    data.extend_from_slice(&device.template_capacity()?.to_le_bytes());
+    data.extend_from_slice(&(device.is_read_only() as u64).to_le_bytes());
+    Ok(())
+}
+
+#[cfg(target_arch = "x86_64")]
 pub fn encode(resources: &VmResources, shm: &ShmManager) -> std::io::Result<Vec<u8>> {
     #[cfg(feature = "vhost-user")]
     if !resources.vhost_user_devices.is_empty()
@@ -65,18 +87,7 @@ pub fn encode(resources: &VmResources, shm: &ShmManager) -> std::io::Result<Vec<
         put(&mut data, resources.block.list.len() as u64);
         for device in &resources.block.list {
             let device = device.lock().unwrap();
-            encode_device(&mut data, &*device);
-            let identity = resources
-                .template_disk_identities
-                .get(device.id())
-                .filter(|id| !id.is_empty() && id.len() <= 1024)
-                .ok_or_else(|| {
-                    std::io::Error::other("template disk content identity is required")
-                })?;
-            put(&mut data, identity.len() as u64);
-            data.extend_from_slice(identity.as_bytes());
-            put(&mut data, device.template_capacity()?);
-            put(&mut data, device.is_read_only() as u64);
+            encode_block(&mut data, &device, &resources.template_disk_identities)?;
         }
     }
     #[cfg(feature = "net")]
@@ -118,7 +129,7 @@ pub fn encode(resources: &VmResources, shm: &ShmManager) -> std::io::Result<Vec<
     Ok(data)
 }
 
-#[cfg(all(test, feature = "blk"))]
+#[cfg(all(test, feature = "blk", target_arch = "x86_64"))]
 mod disk_tests {
     use super::*;
 
