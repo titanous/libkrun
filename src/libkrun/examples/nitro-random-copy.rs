@@ -21,7 +21,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().collect();
     if args.len() != 8 {
         return Err(
-            "usage: nitro-random-copy SOURCE.eif RECEIVER.eif OUTDIR LABEL CPUS COPIES SOURCE_CID".into(),
+            "usage: nitro-random-copy SOURCE.eif RECEIVER.eif OUTDIR LABEL CPUS COPIES SOURCE_CID"
+                .into(),
         );
     }
     let (source_eif, receiver_eif) = (args[1].clone(), args[2].clone());
@@ -134,7 +135,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
     let mut failed = Vec::new();
     for worker in workers {
-        if let Err(e) = worker.join().map_err(|_| "copy thread panicked".to_string()).and_then(|r| r) {
+        if let Err(e) = worker
+            .join()
+            .map_err(|_| "copy thread panicked".to_string())
+            .and_then(|r| r)
+        {
             failed.push(e);
         }
     }
