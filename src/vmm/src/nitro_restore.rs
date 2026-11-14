@@ -151,6 +151,22 @@ pub fn validate(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn reservation_skip_handles_unaligned_chunks() {
+        assert_eq!(
+            super::copy_spans(0x2ffff000, 0x204000).unwrap(),
+            [(0, 0x1000), (0x201000, 0x3000)]
+        );
+        assert_eq!(
+            super::copy_spans(0x30001000, 4096).unwrap(),
+            [(0, 0), (4096, 0)]
+        );
+        assert_eq!(
+            super::copy_spans(0x30200001, 17).unwrap(),
+            [(0, 0), (0, 17)]
+        );
+        assert!(super::copy_spans(usize::MAX, 2).is_err());
+    }
+    #[test]
     fn receiver_identity_must_match_running_source_kernel() {
         let mut compatibility = b"nitro-arm64-v1".to_vec();
         compatibility.extend_from_slice(&[7; 20]);
@@ -164,10 +180,11 @@ mod tests {
     fn template() -> Template {
         Template {
             file: crate::template_memory::create(4096).unwrap(),
-            control: 0x40001000,
+            architecture: crate::template::Architecture::Aarch64,
+            control_page_address: 0x40001000,
             vcpus: 4,
             ram_mib: 1024,
-            clock_ns: 0,
+            clock_state: 0,
             regions: vec![(0x40000000, 0x3f600000, 24576)],
             topology: b"devices".to_vec(),
             compatibility: b"kernel-cpu".to_vec(),
@@ -177,10 +194,59 @@ mod tests {
     fn refuses_manifest_mismatches_before_restore() {
         let t = template();
         assert!(validate(&t, 4, 1024, b"devices", b"kernel-cpu").is_ok());
-        assert!(validate(&t, 1, 1024, b"devices", b"kernel-cpu").is_err());
-        assert!(validate(&t, 4, 4096, b"devices", b"kernel-cpu").is_err());
-        assert!(validate(&t, 4, 1024, b"different", b"kernel-cpu").is_err());
-        assert!(validate(&t, 4, 1024, b"devices", b"other-kernel").is_err());
+        for (result, expected) in [
+            (
+                validate(&t, 1, 1024, b"devices", b"kernel-cpu"),
+                RestoreMismatch::CpuCount,
+            ),
+            (
+                validate(&t, 4, 4096, b"devices", b"kernel-cpu"),
+                RestoreMismatch::MemorySize,
+            ),
+            (
+                validate(&t, 4, 1024, b"different", b"kernel-cpu"),
+                RestoreMismatch::DeviceList,
+            ),
+            (
+                validate(&t, 4, 1024, b"devices", b"other-kernel"),
+                RestoreMismatch::KernelIdentity,
+            ),
+        ] {
+            let error = result.unwrap_err();
+            assert_eq!(
+                error.get_ref().unwrap().downcast_ref::<RestoreMismatch>(),
+                Some(&expected)
+            );
+        }
+    }
+    #[test]
+    fn invalid_manifest_refuses_before_any_receiver_write() {
+        let mut t = template();
+        t.architecture = crate::template::Architecture::X86_64;
+        let mapping = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                1 << 30,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(mapping, libc::MAP_FAILED);
+        let base = mapping.cast::<u8>();
+        unsafe {
+            std::ptr::write_bytes(base, 0xa5, 4096);
+        }
+        let error = unsafe { copy_and_release(&t, base, 1024, [7; 32]) }.unwrap_err();
+        assert_eq!(
+            error.get_ref().unwrap().downcast_ref::<RestoreMismatch>(),
+            Some(&RestoreMismatch::Architecture)
+        );
+        assert!(unsafe { std::slice::from_raw_parts(base, 4096) }
+            .iter()
+            .all(|b| *b == 0xa5));
+        assert_eq!(unsafe { libc::munmap(mapping, 1 << 30) }, 0);
     }
     #[test]
     fn refuses_layout_outside_receiver_backing() {
@@ -194,6 +260,19 @@ mod tests {
             assert!(validate(&t, 4, 1024, b"devices", b"kernel-cpu").is_err());
         }
     }
+}
+
+fn copy_spans(start: usize, count: usize) -> io::Result<[(usize, usize); 2]> {
+    let end = start.checked_add(count).ok_or_else(invalid)?;
+    let before_end = end.min(0x30000000);
+    let after_start = start.max(0x30200000);
+    Ok([
+        (0, before_end.saturating_sub(start)),
+        (
+            after_start.saturating_sub(start).min(count),
+            end.saturating_sub(after_start),
+        ),
+    ])
 }
 
 fn invalid() -> io::Error {
@@ -254,6 +333,9 @@ pub unsafe fn copy_and_release(
         })
     })?;
     let _ = len;
+    if let Some(path) = std::env::var_os("NITRO_IMPORT_PHASE_FILE") {
+        std::fs::write(path, std::process::id().to_string())?;
+    }
     let copy_started = std::time::Instant::now();
     let mut buffer = vec![0u8; 1024 * 1024];
     for &(gpa, len, file_offset) in &template.regions {
@@ -267,21 +349,15 @@ pub unsafe fn copy_and_release(
             let at = offset + position;
             // Copy the portions outside the reservation even when a chunk
             // straddles either boundary (independent of buffer alignment/size).
-            let end = at.checked_add(count).ok_or_else(invalid)?;
-            let before_end = end.min(0x30000000);
-            if at < before_end {
-                unsafe {
-                    std::ptr::copy_nonoverlapping(buffer.as_ptr(), base.add(at), before_end - at);
-                }
-            }
-            let after_start = at.max(0x30200000);
-            if after_start < end {
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        buffer.as_ptr().add(after_start - at),
-                        base.add(after_start),
-                        end - after_start,
-                    );
+            for (skip, len) in copy_spans(at, count)? {
+                if len != 0 {
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            buffer.as_ptr().add(skip),
+                            base.add(at + skip),
+                            len,
+                        );
+                    }
                 }
             }
             position += count;

@@ -29,8 +29,9 @@ check-aarch64:
 test-nitro-aarch64:
     test "$(uname -m)" = aarch64
     cargo test -p nitro_sandbox --features devices
-    cargo test -p vmm --features nitro-sandbox
-    cargo test -p libkrun --lib --features nitro-sandbox
+    cargo test -p vmm --features nitro-sandbox nitro_
+    cargo test -p vmm --features nitro-sandbox template_arm64
+    cargo test -p libkrun --lib --features nitro-sandbox arm64_template
     python3 -m unittest discover -s src/nitro_sandbox/src/receiver_image -p 'test_*.py'
 
 # Build the release library

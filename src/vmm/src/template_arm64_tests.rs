@@ -26,7 +26,7 @@ fn arm64_capture_requires_frozen_publication_and_seals_storage() {
     )
     .unwrap();
     let imported = Template::open(template.file.try_clone().unwrap()).unwrap();
-    assert_eq!(imported.control, control);
+    assert_eq!(imported.control_page_address, control);
     assert_eq!(imported.topology, b"devices");
     assert_eq!(imported.compatibility, b"arm64-kernel-identity");
     assert_eq!(imported.regions.len(), 1);

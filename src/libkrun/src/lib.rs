@@ -1935,7 +1935,9 @@ impl Builder {
             target_arch = "aarch64",
             feature = "nitro-sandbox"
         ))]
-        if (self.nitro_capture.is_some() || self.config.vmr.cooperative_template.is_some())
+        if (self.config.vmr.cooperative_capture.is_some()
+            || self.config.vmr.cooperative_template.is_some()
+            || self.nitro_park.is_some())
             && self.nitro.is_none()
         {
             return Err(StartError::Configuration(std::io::Error::new(
