@@ -34,7 +34,7 @@ mod probe {
             if value["type"] == kind {
                 return Ok(value);
             }
-            if value["type"] != "heartbeat" {
+            if value["type"] != "heartbeat" && value["type"] != "exit" {
                 return Err(io::Error::other(format!(
                     "unexpected agent response: {value}"
                 )));
@@ -60,6 +60,58 @@ mod probe {
                 Err(e) => return Err(e),
             }
         }
+    }
+    fn line(stream: &mut UnixStream) -> io::Result<String> {
+        let mut bytes = Vec::new();
+        for _ in 0..2048 {
+            let mut byte = [0];
+            stream.read_exact(&mut byte)?;
+            if byte[0] == b'\n' {
+                return String::from_utf8(bytes).map_err(io::Error::other);
+            }
+            bytes.push(byte[0]);
+        }
+        Err(io::Error::other("workload line too long"))
+    }
+    fn verify_workload(listener: &UnixListener, cid: u64) -> io::Result<String> {
+        let mut stream = accept(listener)?;
+        let report = line(&mut stream)?;
+        let fields: std::collections::HashMap<_, _> = report
+            .split_whitespace()
+            .filter_map(|s| s.split_once('='))
+            .collect();
+        let number = |key: &str| -> io::Result<u64> {
+            fields
+                .get(key)
+                .ok_or_else(|| io::Error::other("missing workload field"))?
+                .parse()
+                .map_err(io::Error::other)
+        };
+        let old = fields
+            .get("old_result")
+            .ok_or_else(|| io::Error::other("missing old stream result"))?
+            .parse::<i64>()
+            .map_err(io::Error::other)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(io::Error::other)?
+            .as_nanos() as u64;
+        if !report.starts_with("VERIFIED ")
+            || number("bad")? != 0
+            || number("cid")? != cid
+            || old > 0
+            || number("monotonic_after")? < number("monotonic_before")?
+            || now.abs_diff(number("realtime_after")?) > 2_000_000_000
+        {
+            return Err(io::Error::other(format!(
+                "workload verification failed: {report}"
+            )));
+        }
+        println!("WORKLOAD_COPY {report}");
+        Ok(fields
+            .get("random")
+            .ok_or_else(|| io::Error::other("missing random"))?
+            .to_string())
     }
     fn builder(image: &str, cid: u64, socket: &Path) -> io::Result<Builder> {
         let mut builder = Builder::new();
@@ -93,6 +145,9 @@ mod probe {
             1024 * 1024,
         );
         builder.add_vsock_port(7000, socket.into(), false);
+        if std::env::var_os("AGENT_WORKLOAD").is_some() {
+            builder.add_vsock_port(7003, socket.with_extension("workload.sock"), false);
+        }
         Ok(builder)
     }
     fn restore_child(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -107,6 +162,13 @@ mod probe {
         listener.set_nonblocking(true)?;
         // SAFETY: parent pre_exec duplicates only the sealed template to fd100.
         let file = unsafe { std::fs::File::from_raw_fd(100) };
+        let workload_listener = if std::env::var_os("AGENT_WORKLOAD").is_some() {
+            let l = UnixListener::bind(socket.with_extension("workload.sock"))?;
+            l.set_nonblocking(true)?;
+            Some(l)
+        } else {
+            None
+        };
         let mut receiver = builder(&args[2], cid, &socket)?;
         let _readiness = receiver.start_from_template(
             TemplateSource::Descriptor(file),
@@ -133,7 +195,12 @@ mod probe {
                 json!({"type":"copied","request":3,"generation":1}),
             )?;
             response(&mut connection, "ack")?;
-            std::fs::write(directory.join(format!("ready-{cid}")), b"ready")?;
+            let result = if let Some(listener) = workload_listener {
+                verify_workload(&listener, cid)?
+            } else {
+                "ready".into()
+            };
+            std::fs::write(directory.join(format!("ready-{cid}")), result)?;
             let deadline = Instant::now() + Duration::from_secs(12);
             while !directory.join("release").exists() {
                 if Instant::now() >= deadline {
@@ -162,6 +229,17 @@ mod probe {
             std::env::current_dir()?.join(format!("agent-copy-{}.sock", std::process::id()));
         let listener = UnixListener::bind(&socket)?;
         listener.set_nonblocking(true)?;
+        let workload_listener = if std::env::var_os("AGENT_WORKLOAD").is_some() {
+            let l = UnixListener::bind(socket.with_extension("workload.sock"))?;
+            l.set_nonblocking(true)?;
+            Some(l)
+        } else {
+            None
+        };
+        let source_workload = workload_listener
+            .as_ref()
+            .map(UnixListener::try_clone)
+            .transpose()?;
         let mut source = builder(&args[1], 711, &socket)?;
         source.future_template();
         eprintln!("AGENT_SOURCE_BUILD");
@@ -182,6 +260,21 @@ mod probe {
                 &mut connection,
                 json!({"type":"welcome","version":3,"features":[],"token":"clone-test-token"}),
             )?;
+            let mut workload_connection = None;
+            if let Some(listener) = source_workload {
+                send(
+                    &mut connection,
+                    json!({"type":"exec","request":9,"process":1,"command":{"argv":["/clone-workload"]}}),
+                )?;
+                response(&mut connection, "ack")?;
+                let mut stream = accept(&listener)?;
+                let ready = line(&mut stream)?;
+                if !ready.starts_with("READY ") {
+                    return Err(io::Error::other("workload not ready"));
+                }
+                eprintln!("WORKLOAD_SOURCE {ready}");
+                workload_connection = Some(stream);
+            }
             send(
                 &mut connection,
                 json!({"type":"list_processes","request":1}),
@@ -189,7 +282,7 @@ mod probe {
             let processes = response(&mut connection, "processes")?;
             if processes["processes"]
                 .as_array()
-                .is_none_or(|p| !p.is_empty())
+                .is_none_or(|p| p.len() != usize::from(workload_connection.is_some()))
             {
                 return Err(io::Error::other("source workload not quiescent"));
             }
@@ -217,6 +310,7 @@ mod probe {
                     Err(error) => return Err(error),
                 }
             }
+            drop(workload_connection);
             Ok(hello)
         });
         if !matches!(context.run()?, VmExit::Frozen { .. }) {
@@ -280,6 +374,14 @@ mod probe {
             {
                 return Err("copy exited before four-alive barrier".into());
             }
+            if std::env::var_os("AGENT_WORKLOAD").is_some() {
+                let values = (740..744)
+                    .map(|cid| std::fs::read_to_string(directory.join(format!("ready-{cid}"))))
+                    .collect::<io::Result<std::collections::HashSet<_>>>()?;
+                if values.len() != 4 {
+                    return Err("duplicate concurrent random values".into());
+                }
+            }
             println!("AGENT_FOUR_ALIVE count=4");
             std::fs::write(directory.join("release"), b"release")?;
             for child in &mut children {
@@ -298,49 +400,87 @@ mod probe {
         if !(1..=80).contains(&copies) {
             return Err("AGENT_COPIES must be1..80".into());
         }
+        let mut random_values = std::collections::HashSet::new();
         for copy in 0..copies {
             let started = Instant::now();
-            let mut receiver = builder(&args[2], 712 + copy, &socket)?;
+            let copy_socket = socket.with_extension(format!("copy-{copy}.sock"));
+            let copy_listener = UnixListener::bind(&copy_socket)?;
+            copy_listener.set_nonblocking(true)?;
+            let copy_workload = if workload_listener.is_some() {
+                let l = UnixListener::bind(copy_socket.with_extension("workload.sock"))?;
+                l.set_nonblocking(true)?;
+                Some(l)
+            } else {
+                None
+            };
+            let mut receiver = builder(&args[2], 712 + copy, &copy_socket)?;
             let _readiness = receiver.start_from_template(
                 TemplateSource::Descriptor(template.file.try_clone()?),
                 Duration::from_secs(15),
                 |_| Ok(()),
             )?;
             let context = receiver.build()?;
-            let copy_listener = listener.try_clone()?;
             let hello = hello.clone();
+            let (random_tx, random_rx) = std::sync::mpsc::sync_channel(1);
             let receiver_thread = std::thread::spawn(move || -> io::Result<()> {
-                let mut connection = accept(&copy_listener)?;
-                let copied = response(&mut connection, "hello")?;
-                if copied["boot_id"] != hello["boot_id"]
-                    || copied["generation"] != 0
-                    || copied["token"] != "clone-test-token"
-                {
-                    return Err(io::Error::other("resumed agent identity mismatch"));
+                let result = (|| -> io::Result<()> {
+                    eprintln!("COPY_IO_WAIT copy={copy}");
+                    let mut connection = accept(&copy_listener)?;
+                    let copied = response(&mut connection, "hello")?;
+                    eprintln!("COPY_IO_HELLO copy={copy}");
+                    if copied["boot_id"] != hello["boot_id"]
+                        || copied["generation"] != 0
+                        || copied["token"] != "clone-test-token"
+                    {
+                        return Err(io::Error::other("resumed agent identity mismatch"));
+                    }
+                    send(
+                        &mut connection,
+                        json!({"type":"welcome","version":3,"features":[]}),
+                    )?;
+                    send(
+                        &mut connection,
+                        json!({"type":"copied","request":3,"generation":1}),
+                    )?;
+                    response(&mut connection, "ack")?;
+                    eprintln!("COPY_IO_GENERATION_ACK copy={copy}");
+                    if let Some(listener) = copy_workload {
+                        eprintln!("COPY_IO_WORKLOAD_WAIT copy={copy}");
+                        random_tx
+                            .send(verify_workload(&listener, 712 + copy)?)
+                            .map_err(io::Error::other)?;
+                    }
+                    println!(
+                        "AGENT_COPY_READY copy={} create_to_agent_ready_us={}",
+                        copy,
+                        started.elapsed().as_micros()
+                    );
+                    send(&mut connection, json!({"type":"power_off","request":4}))?;
+                    response(&mut connection, "ack")?;
+                    Ok(())
+                })();
+                if let Err(error) = &result {
+                    eprintln!("COPY_IO_ERROR copy={copy} error={error}");
                 }
-                send(
-                    &mut connection,
-                    json!({"type":"welcome","version":3,"features":[]}),
-                )?;
-                send(
-                    &mut connection,
-                    json!({"type":"copied","request":3,"generation":1}),
-                )?;
-                response(&mut connection, "ack")?;
-                println!(
-                    "AGENT_COPY_READY copy={} create_to_agent_ready_us={}",
-                    copy,
-                    started.elapsed().as_micros()
-                );
-                send(&mut connection, json!({"type":"power_off","request":4}))?;
-                response(&mut connection, "ack")?;
-                Ok(())
+                result
             });
             let _exit = context.run()?;
             receiver_thread
                 .join()
                 .map_err(|_| "receiver I/O thread panicked")??;
+            if workload_listener.is_some()
+                && !random_values.insert(random_rx.recv_timeout(Duration::from_secs(1))?)
+            {
+                return Err("duplicate copied random value".into());
+            }
+            std::fs::remove_file(&copy_socket)?;
+            if workload_listener.is_some() {
+                std::fs::remove_file(copy_socket.with_extension("workload.sock"))?;
+            }
             println!("AGENT_COPY_RECONNECTED copy={} cid={} total_us={} quiescent=1 armed_before_trigger=1 generation=1",copy,712+copy,started.elapsed().as_micros());
+        }
+        if workload_listener.is_some() {
+            std::fs::remove_file(socket.with_extension("workload.sock"))?;
         }
         std::fs::remove_file(socket)?;
         Ok(())
