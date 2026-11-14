@@ -206,7 +206,14 @@ pub struct VmResources {
     /// Physical control page and create-new output path for a frozen template.
     #[cfg(target_arch = "x86_64")]
     pub cooperative_capture: Option<(u64, PathBuf)>,
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(
+        target_arch = "x86_64",
+        all(
+            target_os = "linux",
+            target_arch = "aarch64",
+            feature = "nitro-sandbox"
+        )
+    ))]
     pub template_disk_identities: std::collections::BTreeMap<String, String>,
     /// The parameters for the qboot bundle to be loaded in this microVM.
     #[cfg(feature = "tee")]
@@ -524,7 +531,14 @@ mod tests {
             cooperative_template: None,
             #[cfg(target_arch = "x86_64")]
             cooperative_capture: None,
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(any(
+                target_arch = "x86_64",
+                all(
+                    target_os = "linux",
+                    target_arch = "aarch64",
+                    feature = "nitro-sandbox"
+                )
+            ))]
             template_disk_identities: std::collections::BTreeMap::new(),
             fs: Default::default(),
             vsock: Default::default(),

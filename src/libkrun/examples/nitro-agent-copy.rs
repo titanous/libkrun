@@ -3,6 +3,13 @@
     target_arch = "aarch64",
     feature = "nitro-sandbox"
 ))]
+#[path = "nitro_copy_fs/mod.rs"]
+mod nitro_copy_fs;
+#[cfg(all(
+    target_os = "linux",
+    target_arch = "aarch64",
+    feature = "nitro-sandbox"
+))]
 mod probe {
     use krun::{Builder, NitroBackendConfig, NitroSerialization, TemplateSource, VmExit};
     use serde_json::{json, Value};
@@ -98,6 +105,7 @@ mod probe {
             .as_nanos() as u64;
         if !report.starts_with("VERIFIED ")
             || number("bad")? != 0
+            || (std::env::var_os("AGENT_DEVICES").is_some() && number("device_bad")? != 0)
             || number("cid")? != cid
             || old > 0
             || number("monotonic_after")? < number("monotonic_before")?
@@ -112,6 +120,21 @@ mod probe {
             .get("random")
             .ok_or_else(|| io::Error::other("missing random"))?
             .to_string())
+    }
+    fn attach_devices(builder: &mut Builder, disk: &Path, fs: super::nitro_copy_fs::Tree) {
+        builder.add_block_cfg(krun::BlockDeviceConfig {
+            block_id: "data".into(),
+            cache_type: devices::virtio::block::device::CacheType::Writeback,
+            disk_type: krun::BlockDeviceType::Image {
+                path: disk.to_string_lossy().into_owned(),
+                format: krun::ImageType::Raw,
+                sync_mode: krun::SyncMode::Full,
+            },
+            is_disk_read_only: false,
+            direct_io: false,
+        });
+        builder.template_disk_identity("data", "acceptance-frozen-disk-v1");
+        builder.add_virtiofs("copyfs", Box::new(fs), None);
     }
     fn builder(image: &str, cid: u64, socket: &Path) -> io::Result<Builder> {
         let mut builder = Builder::new();
@@ -240,7 +263,14 @@ mod probe {
             .as_ref()
             .map(UnixListener::try_clone)
             .transpose()?;
+        let full_devices = std::env::var_os("AGENT_DEVICES").is_some();
+        let source_disk = socket.with_extension("source-disk");
+        let source_fs = super::nitro_copy_fs::Tree::new(vec![b'A'; 4096]);
         let mut source = builder(&args[1], 711, &socket)?;
+        if full_devices {
+            std::fs::File::create(&source_disk)?.set_len(16 * 1024 * 1024)?;
+            attach_devices(&mut source, &source_disk, source_fs.clone());
+        }
         source.future_template();
         eprintln!("AGENT_SOURCE_BUILD");
         let context = source.build()?;
@@ -264,7 +294,7 @@ mod probe {
             if let Some(listener) = source_workload {
                 send(
                     &mut connection,
-                    json!({"type":"exec","request":9,"process":1,"command":{"argv":["/clone-workload"]}}),
+                    json!({"type":"exec","request":9,"process":1,"command":{"argv":if full_devices {vec!["/clone-workload","devices"]}else{vec!["/clone-workload"]}}}),
                 )?;
                 response(&mut connection, "ack")?;
                 let mut stream = accept(&listener)?;
@@ -320,6 +350,12 @@ mod probe {
             .join()
             .map_err(|_| "source I/O thread panicked")??;
         let template = handle.wait_template_capture()?;
+        let frozen_disk = if full_devices {
+            Some(std::fs::read(&source_disk)?)
+        } else {
+            None
+        };
+        let frozen_fs = source_fs.snapshot();
         eprintln!(
             "AGENT_TEMPLATE_CAPTURED freeze_request_to_template_us={}",
             freeze_rx
@@ -413,7 +449,16 @@ mod probe {
             } else {
                 None
             };
+            let copy_disk = copy_socket.with_extension("disk");
             let mut receiver = builder(&args[2], 712 + copy, &copy_socket)?;
+            if let Some(bytes) = &frozen_disk {
+                std::fs::write(&copy_disk, bytes)?;
+                attach_devices(
+                    &mut receiver,
+                    &copy_disk,
+                    super::nitro_copy_fs::Tree::new(frozen_fs.clone()),
+                );
+            }
             let _readiness = receiver.start_from_template(
                 TemplateSource::Descriptor(template.file.try_clone()?),
                 Duration::from_secs(15),

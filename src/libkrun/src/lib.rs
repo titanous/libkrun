@@ -662,7 +662,17 @@ impl Builder {
 
     /// Declare a block disk's frozen content identity (digest or snapshot token).
     /// A new guest must declare each disk as a copy of the source token.
-    #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
+    #[cfg(all(
+        not(feature = "tee"),
+        any(
+            target_arch = "x86_64",
+            all(
+                target_os = "linux",
+                target_arch = "aarch64",
+                feature = "nitro-sandbox"
+            )
+        )
+    ))]
     pub fn template_disk_identity(
         &mut self,
         block_id: impl Into<String>,
@@ -1358,10 +1368,13 @@ impl Builder {
         }
         #[cfg(all(target_arch = "aarch64", not(feature = "tee")))]
         if (self.nitro_capture.is_some() || self.config.vmr.cooperative_template.is_some())
-            && (self.nitro_device_count_before_consoles()
-                != u32::from(!matches!(self.config.vsock_config, VsockConfig::Disabled))
-                || self.console_count != 0
-                || !self.config.vmr.fs.is_empty())
+            && (self.console_count != 0
+                || self
+                    .config
+                    .vmr
+                    .fs
+                    .iter()
+                    .any(|mount| mount.shm_size.is_some_and(|size| size != 0)))
         {
             return Err(StartError::Nitro(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
@@ -1480,24 +1493,17 @@ impl Builder {
         } else {
             None
         };
-        #[cfg(target_arch = "aarch64")]
-        let capture_has_vsock = !matches!(self.config.vsock_config, VsockConfig::Disabled);
         let config = self.config.vmr.vm_config();
         let memory_mib = config.mem_size_mib.unwrap_or(1024);
         #[cfg(target_arch = "aarch64")]
         let capture_vcpus = config.vcpu_count.unwrap_or(1);
         #[cfg(target_arch = "aarch64")]
         if let Some(template) = &self.config.vmr.cooperative_template {
-            let topology: &[u8] = if capture_has_vsock {
-                b"nitro-vsock-v1"
-            } else {
-                b"nitro-no-devices-v1"
-            };
             vmm::nitro_restore::validate(
                 template,
                 capture_vcpus,
                 memory_mib as u64,
-                topology,
+                &template.topology,
                 &template.compatibility,
             )
             .map_err(StartError::Nitro)?;
@@ -1542,6 +1548,17 @@ impl Builder {
             vcpu_count: config.vcpu_count.unwrap_or(1),
             ram_mib: config.mem_size_mib.unwrap_or(1024) as u32,
         };
+        #[cfg(target_arch = "aarch64")]
+        let template_enabled =
+            self.nitro_capture.is_some() || self.config.vmr.cooperative_template.is_some();
+        #[cfg(target_arch = "aarch64")]
+        let mut template_topology = {
+            let mut bytes = b"nitro-devices-v2".to_vec();
+            bytes.extend_from_slice(
+                &(self.nitro_device_count_before_consoles() as u64).to_le_bytes(),
+            );
+            bytes
+        };
         let mut console_id = self.nitro_device_count_before_consoles();
         let mut runtime = nitro_sandbox::runtime::Runtime::with_lifecycle_lock(
             image_path
@@ -1568,6 +1585,15 @@ impl Builder {
             let block = Arc::new(Mutex::new(
                 vmm::vmm_config::block::BlockBuilder::create_block(cfg)?,
             ));
+            #[cfg(target_arch = "aarch64")]
+            if template_enabled {
+                vmm::template_topology::encode_block(
+                    &mut template_topology,
+                    &block.lock().unwrap(),
+                    &self.config.vmr.template_disk_identities,
+                )
+                .map_err(StartError::Nitro)?;
+            }
             runtime.register_exit_observer(block.clone());
             runtime
                 .add_worker_device(block)
@@ -1591,11 +1617,27 @@ impl Builder {
                 flags,
                 self.socket_policy.clone(),
             )?;
+            #[cfg(target_arch = "aarch64")]
+            if template_enabled {
+                vmm::template_topology::encode_device(&mut template_topology, &vsock);
+            }
             runtime
                 .add_device(Arc::new(Mutex::new(vsock)))
                 .map_err(StartError::Nitro)?;
         }
         for mount in self.config.vmr.fs.drain(..) {
+            #[cfg(target_arch = "aarch64")]
+            if template_enabled {
+                if mount.tag.len() > 36 || mount.tag.as_bytes().contains(&0) {
+                    return Err(StartError::Nitro(std::io::Error::other(
+                        "invalid template filesystem tag",
+                    )));
+                }
+                template_topology.extend_from_slice(&(mount.tag.len() as u64).to_le_bytes());
+                template_topology.extend_from_slice(mount.tag.as_bytes());
+                template_topology
+                    .extend_from_slice(&(mount.shm_size.unwrap_or(0) as u64).to_le_bytes());
+            }
             let device = devices::virtio::Fs::new(
                 mount.tag,
                 mount.fs,
@@ -1604,6 +1646,10 @@ impl Builder {
             .map_err(|error| {
                 StartError::Nitro(std::io::Error::other(format!("virtio-fs: {error:?}")))
             })?;
+            #[cfg(target_arch = "aarch64")]
+            if template_enabled {
+                vmm::template_topology::encode_device(&mut template_topology, &device);
+            }
             runtime
                 .add_filesystem(device, mount.shm_size)
                 .map_err(StartError::Nitro)?;
@@ -1639,11 +1685,7 @@ impl Builder {
         }
         #[cfg(target_arch = "aarch64")]
         if let Some(template) = self.config.vmr.cooperative_template.take() {
-            let topology = if capture_has_vsock {
-                b"nitro-vsock-v1".to_vec()
-            } else {
-                b"nitro-no-devices-v1".to_vec()
-            };
+            let topology = template_topology.clone();
             let compatibility = template.compatibility.clone();
             vmm::nitro_restore::validate(
                 &template,
@@ -1669,11 +1711,7 @@ impl Builder {
                 request: request.clone(),
                 vcpus: capture_vcpus,
                 ram_mib: memory_mib as u64,
-                topology: if capture_has_vsock {
-                    b"nitro-vsock-v1".to_vec()
-                } else {
-                    b"nitro-no-devices-v1".to_vec()
-                },
+                topology: template_topology,
                 compatibility: b"nitro-arm64-v1".to_vec(),
             }));
         }

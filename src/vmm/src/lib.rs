@@ -48,8 +48,15 @@ mod kernel_identity;
 
 #[cfg(target_os = "linux")]
 pub mod template;
-#[cfg(target_arch = "x86_64")]
-mod template_topology;
+#[cfg(any(
+    target_arch = "x86_64",
+    all(
+        target_os = "linux",
+        target_arch = "aarch64",
+        feature = "nitro-sandbox"
+    )
+))]
+pub mod template_topology;
 /// Wrappers over structures used to configure the VMM.
 pub mod vmm_config;
 
