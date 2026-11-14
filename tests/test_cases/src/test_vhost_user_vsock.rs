@@ -58,37 +58,6 @@ mod guest_helpers {
         response
     }
 
-    /// Query the proxy's byte counter.
-    pub fn query_counter() -> u64 {
-        let mut sock = crate::vsock_helpers::vsock_connect(super::COUNTER_PORT);
-        // Send dummy byte to trigger counter response
-        sock.write_all(&[0u8])
-            .expect("failed to write counter query");
-        let mut counter_bytes = [0u8; 8];
-        sock.read_exact(&mut counter_bytes)
-            .expect("failed to read counter");
-        u64::from_le_bytes(counter_bytes)
-    }
-
-    /// Signal ready by creating a file on root virtiofs.
-    pub fn signal_ready() {
-        std::fs::write("/ready", "").expect("failed to write /ready");
-    }
-
-    /// Wait for check signal (file appears on root virtiofs).
-    pub fn wait_for_check() {
-        let start = std::time::Instant::now();
-        let timeout = std::time::Duration::from_secs(30);
-        loop {
-            if std::path::Path::new("/check").exists() {
-                return;
-            }
-            if start.elapsed() > timeout {
-                panic!("Timeout waiting for /check file");
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-    }
 }
 
 // =============================================================================

@@ -1,5 +1,5 @@
 name: 'Setup Build Environment'
-description: 'Common setup for Rust builds with all required packages (Linux & macOS)'
+description: 'Common setup for Linux Rust builds with all required packages'
 runs:
   using: 'composite'
   steps:
@@ -18,15 +18,6 @@ runs:
           ~/.cargo/git
           target
         key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-
-    - name: Set up Homebrew (macOS)
-      if: runner.os == 'macOS'
-      uses: Homebrew/actions/setup-homebrew@master
-
-    - name: Install packages (macOS)
-      if: runner.os == 'macOS'
-      shell: bash
-      run: brew tap slp/krun && brew install virglrenderer clang-format llvm
 
     - name: Install packages (Linux)
       if: runner.os == 'Linux'

@@ -3,7 +3,7 @@
 Last verified: 2026-03-03
 
 ## Purpose
-Virtio-FS (FUSE-over-virtio) device implementation. Exposes a generic `FileSystem` trait for pluggable filesystem backends, with `PassthroughFs` as the built-in host directory backend. Linux-only (macOS virtiofs was removed).
+Virtio-FS (FUSE-over-virtio) device implementation. Exposes a generic `FileSystem` trait for pluggable filesystem backends, with `PassthroughFs` as the built-in host directory backend. Linux-only.
 
 ## Contracts
 - **Exposes**: `Fs` device, `FileSystem` trait, `DaxMapper` trait, `Server` (also re-exported from `devices::lib.rs`), `PassthroughFs`, `ExportTable`, newtype wrappers (`Inode`, `Handle`), FUSE types (`Context`, `Entry`, `DirEntry`, etc.)
@@ -27,7 +27,6 @@ Virtio-FS (FUSE-over-virtio) device implementation. Exposes a generic `FileSyste
 ## Key Decisions
 - `FileSystem` made object-safe by replacing associated types `Inode`/`Handle` with concrete newtypes -- enables `Box<dyn FileSystem>` throughout
 - DAX operations abstracted behind `DaxMapper` trait instead of raw mmap calls -- enables future non-Linux DAX backends
-- macOS virtiofs passthrough removed entirely (was 2600+ lines); `linux/` module no longer behind `#[cfg(target_os)]`
 - `Fs` device takes ownership of `Box<dyn FileSystem>` via `Option` and `.take()`s it during activate
 
 ## Key Files

@@ -1,7 +1,7 @@
 //! Shared network testing helpers used by multiple test modules
 //!
 //! This module provides common functions for network configuration and ICMP testing
-//! that are shared between test_snapshot_net and test_net_async_loopback.
+//! used by the async network loopback integration test.
 
 use std::mem;
 
@@ -107,7 +107,7 @@ pub fn test_ping() {
         // Build ICMP echo request
         let id: u16 = 0x1234;
         let seq: u16 = 1;
-        let payload = b"snapshot-net";
+        let payload = b"loopback-net";
 
         let mut icmp_buf = vec![0u8; 8 + payload.len()];
         icmp_buf[0] = 8; // type = echo request

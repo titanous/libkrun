@@ -1569,7 +1569,7 @@ impl VmHandle {
     }
 
     /// Trigger host-initiated guest shutdown via the MMIO GPIO shutdown eventfd.
-    #[mutants::skip] // shutdown_efd is None on Linux x86_64; only used on aarch64+macOS
+    #[mutants::skip] // shutdown_efd is unavailable on Linux
     pub fn trigger_shutdown_event(&self) -> Result<(), StartError> {
         match self.shutdown_efd.as_ref() {
             Some(efd) => efd.write(1).map_err(|e| {

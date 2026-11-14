@@ -3,7 +3,6 @@ OS = $(shell uname -s)
 LDFLAGS_x86_64_Linux = -lkrun
 LDFLAGS_aarch64_Linux = -lkrun
 LDFLAGS_riscv64_Linux = -lkrun
-LDFLAGS_arm64_Darwin = -L/opt/homebrew/lib -lkrun
 LDFLAGS_sev = -lkrun-sev
 LDFLAGS_tdx = -lkrun-tdx
 LDFLAGS_nitro = -lkrun-awsnitro
@@ -25,9 +24,6 @@ all: $(EXAMPLES)
 
 chroot_vm: chroot_vm.c
 	gcc -o $@ $< $(CFLAGS) $(LDFLAGS_$(ARCH)_$(OS))
-ifeq ($(OS),Darwin)
-	codesign --entitlements chroot_vm.entitlements --force -s - $@
-endif
 
 launch-tee: launch-tee.c
 ifeq ($(SEV),1)
@@ -39,15 +35,9 @@ endif
 
 boot_efi: boot_efi.c
 	gcc -o $@ $< $(CFLAGS) $(LDFLAGS_$(ARCH)_$(OS))
-ifeq ($(OS),Darwin)
-	codesign --entitlements chroot_vm.entitlements --force -s - $@
-endif
 
 external_kernel: external_kernel.c
 	gcc -o $@ $< $(CFLAGS) $(LDFLAGS_$(ARCH)_$(OS))
-ifeq ($(OS),Darwin)
-	codesign --entitlements chroot_vm.entitlements --force -s - $@
-endif
 
 consoles: consoles.c
 	gcc -o $@ $< $(CFLAGS) $(LDFLAGS_$(ARCH)_$(OS))

@@ -83,7 +83,7 @@ pub const IRQ_MAX: u32 = 159;
 /// GICv3 redists reach 0x09FF_0000 - (0x20000 * vcpu_count); at 256 vCPUs
 /// they'd reach 0x07FF_0000. Address 0x0800_0000 is safe for up to ~255 vCPUs.
 /// This address is below DRAM start (0x8000_0000 for kernel boot, 0x4000_0000
-/// for EFI boot), so it is NOT in guest RAM and not registered with UFFD.
+/// for EFI boot), so it is not in guest RAM.
 pub const VMGENID_GUID_PAGE: u64 = 0x0800_0000;
 /// Offset within the GUID page where the 128-bit GUID is stored.
 pub const VMGENID_GUID_OFFSET: u64 = 40;

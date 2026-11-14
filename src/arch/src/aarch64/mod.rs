@@ -84,7 +84,7 @@ pub fn arch_memory_regions(
     // VMGENID GUID page: 4KB region below DRAM, used by the VMGENID device to
     // store the 128-bit VM Generation ID. This is a separate KVM memory slot
     // from DRAM — the guest kernel does not see it as usable RAM (it's not in
-    // the FDT /memory node). Not registered with UFFD for demand-paging.
+    // the FDT /memory node).
     regions.insert(0, (GuestAddress(layout::VMGENID_GUID_PAGE), 0x1000));
 
     (info, regions)

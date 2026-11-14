@@ -26,7 +26,6 @@ vhost = { version = "0.15", features = ["vhost-user-backend"] }
 # does not inherit patches from the root workspace.
 [patch.crates-io]
 vhost = { path = "../vendor/vhost" }
-linux-loader = { git = "https://github.com/theoparis/linux-loader", rev = "af90928dcfa1666d47a5269061ef77857eff46d3" }
 
 [[bin]]
 name = "fuzz_block_request"

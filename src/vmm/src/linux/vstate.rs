@@ -727,11 +727,6 @@ impl Vm {
 
     /// Register an additional memory region with KVM (e.g., DAX window).
     /// Allocates a KVM memory slot and maps guest_phys_addr → userspace_addr.
-    ///
-    /// Note: DAX regions are volatile caches and are not preserved across snapshots,
-    /// so this method intentionally does NOT track the slot in mem_slots (unlike
-    /// memory_region_set). If future use cases need dirty tracking for additional
-    /// KVM slots, extend this method to accept an option to track the slot.
     pub fn register_memory_region(
         &mut self,
         guest_phys_addr: u64,
@@ -1517,9 +1512,6 @@ impl Vcpu {
     fn exited(&mut self) -> StateMachine<Self> {
         // Wait for the VMM to set the exit flag (via Vmm::stop()), or for the
         // event channel to disconnect (VcpuHandle dropped without Vmm::stop()).
-        // The channel disconnect case happens when restore_from_snapshot() fails
-        // before the event loop starts — nobody processes exit_evt, so should_exit
-        // is never set.
         while !self.should_exit.load(Ordering::Acquire) {
             if let Err(crossbeam_channel::RecvTimeoutError::Disconnected) =
                 self.event_receiver.recv_timeout(Duration::from_millis(10))

@@ -40,7 +40,7 @@ impl ReclaimedBitmap {
 
     /// Mark a page as reclaimed by its page-frame number.
     ///
-    /// Silently ignores out-of-bounds PFNs (same pattern as DirtyBitmap).
+    /// Silently ignores out-of-bounds PFNs.
     pub fn mark(&self, pfn: u32) {
         let pfn = pfn as usize;
         if pfn >= self.num_pages {

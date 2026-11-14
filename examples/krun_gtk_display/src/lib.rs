@@ -64,7 +64,6 @@ pub struct DisplayBackendWorker {
 }
 
 impl DisplayBackendWorker {
-    /// NOTE: on macOS GTK has to run on the main thread of the application.
     pub fn run(self) {
         DisplayWorker::run(
             self.app_name,

@@ -7,8 +7,6 @@ use std::collections::BTreeMap as Map;
 use std::convert::TryInto;
 use std::fs::File;
 use std::io::IoSliceMut;
-use std::io::Read;
-use std::io::Write;
 use std::sync::{Arc, Mutex};
 
 use crate::cross_domain::CrossDomain;
@@ -19,8 +17,6 @@ use crate::gfxstream::Gfxstream;
 use crate::rutabaga_2d::Rutabaga2D;
 use crate::rutabaga_os::MemoryMapping;
 use crate::rutabaga_os::SafeDescriptor;
-use crate::rutabaga_snapshot::RutabagaResourceSnapshot;
-use crate::rutabaga_snapshot::RutabagaSnapshot;
 use crate::rutabaga_utils::*;
 
 #[cfg(feature = "virgl_renderer")]
@@ -356,130 +352,6 @@ pub struct Rutabaga {
 }
 
 impl Rutabaga {
-    /// Take a snapshot of Rutabaga's current state. The snapshot is serialized into an opaque byte
-    /// stream and written to `w`.
-    ///
-    /// Only supports Mode2D.
-    pub fn snapshot(&self, w: &mut impl Write) -> RutabagaResult<()> {
-        // We current only support snapshotting Rutabaga2D.
-        if !(self.contexts.is_empty()
-            && self
-                .components
-                .keys()
-                .all(|t| *t == RutabagaComponentType::Rutabaga2D)
-            && self.default_component == RutabagaComponentType::Rutabaga2D
-            && self.capset_info.is_empty())
-        {
-            return Err(RutabagaError::Unsupported);
-        }
-        let snapshot = RutabagaSnapshot {
-            resources: self
-                .resources
-                .iter()
-                .map(|(i, r)| {
-                    if !(r.handle.is_none()
-                        && !r.blob
-                        && r.blob_mem == 0
-                        && r.blob_flags == 0
-                        && r.map_info.is_none()
-                        && r.info_3d.is_none()
-                        && r.vulkan_info.is_none()
-                        && r.component_mask == 1 << (RutabagaComponentType::Rutabaga2D as u8)
-                        && r.mapping.is_none())
-                    {
-                        return Err(RutabagaError::Unsupported);
-                    }
-                    let info = r.info_2d.as_ref().ok_or(RutabagaError::Unsupported)?;
-                    assert_eq!(
-                        usize::try_from(info.width * info.height * 4).unwrap(),
-                        info.host_mem.len()
-                    );
-                    assert_eq!(usize::try_from(r.size).unwrap(), info.host_mem.len());
-                    let s = RutabagaResourceSnapshot {
-                        resource_id: r.resource_id,
-                        width: info.width,
-                        height: info.height,
-                    };
-                    Ok((*i, s))
-                })
-                .collect::<RutabagaResult<_>>()?,
-        };
-
-        snapshot.serialize_to(w).map_err(RutabagaError::IoError)
-    }
-
-    /// Restore Rutabaga to a previously snapshot'd state.
-    ///
-    /// Snapshotting on one host machine and then restoring on another ("host migration") might
-    /// work for very similar machines but isn't explicitly supported yet.
-    ///
-    /// Rutabaga will recreate resources internally, but it's the VMM's responsibility to re-attach
-    /// backing iovecs and re-map the memory after re-creation. Specifically:
-    ///
-    /// * Mode2D
-    ///    * The VMM must call `Rutabaga::attach_backing` calls for all resources that had backing
-    ///      memory at the time of the snapshot.
-    /// * ModeVirglRenderer
-    ///    * Not supported.
-    /// * ModeGfxstream
-    ///    * Not supported.
-    ///
-    /// NOTES: This is required because the pointers to backing memory aren't stable, help from the
-    /// VMM is necessary. In an alternative approach, the VMM could supply Rutabaga with callbacks
-    /// to translate to/from stable guest physical addresses, but it is unclear how well that
-    /// approach would scale to support 3D modes, which have others problems that require VMM help,
-    /// like resource handles.
-    pub fn restore(&mut self, r: &mut impl Read) -> RutabagaResult<()> {
-        let snapshot = RutabagaSnapshot::deserialize_from(r).map_err(RutabagaError::IoError)?;
-
-        // We currently only support restoring to a fresh Rutabaga2D instance.
-        if !(self.resources.is_empty()
-            && self.contexts.is_empty()
-            && self
-                .components
-                .keys()
-                .all(|t| *t == RutabagaComponentType::Rutabaga2D)
-            && self.default_component == RutabagaComponentType::Rutabaga2D
-            && self.capset_info.is_empty())
-        {
-            return Err(RutabagaError::Unsupported);
-        }
-        self.resources = snapshot
-            .resources
-            .into_iter()
-            .map(|(i, s)| {
-                let size = u64::from(s.width * s.height * 4);
-                let r = RutabagaResource {
-                    resource_id: s.resource_id,
-                    handle: None,
-                    blob: false,
-                    blob_mem: 0,
-                    blob_flags: 0,
-                    map_info: None,
-                    info_2d: Some(Rutabaga2DInfo {
-                        width: s.width,
-                        height: s.height,
-                        host_mem: vec![0; usize::try_from(size).unwrap()],
-                    }),
-                    info_3d: None,
-                    vulkan_info: None,
-                    // NOTE: `RutabagaResource::backing_iovecs` isn't snapshotted because the
-                    // pointers won't be valid at restore time, see the `Rutabaga::restore` doc. If
-                    // the client doesn't attach new iovecs, the restored resource will behave as
-                    // if they had been detached (instead of segfaulting on the stale iovec
-                    // pointers).
-                    backing_iovecs: None,
-                    component_mask: 1 << (RutabagaComponentType::Rutabaga2D as u8),
-                    size,
-                    mapping: None,
-                };
-                (i, r)
-            })
-            .collect();
-
-        Ok(())
-    }
-
     fn capset_id_to_component_type(&self, capset_id: u32) -> RutabagaResult<RutabagaComponentType> {
         let component = self
             .capset_info
@@ -1291,78 +1163,5 @@ impl RutabagaBuilder {
             capset_info: rutabaga_capsets,
             fence_handler,
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::*;
-
-    fn new_2d() -> Rutabaga {
-        RutabagaBuilder::new(RutabagaComponentType::Rutabaga2D, 0, 0)
-            .build(RutabagaHandler::new(|_| {}), None)
-            .unwrap()
-    }
-
-    #[test]
-    fn snapshot_restore_2d_no_resources() {
-        let mut buffer = std::io::Cursor::new(Vec::new());
-
-        let rutabaga1 = new_2d();
-        rutabaga1.snapshot(&mut buffer).unwrap();
-
-        let mut rutabaga1 = new_2d();
-        rutabaga1.restore(&mut &buffer.get_ref()[..]).unwrap();
-    }
-
-    #[test]
-    fn snapshot_restore_2d_one_resource() {
-        let resource_id = 123;
-        let resource_create_3d = ResourceCreate3D {
-            target: RUTABAGA_PIPE_TEXTURE_2D,
-            format: 1,
-            bind: RUTABAGA_PIPE_BIND_RENDER_TARGET,
-            width: 100,
-            height: 200,
-            depth: 1,
-            array_size: 1,
-            last_level: 0,
-            nr_samples: 0,
-            flags: 0,
-        };
-
-        let mut buffer = std::io::Cursor::new(Vec::new());
-
-        let mut rutabaga1 = new_2d();
-        rutabaga1
-            .resource_create_3d(resource_id, resource_create_3d)
-            .unwrap();
-        rutabaga1
-            .attach_backing(
-                resource_id,
-                vec![RutabagaIovec {
-                    base: std::ptr::null_mut(),
-                    len: 456,
-                }],
-            )
-            .unwrap();
-        rutabaga1.snapshot(&mut buffer).unwrap();
-
-        let mut rutabaga2 = new_2d();
-        rutabaga2.restore(&mut &buffer.get_ref()[..]).unwrap();
-
-        assert_eq!(rutabaga2.resources.len(), 1);
-        let rutabaga_resource = rutabaga2.resources.get(&resource_id).unwrap();
-        assert_eq!(rutabaga_resource.resource_id, resource_id);
-        assert_eq!(
-            rutabaga_resource.info_2d.as_ref().unwrap().width,
-            resource_create_3d.width
-        );
-        assert_eq!(
-            rutabaga_resource.info_2d.as_ref().unwrap().height,
-            resource_create_3d.height
-        );
-        // NOTE: We attached an backing iovec, but it should be gone post-restore.
-        assert!(rutabaga_resource.backing_iovecs.is_none());
     }
 }

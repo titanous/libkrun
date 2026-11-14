@@ -154,13 +154,6 @@ The proof verifies the constructor's bounds check, and all production call sites
 
 Verify that invalid inputs produce errors (not silent corruption):
 
-```rust
-// Proves wrong magic is rejected — changing validation logic breaks this
-let header = SnapshotHeader { magic: kani::any_where(|&m| m != SNAPSHOT_MAGIC), .. };
-let result = validate_magic_and_version(&header);
-kani::assert(matches!(result, Err(SnapshotError::InvalidMagic)), "wrong magic rejected");
-```
-
 ## Avoiding Tautological Proofs
 
 A tautological proof restates the implementation rather than verifying a property.
@@ -573,20 +566,6 @@ Prefer flat arrays over Vec when the size is known at proof time.
 ### Custom Arbitrary for complex types
 
 When a type has invariants that `derive(Arbitrary)` cannot express:
-
-```rust
-#[cfg(kani)]
-impl kani::Arbitrary for UffdRegion {
-    fn any() -> Self {
-        let guest_addr: u64 = kani::any();
-        let host_addr: u64 = kani::any();
-        let size: u64 = kani::any_where(|&s| s > 0);
-        kani::assume(guest_addr.checked_add(size).is_some());
-        kani::assume(host_addr.checked_add(size).is_some());
-        UffdRegion { guest_addr, host_addr, size, page_offset: 0 }
-    }
-}
-```
 
 ## Proof Design Checklist
 

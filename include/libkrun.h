@@ -229,12 +229,7 @@ int32_t krun_add_disk2(uint32_t ctx_id,
  */ 
 #define KRUN_SYNC_NONE 0
 /**
- * Honor VIRTIO_BLK_F_FLUSH requests, but relax strict hardware syncing on macOS.
- * This is the recommended mode.
- *
- * On macOS this flushes the OS buffers, but does not ask the drive to flush
- * its buffered data, which significantly improves performance. 
- * On Linux this is the same as full sync.
+ * Honor VIRTIO_BLK_F_FLUSH requests. This is equivalent to full sync.
  */
 #define KRUN_SYNC_RELAXED 1
 /** 
@@ -259,9 +254,7 @@ int32_t krun_add_disk2(uint32_t ctx_id,
  *  "read_only"   - whether the mount should be read-only. Required if the caller does not have
  *                  write permissions (for disk images in /usr/share).
  *  "direct_io"   - whether to bypass the host caches.
- *  "sync_mode"   - whether to enable VIRTIO_BLK_F_FLUSH. On macOS, an additional relaxed sync
- *                  mode is available, which is enabled by default, and will not ask the drive
- *                  to flush its buffered data.
+ *  "sync_mode"   - whether to enable VIRTIO_BLK_F_FLUSH.
  *
  * Returns:
  *  Zero on success or a negative error number on failure.
@@ -273,22 +266,6 @@ int32_t krun_add_disk2(uint32_t ctx_id,
                        bool read_only,
                        bool direct_io,
                        uint32_t sync_mode);
-
-/**
- * NO LONGER SUPPORTED. DO NOT USE.
- *
- * Configures the mapped volumes for the microVM. Only supported on macOS, on Linux use
- * user_namespaces and bind-mounts instead. Not available in libkrun-SEV.
- *
- * Arguments:
- *  "ctx_id"         - the configuration context ID.
- *  "mapped_volumes" - an array of string pointers with format "host_path:guest_path" representing
- *                     the volumes to be mapped inside the microVM
- *
- * Returns:
- *  Zero on success or a negative error number on failure.
- */
-int32_t krun_set_mapped_volumes(uint32_t ctx_id, const char *const mapped_volumes[]);
 
 /**
  * Adds an independent virtio-fs device pointing to a host's directory with a tag.
@@ -954,9 +931,6 @@ int32_t krun_setgid(uint32_t ctx_id, gid_t gid);
  *  "ctx_id"  - the configuration context ID.
  *  "enabled" - true to enable Nested Virtualization in the microVM.
  *
- * Notes:
- *  This feature is only supported on macOS.
- *
  * Returns:
  *  Zero on success or a negative error number on failure. Success doesn't imply that
  *  Nested Virtualization is supported on the system, only that it's going to be requested
@@ -966,9 +940,6 @@ int32_t krun_set_nested_virt(uint32_t ctx_id, bool enabled);
 
 /**
  * Check the system if Nested Virtualization is supported
- *
- * Notes:
- *  This feature is only supported on macOS.
  *
  * Returns:
  *  - 1 : Success and Nested Virtualization is supported
@@ -1102,7 +1073,7 @@ int32_t krun_add_virtio_console_default(uint32_t ctx_id,
  * The function can be called multiple times for adding multiple serial devices.
  * In the guest, the consoles will appear in the same order as they are added (that is,
  * the first added console will be "ttyS0", the second "ttyS1", ...). However, if the
- * implicit console is not disabled via `krun_disable_implicit_console` on aarch64 or macOS,
+ * implicit console is not disabled via `krun_disable_implicit_console` on aarch64,
  * the first console created with the function will occupy the "ttyS1" ID.
  *
  * Arguments:

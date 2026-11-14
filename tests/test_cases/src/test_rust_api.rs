@@ -114,29 +114,17 @@ mod host {
 
             let _vm_thread = thread::spawn(move || context.run());
 
-            // AC7.4: On Linux x86, trigger_shutdown_event() is unsupported
-            // On aarch64/macOS, it causes the VM to exit cleanly
+            // The shutdown eventfd is unavailable on Linux.
             let result = handle.trigger_shutdown_event();
-            #[cfg(not(all(target_arch = "aarch64", target_os = "macos")))]
-            {
-                // On Linux: verify the function returns a meaningful Err (not panic)
-                assert!(result.is_err(), "Expected Err on non-aarch64-mac, got Ok");
-                // Verify the error message indicates unsupported (not a crash/panic)
-                let msg = result.unwrap_err().to_string();
-                assert!(
-                    msg.contains("unavailable")
-                        || msg.contains("Unsupported")
-                        || msg.contains("not supported"),
-                    "Unexpected error: {msg}"
-                );
-                println!("OK");
-            }
-            #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
-            {
-                // On aarch64/macOS: should succeed and VM exits cleanly
-                result?;
-                println!("OK");
-            }
+            assert!(result.is_err(), "Expected unsupported shutdown event, got Ok");
+            let msg = result.unwrap_err().to_string();
+            assert!(
+                msg.contains("unavailable")
+                    || msg.contains("Unsupported")
+                    || msg.contains("not supported"),
+                "Unexpected error: {msg}"
+            );
+            println!("OK");
             Ok(())
         }
     }
@@ -179,8 +167,7 @@ mod guest {
 
     impl Test for TestRustApiShutdown {
         fn in_guest(self: Box<Self>) {
-            // On aarch64/macOS: would exit when shutdown event fires
-            // On Linux: host prints OK directly (never reaches guest)
+            // Host prints OK directly; this case does not wait for guest output.
         }
     }
 }
