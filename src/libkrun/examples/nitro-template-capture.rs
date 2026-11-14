@@ -1,0 +1,55 @@
+#[cfg(all(
+    target_os = "linux",
+    target_arch = "aarch64",
+    feature = "nitro-sandbox"
+))]
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    use nitro_sandbox::{
+        lifecycle::{LifecycleLock, Serialization},
+        runtime::{Exit, Runtime},
+    };
+    let args: Vec<_> = std::env::args().collect();
+    if args.len() != 2 {
+        return Err("usage: nitro-template-capture identity-source.eif".into());
+    }
+    let request = vmm::capture_request::CaptureRequest::default();
+    let mut runtime = Runtime::with_lifecycle_lock(
+        &args[1],
+        1 << 30,
+        1,
+        707,
+        std::time::Duration::from_secs(15),
+        Some(LifecycleLock {
+            path: "/run/holodeck/nitro-lifecycle.lock".into(),
+            serialization: Serialization::StartAndTeardown,
+        }),
+    )?;
+    runtime.set_capture_handler(Box::new(vmm::nitro_capture::NitroCapture {
+        request: request.clone(),
+        vcpus: 1,
+        ram_mib: 1024,
+        topology: b"diagnostic-no-devices".to_vec(),
+        compatibility: b"nitro-arm64-v1".to_vec(),
+    }));
+    request.arm(std::time::Duration::from_secs(15))?;
+    if runtime.run()? != Exit::Frozen {
+        return Err("capture did not freeze source".into());
+    }
+    let template = request.wait()?;
+    let reopened = vmm::template::Template::open(template.file.try_clone()?)?;
+    println!(
+        "SHARED_TEMPLATE_CAPTURE ram_mib={} regions={} identity_bytes={}",
+        reopened.ram_mib,
+        reopened.regions.len(),
+        reopened.compatibility.len()
+    );
+    Ok(())
+}
+#[cfg(not(all(
+    target_os = "linux",
+    target_arch = "aarch64",
+    feature = "nitro-sandbox"
+)))]
+fn main() {
+    eprintln!("requires arm64 Linux Nitro feature");
+}
