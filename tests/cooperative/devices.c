@@ -205,7 +205,9 @@ int main(void)
             : "rcx","r11","memory","xmm15");
     }
     if(result!=1 || memcmp(sentinel,restored,wide_simd ? 32 : 16)) fail("freeze or SIMD");
-    if(__builtin_ia32_rdtsc()<tsc_before) fail("TSC went backwards");
+    uint64_t tsc_after=__builtin_ia32_rdtsc();
+    printf("CLONE TSC before=%llu after=%llu\n",(unsigned long long)tsc_before,(unsigned long long)tsc_after);
+    if(tsc_after<tsc_before) fail("TSC went backwards");
     printf("CLONE TSC nondecreasing\n");
     printf("CLONE VECTOR width=%d preserved\n",wide_simd ? 256 : 128);
     unblock_random_read(blocked_fault,blocked_reader);
