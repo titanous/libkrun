@@ -32,6 +32,7 @@
 #include <sys/reboot.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <termios.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -169,8 +170,12 @@ static void *worker_loop(void *argument)
     uint64_t thread = (uint64_t)(w - workers);
     size_t n = c->size;
     int post = 0;
+    uint64_t previous = realtime_ns(), since_jump = 0;
     for (uint64_t seq = 1;; seq++) {
         if (atomic_load(&resumed) && ++post > POST_RECORDS) break;
+        /* A fast thread can wrap its ring before the main thread marks the resume. A wall-clock jump of
+         * 200 ms or more is the copy point (a copy's clock is set to host time); stop 4096 records later. */
+        if (since_jump && ++since_jump > 4096) break;
         c->commit = PENDING;
         for (size_t i = 0; i < n / 8; i++) ((uint64_t *)w->buffer)[i] = pattern(thread, seq, i);
         c->seq = seq;
@@ -195,6 +200,8 @@ static void *worker_loop(void *argument)
         struct record *r = &w->ring[seq % RING];
         r->seq = seq; r->ret = ret; r->hash = hash_words(w->buffer, n);
         memcpy(r->head, w->buffer, 16); memcpy(r->tail, w->buffer + n - 16, 16); r->realtime_ns = realtime_ns();
+        if (!since_jump && r->realtime_ns - previous > 200000000ULL && r->realtime_ns > previous) since_jump = 1;
+        previous = r->realtime_ns;
         c->recorded = seq;
         atomic_signal_fence(memory_order_seq_cst);
         c->state = 0;
@@ -318,5 +325,8 @@ int main(void)
     for (int i = 0; i < THREADS; i++) printf("RANDCOPY THREAD %d %s %zu last=%llu\n", i,
         kind_names[workers[i].control->kind], (size_t)workers[i].control->size,
         (unsigned long long)workers[i].control->recorded);
+    /* Let the serial console drain before power-off; the host reads the records from it. */
+    tcdrain(1);
+    sleep(1);
     reboot(RB_POWER_OFF); for (;;) pause();
 }
