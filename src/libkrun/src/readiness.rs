@@ -42,6 +42,9 @@ impl GuestReadiness {
     /// Return false if this guest has already missed its start deadline.
     pub fn mark_ready(&self) -> bool {
         let mut state = self.inner.0.lock().unwrap();
+        if *state == State::Ready {
+            return true;
+        }
         if *state == State::TimedOut || Instant::now() >= self.deadline {
             *state = State::TimedOut;
             self.inner.1.notify_all();
@@ -80,6 +83,10 @@ mod tests {
         let ready = GuestReadiness::new(Duration::from_secs(10)).unwrap();
         assert!(ready.mark_ready());
         assert_eq!(ready.wait(), Ok(()));
+        let mut duplicate = ready.clone();
+        duplicate.deadline = Instant::now();
+        assert!(duplicate.mark_ready());
+        assert_eq!(duplicate.wait(), Ok(()));
         let late = GuestReadiness::new(Duration::ZERO).unwrap();
         assert_eq!(late.wait(), Err(GuestReadyTimeout));
         assert!(!late.mark_ready());
