@@ -4,6 +4,7 @@ from console_markers import userspace_bytes
 import argparse
 import concurrent.futures
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -22,6 +23,8 @@ parser.add_argument("--control", required=True)
 parser.add_argument("--output", required=True, type=Path)
 parser.add_argument("--cycles", type=int, default=20)
 parser.add_argument("--concurrent", type=int, default=16)
+parser.add_argument("--single-template-copies", type=int, default=0,
+                    help="instead of the matrix, run this many copies from one hashed 8-CPU template")
 parser.add_argument("--passed-fd", action="store_true", help="share one sealed memfd across new VMM processes")
 args = parser.parse_args()
 args.output.mkdir(parents=True, exist_ok=False)
@@ -176,8 +179,39 @@ def run_child(cpus, source_disk, image, name):
             "private_kib_10s": private_kib, "generation": generation.group(1),
             "random": random.group(1), "pending_random": pending.group(1)}
 
+def single_template_copies():
+    disk, image, _, _ = run_source(8, 0)
+    def digest():
+        with image.open("rb") as template:
+            return hashlib.file_digest(template, "sha256").hexdigest()
+    before = digest()
+    source_data = userspace_bytes(image.with_suffix(".freeze.log").read_bytes()).decode(errors="replace")
+    source_random = re.search(r"CLONE SOURCE_RANDOM ([0-9a-f]{64})", source_data)
+    if source_random is None:
+        raise RuntimeError("missing source random sample")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(args.concurrent, 16))) as pool:
+        results = list(pool.map(lambda i: run_child(8, disk, image, f"scale-{i}"), range(args.single_template_copies)))
+    after = digest()
+    for field in ("random", "pending_random", "generation"):
+        if len({m[field] for m in results}) != len(results):
+            raise RuntimeError(f"duplicate {field} in single-template copies")
+    blocked = [m["blocked_random"] for m in results if m["blocked_random"] is not None]
+    if len(set(blocked)) != len(blocked):
+        raise RuntimeError("duplicate blocked-reader random bytes")
+    if any(m["random"] == source_random.group(1) for m in results):
+        raise RuntimeError("copy random bytes match source")
+    if before != after:
+        raise RuntimeError("template bytes changed")
+    (args.output / "measurements.json").write_text(json.dumps({"copies": results,
+        "template_sha256_before": before, "template_sha256_after": after,
+        "source_random": source_random.group(1)}, indent=2))
+    print(f"ACCEPTANCE PASS copies={len(results)} template_sha256={before} source_random=distinct", flush=True)
+
 try:
     ready()
+    if args.single_template_copies:
+        single_template_copies()
+        raise SystemExit(0)
     last = None
     for cpus in (1, 4, 8):
         for cycle in range(args.cycles):

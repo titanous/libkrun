@@ -201,6 +201,11 @@ int main(void)
         0x9182736455463728ULL,0xfedcba9876543210ULL}, restored[4]={0};
     __builtin_cpu_init();
     int wide_simd=__builtin_cpu_supports("avx2");
+    unsigned char source_random[32];
+    if(syscall(SYS_getrandom,source_random,sizeof(source_random),0)!=sizeof(source_random)) fail("source getrandom");
+    printf("CLONE SOURCE_RANDOM ");
+    for(unsigned int i=0;i<sizeof(source_random);i++) printf("%02x",source_random[i]);
+    printf("\n");
     detect_random_fault();
     pthread_t blocked_reader;
     int blocked_fault=block_random_read(&blocked_reader);
