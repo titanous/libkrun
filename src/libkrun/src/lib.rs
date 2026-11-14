@@ -2134,6 +2134,9 @@ impl Context {
                         vmm::vm_exit::VmExit::Shutdown { exit_code: 0 }
                     }
                     nitro_sandbox::runtime::Exit::Stopped => vmm::vm_exit::VmExit::Stopped,
+                    nitro_sandbox::runtime::Exit::Frozen => vmm::vm_exit::VmExit::Frozen {
+                        template_path: std::path::PathBuf::new(),
+                    },
                     nitro_sandbox::runtime::Exit::StatedReason {
                         code,
                         observed_micros,

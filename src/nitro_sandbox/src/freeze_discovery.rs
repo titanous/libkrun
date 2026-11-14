@@ -34,7 +34,7 @@ impl Discovery {
     }
     fn complete(&mut self) -> io::Result<()> {
         let line = String::from_utf8_lossy(&self.line);
-        self.memory.observe(&line)?;
+        self.memory.observe(line.trim_end_matches('\r'))?;
         if line.contains("NITRO_RECEIVER_RANGE reserved [0x70000000-0x701fffff]") {
             self.receiver_reserved = true;
         }
@@ -73,6 +73,14 @@ mod tests {
             .observe(b"\nNITRO_RECEIVER_RANGE reserved [0x70000000-0x701fffff]\n")
             .unwrap();
         assert!(discovery.receiver_reserved);
+    }
+    #[test]
+    fn accepts_serial_console_crlf_memory_lines() {
+        let mut discovery = Discovery::default();
+        discovery
+            .observe(b"[0]   node   0: [mem 0x0000000040000000-0x000000007f5fffff]\r\n")
+            .unwrap();
+        assert_eq!(discovery.memory.ranges(1 << 30).unwrap()[0].2, 0x3f600000);
     }
     #[test]
     fn refuses_conflicting_and_unaligned_control() {

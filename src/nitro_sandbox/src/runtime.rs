@@ -15,6 +15,7 @@ pub enum Exit {
     Stopped,
     Panic,
     LivenessExpired,
+    Frozen,
     StatedReason {
         code: u8,
         observed_micros: Option<u64>,
@@ -62,6 +63,8 @@ pub struct Runtime {
     console: crate::console::Console,
     heartbeat: Option<crate::heartbeat::Heartbeat>,
     stop_reason: Option<crate::stop_reason::StopReason>,
+    capture: Option<Box<dyn crate::capture::CaptureHandler>>,
+    accepted_capture: Option<crate::capture::AcceptedCapture>,
 }
 impl Runtime {
     pub fn new(
@@ -98,6 +101,8 @@ impl Runtime {
             console: Default::default(),
             heartbeat: None,
             stop_reason: None,
+            capture: None,
+            accepted_capture: None,
         })
     }
     pub fn duplicate_vm_descriptor(&self) -> io::Result<std::os::fd::OwnedFd> {
@@ -113,7 +118,14 @@ impl Runtime {
     pub fn set_heartbeat(&mut self, heartbeat: crate::heartbeat::Heartbeat) {
         self.heartbeat = Some(heartbeat);
     }
-    pub fn set_console(&mut self, console: crate::console::Console) {
+    pub fn set_capture_handler(&mut self, handler: Box<dyn crate::capture::CaptureHandler>) {
+        self.capture = Some(handler);
+        self.console.enable_freeze_discovery();
+    }
+    pub fn set_console(&mut self, mut console: crate::console::Console) {
+        if self.capture.is_some() {
+            console.enable_freeze_discovery();
+        }
         self.console = console;
     }
     pub fn set_stop_event(&mut self, stop: Arc<utils::eventfd::EventFd>) {
@@ -201,9 +213,87 @@ impl Runtime {
         Ok(())
     }
 
+    fn poll_capture(&mut self) -> io::Result<bool> {
+        use vm_memory::{Bytes, GuestAddress, GuestMemory};
+        if self.capture.is_none() {
+            return Ok(false);
+        }
+        let Some(discovery) = self.console.freeze_discovery() else {
+            return Ok(false);
+        };
+        let Some(control) = discovery.control else {
+            return Ok(false);
+        };
+        if !discovery.receiver_reserved {
+            return Err(io::Error::other("clone receiver reservation missing"));
+        }
+        // SAFETY: used only within this call; queue workers must be reset before
+        // capture preparation below, and only the control word is read first.
+        let memory = unsafe { self.sandbox.owned_guest_memory(&discovery.memory)? };
+        if !memory.check_range(
+            GuestAddress(control),
+            4096,
+            vm_memory::Permissions::ReadWrite,
+        ) {
+            return Err(io::Error::other("freeze control outside owned RAM"));
+        }
+        let offset = if control < 0x80000000 {
+            control - 0x40000000
+        } else {
+            control - 0x400000000 + 0x40000000
+        };
+        let pointer = (self.sandbox.ram.address() + offset) as *mut u64;
+        if unsafe { pointer.read_volatile() } != crate::cooperative::FROZEN_MAGIC
+            || unsafe { pointer.add(1).read_volatile() } != 0
+        {
+            return Ok(false);
+        }
+        std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+        let prepared = (|| {
+            for transport in &self.transports {
+                if !transport.is_reset(&self.sandbox)? {
+                    return Err(io::Error::other("capture requires every device reset"));
+                }
+            }
+            let mut page = [0; 4096];
+            memory
+                .read_slice(&mut page, GuestAddress(control))
+                .map_err(io::Error::other)?;
+            crate::cooperative::ResumeEntry::parse(&page, |gpa, len| {
+                usize::try_from(len).is_ok_and(|len| {
+                    memory.check_range(GuestAddress(gpa), len, vm_memory::Permissions::ReadWrite)
+                })
+            })?;
+            self.capture.as_mut().unwrap().prepare(&memory, control)
+        })();
+        match prepared {
+            Ok(Some(pending)) => {
+                if let Some(accepted) = crate::capture::AcceptedCapture::decide(pending) {
+                    self.accepted_capture = Some(accepted);
+                    return Ok(true);
+                }
+            }
+            Ok(None) => {}
+            Err(error) => self.capture.as_mut().unwrap().failed(error),
+        }
+        // Refusal remains reversible: existing arm64 release resumes in place.
+        std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
+        unsafe {
+            pointer.add(1).write_volatile(1);
+        }
+        Ok(false)
+    }
+
     pub fn run(mut self) -> io::Result<Exit> {
         let result = self.run_inner();
         let cleanup = self.shutdown();
+        let accepted = self.accepted_capture.take();
+        drop(self);
+        if cleanup.is_ok() {
+            if let Some(accepted) = accepted {
+                accepted.source_closed();
+            }
+        }
         match (result, cleanup) {
             (Err(error), _) | (_, Err(error)) => Err(error),
             (Ok(exit), Ok(())) => Ok(exit),
@@ -290,6 +380,9 @@ impl Runtime {
                 watchdog.devices_ready();
             }
             self.sandbox.drain_console(&mut self.console)?;
+            if self.poll_capture()? {
+                return Ok(Exit::Frozen);
+            }
             if self.stop_reason.is_none() && self.console.panic_seen() {
                 return Ok(Exit::Panic);
             }

@@ -307,8 +307,9 @@ impl Sandbox {
     /// Build a capture view restricted to boot-reported guest-owned extents.
     ///
     /// # Safety
-    /// The caller must stop all device workers and keep this Sandbox alive until
-    /// every returned memory clone is dropped. Guest freeze must remain held.
+    /// Keep this Sandbox alive until every returned memory clone is dropped.
+    /// Snapshot reads require guest freeze and stopped device workers. While
+    /// running, use only the kernel control publication's volatile protocol.
     #[cfg(feature = "devices")]
     pub unsafe fn owned_guest_memory(
         &self,
