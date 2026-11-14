@@ -1134,7 +1134,7 @@ pub fn build_microvm(
         cooperative_topology: if vm_resources.cooperative_capture.is_some()
             || vm_resources.cooperative_template.is_some()
         {
-            crate::template_topology::encode(&vm_resources, &_shm_manager)
+            crate::template_topology::encode(vm_resources, &_shm_manager)
                 .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?
         } else {
             Vec::new()

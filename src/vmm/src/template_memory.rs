@@ -39,7 +39,7 @@ pub fn map(file: &File, offset: u64, size: usize, private: bool) -> io::Result<M
     let end = offset
         .checked_add(size as u64)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "RAM extent overflow"))?;
-    if size == 0 || offset % 4096 != 0 || end > file.metadata()?.len() {
+    if size == 0 || !offset.is_multiple_of(4096) || end > file.metadata()?.len() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "invalid RAM extent",
