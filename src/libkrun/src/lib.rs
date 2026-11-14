@@ -6,7 +6,17 @@ mod readiness;
 pub use readiness::{GuestReadiness, GuestReadyTimeout};
 
 /// A cooperative template descriptor or owner-only persisted file.
-#[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
+#[cfg(all(
+    not(feature = "tee"),
+    any(
+        target_arch = "x86_64",
+        all(
+            target_os = "linux",
+            target_arch = "aarch64",
+            feature = "nitro-sandbox"
+        )
+    )
+))]
 pub enum TemplateSource {
     Descriptor(std::fs::File),
     Path(std::path::PathBuf),
@@ -702,7 +712,17 @@ impl Builder {
     /// rule, disk snapshot declarations, CID and identifiers in one operation.
     /// The returned deadline starts now, including subsequent build time.
     /// Mark it ready only after validating the new agent's identity/generation.
-    #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
+    #[cfg(all(
+        not(feature = "tee"),
+        any(
+            target_arch = "x86_64",
+            all(
+                target_os = "linux",
+                target_arch = "aarch64",
+                feature = "nitro-sandbox"
+            )
+        )
+    ))]
     pub fn start_from_template(
         &mut self,
         source: TemplateSource,
@@ -724,14 +744,34 @@ impl Builder {
 
     /// Start a new VM over a sealed template descriptor. Configure the same
     /// device list in the same order, with independent writable disk backends.
-    #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
+    #[cfg(all(
+        not(feature = "tee"),
+        any(
+            target_arch = "x86_64",
+            all(
+                target_os = "linux",
+                target_arch = "aarch64",
+                feature = "nitro-sandbox"
+            )
+        )
+    ))]
     pub fn start_from_template_fd(&mut self, file: std::fs::File) -> std::io::Result<&mut Self> {
         self.config.vmr.cooperative_template = Some(vmm::template::Template::open(file)?);
         Ok(self)
     }
 
     /// Load a persisted template into immutable backing before starting a VM.
-    #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
+    #[cfg(all(
+        not(feature = "tee"),
+        any(
+            target_arch = "x86_64",
+            all(
+                target_os = "linux",
+                target_arch = "aarch64",
+                feature = "nitro-sandbox"
+            )
+        )
+    ))]
     pub fn start_from_template_path(
         &mut self,
         path: impl AsRef<std::path::Path>,
@@ -1309,8 +1349,15 @@ impl Builder {
 
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     fn build_nitro(mut self, options: NitroBackendConfig) -> Result<Context, StartError> {
+        #[cfg(target_arch = "aarch64")]
+        if self.nitro_capture.is_some() && self.config.vmr.cooperative_template.is_some() {
+            return Err(StartError::Nitro(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "template capture and restore are mutually exclusive",
+            )));
+        }
         #[cfg(all(target_arch = "aarch64", not(feature = "tee")))]
-        if self.nitro_capture.is_some()
+        if (self.nitro_capture.is_some() || self.config.vmr.cooperative_template.is_some())
             && (self.nitro_device_count_before_consoles()
                 != u32::from(!matches!(self.config.vsock_config, VsockConfig::Disabled))
                 || self.console_count != 0
@@ -1439,6 +1486,22 @@ impl Builder {
         let memory_mib = config.mem_size_mib.unwrap_or(1024);
         #[cfg(target_arch = "aarch64")]
         let capture_vcpus = config.vcpu_count.unwrap_or(1);
+        #[cfg(target_arch = "aarch64")]
+        if let Some(template) = &self.config.vmr.cooperative_template {
+            let topology: &[u8] = if capture_has_vsock {
+                b"nitro-vsock-v1"
+            } else {
+                b"nitro-no-devices-v1"
+            };
+            vmm::nitro_restore::validate(
+                template,
+                capture_vcpus,
+                memory_mib as u64,
+                topology,
+                &template.compatibility,
+            )
+            .map_err(StartError::Nitro)?;
+        }
         if memory_mib < 64 || !memory_mib.is_multiple_of(2) || options.watchdog.is_zero() {
             return Err(StartError::Nitro(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
@@ -1575,6 +1638,32 @@ impl Builder {
             runtime.enable_stop_reason().map_err(StartError::Nitro)?;
         }
         #[cfg(target_arch = "aarch64")]
+        if let Some(template) = self.config.vmr.cooperative_template.take() {
+            let topology = if capture_has_vsock {
+                b"nitro-vsock-v1".to_vec()
+            } else {
+                b"nitro-no-devices-v1".to_vec()
+            };
+            let compatibility = template.compatibility.clone();
+            vmm::nitro_restore::validate(
+                &template,
+                capture_vcpus,
+                memory_mib as u64,
+                &topology,
+                &compatibility,
+            )
+            .map_err(StartError::Nitro)?;
+            runtime
+                .set_restore_handler(Box::new(vmm::nitro_restore::NitroRestore {
+                    template,
+                    vcpus: capture_vcpus,
+                    ram_mib: memory_mib as u64,
+                    topology,
+                    compatibility,
+                }))
+                .map_err(StartError::Nitro)?;
+        }
+        #[cfg(target_arch = "aarch64")]
         if let Some(request) = &self.nitro_capture {
             runtime.set_capture_handler(Box::new(vmm::nitro_capture::NitroCapture {
                 request: request.clone(),
@@ -1692,10 +1781,12 @@ impl Builder {
             target_arch = "aarch64",
             feature = "nitro-sandbox"
         ))]
-        if self.nitro_capture.is_some() && self.nitro.is_none() {
+        if (self.nitro_capture.is_some() || self.config.vmr.cooperative_template.is_some())
+            && self.nitro.is_none()
+        {
             return Err(StartError::Configuration(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
-                "arm64 cooperative capture requires Nitro backend",
+                "arm64 cooperative templates require Nitro backend",
             )));
         }
         if let Some(error) = self.configuration_error.take() {
