@@ -1530,7 +1530,20 @@ impl Vcpu {
                     self.exit_evt
                         .write(1)
                         .expect("failed to signal cooperative freeze");
-                    return StateMachine::next(Self::exited);
+                    match self.event_receiver.recv() {
+                        Ok(VcpuEvent::FreezeRejected(error)) => {
+                            let mut regs = match self.fd.get_regs() {
+                                Ok(regs) => regs,
+                                Err(_) => return self.exit(FC_EXIT_CODE_GENERIC_ERROR),
+                            };
+                            regs.rax = error as i64 as u64;
+                            if self.fd.set_regs(&regs).is_err() {
+                                return self.exit(FC_EXIT_CODE_GENERIC_ERROR);
+                            }
+                            return StateMachine::next(Self::running);
+                        }
+                        _ => return StateMachine::next(Self::exited),
+                    }
                 }
                 // Emulation errors lead to vCPU exit.
                 Err(_) => return self.exit(FC_EXIT_CODE_GENERIC_ERROR),
@@ -1567,6 +1580,10 @@ impl Vcpu {
                     .send(VcpuResponse::Resumed)
                     .expect("failed to send resume status");
             }
+            Ok(VcpuEvent::FreezeAccepted) => {
+                state = StateMachine::next(Self::exited);
+            }
+            Ok(VcpuEvent::FreezeRejected(_)) => (),
             // Unhandled exit of the other end.
             Err(TryRecvError::Disconnected) => {
                 // Move to 'exited' state.
@@ -1666,6 +1683,10 @@ pub enum VcpuEvent {
     Pause,
     /// Event that should resume the Vcpu.
     Resume,
+    /// Recover a cooperatively paused source with a negative errno.
+    FreezeRejected(i32),
+    /// Commit the source's terminal frozen state.
+    FreezeAccepted,
 }
 
 #[derive(Debug)]

@@ -71,7 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var_os("CLONE_HVC_CONSOLE").is_some() {
         builder.add_kernel_cmdline_args(&["console=hvc0"]);
     }
-    if args[1] == "freeze" {
+    if args[1] == "freeze" || args[1] == "refuse" {
         builder.capture_cooperative_template(control, PathBuf::from(&args[2]));
     } else if args[1] == "resume" {
         builder.start_from_template_path(&args[2])?;
@@ -87,7 +87,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("COOPERATIVE HOST result={result:?}");
     match (args[1].as_str(), result) {
         ("freeze", krun::VmExit::Frozen { .. }) => Ok(()),
-        ("resume" | "resume-fd", krun::VmExit::Shutdown { exit_code: 0 }) => Ok(()),
+        ("resume" | "resume-fd" | "refuse", krun::VmExit::Shutdown { exit_code: 0 }) => Ok(()),
         _ => Err("unexpected VM exit".into()),
     }
 }

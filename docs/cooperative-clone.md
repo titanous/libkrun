@@ -20,11 +20,14 @@ and enter the kernel's saved continuation over private file-backed RAM.
    suspends consoles, invokes device FREEZE callbacks, offlines secondary CPUs,
    disables interrupts and suspends syscore devices. It saves processor context,
    publishes the page, then writes byte 1 to I/O port `0xe5`.
-4. Only BSP may emit that exit. The VMM parks it terminally, stops/joins all vCPU
-   threads, checks virtio transports have no active backend or DRIVER_OK queues,
+4. Only BSP may emit that exit. The VMM parks it pending an acceptance decision,
+   checks virtio transports have no active backend or DRIVER_OK queues,
    validates the page, saves KVM clock nanoseconds and copies RAM extents into a
-   sealed memfd. It exports a create-new disk image and returns
-   `VmExit::Frozen { template_path }`. Failed validation never publishes a template.
+   sealed memfd. It exports a create-new disk image before accepting capture.
+   On refusal the VMM returns a negative errno in RAX; the x86 hook restores
+   processor state and the generic core recovers devices and thaws tasks through
+   PMSG_RECOVER. On acceptance it stops/joins all vCPU threads permanently and
+   returns `VmExit::Frozen { template_path }`. An accepted source never runs again.
 5. Configure the same vCPUs, RAM size and devices, using independent writable
    disk children and fresh vsock/console backends. Call
    `start_from_template_fd(sealed_file)` or `start_from_template_path(path)`.

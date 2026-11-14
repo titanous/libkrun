@@ -496,8 +496,6 @@ impl Subscriber for Vmm {
                         .unwrap()
                         .as_nanos()
                 );
-                self.vcpu_exit_flag.store(true, Ordering::Release);
-                self.vcpus_handles.clear(); // joins every vCPU before reading RAM
                 let result = (|| -> std::io::Result<std::path::PathBuf> {
                     let (control, path, vcpus, ram_mib) =
                         self.cooperative_capture.as_ref().ok_or_else(|| {
@@ -534,12 +532,22 @@ impl Subscriber for Vmm {
                     template.write_to_path(path)?;
                     Ok(path.clone())
                 })();
-                self.stop(match result {
-                    Ok(template_path) => crate::vm_exit::VmExit::Frozen { template_path },
-                    Err(error) => crate::vm_exit::VmExit::Error {
-                        message: error.to_string(),
-                    },
-                });
+                let template_path = match result {
+                    Ok(path) => path,
+                    Err(error) => {
+                        warn!("cooperative freeze refused: {error}");
+                        if let Some(cpu) = self.vcpus_handles.first() {
+                            let _ = cpu.send_event(VcpuEvent::FreezeRejected(-libc::EINVAL));
+                        }
+                        return;
+                    }
+                };
+                for cpu in &self.vcpus_handles {
+                    let _ = cpu.send_event(VcpuEvent::FreezeAccepted);
+                }
+                self.vcpu_exit_flag.store(true, Ordering::Release);
+                self.vcpus_handles.clear();
+                self.stop(crate::vm_exit::VmExit::Frozen { template_path });
                 return;
             }
             #[cfg(not(target_arch = "x86_64"))]
