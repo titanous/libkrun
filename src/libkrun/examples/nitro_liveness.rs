@@ -41,7 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let exit = context.run()?;
     let elapsed = start.elapsed().as_secs_f64();
     if args[3] == "panic" {
-        assert_eq!(exit, VmExit::GuestPanic);
+        assert_eq!(exit, VmExit::Panic);
     } else {
         assert_eq!(exit, VmExit::LivenessExpired);
     }

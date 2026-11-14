@@ -1969,20 +1969,13 @@ impl Context {
             return runtime
                 .run()
                 .map(|exit| match exit {
-                    nitro_sandbox::runtime::Exit::PowerOff => {
-                        vmm::vm_exit::VmExit::Shutdown { exit_code: 0 }
-                    }
+                    nitro_sandbox::runtime::Exit::PowerOff => vmm::vm_exit::VmExit::Fault,
                     nitro_sandbox::runtime::Exit::Stopped => vmm::vm_exit::VmExit::Stopped,
-                    nitro_sandbox::runtime::Exit::StatedReason {
-                        code,
-                        observed_micros,
-                    } => vmm::vm_exit::VmExit::Error {
-                        message: format!(
-                            "Nitro stated terminal reason {code} observed_micros={observed_micros:?}"
-                        ),
-                    },
+                    nitro_sandbox::runtime::Exit::StatedReason { code, .. } => {
+                        vmm::vm_exit::VmExit::from_stated_reason(code)
+                    }
                     nitro_sandbox::runtime::Exit::Watchdog => vmm::vm_exit::VmExit::DeviceWatchdog,
-                    nitro_sandbox::runtime::Exit::Panic => vmm::vm_exit::VmExit::GuestPanic,
+                    nitro_sandbox::runtime::Exit::Panic => vmm::vm_exit::VmExit::Panic,
                     nitro_sandbox::runtime::Exit::LivenessExpired => {
                         vmm::vm_exit::VmExit::LivenessExpired
                     }

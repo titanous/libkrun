@@ -21,6 +21,8 @@ pub mod resources;
 /// Signal handling utilities.
 #[cfg(target_os = "linux")]
 pub mod signal_handler;
+#[cfg(target_arch = "x86_64")]
+pub mod stop_reason;
 /// VM exit reasons and shared exit state.
 pub mod vm_exit;
 /// Wrappers over structures used to configure the VMM.
@@ -475,6 +477,15 @@ impl Subscriber for Vmm {
             }
 
             let vm_exit = resolve_vm_exit(vcpu_exit_code, vmm_exit_code);
+            #[cfg(target_arch = "x86_64")]
+            let vm_exit = crate::vm_exit::VmExit::resolve(
+                vm_exit,
+                (vmm_exit_code != i32::MAX).then_some(vmm_exit_code),
+                self.pio_device_manager
+                    .stop_reason
+                    .0
+                    .load(Ordering::Acquire),
+            );
             self.stop(vm_exit);
         } else {
             error!("Spurious EventManager event for handler: Vmm");
@@ -494,20 +505,19 @@ impl Subscriber for Vmm {
 /// the correct VmExit variant based on vCPU exit code and VMM exit code.
 /// Tests call this same function to verify the dispatch logic.
 pub(crate) fn resolve_vm_exit(vcpu_exit_code: u8, vmm_exit_code: i32) -> crate::vm_exit::VmExit {
-    if vcpu_exit_code == FC_EXIT_CODE_REBOOT {
-        crate::vm_exit::VmExit::RebootRequested
-    } else if vcpu_exit_code == FC_EXIT_CODE_GENERIC_ERROR {
+    let terminal = if vcpu_exit_code == FC_EXIT_CODE_GENERIC_ERROR {
         crate::vm_exit::VmExit::Error {
             message: "vCPU fatal error".into(),
         }
     } else {
-        let exit_code = if vmm_exit_code != i32::MAX {
-            vmm_exit_code
-        } else {
-            vcpu_exit_code as i32
-        };
-        crate::vm_exit::VmExit::Shutdown { exit_code }
-    }
+        // Reset, PSCI events and terminal faults do not establish guest intent.
+        crate::vm_exit::VmExit::Fault
+    };
+    crate::vm_exit::VmExit::resolve(
+        terminal,
+        (vmm_exit_code != i32::MAX).then_some(vmm_exit_code),
+        0,
+    )
 }
 
 #[cfg(test)]
@@ -547,7 +557,7 @@ mod tests {
     #[test]
     fn test_shutdown_with_zero_exit_code() {
         let vm_exit = resolve_vm_exit(FC_EXIT_CODE_OK, i32::MAX);
-        assert_eq!(vm_exit, crate::vm_exit::VmExit::Shutdown { exit_code: 0 });
+        assert_eq!(vm_exit, crate::vm_exit::VmExit::Fault);
     }
 
     /// Test vm-exit.AC1.2: Guest-set exit code is returned in Shutdown variant
@@ -562,7 +572,7 @@ mod tests {
     #[test]
     fn test_reboot_requested() {
         let vm_exit = resolve_vm_exit(FC_EXIT_CODE_REBOOT, i32::MAX);
-        assert_eq!(vm_exit, crate::vm_exit::VmExit::RebootRequested);
+        assert_eq!(vm_exit, crate::vm_exit::VmExit::Fault);
     }
 
     /// Test vm-exit.AC2.1: vCPU fatal errors return Error variant

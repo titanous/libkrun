@@ -39,6 +39,7 @@ type Result<T> = ::std::result::Result<T, Error>;
 /// The `LegacyDeviceManger` should be initialized only by using the constructor.
 pub struct PortIODeviceManager {
     pub io_bus: devices::Bus,
+    pub stop_reason: Arc<crate::stop_reason::StopReason>,
     pub cmos: Arc<Mutex<devices::legacy::Cmos>>,
     pub stdio_serial: Vec<Arc<Mutex<devices::legacy::Serial>>>,
     pub i8042: Arc<Mutex<devices::legacy::I8042Device>>,
@@ -81,6 +82,7 @@ impl PortIODeviceManager {
 
         Ok(PortIODeviceManager {
             io_bus,
+            stop_reason: Arc::new(crate::stop_reason::StopReason::default()),
             cmos,
             stdio_serial,
             i8042,
@@ -94,6 +96,15 @@ impl PortIODeviceManager {
 
     /// Register supported legacy devices.
     pub fn register_devices(&mut self) -> Result<()> {
+        self.io_bus
+            .insert(
+                Arc::new(Mutex::new(crate::stop_reason::StopReasonDevice(
+                    self.stop_reason.clone(),
+                ))),
+                crate::stop_reason::STOP_REASON_PORT,
+                1,
+            )
+            .map_err(Error::BusError)?;
         self.io_bus
             .insert(self.cmos.clone(), 0x70, 0x8)
             .map_err(Error::BusError)?;
