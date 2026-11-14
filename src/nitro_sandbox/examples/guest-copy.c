@@ -27,6 +27,7 @@ int main(void) {
     for (size_t i = 0; i < count; i++) memory[i] = nonce ^ (i * 0x9e3779b97f4a7c15ULL);
     printf("COPY_SOURCE nonce=%016lx\n", nonce);
     usleep(100000);
+    printf("COPY_FREEZE_BEGIN\n");
     fd = open("/sys/power/nitro_freeze", O_WRONLY);
     if (fd < 0 || write(fd, "1", 1) != 1) { perror("freeze"); return 4; }
     close(fd);
@@ -35,7 +36,7 @@ int main(void) {
     if (getrandom(&fresh, sizeof(fresh), 0) != sizeof(fresh)) return 5;
     struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
     printf("COPY_VERIFY ok=%d bad=%zu nonce=%016lx random=%016lx realtime=%ld.%09ld\n", bad == 0, bad, nonce, fresh, ts.tv_sec, ts.tv_nsec);
-    sleep(1);
+    sleep(5);
     reboot(RB_POWER_OFF);
     return 0;
 }

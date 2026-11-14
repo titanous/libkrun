@@ -4,12 +4,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.len() != 4 {
         return Err("usage: copy-image Image initramfs output.eif".into());
     }
+    let cpus = std::env::var("COPY_CPUS")
+        .unwrap_or_else(|_| "1".into())
+        .parse()?;
+    let memory = std::env::var("COPY_MEMORY_MIB")
+        .unwrap_or_else(|_| "1024".into())
+        .parse()?;
+    let initramfs = if args[2] == "-" {
+        None
+    } else {
+        Some(std::fs::read(&args[2])?)
+    };
     let image = nitro_sandbox::image::package(
         &std::fs::read(&args[1])?,
-        Some(&std::fs::read(&args[2])?),
+        initramfs.as_deref(),
         b"console=ttyS0 nokaslr panic=-1 rdinit=/init",
-        1024,
-        1,
+        memory,
+        cpus,
     )?;
     std::fs::write(&args[3], image)?;
     Ok(())
