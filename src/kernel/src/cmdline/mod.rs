@@ -100,6 +100,14 @@ impl Cmdline {
         }
     }
 
+    /// Insert a flag before an unquoted init-argument separator.
+    pub fn insert_kernel_argument(&mut self, argument: &str) -> Result<()> {
+        valid_element(argument)?;
+        self.has_capacity(argument.len())?;
+        self.push_kernel_argument(argument);
+        Ok(())
+    }
+
     fn push_kernel_argument(&mut self, argument: &str) {
         let mut quoted = false;
         let mut separator = None;
@@ -187,6 +195,18 @@ impl Cmdline {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn template_flag_precedes_unquoted_separator() {
+        let mut line = Cmdline::new(256);
+        line.insert_str("console=ttyS0 name=\"--\" -- agent-arg")
+            .unwrap();
+        line.insert_kernel_argument("cooperative_template").unwrap();
+        assert_eq!(
+            line.as_str(),
+            "console=ttyS0 name=\"--\" cooperative_template -- agent-arg"
+        );
+    }
 
     #[test]
     fn kernel_arguments_precede_init_separator() {

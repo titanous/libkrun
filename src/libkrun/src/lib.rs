@@ -513,6 +513,83 @@ pub use nitro_sandbox::lifecycle::{
     Serialization as NitroSerialization, LIFECYCLE_LOCK_PATH as NITRO_LIFECYCLE_LOCK_PATH,
 };
 
+#[cfg(all(
+    target_os = "linux",
+    target_arch = "aarch64",
+    feature = "nitro-sandbox"
+))]
+pub use nitro_sandbox::runtime::ParkedReceiverError;
+
+/// Why a Nitro template was refused for a receiver (CPU count, memory size,
+/// device list or receiver kernel identity), before any receiver memory is
+/// written. Carried inside the `std::io::Error` (`InvalidInput`).
+#[cfg(all(
+    target_os = "linux",
+    target_arch = "aarch64",
+    feature = "nitro-sandbox"
+))]
+pub use vmm::nitro_restore::RestoreMismatch;
+
+#[cfg(all(
+    target_os = "linux",
+    target_arch = "aarch64",
+    feature = "nitro-sandbox"
+))]
+pub use vmm::capture_request::RestoredCopyCaptureUnsupported;
+
+/// Gives a parked Nitro receiver its template, once. See
+/// `Builder::park_for_template`.
+#[cfg(all(
+    target_os = "linux",
+    target_arch = "aarch64",
+    feature = "nitro-sandbox"
+))]
+pub struct TemplateAssignment {
+    slot: nitro_sandbox::runtime::RestoreAssignment,
+    vcpus: u8,
+    ram_mib: u64,
+    topology: Vec<u8>,
+}
+#[cfg(all(
+    target_os = "linux",
+    target_arch = "aarch64",
+    feature = "nitro-sandbox"
+))]
+impl TemplateAssignment {
+    /// Open and check the template against this receiver's CPU count, memory
+    /// and device list, then hand it over. The receiver's own kernel identity
+    /// is compared before any memory is written. Refused with a
+    /// `ParkedReceiverError::Closed` error after an assignment, expiry or end
+    /// (checked first, whatever the template); a template that does not fit
+    /// is refused with `RestoreMismatch` and the receiver stays parked.
+    pub fn assign(&self, source: TemplateSource) -> std::io::Result<()> {
+        self.slot.check_open()?;
+        let template = match source {
+            TemplateSource::Descriptor(file) => vmm::template::Template::open(file)?,
+            TemplateSource::Path(path) => vmm::template::Template::from_path(path)?,
+        };
+        let compatibility = template.compatibility.clone();
+        vmm::nitro_restore::validate(
+            &template,
+            self.vcpus,
+            self.ram_mib,
+            &self.topology,
+            &compatibility,
+        )?;
+        self.slot.assign(Box::new(vmm::nitro_restore::NitroRestore {
+            template,
+            vcpus: self.vcpus,
+            ram_mib: self.ram_mib,
+            topology: self.topology.clone(),
+            compatibility,
+        }))
+    }
+    /// True once the parked receiver has booted and published READY.
+    pub fn receiver_ready(&self) -> bool {
+        self.slot.receiver_ready()
+    }
+}
+
 #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
 pub struct NitroBackendConfig {
     pub image: PathBuf,
@@ -542,12 +619,25 @@ pub struct Builder {
     nitro_console_base: Option<u32>,
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     nitro_selected_after_consoles: bool,
+    #[cfg(all(
+        target_os = "linux",
+        target_arch = "aarch64",
+        feature = "nitro-sandbox"
+    ))]
+    nitro_capture: Option<vmm::capture_request::CaptureRequest>,
+    #[cfg(all(
+        target_os = "linux",
+        target_arch = "aarch64",
+        feature = "nitro-sandbox"
+    ))]
+    nitro_park: Option<std::time::Duration>,
     config: ContextConfig,
     kernel_cmdline: Vec<String>,
     kernel_cmdline_configured: bool,
     configuration_error: Option<std::io::Error>,
     extra_kernel_args: Vec<String>,
     socket_policy: SocketPolicy,
+    guest_vsock_cid: Option<u32>,
     /// Number of console devices added (for computing device paths)
     console_count: u32,
 }
@@ -647,6 +737,18 @@ impl Builder {
         self
     }
 
+    /// Select the guest-visible userspace-vsock CID (default 3). Copies need fresh CIDs.
+    pub fn vsock_cid(&mut self, cid: u32) -> std::io::Result<&mut Self> {
+        if cid <= 2 || cid == u32::MAX {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "guest vsock CID is reserved",
+            ));
+        }
+        self.guest_vsock_cid = Some(cid);
+        Ok(self)
+    }
+
     /// Disable internet socket forwarding without disabling mapped vsock ports.
     pub fn internet_socket_forwarding(&mut self, enabled: bool) -> &mut Self {
         self.socket_policy.internet_enabled = enabled;
@@ -724,6 +826,32 @@ impl Builder {
         }
         configure(self)?;
         Ok(readiness)
+    }
+
+    /// Nitro arm64 only: build a receiving VM that boots its parked receiver
+    /// before any template is chosen. Configure the shape and the same device
+    /// list, in the same order, that the template's source used; backends stay
+    /// idle until release. Take the handle with
+    /// `Context::take_template_assignment` and give it a template later.
+    ///
+    /// The receiver starts during `build()` and runs in its own thread, so its
+    /// life is bounded from build whether or not `run` is called: `wait`
+    /// counts from build and bounds assignment and release. On expiry the VM
+    /// is torn down under the configured lifecycle lock (slot and pool memory
+    /// released) and `run` returns a `TimedOut` error carrying
+    /// `ParkedReceiverError::Expired`. Dropping the handle unassigned ends it
+    /// the same way with `Abandoned`; dropping the context stops it and waits
+    /// for its teardown. `run` waits for the end. Hand the VM descriptor to a
+    /// daemon with `nitro_descriptor_handoff` (duplicating after build is
+    /// refused, because the VM is already running).
+    #[cfg(all(
+        target_os = "linux",
+        target_arch = "aarch64",
+        feature = "nitro-sandbox"
+    ))]
+    pub fn park_for_template(&mut self, wait: std::time::Duration) -> &mut Self {
+        self.nitro_park = Some(wait);
+        self
     }
 
     /// Start a new VM over a sealed template descriptor. Configure the same
@@ -1338,6 +1466,43 @@ impl Builder {
 
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     fn build_nitro(mut self, options: NitroBackendConfig) -> Result<Context, StartError> {
+        #[cfg(target_arch = "aarch64")]
+        if self.config.vmr.cooperative_capture.is_some() {
+            self.nitro_capture = Some(vmm::capture_request::CaptureRequest::default());
+        }
+        #[cfg(target_arch = "aarch64")]
+        if self.nitro_capture.is_some() && self.config.vmr.cooperative_template.is_some() {
+            return Err(StartError::Nitro(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "template capture and restore are mutually exclusive",
+            )));
+        }
+        #[cfg(target_arch = "aarch64")]
+        if self.nitro_park.is_some()
+            && (self.nitro_capture.is_some() || self.config.vmr.cooperative_template.is_some())
+        {
+            return Err(StartError::Nitro(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "a parked receiver cannot also capture or take a template at build",
+            )));
+        }
+        #[cfg(all(target_arch = "aarch64", not(feature = "tee")))]
+        if (self.nitro_capture.is_some()
+            || self.config.vmr.cooperative_template.is_some()
+            || self.nitro_park.is_some())
+            && (self.console_count != 0
+                || self
+                    .config
+                    .vmr
+                    .fs
+                    .iter()
+                    .any(|mount| mount.shm_size.is_some_and(|size| size != 0)))
+        {
+            return Err(StartError::Nitro(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Nitro template device manifest integration is not available yet",
+            )));
+        }
         let unsupported = || {
             StartError::Nitro(std::io::Error::new(std::io::ErrorKind::Unsupported, "unsupported on this backend: Nitro supports EIF boot with block, userspace vsock and custom console ports only"))
         };
@@ -1452,6 +1617,19 @@ impl Builder {
         };
         let config = self.config.vmr.vm_config();
         let memory_mib = config.mem_size_mib.unwrap_or(1024);
+        #[cfg(target_arch = "aarch64")]
+        let capture_vcpus = config.vcpu_count.unwrap_or(1);
+        #[cfg(target_arch = "aarch64")]
+        if let Some(template) = &self.config.vmr.cooperative_template {
+            vmm::nitro_restore::validate(
+                template,
+                capture_vcpus,
+                memory_mib as u64,
+                &template.topology,
+                &template.compatibility,
+            )
+            .map_err(StartError::Nitro)?;
+        }
         if memory_mib < 64 || !memory_mib.is_multiple_of(2) || options.watchdog.is_zero() {
             return Err(StartError::Nitro(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
@@ -1467,12 +1645,20 @@ impl Builder {
             }
             let mut args = self.kernel_cmdline.clone();
             args.extend(self.extra_kernel_args.iter().cloned());
-            // The guest kernel's socket-forwarding switches, as the KVM builder inserts them.
-            let cmdline = nitro_cmdline(&args, self.nitro_tsi_flags());
+            let forwarded_args = nitro_cmdline(&args, self.nitro_tsi_flags());
+            let mut cmdline = kernel::cmdline::Cmdline::new(65536);
+            cmdline
+                .insert_str(forwarded_args)
+                .map_err(|e| StartError::Nitro(std::io::Error::other(format!("{e:?}"))))?;
+            if self.config.vmr.cooperative_capture.is_some() {
+                cmdline
+                    .insert_kernel_argument("cooperative_template")
+                    .map_err(|e| StartError::Nitro(std::io::Error::other(format!("{e:?}"))))?;
+            }
             let (file, _) = nitro_sandbox::image::cached_files(
                 &kernel.path,
                 kernel.initramfs_path.as_deref(),
-                cmdline.as_bytes(),
+                cmdline.as_str().as_bytes(),
                 memory_mib as u64 * 1024 * 1024,
                 u64::from(config.vcpu_count.unwrap_or(1)),
                 self.nitro_image_cache.as_deref(),
@@ -1492,6 +1678,18 @@ impl Builder {
             console_ports: Vec::new(),
             vcpu_count: config.vcpu_count.unwrap_or(1),
             ram_mib: config.mem_size_mib.unwrap_or(1024) as u32,
+        };
+        #[cfg(target_arch = "aarch64")]
+        let template_enabled = self.nitro_capture.is_some()
+            || self.config.vmr.cooperative_template.is_some()
+            || self.nitro_park.is_some();
+        #[cfg(target_arch = "aarch64")]
+        let mut template_topology = {
+            let mut bytes = b"nitro-devices-v2".to_vec();
+            bytes.extend_from_slice(
+                &(self.nitro_device_count_before_consoles() as u64).to_le_bytes(),
+            );
+            bytes
         };
         let mut console_id = self.nitro_device_count_before_consoles();
         let handoff = self.nitro_descriptor_handoff.take();
@@ -1521,6 +1719,15 @@ impl Builder {
             let block = Arc::new(Mutex::new(
                 vmm::vmm_config::block::BlockBuilder::create_block(cfg)?,
             ));
+            #[cfg(target_arch = "aarch64")]
+            if template_enabled {
+                vmm::template_topology::encode_block(
+                    &mut template_topology,
+                    &block.lock().unwrap(),
+                    &self.config.vmr.template_disk_identities,
+                )
+                .map_err(StartError::Nitro)?;
+            }
             runtime.register_exit_observer(block.clone());
             runtime
                 .add_worker_device(block)
@@ -1535,11 +1742,27 @@ impl Builder {
                 flags,
                 self.socket_policy.clone(),
             )?;
+            #[cfg(target_arch = "aarch64")]
+            if template_enabled {
+                vmm::template_topology::encode_device(&mut template_topology, &vsock);
+            }
             runtime
                 .add_device(Arc::new(Mutex::new(vsock)))
                 .map_err(StartError::Nitro)?;
         }
         for mount in self.config.vmr.fs.drain(..) {
+            #[cfg(target_arch = "aarch64")]
+            if template_enabled {
+                if mount.tag.len() > 36 || mount.tag.as_bytes().contains(&0) {
+                    return Err(StartError::Nitro(std::io::Error::other(
+                        "invalid template filesystem tag",
+                    )));
+                }
+                template_topology.extend_from_slice(&(mount.tag.len() as u64).to_le_bytes());
+                template_topology.extend_from_slice(mount.tag.as_bytes());
+                template_topology
+                    .extend_from_slice(&(mount.shm_size.unwrap_or(0) as u64).to_le_bytes());
+            }
             let device = devices::virtio::Fs::new(
                 mount.tag,
                 mount.fs,
@@ -1548,6 +1771,10 @@ impl Builder {
             .map_err(|error| {
                 StartError::Nitro(std::io::Error::other(format!("virtio-fs: {error:?}")))
             })?;
+            #[cfg(target_arch = "aarch64")]
+            if template_enabled {
+                vmm::template_topology::encode_device(&mut template_topology, &device);
+            }
             runtime
                 .add_filesystem(device, mount.shm_size)
                 .map_err(StartError::Nitro)?;
@@ -1581,7 +1808,86 @@ impl Builder {
         if self.nitro_stop_reason {
             runtime.enable_stop_reason().map_err(StartError::Nitro)?;
         }
-        Context::from_nitro(runtime, device_info)
+        #[cfg(target_arch = "aarch64")]
+        let restored_copy =
+            self.config.vmr.cooperative_template.is_some() || self.nitro_park.is_some();
+        #[cfg(target_arch = "aarch64")]
+        if let Some(template) = self.config.vmr.cooperative_template.take() {
+            let topology = template_topology.clone();
+            let compatibility = template.compatibility.clone();
+            vmm::nitro_restore::validate(
+                &template,
+                capture_vcpus,
+                memory_mib as u64,
+                &topology,
+                &compatibility,
+            )
+            .map_err(StartError::Nitro)?;
+            runtime
+                .set_restore_handler(Box::new(vmm::nitro_restore::NitroRestore {
+                    template,
+                    vcpus: capture_vcpus,
+                    ram_mib: memory_mib as u64,
+                    topology,
+                    compatibility,
+                }))
+                .map_err(StartError::Nitro)?;
+        }
+        #[cfg(target_arch = "aarch64")]
+        let park = match self.nitro_park {
+            Some(wait) => Some(TemplateAssignment {
+                slot: runtime.park_for_restore(wait).map_err(StartError::Nitro)?,
+                vcpus: capture_vcpus,
+                ram_mib: memory_mib as u64,
+                topology: template_topology.clone(),
+            }),
+            None => None,
+        };
+        #[cfg(target_arch = "aarch64")]
+        if let Some(request) = &self.nitro_capture {
+            runtime.set_capture_handler(Box::new(vmm::nitro_capture::NitroCapture {
+                request: request.clone(),
+                vcpus: capture_vcpus,
+                ram_mib: memory_mib as u64,
+                topology: template_topology,
+                compatibility: b"nitro-arm64-v1".to_vec(),
+                export_path: self
+                    .config
+                    .vmr
+                    .cooperative_capture
+                    .as_ref()
+                    .and_then(|(_, path)| (!path.as_os_str().is_empty()).then(|| path.clone())),
+            }));
+        }
+        let context = Context::from_nitro(runtime, device_info)?;
+        #[cfg(target_arch = "aarch64")]
+        let context = {
+            let mut context = context;
+            context.built_vm.nitro_capture = self.nitro_capture.take();
+            if restored_copy {
+                let request = vmm::capture_request::CaptureRequest::default();
+                request.refuse_restored_copy();
+                context.built_vm.nitro_capture = Some(request);
+            }
+            if park.is_some() {
+                // A parked receiver starts now and runs in its own thread, so
+                // its park wait bounds its life from build even if `run` is
+                // never called: the start releases the creation lock, and
+                // expiry, a dropped handle or a dropped context tear it down
+                // under the lifecycle lock.
+                let runtime = context.built_vm.nitro.take().expect("Nitro runtime");
+                let observers = runtime.exit_observer_registry();
+                let heartbeat = runtime.heartbeat_control();
+                context.built_vm.nitro_parked = Some(NitroParked {
+                    run: runtime.start_parked().map_err(StartError::Nitro)?,
+                    observers,
+                    heartbeat,
+                });
+            }
+            context.built_vm.nitro_park = park;
+            context
+        };
+        Ok(context)
     }
 
     /// Select Nitro direct mode using an EIF image. Configured block devices,
@@ -1706,6 +2012,21 @@ impl Builder {
 
     #[allow(unused_mut)] // Mutability is needed only when Nitro selection is compiled.
     pub fn build(mut self) -> Result<Context, StartError> {
+        #[cfg(all(
+            target_os = "linux",
+            target_arch = "aarch64",
+            feature = "nitro-sandbox"
+        ))]
+        if (self.config.vmr.cooperative_capture.is_some()
+            || self.config.vmr.cooperative_template.is_some()
+            || self.nitro_park.is_some())
+            && self.nitro.is_none()
+        {
+            return Err(StartError::Configuration(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "arm64 cooperative templates require Nitro backend",
+            )));
+        }
         if let Some(error) = self.configuration_error.take() {
             return Err(StartError::Configuration(error));
         }
@@ -1839,7 +2160,7 @@ impl Builder {
                 VsockConfig::Explicit { tsi_flags } => {
                     let vsock_device_config = VsockDeviceConfig {
                         vsock_id: "vsock0".to_string(),
-                        guest_cid: 3,
+                        guest_cid: self.guest_vsock_cid.unwrap_or(3),
                         host_port_map: ctx_cfg.tsi_port_map,
                         unix_ipc_port_map: ctx_cfg.unix_ipc_port_map.clone(),
                         tsi_flags: if self.socket_policy.internet_enabled {
@@ -1875,7 +2196,7 @@ impl Builder {
 
                         let vsock_device_config = VsockDeviceConfig {
                             vsock_id: "vsock0".to_string(),
-                            guest_cid: 3,
+                            guest_cid: self.guest_vsock_cid.unwrap_or(3),
                             host_port_map,
                             unix_ipc_port_map: ctx_cfg.unix_ipc_port_map.clone(),
                             tsi_flags,
@@ -1982,12 +2303,35 @@ pub enum BuilderError {
     ConsoleAlreadyAdded,
 }
 
+/// A parked Nitro receiver's runtime, running in its own thread since build.
+#[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+struct NitroParked {
+    run: nitro_sandbox::runtime::ParkedRun,
+    observers: nitro_sandbox::runtime::ExitObserverRegistry,
+    heartbeat: Option<nitro_sandbox::heartbeat::DeadlineControl>,
+}
+
 struct ContextVm {
     kvm: Option<vmm::builder::BuiltVm>,
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     nitro: Option<nitro_sandbox::runtime::Runtime>,
+    /// Set instead of `nitro` for a parked receiver (started at build).
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    nitro_parked: Option<NitroParked>,
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     nitro_device_info: vmm::resources::VmDeviceInfo,
+    #[cfg(all(
+        target_os = "linux",
+        target_arch = "aarch64",
+        feature = "nitro-sandbox"
+    ))]
+    nitro_capture: Option<vmm::capture_request::CaptureRequest>,
+    #[cfg(all(
+        target_os = "linux",
+        target_arch = "aarch64",
+        feature = "nitro-sandbox"
+    ))]
+    nitro_park: Option<TemplateAssignment>,
 }
 impl Deref for ContextVm {
     type Target = vmm::builder::BuiltVm;
@@ -2011,7 +2355,21 @@ impl From<vmm::builder::BuiltVm> for ContextVm {
             #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
             nitro: None,
             #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+            nitro_parked: None,
+            #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
             nitro_device_info: Default::default(),
+            #[cfg(all(
+                target_os = "linux",
+                target_arch = "aarch64",
+                feature = "nitro-sandbox"
+            ))]
+            nitro_capture: None,
+            #[cfg(all(
+                target_os = "linux",
+                target_arch = "aarch64",
+                feature = "nitro-sandbox"
+            ))]
+            nitro_park: None,
         }
     }
 }
@@ -2104,8 +2462,16 @@ impl Context {
     /// host daemon with SCM_RIGHTS before permitting this process to start.
     /// The VM remains alive until the last duplicate is closed; after reaping the
     /// VMM the daemon closes its duplicate under the same lifecycle lock.
+    /// Not available for a parked receiver, which starts at build: give it
+    /// `Builder::nitro_descriptor_handoff` instead.
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     pub fn duplicate_nitro_vm_descriptor(&self) -> std::io::Result<std::os::fd::OwnedFd> {
+        if self.built_vm.nitro_parked.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "a parked receiver starts at build; use Builder::nitro_descriptor_handoff",
+            ));
+        }
         self.built_vm
             .nitro
             .as_ref()
@@ -2122,19 +2488,34 @@ impl Context {
             built_vm: ContextVm {
                 kvm: None,
                 nitro: Some(runtime),
+                nitro_parked: None,
                 nitro_device_info: device_info,
+                #[cfg(all(target_arch = "aarch64", feature = "nitro-sandbox"))]
+                nitro_capture: None,
+                #[cfg(all(target_arch = "aarch64", feature = "nitro-sandbox"))]
+                nitro_park: None,
             },
             event_manager: EventManager::new().map_err(StartError::EventManager)?,
             shutdown_efd: Some(runtime_stop),
             vm_exit: Arc::new(Mutex::new(None)),
         })
     }
+    /// Take the handle that gives this parked Nitro receiver its template.
+    /// Present once, only for contexts built with `Builder::park_for_template`.
+    #[cfg(all(
+        target_os = "linux",
+        target_arch = "aarch64",
+        feature = "nitro-sandbox"
+    ))]
+    pub fn take_template_assignment(&mut self) -> Option<TemplateAssignment> {
+        self.built_vm.nitro_park.take()
+    }
     /// Access device information (console port paths, etc.).
     ///
     /// This returns the actual device paths from the built VM.
     pub fn device_info(&self) -> &vmm::resources::VmDeviceInfo {
         #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
-        if self.built_vm.nitro.is_some() {
+        if self.built_vm.nitro.is_some() || self.built_vm.nitro_parked.is_some() {
             return &self.built_vm.nitro_device_info;
         }
         &self.built_vm.device_info
@@ -2144,14 +2525,20 @@ impl Context {
     /// Must be called before `run()`, since `run()` consumes `self`.
     pub fn vm_handle(&self) -> VmHandle {
         #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
-        if self.built_vm.nitro.is_some() {
-            return VmHandle {
-                vmm: None,
-                heartbeat_control: self
+        if self.built_vm.nitro.is_some() || self.built_vm.nitro_parked.is_some() {
+            let heartbeat_control = match &self.built_vm.nitro_parked {
+                Some(parked) => parked.heartbeat.clone(),
+                None => self
                     .built_vm
                     .nitro
                     .as_ref()
                     .and_then(|runtime| runtime.heartbeat_control()),
+            };
+            return VmHandle {
+                vmm: None,
+                #[cfg(target_arch = "aarch64")]
+                nitro_capture: self.built_vm.nitro_capture.clone(),
+                heartbeat_control,
                 shutdown_efd: self.shutdown_efd.clone(),
                 #[cfg(not(feature = "tee"))]
                 balloon: None,
@@ -2172,6 +2559,12 @@ impl Context {
             vmm: Some(self.built_vm.vmm().clone()),
             #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
             heartbeat_control: None,
+            #[cfg(all(
+                target_os = "linux",
+                target_arch = "aarch64",
+                feature = "nitro-sandbox"
+            ))]
+            nitro_capture: None,
             shutdown_efd: self.shutdown_efd.clone(),
             #[cfg(not(feature = "tee"))]
             balloon: balloon_handle,
@@ -2189,6 +2582,11 @@ impl Context {
             runtime.register_exit_observer(observer);
             return;
         }
+        #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+        if let Some(parked) = &self.built_vm.nitro_parked {
+            parked.observers.register(observer);
+            return;
+        }
         self.built_vm
             .vmm()
             .lock()
@@ -2199,14 +2597,26 @@ impl Context {
     /// Start the VM and run the event loop. This blocks until the VM exits.
     pub fn run(mut self) -> Result<vmm::vm_exit::VmExit, StartError> {
         #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
-        if let Some(runtime) = self.built_vm.nitro.take() {
-            return runtime
-                .run()
+        let nitro_result = match (
+            self.built_vm.nitro.take(),
+            self.built_vm.nitro_parked.take(),
+        ) {
+            (Some(runtime), _) => Some(runtime.run()),
+            // Already running since build; wait for its end.
+            (None, Some(parked)) => Some(parked.run.wait()),
+            (None, None) => None,
+        };
+        #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+        if let Some(result) = nitro_result {
+            return result
                 .map(|exit| match exit {
                     nitro_sandbox::runtime::Exit::PowerOff => {
                         vmm::vm_exit::VmExit::Shutdown { exit_code: 0 }
                     }
                     nitro_sandbox::runtime::Exit::Stopped => vmm::vm_exit::VmExit::Stopped,
+                    nitro_sandbox::runtime::Exit::Frozen => vmm::vm_exit::VmExit::Frozen {
+                        template_path: std::path::PathBuf::new(),
+                    },
                     nitro_sandbox::runtime::Exit::StatedReason {
                         code,
                         observed_micros,
@@ -2291,6 +2701,12 @@ pub struct VmHandle {
     vmm: Option<Arc<Mutex<vmm::Vmm>>>,
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     heartbeat_control: Option<nitro_sandbox::heartbeat::DeadlineControl>,
+    #[cfg(all(
+        target_os = "linux",
+        target_arch = "aarch64",
+        feature = "nitro-sandbox"
+    ))]
+    nitro_capture: Option<vmm::capture_request::CaptureRequest>,
     shutdown_efd: Option<Arc<EventFd>>,
     #[cfg(not(feature = "tee"))]
     balloon: Option<BalloonHandle>,
@@ -2528,21 +2944,8 @@ impl VmHandle {
         &self,
         timeout: std::time::Duration,
     ) -> std::io::Result<vmm::capture_request::CaptureOutcome> {
-        let request = {
-            let vmm = self
-                .vmm
-                .as_ref()
-                .ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::Unsupported,
-                        "cooperative capture requires Linux KVM",
-                    )
-                })?
-                .lock()
-                .unwrap();
-            vmm.arm_template_capture(timeout)?
-        };
-        request.wait()
+        self.arm_template_capture(timeout)?;
+        self.wait_template_capture()
     }
 
     /// Authorize capture after the agent has quiesced the workload.
@@ -2553,6 +2956,14 @@ impl VmHandle {
         not(feature = "tee")
     ))]
     pub fn arm_template_capture(&self, timeout: std::time::Duration) -> std::io::Result<()> {
+        #[cfg(all(
+            target_os = "linux",
+            target_arch = "aarch64",
+            feature = "nitro-sandbox"
+        ))]
+        if let Some(request) = &self.nitro_capture {
+            return request.arm(timeout);
+        }
         let request = self
             .vmm
             .as_ref()
@@ -2575,6 +2986,14 @@ impl VmHandle {
         not(feature = "tee")
     ))]
     pub fn wait_template_capture(&self) -> std::io::Result<vmm::capture_request::CaptureOutcome> {
+        #[cfg(all(
+            target_os = "linux",
+            target_arch = "aarch64",
+            feature = "nitro-sandbox"
+        ))]
+        if let Some(request) = &self.nitro_capture {
+            return request.wait();
+        }
         let request = self
             .vmm
             .as_ref()
@@ -2685,6 +3104,16 @@ mod nitro_cmdline_tests {
         );
     }
     #[test]
+    fn builder_vsock_cid_rejects_reserved_values() {
+        let mut builder = Builder::new();
+        assert_eq!(builder.guest_vsock_cid, None);
+        for cid in [0, 1, 2, u32::MAX] {
+            assert!(builder.vsock_cid(cid).is_err());
+        }
+        builder.vsock_cid(41).unwrap();
+        assert_eq!(builder.guest_vsock_cid, Some(41));
+    }
+    #[test]
     fn builder_flags_follow_internet_forwarding() {
         let mut builder = Builder::new();
         assert_eq!(
@@ -2701,6 +3130,19 @@ mod nitro_cmdline_tests {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(
+        target_os = "linux",
+        target_arch = "aarch64",
+        feature = "nitro-sandbox"
+    ))]
+    #[test]
+    fn arm64_template_mark_requires_nitro_backend() {
+        let mut builder = super::Builder::new();
+        builder.future_template();
+        assert!(
+            matches!(builder.build(),Err(super::StartError::Configuration(error)) if error.kind()==std::io::ErrorKind::Unsupported)
+        );
+    }
     use super::*;
 
     #[test]
@@ -2782,6 +3224,12 @@ mod tests {
         let handle = VmHandle {
             vmm: None,
             heartbeat_control: None,
+            #[cfg(all(
+                target_os = "linux",
+                target_arch = "aarch64",
+                feature = "nitro-sandbox"
+            ))]
+            nitro_capture: None,
             shutdown_efd: Some(stop.clone()),
             #[cfg(not(feature = "tee"))]
             balloon: None,
