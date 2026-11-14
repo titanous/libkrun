@@ -14,6 +14,10 @@ pub mod word {
     pub const CR3: usize = 3;
     pub const CR4: usize = 4;
     pub const RIP: usize = 5;
+    pub const REALTIME: usize = 8;
+    pub const RANDOM_START: usize = 9;
+    pub const RANDOM_END: usize = 14;
+    pub const SEED_READY: usize = 14;
     pub const VERSION: usize = 19;
     pub const CR0: usize = 20;
     pub const EFER: usize = 21;

@@ -569,9 +569,16 @@ impl Subscriber for Vmm {
                         vm_memory::GuestAddress(reported_control),
                     )
                     .map_err(std::io::Error::other)?;
-                    if u64::from_le_bytes(control_page[240..248].try_into().unwrap()) != 20
+                    use crate::cooperative::word;
+                    let build_id_start = word::KERNEL_BUILD_ID * 8;
+                    let build_id_len = word::KERNEL_BUILD_ID_LEN * 8;
+                    if u64::from_le_bytes(
+                        control_page[build_id_len..build_id_len + 8]
+                            .try_into()
+                            .unwrap(),
+                    ) != 20
                         || self.cooperative_compatibility.len() < 20
-                        || control_page[216..236]
+                        || control_page[build_id_start..build_id_start + 20]
                             != self.cooperative_compatibility
                                 [self.cooperative_compatibility.len() - 20..]
                     {
