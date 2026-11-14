@@ -537,6 +537,15 @@ impl Vmm {
                 .load(Ordering::Acquire),
         );
 
+        #[cfg(target_arch = "x86_64")]
+        if self.capture_request.is_armed()
+            && !matches!(vm_exit, crate::vm_exit::VmExit::Frozen { .. })
+        {
+            self.capture_request.complete(Err(std::io::Error::other(
+                crate::capture_request::GuestStoppedDuringCapture(vm_exit.clone()),
+            )));
+        }
+
         // A detached CPU may still access rings: final drain is unsafe in that case.
         for observer in &self.exit_observers {
             let mut observer = observer.lock().expect("Poisoned mutex for exit observer");

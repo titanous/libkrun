@@ -3,6 +3,16 @@ use std::io;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+/// A terminal guest event invalidated an armed template capture.
+#[derive(Debug, Clone)]
+pub struct GuestStoppedDuringCapture(pub crate::vm_exit::VmExit);
+impl std::fmt::Display for GuestStoppedDuringCapture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "guest stopped during template capture: {:?}", self.0)
+    }
+}
+impl std::error::Error for GuestStoppedDuringCapture {}
+
 pub struct CaptureOutcome {
     pub template: crate::template::Template,
     /// None for descriptor-only capture; Some reports requested publication.
@@ -141,6 +151,19 @@ impl CaptureRequest {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stop_capture_failure_retains_typed_terminal_reason() {
+        let error = std::io::Error::other(super::GuestStoppedDuringCapture(
+            crate::vm_exit::VmExit::Panic,
+        ));
+        let reason = error
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<super::GuestStoppedDuringCapture>()
+            .unwrap();
+        assert_eq!(reason.0, crate::vm_exit::VmExit::Panic);
+    }
+
     use super::*;
     #[test]
     fn guest_refusals_have_distinct_errno() {

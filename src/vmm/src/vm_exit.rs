@@ -47,6 +47,7 @@ impl VmExit {
                 exit_code: exit_code.unwrap(),
             },
             Self::LivenessExpired | Self::DeviceWatchdog => terminal,
+            Self::Frozen { .. } if !(1..=4).contains(&reason) => terminal,
             _ => Self::from_stated_reason(reason),
         }
     }
@@ -57,6 +58,24 @@ pub type SharedVmExit = Arc<Mutex<Option<VmExit>>>;
 mod tests {
     use super::VmExit;
     use super::VmExit::*;
+    #[test]
+    fn final_stop_intent_overrides_capture_success_with_typed_reason() {
+        for (reason, expected) in [
+            (1, PowerOffRequested),
+            (2, RebootRequested),
+            (3, Halted),
+            (4, Panic),
+        ] {
+            let frozen = Frozen {
+                template_path: "template".into(),
+            };
+            assert_eq!(VmExit::resolve(frozen, None, reason), expected);
+        }
+        let frozen = Frozen {
+            template_path: "template".into(),
+        };
+        assert_eq!(VmExit::resolve(frozen.clone(), None, 0), frozen);
+    }
     #[test]
     fn classification_precedence_table() {
         for (terminal, code, reason, expected) in [
