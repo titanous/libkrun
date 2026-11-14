@@ -14,6 +14,7 @@ pub struct Console {
     interval_bytes: usize,
     interval: Instant,
     dropped: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    discovery: Option<crate::freeze_discovery::Discovery>,
 }
 impl Default for Console {
     fn default() -> Self {
@@ -48,14 +49,31 @@ impl Console {
             interval_bytes: 0,
             interval: Instant::now(),
             dropped: Default::default(),
+            discovery: None,
         }
+    }
+}
+impl Console {
+    pub fn enable_freeze_discovery(&mut self) {
+        self.discovery = Some(crate::freeze_discovery::Discovery::default());
+    }
+    pub fn freeze_discovery(&self) -> Option<&crate::freeze_discovery::Discovery> {
+        self.discovery.as_ref()
     }
 }
 impl Write for Console {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        // Copy-control discovery first, on raw bytes, before any budget. The
+        // embedder's raw observer still sees these bytes when discovery fails,
+        // so a guest's stop text is never hidden by a discovery error.
+        let discovered = match &mut self.discovery {
+            Some(discovery) => discovery.observe(bytes),
+            None => Ok(()),
+        };
         if let Some(observer) = &mut self.observer {
             observer(bytes);
         }
+        discovered?;
         if self.interval.elapsed() >= Duration::from_secs(1) {
             self.interval = Instant::now();
             self.interval_bytes = 0;
@@ -96,6 +114,22 @@ impl Write for Console {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+    #[test]
+    fn freeze_discovery_is_explicit_and_independent_of_output_budget() {
+        let mut console = Console::default();
+        console
+            .write_all(b"NITRO_FREEZE_CONTROL phys=0x40001000\n")
+            .unwrap();
+        assert!(console.freeze_discovery().is_none());
+        console.enable_freeze_discovery();
+        console
+            .write_all(b"NITRO_FREEZE_CONTROL phys=0x40002000\n")
+            .unwrap();
+        assert_eq!(
+            console.freeze_discovery().unwrap().control,
+            Some(0x40002000)
+        );
+    }
     struct Sink(Arc<Mutex<Vec<u8>>>);
     impl Write for Sink {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {

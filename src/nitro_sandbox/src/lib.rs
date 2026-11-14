@@ -1,7 +1,12 @@
 //! Host-side protocol primitives for the Nitro Sandbox hypervisor.
 //! This is distinct from running a workload inside a confidential enclave.
 
+#[cfg(all(target_os = "linux", feature = "devices"))]
+pub mod capture;
 pub mod console;
+pub mod cooperative;
+pub mod copy_memory;
+pub mod freeze_discovery;
 #[cfg(target_os = "linux")]
 pub mod heartbeat;
 #[cfg(target_os = "linux")]
@@ -10,6 +15,8 @@ pub mod host;
 pub mod image;
 #[cfg(target_os = "linux")]
 pub mod lifecycle;
+pub mod owned_memory;
+pub mod receiver;
 #[cfg(all(target_os = "linux", feature = "devices"))]
 pub mod runtime;
 #[cfg(all(target_os = "linux", feature = "devices"))]
@@ -200,6 +207,10 @@ pub struct DeviceLifecycle {
     active_reset: Option<u64>,
 }
 impl DeviceLifecycle {
+    pub fn is_active(&self) -> bool {
+        self.active_reset.is_some()
+    }
+
     pub fn observe(&mut self, snapshot: &DeviceSnapshot, offered: u64) -> Result<Action, Error> {
         let ready = snapshot.status & 15 == 15 && snapshot.status & (64 | 128) == 0;
         if let Some(reset) = self.active_reset {
@@ -265,7 +276,9 @@ mod tests {
     fn resets_stop_before_reactivation() {
         let mut state = DeviceLifecycle::default();
         let mut s = snapshot();
+        assert!(!state.is_active());
         assert_eq!(state.observe(&s, 1 << 32), Ok(Action::Start));
+        assert!(state.is_active());
         assert_eq!(state.observe(&s, 1 << 32), Ok(Action::None));
         s.reset_count += 1;
         assert_eq!(state.observe(&s, 1 << 32), Ok(Action::Stop));

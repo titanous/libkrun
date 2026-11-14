@@ -1,6 +1,10 @@
 //! Persistent RAM extent format for cooperatively frozen guests.
 
-#[cfg(test)]
+#[cfg(all(test, target_arch = "aarch64"))]
+#[path = "template_arm64_tests.rs"]
+mod arm64_tests;
+
+#[cfg(all(test, target_arch = "x86_64"))]
 mod tests {
     use super::*;
 
@@ -190,10 +194,9 @@ mod tests {
 use std::fs::File;
 use std::io;
 use std::os::unix::fs::{FileExt, OpenOptionsExt};
-use vm_memory::{
-    Address, Bytes, GuestAddress, GuestMemoryBackend, GuestMemoryMmap, GuestMemoryRegion,
-    GuestRegionMmap,
-};
+#[cfg(any(target_arch = "x86_64", feature = "nitro-sandbox", test))]
+use vm_memory::{Address, Bytes, GuestMemoryBackend, GuestMemoryRegion};
+use vm_memory::{GuestAddress, GuestMemoryMmap, GuestRegionMmap};
 
 #[cfg(test)]
 thread_local! {
@@ -516,6 +519,23 @@ impl Template {
         )
     }
 
+    #[cfg(all(target_arch = "aarch64", not(feature = "nitro-sandbox")))]
+    pub fn capture_with_manifest(
+        _memory: &GuestMemoryMmap,
+        _control_page_address: u64,
+        _vcpus: u8,
+        _ram_mib: u64,
+        _clock_state: u64,
+        _topology: &[u8],
+        _compatibility: &[u8],
+    ) -> io::Result<Self> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "arm64 KVM cooperative capture is unsupported",
+        ))
+    }
+
+    #[cfg(not(all(target_arch = "aarch64", not(feature = "nitro-sandbox"))))]
     pub fn capture_with_manifest(
         memory: &GuestMemoryMmap,
         control_page_address: u64,
@@ -535,7 +555,22 @@ impl Template {
         memory
             .read_slice(&mut page, GuestAddress(control_page_address))
             .map_err(io::Error::other)?;
+        #[cfg(target_arch = "x86_64")]
         crate::cooperative::ResumeEntry::parse(&page)?;
+        #[cfg(all(target_arch = "aarch64", feature = "nitro-sandbox"))]
+        nitro_sandbox::cooperative::ResumeEntry::parse(&page, |address, size| {
+            memory.iter().any(|region| {
+                address >= region.start_addr().raw_value()
+                    && address
+                        .checked_add(size)
+                        .is_some_and(|end| end <= region.start_addr().raw_value() + region.len())
+            })
+        })?;
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "cooperative capture is unsupported on this architecture",
+        ));
         if memory.num_regions() > MAX_REGIONS || vcpus == 0 {
             return Err(invalid());
         }

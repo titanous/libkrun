@@ -976,7 +976,7 @@ pub fn build_microvm(
 
     #[cfg(target_arch = "x86_64")]
     let mut vcpus;
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(not(target_arch = "x86_64"))]
     let vcpus;
     let intc: IrqChip;
 
