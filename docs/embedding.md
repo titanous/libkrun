@@ -175,7 +175,18 @@ Network devices are refused because guest MAC state is retained. Keep templates
 within one trust domain: kernel secrets and address layouts remain shared.
 The daemon must impose a separate start-to-valid-agent-Hello deadline and
 destroy an unready copy; kernel continuation is not proof of application ready.
-A typed builder readiness deadline is not supplied by this API yet.
+For a bounded library wait use
+`start_from_template(TemplateSource::{Descriptor(file), Path(path)}, timeout,
+|builder| { /* fresh devices, policy, disk identities and guest IDs */ Ok(()) })`.
+It returns `GuestReadiness`; the deadline starts at this call and includes build
+and launch. Clone this handle to the host's agent listener, and call
+`mark_ready()` only after validating the expected Hello identity and generation.
+Call `wait()` on the supervising thread, never the VMM event loop. It returns
+`GuestReadyTimeout`, a distinct typed error from freeze `TimedOut`; late
+confirmation is refused. The process supervisor must kill/reap the VMM on this
+error. The library cannot validate application protocol bytes on the caller's
+socket, and this handle deliberately does not mistake kernel/device activity
+for agent readiness.
 
 ## Contract for every hypervisor backend
 

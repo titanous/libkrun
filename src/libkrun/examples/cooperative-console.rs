@@ -89,6 +89,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         return Err("invalid mode".into());
     }
+    let readiness_probe = if std::env::var_os("CLONE_TEST_READY_TIMEOUT").is_some() {
+        let readiness = krun::GuestReadiness::new(std::time::Duration::from_millis(100))?;
+        Some(std::thread::spawn(move || {
+            assert_eq!(readiness.wait(), Err(krun::GuestReadyTimeout));
+            assert!(!readiness.mark_ready());
+            eprintln!("READINESS TYPED TIMEOUT late confirmation refused");
+        }))
+    } else {
+        None
+    };
     let context = builder.build()?;
     if args[1] == "freeze" || args[1] == "refuse" {
         context
@@ -109,6 +119,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
     let result = context.run()?;
+    if let Some(probe) = readiness_probe {
+        probe.join().expect("readiness probe");
+    }
     if let Some(capture) = capture {
         capture.join().expect("capture thread")?;
     }

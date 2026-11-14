@@ -2,6 +2,15 @@
 compile_error!("unsupported on this backend: nitro-sandbox cannot be combined with tee");
 #[cfg(all(feature = "nitro-sandbox", feature = "aws-nitro"))]
 compile_error!("unsupported on this backend: nitro-sandbox cannot be combined with aws-nitro");
+mod readiness;
+pub use readiness::{GuestReadiness, GuestReadyTimeout};
+
+/// A cooperative template descriptor or owner-only persisted file.
+#[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
+pub enum TemplateSource {
+    Descriptor(std::fs::File),
+    Path(std::path::PathBuf),
+}
 
 use crossbeam_channel::unbounded;
 #[cfg(feature = "gpu")]
@@ -670,6 +679,30 @@ impl Builder {
     ) -> &mut Self {
         self.config.vmr.cooperative_capture = Some((control_page, path.into()));
         self
+    }
+
+    /// Import a template and configure this new guest's devices, connection
+    /// rule, disk snapshot declarations, CID and identifiers in one operation.
+    /// The returned deadline starts now, including subsequent build time.
+    /// Mark it ready only after validating the new agent's identity/generation.
+    #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
+    pub fn start_from_template(
+        &mut self,
+        source: TemplateSource,
+        timeout: std::time::Duration,
+        configure: impl FnOnce(&mut Self) -> std::io::Result<()>,
+    ) -> std::io::Result<GuestReadiness> {
+        let readiness = GuestReadiness::new(timeout)?;
+        match source {
+            TemplateSource::Descriptor(file) => {
+                self.start_from_template_fd(file)?;
+            }
+            TemplateSource::Path(path) => {
+                self.start_from_template_path(path)?;
+            }
+        }
+        configure(self)?;
+        Ok(readiness)
     }
 
     /// Start a new VM over a sealed template descriptor. Configure the same
