@@ -650,6 +650,7 @@ impl Sandbox {
         };
         std::mem::replace(&mut self.ram, empty)
     }
+    #[cfg(feature = "devices")]
     pub(crate) fn close_retaining_worker_mappings(&mut self) {
         self.close_vm();
         // A backend that refused reset may still access queues. Keep these
