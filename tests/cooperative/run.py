@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Real-KVM cooperative clone matrix; run through just cooperative-clone."""
+from console_markers import userspace_bytes
 import argparse
 import concurrent.futures
 import fcntl
@@ -73,10 +74,16 @@ def run_source(cpus, cycle):
         timer = threading.Timer(30, process.kill)
         timer.start()
         try:
+            console = b""
             for line in process.stdout:
                 output.write(line)
                 now = time.monotonic_ns()
-                if b"CLONE FREEZE" in line: trigger = now
+                console += line
+                # Kernel printk can split a userspace serial write mid-marker.
+                # Preserve the raw log; remove only timestamped kernel lines for
+                # marker recognition, never guest assertions or VMM results.
+                markers = userspace_bytes(console)
+                if trigger is None and b"CLONE FREEZE" in markers: trigger = now
                 if b"COOPERATIVE FROZEN" in line: frozen = now
             result = process.wait()
         finally:
