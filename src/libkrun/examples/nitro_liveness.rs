@@ -37,15 +37,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     let context = builder.build()?;
+    let resume = if args[3] == "suspend" {
+        let handle = context.vm_handle();
+        handle.suspend_liveness_deadline()?;
+        Some(std::thread::spawn(move || {
+            std::thread::park_timeout(std::time::Duration::from_secs(2));
+            handle.resume_liveness_deadline().unwrap();
+        }))
+    } else {
+        None
+    };
     let start = std::time::Instant::now();
     let exit = context.run()?;
+    if let Some(resume) = resume {
+        resume.join().unwrap();
+    }
+    if args[3] != "panic" {
+        assert!(!std::path::Path::new(&args[2]).exists());
+    }
     let elapsed = start.elapsed().as_secs_f64();
     if args[3] == "panic" {
         assert_eq!(exit, VmExit::Panic);
     } else {
         assert_eq!(exit, VmExit::LivenessExpired);
     }
-    if args[3] == "heartbeat" {
+    if args[3] == "heartbeat" || args[3] == "suspend" {
         assert!(
             elapsed >= 2.5,
             "heartbeats did not extend deadline: {elapsed}"

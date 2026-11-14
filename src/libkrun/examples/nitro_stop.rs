@@ -18,9 +18,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     builder.disable_implicit_console()?;
     builder.vm_config(1, 1024)?;
     builder.nitro_lifecycle_lock(args[2].clone().into(), NitroSerialization::StartAndTeardown);
+    let _signal = builder.install_nitro_sigterm_handler()?;
     let context = builder.build()?;
     let handle = context.vm_handle();
-    let _signal = handle.install_sigterm_handler()?;
     println!("STOP_TEST_READY pid={}", std::process::id());
     std::io::stdout().flush()?;
     let worker = if args[3] == "handle" {

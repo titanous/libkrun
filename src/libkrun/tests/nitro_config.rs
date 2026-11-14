@@ -16,6 +16,15 @@ fn rejected(mut builder: Builder, expected: &str) {
     }
 }
 #[test]
+fn rejects_nonzero_dax_window_before_allocating_vm() {
+    for size in [1, 2 * 1024 * 1024, 256 * 1024 * 1024] {
+        let mut builder = Builder::new();
+        builder.disable_implicit_console().unwrap();
+        builder.add_virtiofs_path("test", "/tmp", Some(size), false);
+        rejected(builder, "DAX windows");
+    }
+}
+#[test]
 fn rejects_unsupported_memory_geometry_before_allocating_vm() {
     let mut builder = Builder::new();
     builder.disable_implicit_console().unwrap();

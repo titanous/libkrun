@@ -198,16 +198,20 @@ internally. Packaged-image command lines cannot be overridden; other
 unsupported device/configuration methods fail build with
 `unsupported on this backend`, never silently discarded. The Rust packager is
 byte-for-byte tested against the kernel lane's deterministic Python builder.
-A SHA-256 content key includes all inputs, memory and CPUs; up to eight immutable
-sealed memfd images are cached per process. Cache hits still read/hash inputs to
-avoid stale path metadata but skip image packaging/CRC/copy. The packaged EIF path
-remains available and bypasses packaging. For one-VMM-per-process services, call
-`nitro_image_cache(directory)` with a pre-created daemon-owned directory that is
-not group/other-writable. Content-addressed EIF files are atomically published
-under an exclusive cache flock and reused across processes; killed writers leave
-no published partial image. The daemon owns disk-cache eviction and must not
-modify published files in place. The trusted cache directory is not a tenant
-input; symlink files are refused. Caller-supplied block storage and its read-only setting
+The external-kernel path streams opened inputs into a memfd with a 64 KiB buffer,
+without retaining full kernel/initramfs or packaged byte vectors. Without a disk
+cache that sealed image is released after load. Disk-cache entries are named by
+the final EIF SHA-256 and verified against the expected content on every hit;
+readers take no exclusive cache lock. Publication uses unique temporary files and
+atomic rename, so killed writers leave no published partial image. The current
+verification path regenerates one expected image even on hits; this costs CPU
+and memory bandwidth, but keeps transient userspace storage near one image size.
+The older byte-slice packaging API retains at most 64 MiB in its process cache;
+images larger than that are not retained there. The packaged EIF path bypasses
+packaging. For cross-process reuse call `nitro_image_cache(directory)` with a
+pre-created VMM-uid-owned directory that is not group/other-writable. The daemon
+owns disk-cache eviction and must not modify published files in place. The cache
+directory is not a tenant input; symlink entries are refused. Caller-supplied block storage and its read-only setting
 are shared with KVM unchanged. Select Nitro and configure block/vsock devices
 before adding custom consoles, and call `disable_implicit_console()`. Returned
 console paths follow Nitro's actual block/vsock/console registration order; build
@@ -239,34 +243,62 @@ output in a nonblocking embedder writer. Excess bytes are dropped, never queued;
 the lifetime cap does not reset and the rate cap replenishes once per second.
 This is independent of custom virtio-console port sinks. Sink callbacks must not
 block; byte limits cannot bound an arbitrary callback's execution time.
+Sink bytes are raw guest output, including escape sequences, invalid UTF-8 and
+forged line prefixes. The embedder must escape terminal controls and encode bytes
+safely before writing terminals or structured logs. No sink is installed by
+default: output is drained and discarded, never implicitly sent to stdout.
 
 ### Host-owned lifecycle lock
 
 On hosts requiring serialized teardown, call
 `nitro_lifecycle_lock(path, NitroSerialization::Teardown)` before build.
-`StartAndTeardown` additionally serializes VM creation and start ioctls. The daemon
+`StartAndTeardown` holds one lock continuously from VM creation through a
+successful start, including loading and device setup. The daemon
 creates a regular lock file with service-owned permissions before launching VMMs;
 the library opens it without following symlinks and retains that inode. Do not
 unlink, replace, or rotate the file while any VMM exists. No lock is used by default;
 that default is not safe on hosts requiring serialized teardown, including m9g.
 
-**Before killing a VMM**, the daemon must open this same file and take exclusive
-`flock`, send the kill signal, wait for the process to be reaped and for its guest
-to be gone, then release the lock. Hold it across all those steps. Killing a VMM
-without the lock bypasses library teardown serialization. Prefer a handle stop
-request, which stops workers and closes the VM under the configured lock.
-A one-guest VMM can call `handle.install_sigterm_handler()` and retain the returned
-guard through `run`; SIGTERM then writes the same stop event and returns
-`VmExit::Stopped`. Installation is explicit so the library does not silently
-replace the embedder's process-wide signal policy.
+**The host daemon retains a VM descriptor for every guest.** After `build` and
+before `run`, call `Context::duplicate_nitro_vm_descriptor()` and transfer the
+owned descriptor to the daemon with `SCM_RIGHTS`. Wait for the daemon's
+acknowledgment before starting. A VM lives until the last duplicate is closed:
+SIGKILL, a crash, OOM, or a panicking destructor in the VMM cannot perform the
+final close while the daemon retains its duplicate. This handoff is required on
+hosts with serialized teardown. The interval before handoff is not protected
+against an unexpected process death; supervise creation accordingly.
+
+The daemon opens the same inode using `NitroLifecycleLock::open`, reaps the VMM,
+then calls `NitroOpenLifecycleLock::close_vm_descriptor(&mut descriptor)` off its
+event loop. The helper acquires exclusive flock before consuming the descriptor;
+on lock failure ownership stays with the caller, which must retry. Close all
+retained duplicates serially. Reaping alone is not guest destruction while a
+duplicate remains. Never drop a retained descriptor outside the lock. Prefer
+handle stop for orderly worker shutdown. See `nitro_supervised` and
+`supervised-lifecycles.py` for bounded handoff/kill/reap/close fixtures.
+
+Call `builder.install_nitro_sigterm_handler()` before `build` and retain the
+returned guard through build and run. SIGTERM received during build is retained
+as a stop request; during run it returns `VmExit::Stopped`. Registration is
+explicit because it changes process-wide signal policy. The post-build handle
+method remains available, but cannot protect the creation interval. On teardown
+backend refusal, `run` returns an error after locked close and retains mappings
+that a worker may still access until the one-guest process exits. Exit observer
+panics are contained so cleanup reaches the locked close.
 All cooperating VMMs and the daemon must resolve the path to the same inode,
 including across mount namespaces. Starts/stops in different processes are
 serialized by the kernel's flock, not a process-local mutex.
 
 The device watchdog bounds readiness/reset recovery and returns
 `VmExit::DeviceWatchdog`. For workload liveness, configure
-`nitro_heartbeat(port, socket_path, deadline)`: the VMM binds a new Unix socket and
-reserves that mapped vsock port. The guest agent connects to host CID 2 at the port
+`nitro_heartbeat(port, socket_path, deadline)`: the embedder supplies a parent
+directory owned by the VMM uid with owner-only permissions (normally 0700).
+The VMM binds a new Unix socket before guest creation/start, refuses any existing
+path, and reserves that mapped vsock port. Normal teardown removes the socket;
+after SIGKILL/crash the daemon removes its stale socket inside the private
+directory after reaping the VMM. Call `VmHandle::suspend_liveness_deadline()`
+before an intentional freeze and `resume_liveness_deadline()` afterward; resume
+starts a fresh full deadline, excluding suspended time. The guest agent connects to host CID 2 at the port
 and sends ASCII `H` periodically (recommend at most one third of the deadline).
 The deadline starts after the guest starts and refreshes only on `H`; failure to
 connect or silence returns `VmExit::LivenessExpired`. Reconnection is supported.
@@ -333,7 +365,7 @@ notification latency. Silent hangs remain bounded by the running heartbeat.
 | `add_vsock_port` | Guest-originated mapped Unix connections/listens, subject to policy. |
 | `port_map` | Honored only with internet forwarding enabled; otherwise build rejects nonempty map. |
 | `add_block_cfg`, `add_block_backend`, `root_block_cfg`, `data_block_cfg` | Shared block backend/read-only semantics and exit callbacks; new list takes precedence over legacy setters. |
-| `add_virtiofs`, `add_virtiofs_path`, `set_root` | In-process FileSystem or passthrough served over virtio-fs; missing host paths are build errors. Tags 1..36 bytes. Optional copy-backed DAX described below. |
+| `add_virtiofs`, `add_virtiofs_path`, `set_root` | In-process FileSystem or passthrough served over virtio-fs; missing host paths are build errors. Tags 1..36 bytes. Nonzero DAX windows are rejected before guest allocation. |
 | `disable_implicit_console` | Required; cannot omit an already-configured implicit console silently. |
 | `add_virtio_console`, `add_virtio_console_with_ports`, `add_port`, `add_port_fd`, `add_port_console_fd`, `console_port_path` | Custom ports honored; select backend/configure preceding block/vsock/fs devices first. Incompatible late ordering rejected. |
 | `nitro_console_sink` | Bounded kernel diagnostics, discard by default; independent of custom console ports. |
@@ -350,23 +382,24 @@ notification latency. Silent hangs remain bounded by the running heartbeat.
 | `VmHandle::pause`, `resume`, `notify_vm_generation_change` | Clear Unsupported error. No running-guest copy support in this backend. |
 | `VmHandle::balloon` | None; therefore BalloonHandle operations are unavailable on Nitro. |
 
-Virtio-fs DAX uses a private pool window per guest, not shared host-cache pages.
-The VMM zeroes every device region before registration and copies file data into
-it; removal zeroes the requested range without replacing its registered mapping.
-One optional window is supported per mount: 2 MiB-aligned, 2..256 MiB. No-DAX
-mounts have no device-region cost. Read-only `map_file`/`map_data` work; writable
-file-backed DAX mapping returns Unsupported instead of silently losing writes.
-Writable filesystem operations use ordinary FUSE requests. Workers stop before
-VM close; window backing remains mapped until VM close, including error paths.
+Nitro virtio-fs has no DAX window. Set `shm_size` to `None` (or zero);
+`build` rejects every nonzero value before creating a guest. The runtime also
+rejects nonzero windows, and never installs the copying mapper. Reads, writes,
+and guest page-cache mappings use ordinary FUSE requests. A copied file window
+cannot provide coherent DAX semantics when a file changes. KVM DAX is unchanged.
+Filesystem mounts incur no device-region allocation. Every other device region
+is still zeroed before registration, and workers stop before VM close.
 
-Observed m8g coverage includes mount by tag, correct contents, create/write/rename/
-delete, 1,000 files, complete 64 MiB reads and DAX mmap, and 100 mounted lifecycles
-with unchanged slot/pool accounting. The real treefs read-only/writable adapters
-pass the corresponding no-DAX checks plus 3,000 writable operations and live tree
-replacement. At treefs `c70edfb`, explicit DAX fails because its adapter rejects
-Linux's `fh=u64::MAX` no-handle setupmapping; see `examples/treefs-nitro` for the
-retained reproduction. This is not claimed to pass until the adapter contract is
-resolved.
+Observed m8g no-DAX coverage includes mount by tag, correct contents,
+create/write/rename/delete, 1,000 files and complete 64 MiB reads. The real treefs
+read-only/writable adapters also pass 3,000 writable operations and live tree
+replacement. Historical copying-window experiments are not supported behavior.
+
+Set `NITRO_PROFILE=1` to emit ASCII timings for each hypervisor ioctl, mapping,
+image load and VM close to stderr. This is opt-in diagnostic output; route it to
+a file. `nitro_agent_timing` measures build, first guest protocol byte and total
+run separately. Image-load timing includes its registration ioctls and must not
+be added to them twice.
 
 Limits: memory is bounded by the host's configured pool, CPU admission and guest
 slots by the driver; requested CPU count fits `u8` (1..255) but host capacity can
