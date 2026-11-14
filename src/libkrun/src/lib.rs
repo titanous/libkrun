@@ -1137,6 +1137,20 @@ impl Builder {
     }
 
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    fn create_nitro_vsock(
+        cid: u64,
+        port_map: Option<HashMap<u16, u16>>,
+        unix_map: Option<HashMap<u32, (PathBuf, bool)>>,
+        flags: TsiFlags,
+        policy: devices::virtio::vsock::policy::SocketPolicy,
+    ) -> Result<devices::virtio::Vsock, StartError> {
+        let mut device = devices::virtio::Vsock::new(cid, port_map, unix_map, flags)
+            .map_err(|e| StartError::Nitro(std::io::Error::other(format!("vsock: {e:?}"))))?;
+        device.set_socket_policy(policy);
+        Ok(device)
+    }
+
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     fn build_nitro(mut self, options: NitroBackendConfig) -> Result<Context, StartError> {
         let unsupported = || {
             StartError::Nitro(std::io::Error::new(std::io::ErrorKind::Unsupported, "unsupported on this backend: Nitro supports EIF boot with block, userspace vsock and custom console ports only"))
@@ -1257,14 +1271,13 @@ impl Builder {
             if !self.socket_policy.internet_enabled {
                 flags.remove(TsiFlags::HIJACK_INET);
             }
-            let mut vsock = devices::virtio::Vsock::new(
+            let vsock = Self::create_nitro_vsock(
                 options.cid,
                 self.config.tsi_port_map,
                 self.config.unix_ipc_port_map,
                 flags,
-            )
-            .map_err(|e| StartError::Nitro(std::io::Error::other(format!("vsock: {e:?}"))))?;
-            vsock.set_socket_policy(self.socket_policy.clone());
+                self.socket_policy.clone(),
+            )?;
             runtime
                 .add_device(Arc::new(Mutex::new(vsock)))
                 .map_err(StartError::Nitro)?;
@@ -2031,6 +2044,36 @@ impl VmHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    fn nitro_device_construction_preserves_rule_on_reset() {
+        use devices::virtio::vsock::policy::SocketPolicy;
+        use devices::virtio::VirtioDevice;
+        let mut device = Builder::create_nitro_vsock(
+            210,
+            None,
+            None,
+            TsiFlags::empty(),
+            SocketPolicy {
+                policy: Some(Arc::new(AllowlistPolicy::new([]))),
+                internet_enabled: true,
+            },
+        )
+        .unwrap();
+        let address: SocketAddress = "127.0.0.1:7000"
+            .parse::<std::net::SocketAddr>()
+            .unwrap()
+            .into();
+        for _ in 0..3 {
+            assert!(device.socket_policy().internet_enabled);
+            assert!(device
+                .socket_policy()
+                .check(SocketOperation::TcpConnect, &address)
+                .is_err());
+            assert!(device.reset());
+        }
+    }
 
     #[test]
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
