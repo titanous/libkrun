@@ -1,12 +1,8 @@
 # Combining stop reasons with Nitro memory copying
 
-This is merge guidance, not a claim that the Nitro memory-copy branch has been
-merged or tested with these changes. The first reviewed overlap was
-`nitro-clone-nitro` at `e34ba088`, based on `b194fdf4`; that branch later also
-changed `src/vmm/src/capture_request.rs`, so ten files are shared.
-
-Preserve the following rules in the ten shared files (paths are repository
-relative):
+Both are merged on this branch (merge 6dde738b of `nitro` at 978df6e2). The
+rules below are what that merge keeps, and what any later merge touching these
+ten files must keep (paths are repository relative):
 
 | File | Required combination |
 |---|---|
@@ -23,21 +19,20 @@ relative):
 
 ## Capture acceptance guard
 
-Nitro `poll_capture` must reject a capture before accepting it when a final
-reason 1--4 has already arrived. Preparing (5) alone is not a terminal reason.
-Recheck the retained reason after stopping/closing the source and before
-publishing a template; a reason arriving during acceptance must also reject
-publication. Propagate close/join errors before publication. Set
-`TerminalFacts::frozen` only after the source has actually closed successfully.
-The shared resolver makes a final reason outrank frozen state, but that resolver
-alone cannot undo an already-published template.
-
-The reason byte is only set on Nitro when the guest kernel has the reason-device
-driver and holodeck enables `Builder::nitro_stop_reason`. Until both are in the
-base, the byte stays 0 and this guard alone checks nothing on Nitro: the guard
-must then also reject (before accepting, and again before publishing) when the
-run's host stop event is pending, which is how holodeck's console stop watch
-ends a Nitro guest today.
+On Nitro (`Runtime::guest_stop`, used by `poll_capture` and `run_facts`) a
+capture is refused when a final reason 1--4 has been stated OR the run's host
+stop event is pending (read without consuming it). Preparing (5) alone is not a
+terminal reason. It is checked three times: before the memory copy, again
+immediately before the irreversible acceptance, and after the source's devices
+stopped, before the source is closed and the template published. A refusal
+before acceptance resumes the source in place; after acceptance no template is
+published. Both reach the waiting caller as the typed
+`GuestStoppedDuringCapture` (the stated ending, or `Stopped` for a host stop),
+through `CaptureHandler::guest_stopped` and `PreparedCapture::reject`. An error
+after acceptance publishes nothing (the waiter gets "timed out after
+acceptance"). `TerminalFacts::frozen` is set only after the source has closed.
+The pending host stop matters because holodeck's console stop watch ends a Nitro
+guest through it until the reason device carries the reason on Nitro.
 
 ## Stop-channel inheritance for copies
 
