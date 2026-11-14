@@ -22,7 +22,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         nitro_sandbox::lifecycle::LIFECYCLE_LOCK_PATH.into(),
         NitroSerialization::StartAndTeardown,
     );
-    builder.vm_config(1, 1024)?;
+    let memory = std::env::var("COPY_MEMORY_MIB")
+        .unwrap_or_else(|_| "1024".into())
+        .parse()?;
+    builder.vm_config(1, memory)?;
     builder.disable_implicit_console()?;
     builder.add_vsock_port(7000, socket, false);
     builder.nitro_console_sink(
@@ -72,10 +75,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     context.run()?;
     worker.join().map_err(|_| "ordinary worker panic")??;
-    if !std::fs::read_to_string("ordinary-console.log")?
-        .contains("ORDINARY TRIGGER PASS absent vsock-alive")
-    {
-        return Err("ordinary trigger evidence missing".into());
+    let console = std::fs::read_to_string("ordinary-console.log")?;
+    let overlap = std::env::var_os("RESERVATION_OVERLAP").is_some();
+    let expected = if overlap {
+        "OVERLAP TRIGGER PASS refused vsock-alive"
+    } else {
+        "ORDINARY TRIGGER PASS absent vsock-alive"
+    };
+    if !console.contains(expected) {
+        return Err("guest trigger evidence missing".into());
+    }
+    if console.contains("NITRO_RECEIVER_RANGE reserved") {
+        return Err("refused or ordinary guest advertised a receiver reservation".into());
+    }
+    if overlap && !console.contains("receiver range overlaps reserved boot memory") {
+        return Err("overlapping boot reservation was not diagnosed".into());
     }
     println!("ORDINARY_CAPTURE_NEGATIVE_PASS trigger_absent=1 typed_error=1");
     Ok(())

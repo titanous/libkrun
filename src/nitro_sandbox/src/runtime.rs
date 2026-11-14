@@ -352,7 +352,13 @@ impl Runtime {
             return Ok(false);
         };
         if !discovery.receiver_reserved {
-            return Err(io::Error::other("clone receiver reservation missing"));
+            // Reservation publication precedes the final boot marker. A missing
+            // reservation disables capture, not the running source guest.
+            if discovery.marker.is_some() {
+                self.capture.as_mut().unwrap().marker_confirmed(false);
+                self.capture = None;
+            }
+            return Ok(false);
         }
         // SAFETY: used only within this call; queue workers must be reset before
         // capture preparation below, and only the control word is read first.
