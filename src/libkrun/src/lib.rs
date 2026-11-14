@@ -34,6 +34,9 @@ pub use devices::virtio::net::{
 pub use devices::virtio::port_io::{self, PortInput, PortOutput};
 #[cfg(not(feature = "tee"))]
 pub use devices::virtio::rng::{OsRngBackend, RngBackend};
+pub use devices::virtio::vsock::policy::{
+    OutboundPolicy, SocketAddress, SocketOperation, SocketPolicy,
+};
 pub use devices::virtio::PortDescription;
 pub use devices::virtio::VmmExitObserver;
 use libc::{c_char, size_t};
@@ -54,6 +57,8 @@ use vmm::resources::{TsiFlags, VmResources, VsockConfig};
 pub use vmm::vm_exit::VmExit;
 #[cfg(feature = "blk")]
 pub use vmm::vmm_config::block::{BlockConfigError, BlockDeviceConfig, BlockRootConfig};
+use vmm::vmm_config::external_kernel::ExternalKernel;
+pub use vmm::vmm_config::external_kernel::KernelFormat;
 #[cfg(not(feature = "tee"))]
 use vmm::vmm_config::fs::FsMount;
 use vmm::vmm_config::kernel_bundle::KernelBundle;
@@ -485,6 +490,7 @@ pub struct Builder {
     config: ContextConfig,
     kernel_cmdline: Vec<String>,
     extra_kernel_args: Vec<String>,
+    socket_policy: SocketPolicy,
     /// Number of console devices added (for computing device paths)
     console_count: u32,
 }
@@ -535,6 +541,62 @@ impl Builder {
             .set_vm_config(&vm_config)
             .map_err(|_| StartError::ZeroVcpus)?;
         Ok(self)
+    }
+
+    /// Select an external kernel instead of the bundled firmware library.
+    ///
+    /// On x86-64 use `Elf` for an uncompressed ELF vmlinux, or `ImageGz`,
+    /// `ImageBz2`, or `ImageZstd` for an image containing a compressed ELF.
+    /// On arm64 use `Raw` for an uncompressed Linux Image or `PeGz` for a
+    /// PE image containing a gzip-compressed Image. Other formats are rejected.
+    /// Kernel and initramfs contents are copied into guest memory during build.
+    pub fn external_kernel(
+        &mut self,
+        path: PathBuf,
+        format: KernelFormat,
+        initramfs_path: Option<PathBuf>,
+    ) -> std::io::Result<&mut Self> {
+        let supported = match format {
+            #[cfg(target_arch = "x86_64")]
+            KernelFormat::Elf
+            | KernelFormat::ImageGz
+            | KernelFormat::ImageBz2
+            | KernelFormat::ImageZstd => true,
+            #[cfg(target_arch = "aarch64")]
+            KernelFormat::Raw | KernelFormat::PeGz => true,
+            _ => false,
+        };
+        if !supported {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "kernel format unsupported on this architecture",
+            ));
+        }
+        let initramfs_size = initramfs_path
+            .as_ref()
+            .map(std::fs::metadata)
+            .transpose()?
+            .map_or(0, |m| m.len());
+        self.config.vmr.set_external_kernel(ExternalKernel {
+            path,
+            format,
+            initramfs_path,
+            initramfs_size,
+            cmdline: None,
+        });
+        Ok(self)
+    }
+
+    /// Authorize host socket operations for this guest. Defaults to allow all.
+    pub fn outbound_policy(&mut self, policy: Arc<dyn OutboundPolicy>) -> &mut Self {
+        self.socket_policy.policy = Some(policy);
+        self
+    }
+
+    /// Disable internet socket forwarding without disabling mapped vsock ports.
+    pub fn internet_socket_forwarding(&mut self, enabled: bool) -> &mut Self {
+        self.socket_policy.internet_enabled = enabled;
+        self
     }
 
     pub fn workdir(&mut self, workdir: String) -> &mut Self {
@@ -604,6 +666,23 @@ impl Builder {
     pub fn add_block_cfg(&mut self, block_cfg: BlockDeviceConfig) -> &mut Self {
         self.config.block_cfgs.push(block_cfg);
         self
+    }
+
+    /// Attach caller-owned storage; `read_only` controls the guest-visible device.
+    #[cfg(feature = "blk")]
+    pub fn add_block_backend(
+        &mut self,
+        id: String,
+        backend: Arc<dyn BlockBackend + Send + Sync>,
+        read_only: bool,
+    ) -> &mut Self {
+        self.add_block_cfg(BlockDeviceConfig {
+            block_id: id,
+            cache_type: backend.cache_type(),
+            disk_type: BlockDeviceType::Custom { backend },
+            is_disk_read_only: read_only,
+            direct_io: false,
+        })
     }
 
     #[cfg(not(feature = "tee"))]
@@ -1095,11 +1174,18 @@ impl Builder {
             }
         } else {
             let mut cmdline = self.kernel_cmdline;
-            cmdline.push(ctx_cfg.get_env());
+            let external = ctx_cfg.vmr.external_kernel.is_some();
+            if !external {
+                cmdline.push(ctx_cfg.get_env());
+            }
             cmdline.extend(self.extra_kernel_args);
             KernelCmdlineConfig {
                 cmdline,
-                args: vec![format!(" -- {}", ctx_cfg.get_args())],
+                args: if external {
+                    Vec::new()
+                } else {
+                    vec![format!(" -- {}", ctx_cfg.get_args())]
+                },
             }
         };
 
@@ -1125,6 +1211,12 @@ impl Builder {
         let skip_userspace_vsock = ctx_cfg.vhost_user_vsock;
         #[cfg(not(feature = "vhost-user"))]
         let skip_userspace_vsock = false;
+
+        if skip_userspace_vsock
+            && (self.socket_policy.policy.is_some() || !self.socket_policy.internet_enabled)
+        {
+            return Err(StartError::UnsupportedSocketPolicy);
+        }
 
         if !skip_userspace_vsock {
             match &ctx_cfg.vsock_config {
@@ -1166,6 +1258,10 @@ impl Builder {
                     }
                 }
             }
+        }
+
+        if let Some(vsock) = ctx_cfg.vmr.vsock.get() {
+            vsock.lock().unwrap().set_socket_policy(self.socket_policy);
         }
 
         if let Some(virgl_flags) = ctx_cfg.gpu_virgl_flags {
@@ -1270,6 +1366,8 @@ pub struct Context {
 
 #[derive(Debug, thiserror::Error)]
 pub enum StartError {
+    #[error("host socket policy cannot be enforced by an external vhost-user-vsock server")]
+    UnsupportedSocketPolicy,
     #[error("could not setup event manager: {0:?}")]
     EventManager(polly::event_manager::Error),
     #[cfg(not(feature = "static-firmware"))]
@@ -2214,6 +2312,50 @@ mod tests {
         assert!(result.contains("KRUN_BLOCK_ROOT_OPTIONS=ro,noatime"));
     }
 
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_external_kernel_configuration() {
+        let mut builder = Builder::new();
+        builder
+            .external_kernel(PathBuf::from("vmlinux"), KernelFormat::Elf, None)
+            .unwrap();
+        let kernel = builder.config.vmr.external_kernel().unwrap();
+        assert_eq!(kernel.path, PathBuf::from("vmlinux"));
+        assert_eq!(kernel.initramfs_size, 0);
+        assert!(kernel.cmdline.is_none());
+        assert!(builder
+            .external_kernel(PathBuf::from("Image"), KernelFormat::Raw, None)
+            .is_err());
+        assert_eq!(
+            builder.config.vmr.external_kernel().unwrap().path,
+            PathBuf::from("vmlinux")
+        );
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_external_kernel_initramfs_size() {
+        let file = utils::tempfile::TempFile::new().unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(file.as_path())
+            .unwrap()
+            .set_len(4096)
+            .unwrap();
+        let mut builder = Builder::new();
+        builder
+            .external_kernel(
+                PathBuf::from("vmlinux"),
+                KernelFormat::Elf,
+                Some(file.as_path().to_owned()),
+            )
+            .unwrap();
+        assert_eq!(
+            builder.config.vmr.external_kernel().unwrap().initramfs_size,
+            4096
+        );
+    }
+
     // Builder field-setting method tests
     #[test]
     fn test_builder_workdir_sets_field() {
@@ -2385,6 +2527,37 @@ mod tests {
         };
         builder.add_block_cfg(blk);
         assert_eq!(builder.config.block_cfgs.len(), 1);
+    }
+
+    #[cfg(feature = "blk")]
+    #[test]
+    fn test_caller_disk_read_only_and_identifier() {
+        struct Disk;
+        impl BlockBackend for Disk {
+            fn cache_type(&self) -> CacheType {
+                CacheType::Writeback
+            }
+            fn nsectors(&self) -> u64 {
+                8
+            }
+            fn image_id(&self) -> &[u8] {
+                b"test-disk"
+            }
+            fn read_vectored_at(&self, _: &[VolatileSlice], _: u64) -> std::io::Result<usize> {
+                Ok(0)
+            }
+            fn write_vectored_at(&self, _: &[VolatileSlice], _: u64) -> std::io::Result<usize> {
+                Ok(0)
+            }
+        }
+        for read_only in [false, true] {
+            let mut builder = Builder::new();
+            builder.add_block_backend("caller".into(), Arc::new(Disk), read_only);
+            let config = &builder.config.block_cfgs[0];
+            assert_eq!(config.block_id, "caller");
+            assert_eq!(config.is_disk_read_only, read_only);
+            assert!(matches!(config.disk_type, BlockDeviceType::Custom { .. }));
+        }
     }
 
     // next_console_device_index arithmetic tests

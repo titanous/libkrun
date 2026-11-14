@@ -112,6 +112,7 @@ pub struct VsockMuxer {
     reaper_sender: Option<Sender<u64>>,
     unix_ipc_port_map: Option<HashMap<u32, (PathBuf, bool)>>,
     tsi_flags: TsiFlags,
+    pub(crate) socket_policy: super::policy::SocketPolicy,
 }
 
 impl VsockMuxer {
@@ -133,6 +134,7 @@ impl VsockMuxer {
             reaper_sender: None,
             unix_ipc_port_map,
             tsi_flags,
+            socket_policy: Default::default(),
         }
     }
 
@@ -154,7 +156,7 @@ impl VsockMuxer {
 
         let (sender, receiver) = unbounded();
 
-        let thread = MuxerThread::new(
+        let mut thread = MuxerThread::new(
             self.cid,
             self.epoll.clone(),
             self.rxq.clone(),
@@ -165,6 +167,7 @@ impl VsockMuxer {
             sender.clone(),
             self.unix_ipc_port_map.clone().unwrap_or_default(),
         );
+        thread.socket_policy = self.socket_policy.clone();
         thread.run();
 
         self.reaper_sender = Some(sender);
@@ -315,7 +318,8 @@ impl VsockMuxer {
                         queue.clone(),
                         self.rxq.clone(),
                     ) {
-                        Ok(proxy) => {
+                        Ok(mut proxy) => {
+                            proxy.socket_policy = self.socket_policy.clone();
                             self.proxy_map
                                 .write()
                                 .unwrap()
@@ -348,7 +352,8 @@ impl VsockMuxer {
                         queue.clone(),
                         self.rxq.clone(),
                     ) {
-                        Ok(proxy) => {
+                        Ok(mut proxy) => {
+                            proxy.socket_policy = self.socket_policy.clone();
                             self.proxy_map
                                 .write()
                                 .unwrap()
@@ -584,6 +589,7 @@ impl VsockMuxer {
                     path.to_path_buf(),
                 )
                 .unwrap();
+                unix.socket_policy = self.socket_policy.clone();
                 let tsi = TsiConnectReq {
                     peer_port: 0,
                     addr: SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0).into(),

@@ -5,6 +5,7 @@ use super::{
 
 use nix::errno::Errno;
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
+use nix::sys::socket::SockaddrLike;
 use nix::sys::socket::{
     accept, bind, connect, listen, recv, send, shutdown, socket, AddressFamily, Backlog, MsgFlags,
     Shutdown, SockFlag, SockType, UnixAddr,
@@ -26,6 +27,7 @@ use utils::epoll::EventSet;
 use vm_memory::GuestMemoryMmap;
 
 pub struct UnixProxy {
+    pub(crate) socket_policy: super::policy::SocketPolicy,
     id: u64,
     cid: u64,
     fd: OwnedFd,
@@ -85,6 +87,7 @@ impl UnixProxy {
         let fd = proxy_fd_create(id)?;
 
         Ok(UnixProxy {
+            socket_policy: Default::default(),
             id,
             cid,
             local_port,
@@ -118,6 +121,7 @@ impl UnixProxy {
     ) -> Self {
         debug!("new_reverse: id={id} local_port={local_port} peer_port={peer_port}");
         UnixProxy {
+            socket_policy: Default::default(),
             id,
             cid,
             local_port,
@@ -312,7 +316,16 @@ impl Proxy for UnixProxy {
 
         let addr = UnixAddr::new(&self.path).unwrap();
 
-        let result = match connect(self.fd.as_raw_fd(), &addr) {
+        // SAFETY: addr owns a valid sockaddr_un for its reported length.
+        let storage = unsafe {
+            nix::sys::socket::SockaddrStorage::from_raw(addr.as_ptr().cast(), Some(addr.len()))
+        }
+        .unwrap();
+        let result = match self
+            .socket_policy
+            .check(super::policy::SocketOperation::UnixConnect, &storage)
+            .and_then(|()| connect(self.fd.as_raw_fd(), &addr))
+        {
             Ok(()) => {
                 debug!("connect: Connected");
                 self.switch_to_connected();

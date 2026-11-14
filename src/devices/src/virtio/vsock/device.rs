@@ -83,6 +83,10 @@ impl Vsock {
         })
     }
 
+    pub fn set_socket_policy(&mut self, policy: super::policy::SocketPolicy) {
+        self.muxer.socket_policy = policy;
+    }
+
     pub fn id(&self) -> &str {
         defs::VSOCK_DEV_ID
     }

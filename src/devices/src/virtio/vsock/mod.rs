@@ -12,6 +12,7 @@ mod muxer_rxq;
 mod muxer_thread;
 #[allow(dead_code)]
 mod packet;
+pub mod policy;
 mod proxy;
 mod reaper;
 mod tsi_dgram;
