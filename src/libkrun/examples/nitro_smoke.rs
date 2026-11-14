@@ -19,9 +19,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     builder.add_vsock_port(7000, args[3].clone().into(), false);
     let cid = std::env::var("NITRO_CID").unwrap_or_else(|_| "200".into()).parse()?;
-    builder.nitro_backend(NitroBackendConfig { image: args[1].clone().into(), cid, watchdog: std::time::Duration::from_secs(15) });
+    let expected_watchdog = std::env::var_os("NITRO_EXPECT_WATCHDOG").is_some();
+    builder.nitro_backend(NitroBackendConfig { image: args[1].clone().into(), cid, watchdog: std::time::Duration::from_secs(if expected_watchdog { 3 } else { 15 }) });
     match builder.build()?.run()? {
-        VmExit::Shutdown { .. } => Ok(()),
+        VmExit::Error { message } if expected_watchdog && message == "Nitro guest watchdog expired" => { eprintln!("REBOOT_WATCHDOG_OK"); Ok(()) },
+        VmExit::Shutdown { .. } if !expected_watchdog => Ok(()),
         other => Err(format!("unexpected exit: {other:?}").into()),
     }
 }

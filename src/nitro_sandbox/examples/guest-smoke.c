@@ -34,5 +34,11 @@ int main(void) {
  if(memcmp(b,text,sizeof(text))) fail("vsock data"); close(s); printf("NITRO_VSOCK_OK\n");
  int c=-1; for(int n=0;n<500 && c<0;n++){ c=open("/dev/vport2p0",O_WRONLY|O_NONBLOCK); if(c<0)c=open("/dev/hvc0",O_WRONLY|O_NONBLOCK); if(c<0)usleep(10000); }
  if(c<0) fail("console open"); if(write(c,"NITRO_VIRTIO_CONSOLE_OK\n",23)!=23) fail("console write"); close(c);
- if(umount("/mnt"))fail("unmount"); printf("NITRO_SMOKE_OK\n"); sync(); reboot(RB_POWER_OFF); return 1;
+ if(umount("/mnt"))fail("unmount"); printf("NITRO_SMOKE_OK\n"); sync();
+#ifdef REBOOT_GUEST
+ reboot(RB_AUTOBOOT);
+#else
+ reboot(RB_POWER_OFF);
+#endif
+ return 1;
 }
