@@ -86,7 +86,7 @@ impl Vsock {
             .unwrap();
 
         // Register queue events with the event manager. On re-activation
-        // (e.g. snapshot restore) the FDs are the same Arc<EventFd>s from the
+        // after reset the FDs are the same Arc<EventFd>s from the
         // transport, so duplicate registration is harmless (epoll_ctl EPOLL_CTL_ADD
         // with an existing fd returns EEXIST, which we ignore).
         event_manager

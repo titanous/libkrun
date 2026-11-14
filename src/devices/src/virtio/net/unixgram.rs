@@ -37,7 +37,7 @@ impl Unixgram {
 
     /// Create the backend opening a connection to the userspace network proxy.
     pub fn open(path: PathBuf, send_vfkit_magic: bool) -> Result<Self, ConnectError> {
-        // We cannot create a non-blocking socket on macOS here. This is done later in new().
+        // Non-blocking mode is configured in new().
         let fd = socket(
             AddressFamily::Unix,
             SockType::Datagram,

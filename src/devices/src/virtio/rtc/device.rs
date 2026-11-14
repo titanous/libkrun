@@ -432,10 +432,7 @@ impl Rtc {
                 }
 
                 uapi::VIRTIO_RTC_REQ_CROSS_CAP => {
-                    // Cross-timestamping is disabled for now. On macOS with HVF,
-                    // PTP_SYS_OFFSET_PRECISE fails with EOVERFLOW due to kernel
-                    // interpolation issues, causing error logs. The fallback method
-                    // (PTP_SYS_OFFSET) works fine without cross-timestamping support.
+                    // Cross-timestamping is disabled; guests use PTP_SYS_OFFSET.
                     let resp = RespCrossCap {
                         head: RespHead {
                             status: uapi::VIRTIO_RTC_S_OK,

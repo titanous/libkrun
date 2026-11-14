@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 
 use utils::byte_order;
 use utils::eventfd::EventFd;
@@ -43,20 +43,13 @@ pub struct Vsock {
     pub(crate) muxer: VsockMuxer,
     pub(crate) queue_rx: Option<Arc<Mutex<VirtQueue>>>,
     pub(crate) queue_tx: Option<Arc<Mutex<VirtQueue>>>,
-    /// Snapshot buffer: holds queue state for save/restore.
+    /// Device-local queue state.
     pub(crate) queues: Vec<VirtQueue>,
     pub(crate) queue_events: Vec<Arc<EventFd>>,
     pub(crate) avail_features: u64,
     pub(crate) acked_features: u64,
     pub(crate) activate_evt: EventFd,
     pub(crate) device_state: DeviceState,
-
-    muxer_quiesce_fd: EventFd,
-    muxer_resume_fd: EventFd,
-    muxer_quiesce_ack: Arc<(Mutex<bool>, Condvar)>,
-    timesync_quiesce_fd: EventFd,
-    timesync_resume_fd: EventFd,
-    timesync_quiesce_ack: Arc<(Mutex<bool>, Condvar)>,
 }
 
 impl Vsock {
@@ -87,14 +80,6 @@ impl Vsock {
             activate_evt: EventFd::new(utils::eventfd::EFD_NONBLOCK)
                 .map_err(super::VsockError::EventFd)?,
             device_state: DeviceState::Inactive,
-            muxer_quiesce_fd: EventFd::new(utils::eventfd::EFD_NONBLOCK)
-                .map_err(super::VsockError::EventFd)?,
-            muxer_resume_fd: EventFd::new(0).map_err(super::VsockError::EventFd)?,
-            muxer_quiesce_ack: Arc::new((Mutex::new(false), Condvar::new())),
-            timesync_quiesce_fd: EventFd::new(utils::eventfd::EFD_NONBLOCK)
-                .map_err(super::VsockError::EventFd)?,
-            timesync_resume_fd: EventFd::new(0).map_err(super::VsockError::EventFd)?,
-            timesync_quiesce_ack: Arc::new((Mutex::new(false), Condvar::new())),
         })
     }
 
@@ -332,33 +317,11 @@ impl VirtioDevice for Vsock {
         let rxq_kick = (*self.queue_events[RXQ_INDEX])
             .try_clone()
             .map_err(|_| ActivateError::BadActivate)?;
-        let muxer_quiesce_fd = self
-            .muxer_quiesce_fd
-            .try_clone()
-            .map_err(|_| ActivateError::BadActivate)?;
-        let muxer_resume_fd = self
-            .muxer_resume_fd
-            .try_clone()
-            .map_err(|_| ActivateError::BadActivate)?;
-        let timesync_quiesce_fd = self
-            .timesync_quiesce_fd
-            .try_clone()
-            .map_err(|_| ActivateError::BadActivate)?;
-        let timesync_resume_fd = self
-            .timesync_resume_fd
-            .try_clone()
-            .map_err(|_| ActivateError::BadActivate)?;
         self.muxer.activate(
             mem.clone(),
             self.queue_rx.clone().unwrap(),
             interrupt.clone(),
             rxq_kick,
-            muxer_quiesce_fd,
-            muxer_resume_fd,
-            self.muxer_quiesce_ack.clone(),
-            timesync_quiesce_fd,
-            timesync_resume_fd,
-            self.timesync_quiesce_ack.clone(),
         );
 
         self.device_state = DeviceState::Activated(mem, interrupt);

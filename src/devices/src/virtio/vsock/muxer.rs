@@ -22,7 +22,6 @@ use vm_memory::GuestMemoryMmap;
 
 use crate::virtio::InterruptTransport;
 use std::net::{Ipv4Addr, SocketAddrV4};
-use std::sync::Condvar;
 use utils::eventfd::EventFd;
 
 pub type ProxyMap = Arc<RwLock<HashMap<u64, Mutex<Box<dyn Proxy>>>>>;
@@ -144,12 +143,6 @@ impl VsockMuxer {
         queue: Arc<Mutex<VirtQueue>>,
         interrupt: InterruptTransport,
         rxq_kick: EventFd,
-        muxer_quiesce_fd: EventFd,
-        muxer_resume_fd: EventFd,
-        muxer_quiesce_ack: Arc<(Mutex<bool>, Condvar)>,
-        _timesync_quiesce_fd: EventFd,
-        _timesync_resume_fd: EventFd,
-        _timesync_quiesce_ack: Arc<(Mutex<bool>, Condvar)>,
     ) {
         self.queue = Some(queue.clone());
         self.mem = Some(mem.clone());
@@ -171,9 +164,6 @@ impl VsockMuxer {
             interrupt.clone(),
             sender.clone(),
             self.unix_ipc_port_map.clone().unwrap_or_default(),
-            muxer_quiesce_fd,
-            muxer_resume_fd,
-            muxer_quiesce_ack,
         );
         thread.run();
 

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::unix::io::RawFd;
 use std::path::PathBuf;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use super::super::Queue as VirtQueue;
@@ -16,7 +16,6 @@ use crate::virtio::InterruptTransport;
 use crossbeam_channel::Sender;
 use rand::{rng, rngs::ThreadRng, Rng};
 use utils::epoll::{ControlOperation, Epoll, EpollEvent, EventSet};
-use utils::eventfd::EventFd;
 use vm_memory::GuestMemoryMmap;
 
 pub struct MuxerThread {
@@ -29,9 +28,6 @@ pub struct MuxerThread {
     interrupt: InterruptTransport,
     reaper_sender: Sender<u64>,
     unix_ipc_port_map: HashMap<u32, (PathBuf, bool)>,
-    quiesce_fd: EventFd,
-    resume_fd: EventFd,
-    quiesce_ack: Arc<(Mutex<bool>, Condvar)>,
 }
 
 impl MuxerThread {
@@ -46,9 +42,6 @@ impl MuxerThread {
         interrupt: InterruptTransport,
         reaper_sender: Sender<u64>,
         unix_ipc_port_map: HashMap<u32, (PathBuf, bool)>,
-        quiesce_fd: EventFd,
-        resume_fd: EventFd,
-        quiesce_ack: Arc<(Mutex<bool>, Condvar)>,
     ) -> Self {
         MuxerThread {
             cid,
@@ -60,9 +53,6 @@ impl MuxerThread {
             interrupt,
             reaper_sender,
             unix_ipc_port_map,
-            quiesce_fd,
-            resume_fd,
-            quiesce_ack,
         }
     }
 
@@ -182,32 +172,7 @@ impl MuxerThread {
         }
     }
 
-    fn handle_quiesce(&self) {
-        let _ = self.quiesce_fd.read();
-        debug!("vsock: muxer_thread quiesced");
-
-        // Signal the device that we're quiesced.
-        let (lock, cvar) = &*self.quiesce_ack;
-        {
-            let mut acked = lock.lock().unwrap();
-            *acked = true;
-            cvar.notify_one();
-        }
-
-        // Park until resume_fd is signalled.
-        let _ = self.resume_fd.read();
-        debug!("vsock: muxer_thread resumed");
-    }
-
     fn work(self) {
-        // Register quiesce_fd with a sentinel data value (0) that won't
-        // collide with any proxy ID.
-        let _ = self.epoll.ctl(
-            ControlOperation::Add,
-            self.quiesce_fd.as_raw_fd(),
-            &EpollEvent::new(EventSet::IN, 0),
-        );
-
         let mut thread_rng = rng();
         self.create_lisening_ipc_sockets();
         loop {
@@ -221,11 +186,6 @@ impl MuxerThread {
                         let evset = EventSet::from_bits(ev.events).unwrap();
                         let id = ev.data();
                         debug!("vsock: muxer_thread event: id={id} evset={evset:?}");
-
-                        if id == 0 {
-                            self.handle_quiesce();
-                            continue;
-                        }
 
                         let update = self.proxy_map.read().unwrap().get(&id).map(|proxy_lock| {
                             let mut proxy = proxy_lock.lock().unwrap();

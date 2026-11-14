@@ -141,14 +141,6 @@ pub trait BlockBackend: Send {
     /// Called when the VMM is shutting down.
     /// Use this for cleanup like flushing data to persistent storage.
     fn on_exit(&self) {}
-
-    /// Serialize backend state for snapshot. Default: no state saved.
-    fn save_snapshot_state(&self) -> Option<Vec<u8>> {
-        None
-    }
-
-    /// Restore backend state from a previous snapshot. Default: no-op.
-    fn restore_snapshot_state(&self, _data: &[u8]) {}
 }
 
 impl<B> BlockBackend for std::sync::Arc<B>
@@ -193,14 +185,6 @@ where
 
     fn on_exit(&self) {
         (**self).on_exit()
-    }
-
-    fn save_snapshot_state(&self) -> Option<Vec<u8>> {
-        (**self).save_snapshot_state()
-    }
-
-    fn restore_snapshot_state(&self, data: &[u8]) {
-        (**self).restore_snapshot_state(data)
     }
 }
 
@@ -312,14 +296,6 @@ pub trait AsyncBlockBackend: Send + Sync + 'static {
     /// Called when the VMM is shutting down.
     /// Use this for cleanup like flushing data to persistent storage.
     fn on_exit(&self) {}
-
-    /// Serialize backend state for snapshot. Default: no state saved.
-    fn save_snapshot_state(&self) -> Option<Vec<u8>> {
-        None
-    }
-
-    /// Restore backend state from a previous snapshot. Default: no-op.
-    fn restore_snapshot_state(&self, _data: &[u8]) {}
 }
 
 /// A guard that holds a pointer and length for a volatile memory region.

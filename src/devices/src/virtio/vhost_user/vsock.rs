@@ -14,8 +14,8 @@ use vhost::vhost_user::message::VhostUserConfigFlags;
 use vhost::vhost_user::VhostUserFrontend;
 
 use crate::virtio::device::VirtioDevice;
+use crate::virtio::ActivateResult;
 use crate::virtio::QueueConfig;
-use crate::virtio::{ActivateResult, Queue};
 
 use super::VhostUserDevice;
 
@@ -27,12 +27,7 @@ const QUEUE_SIZE: u16 = 256;
 pub struct VhostUserVsock {
     vhost_user: VhostUserDevice,
     guest_cid: u64,
-    // Only read in snapshot restore paths (feature-gated by snapshot); set unconditionally in new().
-    #[allow(dead_code)]
-    socket_path: Option<String>,
     queue_configs: Vec<QueueConfig>,
-    /// Queue state buffer for snapshot support
-    queues: Vec<Queue>,
 }
 
 impl VhostUserVsock {
@@ -46,7 +41,7 @@ impl VhostUserVsock {
             NUM_QUEUES as u16,
             &[QUEUE_SIZE; NUM_QUEUES],
         )?;
-        Self::build_from_device(vhost_user, Some(socket_path.to_string()))
+        Self::build_from_device(vhost_user)
     }
 
     /// Create a new VhostUserVsock from a pre-connected UnixStream.
@@ -59,14 +54,11 @@ impl VhostUserVsock {
             NUM_QUEUES as u16,
             &[QUEUE_SIZE; NUM_QUEUES],
         )?;
-        Self::build_from_device(vhost_user, None)
+        Self::build_from_device(vhost_user)
     }
 
     /// Shared construction: fetch guest_cid from backend config, build struct.
-    fn build_from_device(
-        vhost_user: VhostUserDevice,
-        socket_path: Option<String>,
-    ) -> IoResult<Self> {
+    fn build_from_device(vhost_user: VhostUserDevice) -> IoResult<Self> {
         // Fetch guest_cid from backend via GET_CONFIG
         let guest_cid = {
             let mut frontend = vhost_user.frontend.lock().unwrap();
@@ -89,14 +81,11 @@ impl VhostUserVsock {
         debug!("vhost-user-vsock: guest_cid = {}", guest_cid);
 
         let queue_configs = vec![QueueConfig::new(QUEUE_SIZE); NUM_QUEUES];
-        let queues = (0..NUM_QUEUES).map(|_| Queue::new(QUEUE_SIZE)).collect();
 
         Ok(VhostUserVsock {
             vhost_user,
             guest_cid,
-            socket_path,
             queue_configs,
-            queues,
         })
     }
 
@@ -131,14 +120,6 @@ impl VirtioDevice for VhostUserVsock {
         &self.queue_configs
     }
 
-    fn queues(&self) -> &[Queue] {
-        &self.queues
-    }
-
-    fn queues_mut(&mut self) -> &mut [Queue] {
-        &mut self.queues
-    }
-
     fn read_config(&self, offset: u64, data: &mut [u8]) {
         if offset >= 8 {
             warn!(
@@ -163,19 +144,6 @@ impl VirtioDevice for VhostUserVsock {
         interrupt: crate::virtio::InterruptTransport,
         queues: Vec<crate::virtio::DeviceQueue>,
     ) -> ActivateResult {
-        // Copy queue state for snapshot (MmioTransport reads device.queues())
-        for (i, dq) in queues.iter().enumerate() {
-            if let Some(q) = self.queues.get_mut(i) {
-                q.size = dq.queue.size;
-                q.ready = dq.queue.ready;
-                q.desc_table = dq.queue.desc_table;
-                q.avail_ring = dq.queue.avail_ring;
-                q.used_ring = dq.queue.used_ring;
-                q.set_next_avail(dq.queue.next_avail().0);
-                q.set_next_used(dq.queue.next_used().0);
-            }
-        }
-
         // Delegate to generic VhostUserDevice activation
         self.vhost_user.activate(mem, interrupt, queues)
     }
@@ -212,9 +180,7 @@ impl VhostUserVsock {
         VhostUserVsock {
             vhost_user: VhostUserDevice::new_for_test_unconnected(),
             guest_cid,
-            socket_path: None,
             queue_configs: vec![QueueConfig::new(QUEUE_SIZE); NUM_QUEUES],
-            queues: (0..NUM_QUEUES).map(|_| Queue::new(QUEUE_SIZE)).collect(),
         }
     }
 }

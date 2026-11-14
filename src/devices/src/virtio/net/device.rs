@@ -22,8 +22,6 @@ use std::cmp;
 use std::io::Write;
 use std::os::fd::RawFd;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
 use utils::eventfd::{EventFd, EFD_NONBLOCK};
 use virtio_bindings::virtio_net::VIRTIO_NET_F_MAC;
 use vm_memory::{ByteValued, GuestMemoryError, GuestMemoryMmap};
@@ -126,21 +124,6 @@ pub struct Net {
 
     /// Stop event for async worker shutdown
     worker_stop_fd: EventFd,
-    /// Trigger queue-state resync after snapshot restore
-    worker_resync_fd: EventFd,
-    worker_queue_state: Arc<Mutex<Vec<Queue>>>,
-    worker_queue_generation: Arc<AtomicU64>,
-
-    /// Signal the async worker to quiesce (publish queues then park).
-    worker_quiesce_fd: EventFd,
-    /// Signal the async worker to resume after quiesce.
-    worker_resume_fd: EventFd,
-    /// Condvar the worker sets when it has published queues and parked.
-    worker_quiesce_ack: Arc<(Mutex<bool>, Condvar)>,
-    /// Shared backend snapshot state. Worker writes during quiesce (save),
-    /// device reads in save_backend_state(). Device writes in
-    /// restore_backend_state(), worker reads during resync (restore).
-    worker_backend_state: Arc<Mutex<Option<Vec<u8>>>>,
 }
 
 impl Net {
@@ -159,8 +142,6 @@ impl Net {
         }
 
         let queues: Vec<Queue> = QUEUE_SIZES.iter().map(|&s| Queue::new(s)).collect();
-        let worker_queue_state = Arc::new(Mutex::new(queues.clone()));
-        let worker_queue_generation = Arc::new(AtomicU64::new(0));
 
         let config = VirtioNetConfig {
             mac,
@@ -169,11 +150,6 @@ impl Net {
         };
 
         let worker_stop_fd = EventFd::new(EFD_NONBLOCK).map_err(Error::EventFd)?;
-        let worker_resync_fd = EventFd::new(EFD_NONBLOCK).map_err(Error::EventFd)?;
-        let worker_quiesce_fd = EventFd::new(EFD_NONBLOCK).map_err(Error::EventFd)?;
-        let worker_resume_fd = EventFd::new(EFD_NONBLOCK).map_err(Error::EventFd)?;
-        let worker_quiesce_ack = Arc::new((Mutex::new(false), Condvar::new()));
-        let worker_backend_state = Arc::new(Mutex::new(None));
 
         Ok(Net {
             id,
@@ -187,13 +163,6 @@ impl Net {
             device_state: DeviceState::Inactive,
             config,
             worker_stop_fd,
-            worker_resync_fd,
-            worker_queue_state,
-            worker_queue_generation,
-            worker_quiesce_fd,
-            worker_resume_fd,
-            worker_quiesce_ack,
-            worker_backend_state,
         })
     }
 
@@ -291,10 +260,6 @@ impl VirtioDevice for Net {
                     rx_q.event.try_clone().unwrap(),
                     tx_q.event.try_clone().unwrap(),
                 ];
-                if let Ok(mut shared) = self.worker_queue_state.lock() {
-                    *shared = queue_list.clone();
-                }
-                self.worker_queue_generation.fetch_add(1, Ordering::SeqCst);
                 let worker = AsyncNetWorker::new(
                     queue_list,
                     queue_evts,
@@ -302,13 +267,6 @@ impl VirtioDevice for Net {
                     mem.clone(),
                     factory,
                     self.worker_stop_fd.try_clone().unwrap(),
-                    self.worker_resync_fd.try_clone().unwrap(),
-                    self.worker_queue_state.clone(),
-                    self.worker_queue_generation.clone(),
-                    self.worker_quiesce_fd.try_clone().unwrap(),
-                    self.worker_resume_fd.try_clone().unwrap(),
-                    self.worker_quiesce_ack.clone(),
-                    self.worker_backend_state.clone(),
                 );
                 worker.run();
                 self.device_state = DeviceState::Activated(mem, interrupt);

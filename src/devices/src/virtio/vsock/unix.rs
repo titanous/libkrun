@@ -54,7 +54,7 @@ fn proxy_fd_create(id: u64) -> Result<OwnedFd, ProxyError> {
     )
     .map_err(ProxyError::CreatingSocket)?;
 
-    // macOS forces us to do this here instead of just using SockFlag::SOCK_NONBLOCK above.
+    // Set non-blocking mode before using the socket.
     match fcntl(&fd, FcntlArg::F_GETFL) {
         Ok(flags) => match OFlag::from_bits(flags) {
             Some(flags) => {

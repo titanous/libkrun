@@ -15,8 +15,8 @@
 
 use std::cmp;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+#[cfg(test)]
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -47,13 +47,6 @@ pub struct AsyncNetWorker {
     mem: GuestMemoryMmap,
     factory: Box<dyn AsyncNetBackendFactory>,
     stop_fd: EventFd,
-    resync_fd: EventFd,
-    shared_queues: Arc<Mutex<Vec<Queue>>>,
-    shared_generation: Arc<AtomicU64>,
-    quiesce_fd: EventFd,
-    resume_fd: EventFd,
-    quiesce_ack: Arc<(Mutex<bool>, Condvar)>,
-    shared_backend_state: Arc<Mutex<Option<Vec<u8>>>>,
 }
 
 impl AsyncNetWorker {
@@ -66,13 +59,6 @@ impl AsyncNetWorker {
         mem: GuestMemoryMmap,
         factory: Box<dyn AsyncNetBackendFactory>,
         stop_fd: EventFd,
-        resync_fd: EventFd,
-        shared_queues: Arc<Mutex<Vec<Queue>>>,
-        shared_generation: Arc<AtomicU64>,
-        quiesce_fd: EventFd,
-        resume_fd: EventFd,
-        quiesce_ack: Arc<(Mutex<bool>, Condvar)>,
-        shared_backend_state: Arc<Mutex<Option<Vec<u8>>>>,
     ) -> Self {
         Self {
             queues,
@@ -81,13 +67,6 @@ impl AsyncNetWorker {
             mem,
             factory,
             stop_fd,
-            resync_fd,
-            shared_queues,
-            shared_generation,
-            quiesce_fd,
-            resume_fd,
-            quiesce_ack,
-            shared_backend_state,
         }
     }
 
@@ -123,13 +102,6 @@ impl AsyncNetWorker {
             mem,
             factory,
             stop_fd,
-            resync_fd,
-            shared_queues,
-            shared_generation,
-            quiesce_fd,
-            resume_fd,
-            quiesce_ack,
-            shared_backend_state,
         } = self;
 
         // Wrap TX eventfd for async early — we need to drain TX during backend creation
@@ -146,30 +118,6 @@ impl AsyncNetWorker {
             Ok(fd) => fd,
             Err(e) => {
                 error!("failed to create AsyncFd for stop: {e}");
-                return;
-            }
-        };
-
-        let async_resync = match dup_fd(&resync_fd).and_then(AsyncFd::new) {
-            Ok(fd) => fd,
-            Err(e) => {
-                error!("failed to create AsyncFd for resync: {e}");
-                return;
-            }
-        };
-
-        let async_quiesce = match dup_fd(&quiesce_fd).and_then(AsyncFd::new) {
-            Ok(fd) => fd,
-            Err(e) => {
-                error!("failed to create AsyncFd for quiesce: {e}");
-                return;
-            }
-        };
-
-        let async_resume = match dup_fd(&resume_fd).and_then(AsyncFd::new) {
-            Ok(fd) => fd,
-            Err(e) => {
-                error!("failed to create AsyncFd for resume: {e}");
                 return;
             }
         };
@@ -217,7 +165,6 @@ impl AsyncNetWorker {
         let mut tx_buf = vec![0u8; MAX_BUFFER_SIZE];
 
         debug!("async net worker: entering main loop");
-        let mut applied_generation: u64 = 0;
 
         loop {
             // Cap poll delay to 1 second to ensure timely interrupt re-signaling.
@@ -231,62 +178,12 @@ impl AsyncNetWorker {
             tokio::select! {
                 biased;
 
-                // Snapshot quiesce: publish queue state, ACK, then park until resume
-                ready = async_quiesce.readable() => {
-                    if let Ok(mut guard) = ready {
-                        guard.clear_ready();
-                        if quiesce_fd.read().is_ok() {
-                            debug!("async net worker: quiesce requested, publishing queue + backend state");
-                            // Publish local queues to shared state
-                            if let Ok(mut shared) = shared_queues.lock() {
-                                for (dst, src) in shared.iter_mut().zip(queues.iter()) {
-                                    *dst = src.clone();
-                                }
-                            }
-                            // Publish backend snapshot state
-                            if let Ok(mut shared) = shared_backend_state.lock() {
-                                *shared = backend.save_snapshot_state();
-                            }
-                            // Signal the device that we've parked
-                            {
-                                let (lock, cvar) = &*quiesce_ack;
-                                *lock.lock().unwrap() = true;
-                                cvar.notify_one();
-                            }
-                            // Park: wait for resume_fd
-                            debug!("async net worker: parked, waiting for resume");
-                            loop {
-                                match async_resume.readable().await {
-                                    Ok(mut rg) => {
-                                        rg.clear_ready();
-                                        if resume_fd.read().is_ok() {
-                                            break;
-                                        }
-                                    }
-                                    Err(e) => {
-                                        error!("async net worker: resume fd error: {e}");
-                                        break;
-                                    }
-                                }
-                            }
-                            debug!("async net worker: resumed from quiesce");
-                        }
-                    }
-                }
-
                 // Guest sent packets (TX queue)
                 ready = async_tx_evt.readable() => {
                     match ready {
                         Ok(mut guard) => {
                             guard.clear_ready();
                             if queue_evts[TX_INDEX].read().is_ok() {
-                                apply_shared_queue_state_if_needed(
-                                    &mut queues,
-                                    &mem,
-                                    &shared_queues,
-                                    &shared_generation,
-                                    &mut applied_generation,
-                                );
                                 trace!("async net worker: TX queue event");
                                 drain_tx_queue(
                                     &mut queues,
@@ -306,13 +203,6 @@ impl AsyncNetWorker {
 
                 // Backend has packet for guest
                 Some(packet) = to_guest_rx.recv() => {
-                    apply_shared_queue_state_if_needed(
-                        &mut queues,
-                        &mem,
-                        &shared_queues,
-                        &shared_generation,
-                        &mut applied_generation,
-                    );
                     trace!("async net worker: RX packet from backend, len={}", packet.len());
                     push_to_rx_queue(
                         &mut queues,
@@ -384,78 +274,8 @@ impl AsyncNetWorker {
                     }
                 }
 
-                // Queue resync after snapshot restore
-                ready = async_resync.readable() => {
-                    if let Ok(mut guard) = ready {
-                        guard.clear_ready();
-                        if resync_fd.read().is_ok() {
-                            apply_shared_queue_state_if_needed(
-                                &mut queues,
-                                &mem,
-                                &shared_queues,
-                                &shared_generation,
-                                &mut applied_generation,
-                            );
-                            // Restore backend state if the device provided one
-                            if let Ok(mut shared) = shared_backend_state.lock() {
-                                if let Some(data) = shared.take() {
-                                    debug!("async net worker: restoring backend state ({} bytes)", data.len());
-                                    backend.restore_snapshot_state(&data);
-                                }
-                            }
-                            if queues[TX_INDEX].ready && !queues[TX_INDEX].is_empty(&mem) {
-                                trace!("async net worker: resync detected pending TX without event");
-                                drain_tx_queue(
-                                    &mut queues,
-                                    &mem,
-                                    &interrupt,
-                                    &mut *backend,
-                                    &mut tx_buf,
-                                );
-                                backend.poll();
-                            }
-                            trace!("async net worker: queues resynced from snapshot state");
-                        }
-                    }
-                }
             }
         }
-    }
-}
-
-fn apply_shared_queue_state_if_needed(
-    queues: &mut [Queue],
-    mem: &GuestMemoryMmap,
-    shared_queues: &Arc<Mutex<Vec<Queue>>>,
-    shared_generation: &Arc<AtomicU64>,
-    applied_generation: &mut u64,
-) {
-    let generation = shared_generation.load(Ordering::Acquire);
-    if generation == *applied_generation {
-        return;
-    }
-
-    if let Ok(shared) = shared_queues.lock() {
-        for (dst, src) in queues.iter_mut().zip(shared.iter()) {
-            *dst = src.clone();
-
-            if dst.ready {
-                if let Some(used_idx_addr) = dst.used_ring.checked_add(2) {
-                    if let Ok(used_idx) = mem.read_obj::<u16>(used_idx_addr) {
-                        dst.set_next_used(used_idx);
-                    }
-                }
-
-                if let Some(avail_idx_addr) = dst.avail_ring.checked_add(2) {
-                    if let Ok(avail_idx) = mem.read_obj::<u16>(avail_idx_addr) {
-                        if dst.next_avail().0 > avail_idx {
-                            dst.set_next_avail(avail_idx);
-                        }
-                    }
-                }
-            }
-        }
-        *applied_generation = generation;
     }
 }
 
@@ -535,7 +355,6 @@ fn drain_tx_queue(
         }
     }
     // Signal guest that we consumed descriptors.
-    // Snapshot restore can desynchronize notification heuristics; signal unconditionally.
     if let Err(e) = interrupt.try_signal_used_queue() {
         error!("failed to signal TX used queue: {e:?}");
     }
@@ -632,7 +451,6 @@ fn push_to_rx_queue(
         .ok();
 
     // Signal guest.
-    // Snapshot restore can desynchronize notification heuristics; signal unconditionally.
     if let Err(e) = interrupt.try_signal_used_queue() {
         error!("failed to signal RX used queue: {e:?}");
     }
@@ -690,37 +508,7 @@ mod tests {
     };
     use crate::legacy::DummyIrqChip;
     use crate::virtio::InterruptTransport;
-    use std::sync::Condvar;
     use vm_memory::GuestAddress;
-
-    /// Dummy net backend that does nothing (for quiesce testing).
-    struct DummyNetBackend;
-
-    impl AsyncNetBackend for DummyNetBackend {
-        fn handle_guest_tx(&mut self, _packet: &[u8]) {}
-        fn poll(&mut self) {}
-        fn on_exit(&mut self) {}
-    }
-
-    /// Factory that creates a DummyNetBackend.
-    struct DummyNetBackendFactory;
-
-    impl AsyncNetBackendFactory for DummyNetBackendFactory {
-        fn create(self: Box<Self>) -> SendBoxFuture<'static, std::io::Result<NetBackendHandle>> {
-            Box::pin(async move {
-                let (to_guest_tx, to_guest_rx) = tokio::sync::mpsc::channel(16);
-                // Drop tx immediately: DummyNetBackend never sends guest-bound packets.
-                // The select! arm `Some(p) = to_guest_rx.recv()` is disabled when the
-                // channel is closed, so the worker loop continues via other branches.
-                drop(to_guest_tx);
-                Ok(NetBackendHandle {
-                    backend: Box::new(DummyNetBackend),
-                    to_guest_rx,
-                    wake_rx: None,
-                })
-            })
-        }
-    }
 
     use bytes::Bytes;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -733,32 +521,18 @@ mod tests {
         poll_delay_value: Option<Duration>,
         /// Count of poll() invocations.
         poll_count: Arc<AtomicUsize>,
-        /// Data returned by save_snapshot_state (None means no state).
-        snapshot_data: Option<Vec<u8>>,
-        /// Data received by restore_snapshot_state.
-        restored_state: Arc<Mutex<Option<Vec<u8>>>>,
     }
 
     impl TrackingNetBackend {
-        fn new(
-            snapshot_data: Option<Vec<u8>>,
-        ) -> (
-            Self,
-            Arc<Mutex<Vec<Vec<u8>>>>,
-            Arc<AtomicUsize>,
-            Arc<Mutex<Option<Vec<u8>>>>,
-        ) {
+        fn new() -> (Self, Arc<Mutex<Vec<Vec<u8>>>>, Arc<AtomicUsize>) {
             let tx_received = Arc::new(Mutex::new(Vec::new()));
             let poll_count = Arc::new(AtomicUsize::new(0));
-            let restored_state = Arc::new(Mutex::new(None));
             let backend = TrackingNetBackend {
                 tx_received: tx_received.clone(),
                 poll_delay_value: None,
                 poll_count: poll_count.clone(),
-                snapshot_data,
-                restored_state: restored_state.clone(),
             };
-            (backend, tx_received, poll_count, restored_state)
+            (backend, tx_received, poll_count)
         }
     }
 
@@ -773,14 +547,6 @@ mod tests {
 
         fn poll_delay(&mut self) -> Option<Duration> {
             self.poll_delay_value
-        }
-
-        fn save_snapshot_state(&self) -> Option<Vec<u8>> {
-            self.snapshot_data.clone()
-        }
-
-        fn restore_snapshot_state(&mut self, data: &[u8]) {
-            *self.restored_state.lock().unwrap() = Some(data.to_vec());
         }
 
         fn on_exit(&mut self) {}
@@ -1108,17 +874,9 @@ mod tests {
             EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
         ];
         let stop_fd = EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap();
-        let resync_fd = EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap();
-        let quiesce_fd = EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap();
-        let resume_fd = EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap();
-
-        let shared_queues = Arc::new(Mutex::new(queues.clone()));
-        let shared_generation = Arc::new(AtomicU64::new(0));
-        let quiesce_ack = Arc::new((Mutex::new(false), Condvar::new()));
-        let shared_backend_state = Arc::new(Mutex::new(None));
 
         // Create TrackingNetBackend
-        let (backend, _tx_received, _poll_count, _restored_state) = TrackingNetBackend::new(None);
+        let (backend, _tx_received, _poll_count) = TrackingNetBackend::new();
 
         // Create a holder for the tx sender that the factory will populate
         let tx_from_factory = Arc::new(Mutex::new(None));
@@ -1135,21 +893,8 @@ mod tests {
             wake_tx_from_factory,
         ));
 
-        let worker = AsyncNetWorker::new(
-            queues,
-            queue_evts,
-            interrupt,
-            mem.clone(),
-            factory,
-            stop_fd,
-            resync_fd,
-            shared_queues.clone(),
-            shared_generation,
-            quiesce_fd,
-            resume_fd,
-            quiesce_ack,
-            shared_backend_state,
-        );
+        let worker =
+            AsyncNetWorker::new(queues, queue_evts, interrupt, mem.clone(), factory, stop_fd);
 
         let _handle = worker.run();
 
@@ -1230,17 +975,9 @@ mod tests {
             EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
         ];
         let stop_fd = EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap();
-        let resync_fd = EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap();
-        let quiesce_fd = EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap();
-        let resume_fd = EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap();
-
-        let shared_queues = Arc::new(Mutex::new(queues.clone()));
-        let shared_generation = Arc::new(AtomicU64::new(0));
-        let quiesce_ack = Arc::new((Mutex::new(false), Condvar::new()));
-        let shared_backend_state = Arc::new(Mutex::new(None));
 
         // Create TrackingNetBackend
-        let (backend, _tx_received, _poll_count, _restored_state) = TrackingNetBackend::new(None);
+        let (backend, _tx_received, _poll_count) = TrackingNetBackend::new();
 
         // Create holders for the tx sender that the factory will populate
         let tx_from_factory = Arc::new(Mutex::new(None));
@@ -1257,21 +994,7 @@ mod tests {
             wake_tx_from_factory,
         ));
 
-        let worker = AsyncNetWorker::new(
-            queues,
-            queue_evts,
-            interrupt,
-            mem,
-            factory,
-            stop_fd,
-            resync_fd,
-            shared_queues,
-            shared_generation,
-            quiesce_fd,
-            resume_fd,
-            quiesce_ack,
-            shared_backend_state,
-        );
+        let worker = AsyncNetWorker::new(queues, queue_evts, interrupt, mem, factory, stop_fd);
 
         let _handle = worker.run();
 
@@ -1300,126 +1023,6 @@ mod tests {
         _handle.join().expect("worker thread panicked");
     }
 
-    /// AC3.7: Snapshot state survives quiesce/resync cycle.
-    #[test]
-    fn test_snapshot_state_survives_quiesce_resync() {
-        let mem = vm_memory::GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
-        let irqchip: crate::legacy::IrqChip = DummyIrqChip::new().into();
-        let interrupt = InterruptTransport::new(irqchip, "test-net".into()).unwrap();
-
-        let queues = vec![Queue::new(256), Queue::new(256)];
-        let queue_evts = vec![
-            EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
-            EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
-        ];
-        let stop_fd = EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap();
-        let resync_fd = EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap();
-        let quiesce_fd = EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap();
-        let resume_fd = EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap();
-
-        let shared_queues = Arc::new(Mutex::new(queues.clone()));
-        let shared_generation = Arc::new(AtomicU64::new(0));
-        let quiesce_ack = Arc::new((Mutex::new(false), Condvar::new()));
-        let quiesce_ack_clone = quiesce_ack.clone();
-
-        let quiesce_fd_clone = quiesce_fd.try_clone().unwrap();
-        let resume_fd_clone = resume_fd.try_clone().unwrap();
-        let stop_fd_clone = stop_fd.try_clone().unwrap();
-        let resync_fd_clone = resync_fd.try_clone().unwrap();
-
-        // Create TrackingNetBackend with snapshot data
-        let snapshot_data = b"state-bytes".to_vec();
-        let (backend, _tx_received, _poll_count, restored_state) =
-            TrackingNetBackend::new(Some(snapshot_data.clone()));
-
-        let tx_from_factory = Arc::new(Mutex::new(None));
-        let wake_enabled = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let wake_tx_from_factory = Arc::new(Mutex::new(None));
-
-        let factory: Box<dyn AsyncNetBackendFactory> = Box::new(TrackingNetBackendFactory::new(
-            backend,
-            tx_from_factory,
-            wake_enabled,
-            wake_tx_from_factory,
-        ));
-
-        let shared_backend_state = Arc::new(Mutex::new(None));
-        let shared_backend_state_clone = shared_backend_state.clone();
-
-        let worker = AsyncNetWorker::new(
-            queues,
-            queue_evts,
-            interrupt,
-            mem,
-            factory,
-            stop_fd,
-            resync_fd,
-            shared_queues,
-            shared_generation,
-            quiesce_fd,
-            resume_fd,
-            quiesce_ack,
-            shared_backend_state,
-        );
-
-        let _handle = worker.run();
-
-        // --- First quiesce cycle: save snapshot state ---
-        {
-            let (lock, _) = &*quiesce_ack_clone;
-            *lock.lock().unwrap() = false;
-        }
-        quiesce_fd_clone.write(1).unwrap();
-
-        // Wait for ack
-        {
-            let (lock, cvar) = &*quiesce_ack_clone;
-            let guard = lock.lock().unwrap();
-            let (guard, timeout_result) = cvar
-                .wait_timeout_while(guard, std::time::Duration::from_secs(5), |acked| !*acked)
-                .unwrap();
-            assert!(
-                *guard && !timeout_result.timed_out(),
-                "Net worker did not ack quiesce"
-            );
-        }
-
-        // Check if snapshot state was saved
-        let saved_state = shared_backend_state_clone.lock().unwrap().clone();
-        assert_eq!(
-            saved_state,
-            Some(snapshot_data.clone()),
-            "Snapshot state should be saved in shared_backend_state"
-        );
-
-        // Resume
-        {
-            let (lock, _) = &*quiesce_ack_clone;
-            *lock.lock().unwrap() = false;
-        }
-        resume_fd_clone.write(1).unwrap();
-
-        // --- Resync to trigger restore_snapshot_state ---
-        resync_fd_clone.write(1).unwrap();
-
-        // Wait for resync to be processed (restore_snapshot_state populates restored_state)
-        let restored_state_clone = restored_state.clone();
-        poll_until("restore_snapshot_state called", move || {
-            restored_state_clone.lock().unwrap().is_some()
-        });
-
-        // Check if restore_snapshot_state was called
-        let restored = restored_state.lock().unwrap();
-        assert_eq!(
-            *restored,
-            Some(snapshot_data),
-            "restore_snapshot_state should have been called with snapshot data"
-        );
-
-        stop_fd_clone.write(1).unwrap();
-        _handle.join().expect("worker thread panicked");
-    }
-
     /// AC3.8: wake_rx signal triggers poll() call.
     #[test]
     fn test_wake_rx_triggers_poll() {
@@ -1433,16 +1036,9 @@ mod tests {
             EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
         ];
         let stop_fd = EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap();
-        let resync_fd = EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap();
-        let quiesce_fd = EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap();
-        let resume_fd = EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap();
-
-        let shared_queues = Arc::new(Mutex::new(queues.clone()));
-        let shared_generation = Arc::new(AtomicU64::new(0));
-        let quiesce_ack = Arc::new((Mutex::new(false), Condvar::new()));
 
         // Create TrackingNetBackend
-        let (backend, _tx_received, poll_count, _restored_state) = TrackingNetBackend::new(None);
+        let (backend, _tx_received, poll_count) = TrackingNetBackend::new();
         let poll_count_clone = poll_count.clone();
 
         // Create holders for channels
@@ -1460,23 +1056,7 @@ mod tests {
             wake_tx_from_factory,
         ));
 
-        let shared_backend_state = Arc::new(Mutex::new(None));
-
-        let worker = AsyncNetWorker::new(
-            queues,
-            queue_evts,
-            interrupt,
-            mem,
-            factory,
-            stop_fd,
-            resync_fd,
-            shared_queues,
-            shared_generation,
-            quiesce_fd,
-            resume_fd,
-            quiesce_ack,
-            shared_backend_state,
-        );
+        let worker = AsyncNetWorker::new(queues, queue_evts, interrupt, mem, factory, stop_fd);
 
         let _handle = worker.run();
 
@@ -1534,17 +1114,9 @@ mod tests {
             EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
         ];
         let stop_fd = EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap();
-        let resync_fd = EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap();
-        let quiesce_fd = EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap();
-        let resume_fd = EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap();
-
-        let shared_queues = Arc::new(Mutex::new(queues.clone()));
-        let shared_generation = Arc::new(AtomicU64::new(0));
-        let quiesce_ack = Arc::new((Mutex::new(false), Condvar::new()));
 
         // Create TrackingNetBackend with a 50ms poll_delay
-        let (mut backend, _tx_received, poll_count, _restored_state) =
-            TrackingNetBackend::new(None);
+        let (mut backend, _tx_received, poll_count) = TrackingNetBackend::new();
         backend.poll_delay_value = Some(std::time::Duration::from_millis(50));
         let poll_count_clone = poll_count.clone();
 
@@ -1561,23 +1133,7 @@ mod tests {
             wake_tx_from_factory,
         ));
 
-        let shared_backend_state = Arc::new(Mutex::new(None));
-
-        let worker = AsyncNetWorker::new(
-            queues,
-            queue_evts,
-            interrupt,
-            mem,
-            factory,
-            stop_fd,
-            resync_fd,
-            shared_queues,
-            shared_generation,
-            quiesce_fd,
-            resume_fd,
-            quiesce_ack,
-            shared_backend_state,
-        );
+        let worker = AsyncNetWorker::new(queues, queue_evts, interrupt, mem, factory, stop_fd);
 
         let _handle = worker.run();
 
@@ -1602,118 +1158,5 @@ mod tests {
 
         stop_fd_clone.write(1).unwrap();
         _handle.join().expect("worker thread panicked");
-    }
-
-    /// Test that the quiesce protocol works: signal quiesce → worker acks → resume.
-    #[test]
-    fn test_quiesce_ack_resume() {
-        let mem = vm_memory::GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
-        let irqchip: crate::legacy::IrqChip = DummyIrqChip::new().into();
-        let interrupt = InterruptTransport::new(irqchip, "test-net".into()).unwrap();
-
-        let queues = vec![Queue::new(256), Queue::new(256)];
-        let queue_evts = vec![
-            EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
-            EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
-        ];
-        let stop_fd = EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap();
-        let resync_fd = EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap();
-        let quiesce_fd = EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap();
-        let resume_fd = EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap();
-
-        let shared_queues = Arc::new(Mutex::new(queues.clone()));
-        let shared_generation = Arc::new(AtomicU64::new(0));
-        let quiesce_ack = Arc::new((Mutex::new(false), Condvar::new()));
-
-        let quiesce_fd_clone = quiesce_fd.try_clone().unwrap();
-        let resume_fd_clone = resume_fd.try_clone().unwrap();
-        let stop_fd_clone = stop_fd.try_clone().unwrap();
-        let quiesce_ack_clone = quiesce_ack.clone();
-
-        let factory: Box<dyn AsyncNetBackendFactory> = Box::new(DummyNetBackendFactory);
-
-        let shared_backend_state = Arc::new(Mutex::new(None));
-
-        let worker = AsyncNetWorker::new(
-            queues,
-            queue_evts,
-            interrupt,
-            mem,
-            factory,
-            stop_fd,
-            resync_fd,
-            shared_queues.clone(),
-            shared_generation.clone(),
-            quiesce_fd,
-            resume_fd,
-            quiesce_ack.clone(),
-            shared_backend_state,
-        );
-
-        let handle = worker.run();
-
-        // Give the worker time to start and create backend
-        std::thread::sleep(std::time::Duration::from_millis(100));
-
-        // --- Quiesce cycle 1: verify ack ---
-        {
-            let (lock, _) = &*quiesce_ack_clone;
-            *lock.lock().unwrap() = false;
-        }
-        quiesce_fd_clone.write(1).unwrap();
-
-        // Wait for ack with timeout
-        {
-            let (lock, cvar) = &*quiesce_ack_clone;
-            let guard = lock.lock().unwrap();
-            let (guard, timeout_result) = cvar
-                .wait_timeout_while(guard, std::time::Duration::from_secs(5), |acked| !*acked)
-                .unwrap();
-            assert!(
-                *guard && !timeout_result.timed_out(),
-                "Net worker did not ack quiesce within timeout"
-            );
-        }
-
-        // Verify shared queues were updated
-        {
-            let shared = shared_queues.lock().unwrap();
-            assert_eq!(shared.len(), 2);
-        }
-
-        // Resume
-        {
-            let (lock, _) = &*quiesce_ack_clone;
-            *lock.lock().unwrap() = false;
-        }
-        resume_fd_clone.write(1).unwrap();
-
-        // Give worker time to resume
-        std::thread::sleep(std::time::Duration::from_millis(50));
-
-        // --- Quiesce cycle 2: verify it works a second time ---
-        {
-            let (lock, _) = &*quiesce_ack_clone;
-            *lock.lock().unwrap() = false;
-        }
-        quiesce_fd_clone.write(1).unwrap();
-
-        {
-            let (lock, cvar) = &*quiesce_ack_clone;
-            let guard = lock.lock().unwrap();
-            let (guard, timeout_result) = cvar
-                .wait_timeout_while(guard, std::time::Duration::from_secs(5), |acked| !*acked)
-                .unwrap();
-            assert!(
-                *guard && !timeout_result.timed_out(),
-                "Net worker did not ack second quiesce within timeout"
-            );
-        }
-
-        // Resume and stop
-        resume_fd_clone.write(1).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        stop_fd_clone.write(1).unwrap();
-        handle.join().expect("worker thread panicked");
     }
 }

@@ -69,7 +69,7 @@ impl Console {
                     self_subscriber.clone(),
                 )
                 .unwrap_or_else(|e| {
-                    // On re-activation (e.g. snapshot restore), the queue events
+                    // On re-activation after reset, the queue events
                     // may already be registered. EEXIST from epoll_ctl is harmless.
                     debug!("console: queue {queue_index} register (may be re-register): {e:?}");
                 });

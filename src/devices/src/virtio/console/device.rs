@@ -9,7 +9,7 @@ use utils::eventfd::EventFd;
 use vm_memory::{ByteValued, Bytes, GuestMemoryMmap};
 
 use super::super::{
-    ActivateError, ActivateResult, DeviceQueue, DeviceState, Queue, QueueConfig, VirtioDevice,
+    ActivateError, ActivateResult, DeviceQueue, DeviceState, QueueConfig, VirtioDevice,
 };
 use super::{defs, defs::control_event, defs::uapi};
 use crate::virtio::console::console_control::{
@@ -62,8 +62,6 @@ pub struct Console {
     pub(crate) queues: Vec<Option<DeviceQueue>>,
     // TODO: move the queue event handling to the correct threads!
     pub(crate) queue_events: Vec<Arc<EventFd>>,
-    /// Snapshot buffer: holds plain Queue state for save/restore via VirtioDevice trait.
-    snapshot_queues: Vec<Queue>,
 
     pub(crate) avail_features: u64,
     pub(crate) acked_features: u64,
@@ -93,15 +91,12 @@ impl Console {
             .unwrap_or((0, 0));
         let config = VirtioConsoleConfig::new(cols, rows, ports.len() as u32);
 
-        let snapshot_queues: Vec<Queue> = (0..num_queues).map(|_| Queue::new(QUEUE_SIZE)).collect();
-
         Ok(Console {
             control: ConsoleControl::new(),
             ports,
             queue_config,
             queues: Vec::new(),
             queue_events: Vec::new(),
-            snapshot_queues,
             avail_features: AVAIL_FEATURES,
             acked_features: 0,
             activate_evt: EventFd::new(utils::eventfd::EFD_NONBLOCK)
@@ -323,14 +318,6 @@ impl VirtioDevice for Console {
         &self.queue_config
     }
 
-    fn queues(&self) -> &[Queue] {
-        &self.snapshot_queues
-    }
-
-    fn queues_mut(&mut self) -> &mut [Queue] {
-        &mut self.snapshot_queues
-    }
-
     fn read_config(&self, offset: u64, mut data: &mut [u8]) {
         let config_slice = self.config.as_slice();
         let config_len = config_slice.len() as u64;
@@ -366,18 +353,6 @@ impl VirtioDevice for Console {
 
         self.queue_events = queues.iter().map(|dq| dq.event.clone()).collect();
         self.queues = queues.into_iter().map(Some).collect();
-
-        // Populate snapshot_queues with the initial queue configuration (addresses,
-        // ready flags). Port queues are later take()n by port threads, making them
-        // inaccessible to sync_queues_for_snapshot(). By copying here we ensure the
-        // snapshot buffer always has the correct static queue configuration.
-        for (i, opt_dq) in self.queues.iter().enumerate() {
-            if let Some(dq) = opt_dq {
-                if i < self.snapshot_queues.len() {
-                    self.snapshot_queues[i] = dq.queue.clone();
-                }
-            }
-        }
 
         self.device_state = DeviceState::Activated(mem, interrupt);
 

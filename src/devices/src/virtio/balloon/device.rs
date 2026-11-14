@@ -335,7 +335,7 @@ impl Balloon {
                         }
                     }
 
-                    // Track this page in the inflated bitmap for snapshot exclusion
+                    // Track this page in the inflated bitmap
                     if let Some(ref bitmap) = self.inflated_bitmap {
                         bitmap.mark(pfn);
                     }
@@ -641,14 +641,6 @@ impl Balloon {
             "balloon: initiated free page hinting with cmd_id: {}",
             cmd_id
         );
-    }
-
-    /// Query the reclaimed bitmaps for snapshot integration.
-    pub fn reclaimed_bitmaps(&self) -> (Option<&ReclaimedBitmap>, Option<&ReclaimedBitmap>) {
-        (
-            self.inflated_bitmap.as_ref(),
-            self.reported_free_bitmap.as_ref(),
-        )
     }
 
     /// Check if the balloon device is active (activated and not inactive).

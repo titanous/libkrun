@@ -17,7 +17,7 @@ use vm_memory::ByteValued;
 
 use crate::virtio::device::{VirtioDevice, VirtioShmRegion};
 use crate::virtio::QueueConfig;
-use crate::virtio::{ActivateError, ActivateResult, Queue};
+use crate::virtio::{ActivateError, ActivateResult};
 use vhost::VhostUserMemoryRegionInfo;
 
 use super::VhostUserDevice;
@@ -55,8 +55,6 @@ pub struct VhostUserFs {
     dax_window_fd: Option<OwnedFd>,
     tag: String,
     socket_path: String,
-    /// Queue state buffer for snapshot support
-    queues: Vec<Queue>,
 }
 
 impl VirtioDevice for VhostUserFs {
@@ -82,14 +80,6 @@ impl VirtioDevice for VhostUserFs {
 
     fn queue_config(&self) -> &[QueueConfig] {
         &self.queue_configs
-    }
-
-    fn queues(&self) -> &[Queue] {
-        &self.queues
-    }
-
-    fn queues_mut(&mut self) -> &mut [Queue] {
-        &mut self.queues
     }
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {
@@ -125,22 +115,6 @@ impl VirtioDevice for VhostUserFs {
         interrupt: crate::virtio::InterruptTransport,
         queues: Vec<crate::virtio::DeviceQueue>,
     ) -> ActivateResult {
-        // Save queue state for snapshot: MmioTransport's save_state() reads
-        // device.queues() to serialize queue GPAs/sizes. Vhost-user devices
-        // don't have worker threads that update self.queues, so copy the
-        // guest-configured values from DeviceQueues here.
-        for (i, dq) in queues.iter().enumerate() {
-            if let Some(q) = self.queues.get_mut(i) {
-                q.size = dq.queue.size;
-                q.ready = dq.queue.ready;
-                q.desc_table = dq.queue.desc_table;
-                q.avail_ring = dq.queue.avail_ring;
-                q.used_ring = dq.queue.used_ring;
-                q.set_next_avail(dq.queue.next_avail().0);
-                q.set_next_used(dq.queue.next_used().0);
-            }
-        }
-
         // Delegate to generic VhostUserDevice activation
         // This handles: set_owner, set_mem_table (RAM), set_features,
         // vring setup, interrupt forwarding
@@ -262,11 +236,6 @@ impl VhostUserFs {
             (None, None)
         };
 
-        let num_queues = config.num_request_queues as usize;
-        let queues = (0..1 + num_queues)
-            .map(|_| Queue::new(QUEUE_SIZE))
-            .collect();
-
         Ok(VhostUserFs {
             vhost_user,
             config,
@@ -276,7 +245,6 @@ impl VhostUserFs {
             dax_window_fd,
             tag: tag.to_string(),
             socket_path: socket_path.to_string(),
-            queues,
         })
     }
 
@@ -452,10 +420,6 @@ impl VhostUserFs {
             queue_configs.push(QueueConfig::new(QUEUE_SIZE)); // Request queues
         }
 
-        let queues = (0..1 + num_queues)
-            .map(|_| Queue::new(QUEUE_SIZE))
-            .collect();
-
         VhostUserFs {
             vhost_user: VhostUserDevice::new_for_test_unconnected(),
             config,
@@ -465,7 +429,6 @@ impl VhostUserFs {
             dax_window_fd: None,
             tag: String::new(),
             socket_path: String::new(),
-            queues,
         }
     }
 }

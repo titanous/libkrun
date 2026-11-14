@@ -62,7 +62,7 @@ impl TsiDgramProxy {
         let fd = socket(family, SockType::Datagram, SockFlag::empty(), None)
             .map_err(ProxyError::CreatingSocket)?;
 
-        // macOS forces us to do this here instead of just using SockFlag::SOCK_NONBLOCK above.
+        // Set non-blocking mode before using the socket.
         match fcntl(&fd, FcntlArg::F_GETFL) {
             Ok(flags) => match OFlag::from_bits(flags) {
                 Some(flags) => {

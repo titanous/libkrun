@@ -1,20 +1,18 @@
 use crate::virtio::descriptor_utils::{Reader, Writer};
 use crate::virtio::file_traits::BlockBackendAdapter;
 
-use super::super::{DeviceQueue, Queue};
+use super::super::DeviceQueue;
 use super::{BlockBackend, CacheType};
 
 use crate::virtio::InterruptTransport;
 use std::io::{self, Write};
 use std::os::fd::AsRawFd;
 use std::result;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use utils::epoll::{ControlOperation, Epoll, EpollEvent, EventSet};
 use utils::eventfd::EventFd;
 use virtio_bindings::virtio_blk::*;
-use vm_memory::{Address, ByteValued, Bytes, GuestMemoryMmap};
+use vm_memory::{ByteValued, GuestMemoryMmap};
 
 #[allow(dead_code)]
 #[derive(Debug)]
@@ -63,13 +61,6 @@ pub struct BlockWorker<B: BlockBackend> {
     mem: GuestMemoryMmap,
     disk: B,
     stop_fd: EventFd,
-    shared_queue: Arc<Mutex<Queue>>,
-    shared_generation: Arc<AtomicU64>,
-    applied_generation: u64,
-    resync_fd: EventFd,
-    quiesce_fd: EventFd,
-    resume_fd: EventFd,
-    quiesce_ack: Arc<(Mutex<bool>, Condvar)>,
 }
 
 impl<B: BlockBackend + 'static> BlockWorker<B> {
@@ -80,27 +71,13 @@ impl<B: BlockBackend + 'static> BlockWorker<B> {
         mem: GuestMemoryMmap,
         disk: B,
         stop_fd: EventFd,
-        shared_queue: Arc<Mutex<Queue>>,
-        shared_generation: Arc<AtomicU64>,
-        resync_fd: EventFd,
-        quiesce_fd: EventFd,
-        resume_fd: EventFd,
-        quiesce_ack: Arc<(Mutex<bool>, Condvar)>,
     ) -> Self {
-        let applied_generation = shared_generation.load(Ordering::Acquire);
         Self {
             device_queue,
             interrupt,
             mem,
             disk,
             stop_fd,
-            shared_queue,
-            shared_generation,
-            applied_generation,
-            resync_fd,
-            quiesce_fd,
-            resume_fd,
-            quiesce_ack,
         }
     }
 
@@ -114,8 +91,6 @@ impl<B: BlockBackend + 'static> BlockWorker<B> {
     fn work(mut self) {
         let virtq_ev_fd = self.device_queue.event.as_raw_fd();
         let stop_ev_fd = self.stop_fd.as_raw_fd();
-        let resync_ev_fd = self.resync_fd.as_raw_fd();
-        let quiesce_ev_fd = self.quiesce_fd.as_raw_fd();
 
         let worker_nsectors = self.disk.nsectors();
         let mut total_queue_events: u64 = 0;
@@ -141,18 +116,6 @@ impl<B: BlockBackend + 'static> BlockWorker<B> {
             ControlOperation::Add,
             stop_ev_fd,
             &EpollEvent::new(EventSet::IN, stop_ev_fd as u64),
-        );
-
-        let _ = epoll.ctl(
-            ControlOperation::Add,
-            resync_ev_fd,
-            &EpollEvent::new(EventSet::IN, resync_ev_fd as u64),
-        );
-
-        let _ = epoll.ctl(
-            ControlOperation::Add,
-            quiesce_ev_fd,
-            &EpollEvent::new(EventSet::IN, quiesce_ev_fd as u64),
         );
 
         loop {
@@ -183,34 +146,6 @@ impl<B: BlockBackend + 'static> BlockWorker<B> {
                                     total_requests,
                                 );
                             }
-                            EventSet::IN if source == resync_ev_fd => {
-                                let _ = self.resync_fd.read();
-                                log::debug!(
-                                    "sync block worker [ns={}]: resync event, before: avail={} used={}",
-                                    worker_nsectors,
-                                    self.device_queue.queue.next_avail().0,
-                                    self.device_queue.queue.next_used().0,
-                                );
-                                self.apply_shared_queue_state();
-                                log::debug!(
-                                    "sync block worker [ns={}]: resync done, after: avail={} used={}",
-                                    worker_nsectors,
-                                    self.device_queue.queue.next_avail().0,
-                                    self.device_queue.queue.next_used().0,
-                                );
-                            }
-                            EventSet::IN if source == quiesce_ev_fd => {
-                                log::debug!(
-                                    "sync block worker [ns={}]: quiesce event",
-                                    worker_nsectors
-                                );
-                                let _ = self.quiesce_fd.read();
-                                self.handle_quiesce();
-                                log::debug!(
-                                    "sync block worker [ns={}]: resumed after quiesce",
-                                    worker_nsectors
-                                );
-                            }
                             EventSet::IN if source == stop_ev_fd => {
                                 log::debug!("sync block worker [ns={}]: stopping", worker_nsectors);
                                 let _ = self.stop_fd.read();
@@ -232,52 +167,6 @@ impl<B: BlockBackend + 'static> BlockWorker<B> {
                     );
                 }
             }
-        }
-    }
-
-    fn handle_quiesce(&mut self) {
-        // Publish current queue state so sync_queues_for_snapshot captures reality.
-        if let Ok(mut shared) = self.shared_queue.lock() {
-            *shared = self.device_queue.queue.clone();
-        }
-
-        // Signal the device that we're quiesced.
-        let (lock, cvar) = &*self.quiesce_ack;
-        {
-            let mut acked = lock.lock().unwrap();
-            *acked = true;
-            cvar.notify_one();
-        }
-
-        // Park until resume_fd is signalled.
-        let _ = self.resume_fd.read();
-    }
-
-    fn apply_shared_queue_state(&mut self) {
-        let generation = self.shared_generation.load(Ordering::Acquire);
-        if generation == self.applied_generation {
-            return;
-        }
-
-        if let Ok(shared) = self.shared_queue.lock() {
-            self.device_queue.queue = shared.clone();
-
-            if self.device_queue.queue.ready {
-                if let Some(used_idx_addr) = self.device_queue.queue.used_ring.checked_add(2) {
-                    if let Ok(used_idx) = self.mem.read_obj::<u16>(used_idx_addr) {
-                        self.device_queue.queue.set_next_used(used_idx);
-                    }
-                }
-                if let Some(avail_idx_addr) = self.device_queue.queue.avail_ring.checked_add(2) {
-                    if let Ok(avail_idx) = self.mem.read_obj::<u16>(avail_idx_addr) {
-                        if self.device_queue.queue.next_avail().0 > avail_idx {
-                            self.device_queue.queue.set_next_avail(avail_idx);
-                        }
-                    }
-                }
-            }
-
-            self.applied_generation = generation;
         }
     }
 

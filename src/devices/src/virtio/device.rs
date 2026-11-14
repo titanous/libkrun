@@ -109,20 +109,17 @@ pub trait VirtioDevice: AsAny + Send {
     /// The transport uses this to construct the queues during initialization and after reset.
     fn queue_config(&self) -> &[QueueConfig];
 
-    /// Returns the device queues (snapshot buffer).
-    /// Snapshot-capable devices override this to return their queue state.
+    /// Returns device-local queue state when available.
     fn queues(&self) -> &[Queue] {
         &[]
     }
 
-    /// Returns a mutable reference to the device queues (snapshot buffer).
-    /// Used by snapshot restore to inject queue state before re-activation.
+    /// Returns mutable device-local queue state when available.
     fn queues_mut(&mut self) -> &mut [Queue] {
         &mut []
     }
 
     /// Returns the device queue event fds.
-    /// Used by post_restore_kick to notify workers after snapshot restore.
     fn queue_events(&self) -> &[EventFd] {
         &[]
     }

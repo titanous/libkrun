@@ -14,8 +14,7 @@ use std::io::{self, Write};
 use std::os::linux::fs::MetadataExt;
 use std::path::PathBuf;
 use std::result;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use imago::io_buffers::{IoVector, IoVectorMut};
@@ -326,25 +325,13 @@ pub struct Block {
     disk: Option<BlockDeviceBackend>,
     worker_thread: Option<JoinHandle<()>>,
     worker_stopfd: EventFd,
-    worker_resyncfd: EventFd,
-    worker_queue_state: Arc<Mutex<Queue>>,
-    worker_queue_generation: Arc<AtomicU64>,
-
-    /// Signal the async worker to quiesce (drain + publish queues then park).
-    worker_quiesce_fd: EventFd,
-    /// Signal the async worker to resume after quiesce.
-    worker_resume_fd: EventFd,
-    /// Condvar the worker sets when it has drained, published queues and parked.
-    worker_quiesce_ack: Arc<(Mutex<bool>, Condvar)>,
-    /// Shared backend snapshot state for async workers.
-    worker_backend_state: Arc<Mutex<Option<Vec<u8>>>>,
 
     // Virtio fields.
     pub(crate) avail_features: u64,
     pub(crate) acked_features: u64,
     config: VirtioBlkConfig,
 
-    // Queue snapshot buffer.
+    // Device-local queue state.
     queues: Vec<Queue>,
     queue_evts: Vec<EventFd>,
 
@@ -457,9 +444,6 @@ impl Block {
             queue_evts.push(EventFd::new(EFD_NONBLOCK)?);
         }
 
-        let worker_queue_state = Arc::new(Mutex::new(Queue::new(QUEUE_SIZES[0])));
-        let worker_queue_generation = Arc::new(AtomicU64::new(0));
-
         let config = VirtioBlkConfig {
             capacity: disk.nsectors(),
             size_max: 0,
@@ -486,13 +470,6 @@ impl Block {
             device_state: DeviceState::Inactive,
             worker_thread: None,
             worker_stopfd: EventFd::new(EFD_NONBLOCK)?,
-            worker_resyncfd: EventFd::new(EFD_NONBLOCK)?,
-            worker_queue_state,
-            worker_queue_generation,
-            worker_quiesce_fd: EventFd::new(EFD_NONBLOCK)?,
-            worker_resume_fd: EventFd::new(EFD_NONBLOCK)?,
-            worker_quiesce_ack: Arc::new((Mutex::new(false), Condvar::new())),
-            worker_backend_state: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -590,11 +567,6 @@ impl VirtioDevice for Block {
         // Take ownership of the disk - for async factory we need to move it to the worker
         let disk = self.disk.take().ok_or(ActivateError::BadActivate)?;
 
-        if let Ok(mut shared) = self.worker_queue_state.lock() {
-            *shared = blk_q.queue.clone();
-        }
-        self.worker_queue_generation.fetch_add(1, Ordering::SeqCst);
-
         match disk {
             BlockDeviceBackend::Sync(backend) => {
                 log::debug!("block: starting sync worker");
@@ -607,12 +579,6 @@ impl VirtioDevice for Block {
                     mem.clone(),
                     backend,
                     self.worker_stopfd.try_clone().unwrap(),
-                    self.worker_queue_state.clone(),
-                    self.worker_queue_generation.clone(),
-                    self.worker_resyncfd.try_clone().unwrap(),
-                    self.worker_quiesce_fd.try_clone().unwrap(),
-                    self.worker_resume_fd.try_clone().unwrap(),
-                    self.worker_quiesce_ack.clone(),
                 );
                 self.worker_thread = Some(worker.run());
             }
@@ -627,13 +593,6 @@ impl VirtioDevice for Block {
                     mem.clone(),
                     factory,
                     self.worker_stopfd.try_clone().unwrap(),
-                    self.worker_resyncfd.try_clone().unwrap(),
-                    self.worker_queue_state.clone(),
-                    self.worker_queue_generation.clone(),
-                    self.worker_quiesce_fd.try_clone().unwrap(),
-                    self.worker_resume_fd.try_clone().unwrap(),
-                    self.worker_quiesce_ack.clone(),
-                    self.worker_backend_state.clone(),
                 );
                 self.worker_thread = Some(worker.run());
             }

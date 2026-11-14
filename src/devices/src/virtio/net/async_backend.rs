@@ -91,29 +91,6 @@ pub trait AsyncNetBackend: 'static {
 
     /// Called when the worker is shutting down.
     fn on_exit(&mut self);
-
-    /// Serialize backend state for snapshot.
-    ///
-    /// Called during snapshot quiesce, after the worker has stopped processing
-    /// packets. The returned bytes are included in the device's snapshot and
-    /// passed back to `restore_snapshot_state` on restore.
-    ///
-    /// Backends with connection state (e.g., TCP/IP stack state, NAT mappings)
-    /// should implement this to preserve open connections across snapshots.
-    /// The serialization format is entirely up to the backend.
-    ///
-    /// Default: no state saved.
-    fn save_snapshot_state(&self) -> Option<Vec<u8>> {
-        None
-    }
-
-    /// Restore backend state from a previous snapshot.
-    ///
-    /// Called during snapshot restore, after the worker receives the resync
-    /// signal. The data was previously returned by `save_snapshot_state`.
-    ///
-    /// Default: no-op.
-    fn restore_snapshot_state(&mut self, _data: &[u8]) {}
 }
 
 /// Factory trait for creating async network backends.
