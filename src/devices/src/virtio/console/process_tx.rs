@@ -69,7 +69,10 @@ pub(crate) fn process_tx_with_state(
     drain: Arc<AtomicBool>,
     state: Arc<super::ConsoleTxState>,
 ) {
-    let buffer = Arc::new(super::tx_buffer::Buffer::new(state.clone()));
+    let buffer = Arc::new(super::tx_buffer::Buffer::with_stop(
+        state.clone(),
+        stop.clone(),
+    ));
     let writer_buffer = buffer.clone();
     let writer = thread::spawn(move || writer_buffer.write(output.lock().unwrap().as_mut()));
     let copied: Arc<Mutex<Box<dyn PortOutput + Send>>> = Arc::new(Mutex::new(Box::new(

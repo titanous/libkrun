@@ -2230,6 +2230,7 @@ impl Context {
         if self.built_vm.nitro.is_some() {
             return VmHandle {
                 vmm: None,
+                console_tx_states: Vec::new(),
                 heartbeat_control: self
                     .built_vm
                     .nitro
@@ -2253,6 +2254,13 @@ impl Context {
 
         VmHandle {
             vmm: Some(self.built_vm.vmm().clone()),
+            console_tx_states: self
+                .built_vm
+                .vmm()
+                .lock()
+                .unwrap()
+                .console_tx_states
+                .clone(),
             #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
             heartbeat_control: None,
             shutdown_efd: self.shutdown_efd.clone(),
@@ -2375,6 +2383,7 @@ pub enum BalloonError {
 #[derive(Clone)]
 pub struct VmHandle {
     vmm: Option<Arc<Mutex<vmm::Vmm>>>,
+    console_tx_states: Vec<Arc<devices::virtio::console::ConsoleTxState>>,
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     heartbeat_control: Option<nitro_sandbox::heartbeat::DeadlineControl>,
     shutdown_efd: Option<Arc<EventFd>>,
@@ -2533,17 +2542,14 @@ impl Drop for NitroSigtermGuard {
 
 impl VmHandle {
     /// Cumulative guest console bytes discarded by bounded host output buffers.
+    /// Reads shared atomics without locking the VMM, including during teardown.
     /// Remains readable after `Context::run` returns. Backends without these
     /// virtio console buffers return zero.
     pub fn console_dropped_bytes(&self) -> u64 {
-        self.vmm.as_ref().map_or(0, |vmm| {
-            vmm.lock()
-                .unwrap()
-                .console_tx_states
-                .iter()
-                .map(|state| state.dropped_bytes())
-                .sum()
-        })
+        self.console_tx_states
+            .iter()
+            .map(|state| state.dropped_bytes())
+            .sum()
     }
 
     /// Suspend Nitro guest heartbeat expiry while the embedder freezes a guest.
@@ -2881,6 +2887,7 @@ mod tests {
         let stop = Arc::new(EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap());
         let handle = VmHandle {
             vmm: None,
+            console_tx_states: vec![Arc::new(devices::virtio::console::ConsoleTxState::default())],
             heartbeat_control: None,
             shutdown_efd: Some(stop.clone()),
             #[cfg(not(feature = "tee"))]

@@ -10,12 +10,15 @@ const FULL_WAIT: Duration = Duration::from_millis(10);
 const FINAL_DRAIN: Duration = Duration::from_millis(100);
 const CHUNK: usize = 16 * 1024;
 
+enum Item {
+    Data(Vec<u8>),
+    Loss(u64),
+}
 #[derive(Default)]
 struct Inner {
-    chunks: VecDeque<Vec<u8>>,
+    chunks: VecDeque<Item>,
     bytes: usize,
     lost: u64,
-    full_since: Option<Instant>,
     finished: Option<Instant>,
 }
 
@@ -23,21 +26,34 @@ pub(super) struct Buffer {
     inner: Mutex<Inner>,
     changed: Condvar,
     state: Arc<ConsoleTxState>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
 }
 impl Buffer {
+    #[cfg(test)]
     pub fn new(state: Arc<ConsoleTxState>) -> Self {
+        Self::with_stop(state, Arc::new(std::sync::atomic::AtomicBool::new(false)))
+    }
+    pub fn with_stop(state: Arc<ConsoleTxState>, stop: Arc<std::sync::atomic::AtomicBool>) -> Self {
         Self {
             inner: Mutex::new(Inner::default()),
             changed: Condvar::new(),
             state,
+            stop,
         }
     }
     /// Drop incoming bytes, preserving already accepted stream order.
+    #[cfg(test)]
     pub fn push(&self, bytes: &[u8]) {
+        self.push_until(bytes, Instant::now() + FULL_WAIT);
+    }
+    fn push_until(&self, bytes: &[u8], deadline: Instant) {
         let mut inner = self.inner.lock().unwrap();
-        while inner.lost != 0 || bytes.len() > CAPACITY.saturating_sub(inner.bytes) {
-            let since = *inner.full_since.get_or_insert_with(Instant::now);
-            if inner.finished.is_some() || since.elapsed() >= FULL_WAIT {
+        loop {
+            let stopped = self.stop.load(Ordering::Acquire);
+            if inner.finished.is_none() && bytes.len() <= CAPACITY.saturating_sub(inner.bytes) {
+                break;
+            }
+            if stopped || inner.finished.is_some() || Instant::now() >= deadline {
                 inner.lost += bytes.len() as u64;
                 self.state
                     .dropped
@@ -45,11 +61,17 @@ impl Buffer {
                 self.changed.notify_all();
                 return;
             }
-            let wait = FULL_WAIT.saturating_sub(since.elapsed());
+            let wait = deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_millis(1));
             inner = self.changed.wait_timeout(inner, wait).unwrap().0;
         }
+        if inner.lost != 0 {
+            let lost = std::mem::take(&mut inner.lost);
+            inner.chunks.push_back(Item::Loss(lost));
+        }
         inner.bytes += bytes.len();
-        inner.chunks.push_back(bytes.to_vec());
+        inner.chunks.push_back(Item::Data(bytes.to_vec()));
         self.changed.notify_all();
     }
     pub fn finish(&self) {
@@ -68,12 +90,17 @@ impl Buffer {
                         self.state.dropped.fetch_add(dropped, Ordering::Relaxed);
                         return;
                     }
-                    if let Some(bytes) = inner.chunks.pop_front() {
-                        break (bytes, true);
+                    if let Some(item) = inner.chunks.pop_front() {
+                        break match item {
+                            Item::Data(bytes) => (bytes, true),
+                            Item::Loss(lost) => (
+                                format!("\n[console: {lost} bytes dropped]\n").into_bytes(),
+                                false,
+                            ),
+                        };
                     }
                     if inner.lost != 0 {
                         let lost = std::mem::take(&mut inner.lost);
-                        inner.full_since = None;
                         self.changed.notify_all();
                         break (
                             format!("\n[console: {lost} bytes dropped]\n").into_bytes(),
@@ -113,7 +140,6 @@ impl Buffer {
                         if counted {
                             let mut inner = self.inner.lock().unwrap();
                             inner.bytes -= n;
-                            inner.full_since = None;
                             self.changed.notify_all();
                         }
                     }
@@ -145,6 +171,7 @@ pub(super) struct BufferedOutput(pub Arc<Buffer>);
 impl PortOutput for BufferedOutput {
     fn write_volatile(&mut self, source: &vm_memory::VolatileSlice) -> std::io::Result<usize> {
         // Copy in bounded chunks even if a malicious descriptor spans all guest RAM.
+        let deadline = Instant::now() + FULL_WAIT;
         let mut offset = 0;
         while offset < source.len() {
             let count = CHUNK.min(source.len() - offset);
@@ -153,7 +180,7 @@ impl PortOutput for BufferedOutput {
                 .offset(offset)
                 .map_err(std::io::Error::other)?
                 .copy_to(&mut bytes);
-            self.0.push(&bytes);
+            self.0.push_until(&bytes, deadline);
             offset += count;
         }
         Ok(source.len())
@@ -215,13 +242,95 @@ mod tests {
         {
             let mut inner = buffer.inner.lock().unwrap();
             inner.lost = 7;
-            inner.full_since = Some(Instant::now() - FULL_WAIT);
         }
         buffer.push(b"later");
-        assert!(buffer.inner.lock().unwrap().chunks.is_empty());
-        assert_eq!(buffer.inner.lock().unwrap().lost, 12);
-        assert_eq!(state.dropped_bytes(), 5);
+        let inner = buffer.inner.lock().unwrap();
+        assert!(matches!(inner.chunks.front(), Some(Item::Loss(7))));
+        assert!(matches!(inner.chunks.back(), Some(Item::Data(bytes)) if bytes == b"later"));
+        assert_eq!(inner.lost, 0);
+        assert_eq!(state.dropped_bytes(), 0);
     }
+    #[test]
+    fn progressing_reader_does_not_extend_guest_write_budget() {
+        let state = Arc::new(ConsoleTxState::default());
+        let buffer = Arc::new(Buffer::new(state));
+        buffer.push(&vec![1; CAPACITY]);
+        let progress = buffer.clone();
+        let reader = std::thread::spawn(move || {
+            let until = Instant::now() + Duration::from_millis(100);
+            while Instant::now() < until {
+                let inner = progress.inner.lock().unwrap();
+                progress.changed.notify_all();
+                drop(inner);
+                std::thread::yield_now();
+            }
+        });
+        let began = Instant::now();
+        buffer.push(&vec![2; CHUNK]);
+        let elapsed = began.elapsed();
+        reader.join().unwrap();
+        assert!(
+            elapsed < Duration::from_millis(50),
+            "guest write waited {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn loss_does_not_refuse_input_when_room_is_available() {
+        let state = Arc::new(ConsoleTxState::default());
+        let buffer = Buffer::new(state);
+        buffer.inner.lock().unwrap().lost = 7;
+        buffer.push(b"later");
+        assert!(buffer
+            .inner
+            .lock()
+            .unwrap()
+            .chunks
+            .iter()
+            .any(|chunk| matches!(chunk, Item::Data(bytes) if bytes == b"later")));
+    }
+
+    #[test]
+    fn finish_releases_a_blocked_guest_write_without_accepting_more() {
+        let buffer = Arc::new(Buffer::new(Arc::new(ConsoleTxState::default())));
+        buffer.push(&vec![1; CAPACITY]);
+        buffer.finish();
+        let began = Instant::now();
+        buffer.push_until(b"stop", Instant::now() + Duration::from_secs(1));
+        assert!(began.elapsed() < Duration::from_millis(20));
+        let mut inner = buffer.inner.lock().unwrap();
+        inner.bytes = 0;
+        inner.chunks.clear();
+        drop(inner);
+        buffer.push(b"after-stop");
+        assert!(
+            buffer.inner.lock().unwrap().chunks.is_empty(),
+            "finished buffer accepted guest bytes"
+        );
+    }
+
+    #[test]
+    fn stop_releases_waiting_producer_even_with_a_long_deadline() {
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let buffer = Arc::new(Buffer::with_stop(
+            Arc::new(ConsoleTxState::default()),
+            stop.clone(),
+        ));
+        buffer.push(&vec![1; CAPACITY]);
+        let producer_buffer = buffer.clone();
+        let (sent, received) = std::sync::mpsc::channel();
+        let producer = std::thread::spawn(move || {
+            producer_buffer.push_until(b"blocked", Instant::now() + Duration::from_secs(1));
+            sent.send(()).unwrap();
+        });
+        std::thread::sleep(Duration::from_millis(5));
+        let began = Instant::now();
+        stop.store(true, Ordering::Release);
+        assert!(received.recv_timeout(Duration::from_millis(50)).is_ok());
+        producer.join().unwrap();
+        assert!(began.elapsed() < Duration::from_millis(50));
+    }
+
     #[test]
     fn incoming_overflow_is_bounded_and_counted_once() {
         let state = Arc::new(ConsoleTxState::default());
@@ -233,6 +342,6 @@ mod tests {
         assert_eq!(inner.bytes, CAPACITY);
         assert_eq!(inner.lost, 36);
         assert_eq!(state.dropped_bytes(), 36);
-        assert_eq!(inner.chunks.front().unwrap()[0], 1);
+        assert!(matches!(inner.chunks.front(), Some(Item::Data(bytes)) if bytes[0] == 1));
     }
 }
