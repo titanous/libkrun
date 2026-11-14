@@ -999,9 +999,17 @@ pub fn build_microvm(
         )
         .map_err(StartMicrovmError::Internal)?;
         if let Some(template) = &vm_resources.cooperative_template {
-            let compatibility = vcpus[0]
-                .template_compatibility()
+            let compatibility = template_compatibility(vm_resources, &vcpus[0])
                 .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
+            if compatibility.len() >= 20
+                && template.compatibility.len() >= 20
+                && compatibility[compatibility.len() - 20..]
+                    != template.compatibility[template.compatibility.len() - 20..]
+            {
+                return Err(StartMicrovmError::GuestMemoryMmap(
+                    "template kernel build identifier mismatch".into(),
+                ));
+            }
             if compatibility != template.compatibility {
                 return Err(StartMicrovmError::GuestMemoryMmap(
                     "template CPU features, extended-state layout or TSC frequency mismatch".into(),
@@ -1150,8 +1158,7 @@ pub fn build_microvm(
         cooperative_compatibility: if vm_resources.cooperative_capture.is_some()
             || vm_resources.cooperative_template.is_some()
         {
-            vcpus[0]
-                .template_compatibility()
+            template_compatibility(vm_resources, &vcpus[0])
                 .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?
         } else {
             Vec::new()
@@ -1938,6 +1945,32 @@ pub struct PayloadConfig {
     entry_addr: GuestAddress,
     initrd_config: Option<InitrdConfig>,
     kernel_cmdline: Option<String>,
+}
+
+#[cfg(target_arch = "x86_64")]
+fn template_compatibility(resources: &VmResources, cpu: &Vcpu) -> io::Result<Vec<u8>> {
+    let mut data = cpu.template_compatibility()?;
+    let kernel = resources.external_kernel.as_ref().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::Unsupported,
+            "templates require an external ELF kernel with build ID",
+        )
+    })?;
+    let file = std::fs::File::open(&kernel.path)?;
+    let size = usize::try_from(file.metadata()?.len()).map_err(io::Error::other)?;
+    if size == 0 {
+        return Err(io::Error::other("empty template kernel"));
+    }
+    let mapping: vm_memory::MmapRegion = vm_memory::mmap::MmapRegionBuilder::new(size)
+        .with_file_offset(vm_memory::FileOffset::new(file, 0))
+        .with_mmap_prot(libc::PROT_READ)
+        .with_mmap_flags(libc::MAP_PRIVATE)
+        .build()
+        .map_err(io::Error::other)?;
+    // SAFETY: the read-only mapping owns size readable bytes for this scope.
+    let bytes = unsafe { std::slice::from_raw_parts(mapping.as_ptr(), size) };
+    data.extend_from_slice(&crate::kernel_identity::build_id(bytes)?);
+    Ok(data)
 }
 
 pub fn create_guest_memory(

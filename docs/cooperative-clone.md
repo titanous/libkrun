@@ -138,8 +138,10 @@ Word392 is compatibility-manifest length (at most16384 bytes). Page1 contains
 topology bytes; pages2-5 contain configured BSP CPUID entries (including xsave
 layout) and KVM TSC frequency. Logical CPU IDs in extended-topology EDX are
 normalized because they are not CPU features. A new VM refuses differing
-features/layout/frequency before entering KVM. Kernel build-ID fencing is not
-yet supplied. Extents are page-aligned, ordered, non-overlapping and bounded by
+features/layout/frequency before entering KVM. The final20 manifest bytes are
+the external ELF kernel's GNU build ID; capture also checks the guest-published
+ID in control words27-29 (word30 is length20). Starts with a different configured
+kernel build are refused. Templates currently require an external ELF kernel. Extents are page-aligned, ordered, non-overlapping and bounded by
 file length. RAM starts at file offset24576. Earlier formats are refused.
 No active virtqueues, DAX content or backend state are serialized. Child RAM
 writes cannot modify the source or other clones.

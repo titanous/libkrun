@@ -31,6 +31,8 @@ pub mod template_memory;
 pub mod capture_request;
 #[cfg(target_arch = "x86_64")]
 pub mod cooperative;
+#[cfg(target_arch = "x86_64")]
+mod kernel_identity;
 
 #[cfg(target_arch = "x86_64")]
 pub mod template;
@@ -548,6 +550,23 @@ impl Subscriber for Vmm {
                             .remove_region(*address, *size as u64)
                             .map_err(std::io::Error::other)?
                             .0;
+                    }
+                    let mut control_page = [0u8; 4096];
+                    vm_memory::Bytes::read_slice(
+                        &ram,
+                        &mut control_page,
+                        vm_memory::GuestAddress(reported_control),
+                    )
+                    .map_err(std::io::Error::other)?;
+                    if u64::from_le_bytes(control_page[240..248].try_into().unwrap()) != 20
+                        || self.cooperative_compatibility.len() < 20
+                        || control_page[216..236]
+                            != self.cooperative_compatibility
+                                [self.cooperative_compatibility.len() - 20..]
+                    {
+                        return Err(std::io::Error::other(
+                            "guest kernel build identifier does not match configured kernel",
+                        ));
                     }
                     let template = crate::template::Template::capture_with_manifest(
                         &ram,
