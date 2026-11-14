@@ -25,6 +25,12 @@ mod tests {
         assert!(Template::capture_with_topology(&memory, 4096, 1, 1, 123, &[0; 4097]).is_err());
         let topology = b"ordered device topology";
         let template = Template::capture_with_topology(&memory, 4096, 1, 1, 123, topology).unwrap();
+        use std::os::unix::fs::MetadataExt;
+        assert!(
+            template.file.metadata().unwrap().blocks() * 512
+                < template.file.metadata().unwrap().len(),
+            "capture must leave zero guest pages as holes"
+        );
         let reopened = Template::open(template.file.try_clone().unwrap()).unwrap();
         assert_eq!(reopened.topology, topology);
         assert_eq!(reopened.clock_ns, 123);
@@ -276,7 +282,13 @@ impl Template {
                 region
                     .read_slice(&mut buffer[..len], vm_memory::MemoryRegionAddress(position))
                     .map_err(io::Error::other)?;
-                file.write_all_at(&buffer[..len], offset + position)?;
+                // The pre-sized descriptor represents absent pages as zeroes.
+                // Do not allocate shmem for untouched or all-zero guest pages.
+                for (index, page) in buffer[..len].chunks(4096).enumerate() {
+                    if page.iter().any(|byte| *byte != 0) {
+                        file.write_all_at(page, offset + position + (index * 4096) as u64)?;
+                    }
+                }
                 position += len as u64;
             }
             offset += region.len();
