@@ -54,6 +54,7 @@ pub struct TsiStreamProxy {
     unixsock_path: Option<PathBuf>,
     pending: super::stream_buffer::StreamBuffer,
     rx_paused: bool,
+    created: std::time::Instant,
 }
 
 impl TsiStreamProxy {
@@ -100,6 +101,7 @@ impl TsiStreamProxy {
             unixsock_path: None,
             pending: Default::default(),
             rx_paused: false,
+            created: std::time::Instant::now(),
         })
     }
 
@@ -141,6 +143,7 @@ impl TsiStreamProxy {
             unixsock_path: None,
             pending: Default::default(),
             rx_paused: false,
+            created: std::time::Instant::now(),
         }
     }
 
@@ -157,6 +160,11 @@ impl TsiStreamProxy {
             self.fd = Some(fd);
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn age_for_test(&mut self, by: std::time::Duration) {
+        self.created -= by;
     }
 
     fn init_data_pkt(&self, pkt: &mut VsockPacket) {
@@ -824,6 +832,10 @@ impl Proxy for TsiStreamProxy {
             remove_proxy,
             ..Default::default()
         }
+    }
+
+    fn unallocated_since(&self) -> Option<std::time::Instant> {
+        self.fd.is_none().then_some(self.created)
     }
 
     fn resume_rx(&mut self) -> Option<ProxyUpdate> {

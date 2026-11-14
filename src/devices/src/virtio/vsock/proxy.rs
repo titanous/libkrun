@@ -98,4 +98,9 @@ pub trait Proxy: Send + AsRawFd {
         None
     }
     fn process_event(&mut self, evset: EventSet) -> ProxyUpdate;
+    /// If this proxy holds no host socket, when it was created. Such proxies cost VMM memory
+    /// only, so the muxer bounds how many a guest may hold.
+    fn unallocated_since(&self) -> Option<std::time::Instant> {
+        None
+    }
 }
