@@ -30,6 +30,12 @@ pub mod vm_exit;
     feature = "nitro-sandbox"
 ))]
 pub mod nitro_capture;
+#[cfg(all(
+    target_os = "linux",
+    target_arch = "aarch64",
+    feature = "nitro-sandbox"
+))]
+pub mod nitro_restore;
 #[cfg(target_os = "linux")]
 pub mod template_memory;
 
