@@ -4,6 +4,9 @@
 #include <fcntl.h>
 #include <linux/vm_sockets.h>
 #include <linux/capability.h>
+#include <linux/userfaultfd.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <netinet/in.h>
 #include <pthread.h>
 #include <poll.h>
@@ -69,6 +72,40 @@ static void *writer(void *unused)
         if (pwrite(fd, record, sizeof(record), (seq % 64) * sizeof(record)) != sizeof(record) || fdatasync(fd)) atomic_fetch_add(&errors, 1);
     }
     close(fd); return NULL;
+}
+static void *blocked_random_page;
+static void *blocked_random_reader(void *unused)
+{
+    (void)unused;
+    int fd=open("/dev/random",O_RDONLY);
+    if(fd<0 || read(fd,blocked_random_page,32)!=32) fail("blocked random read");
+    close(fd);
+    return NULL;
+}
+static int block_random_read(pthread_t *reader)
+{
+    int fd=syscall(SYS_userfaultfd,O_CLOEXEC|O_NONBLOCK);
+    struct uffdio_api api={.api=UFFD_API};
+    if(fd<0 || ioctl(fd,UFFDIO_API,&api)) fail("random userfault api");
+    blocked_random_page=mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+    struct uffdio_register reg={.range={.start=(uintptr_t)blocked_random_page,.len=4096},.mode=UFFDIO_REGISTER_MODE_MISSING};
+    if(blocked_random_page==MAP_FAILED || ioctl(fd,UFFDIO_REGISTER,&reg) || pthread_create(reader,NULL,blocked_random_reader,NULL)) fail("random userfault register");
+    struct pollfd ready={.fd=fd,.events=POLLIN};
+    struct uffd_msg event;
+    if(poll(&ready,1,3000)!=1 || read(fd,&event,sizeof(event))!=sizeof(event) || event.event!=UFFD_EVENT_PAGEFAULT) fail("random read not blocked");
+    printf("CLONE RANDOM reader blocked in copy\n");
+    return fd;
+}
+static void unblock_random_read(int fd,pthread_t reader)
+{
+    struct uffdio_zeropage zero={.range={.start=(uintptr_t)blocked_random_page,.len=4096}};
+    if(ioctl(fd,UFFDIO_ZEROPAGE,&zero)) fail("random fault resolve");
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME,&deadline); deadline.tv_sec+=3;
+    if(pthread_timedjoin_np(reader,NULL,&deadline)) fail("random reader join");
+    printf("CLONE BLOCKED_RANDOM ");
+    for(unsigned i=0;i<32;i++) printf("%02x",((unsigned char *)blocked_random_page)[i]);
+    printf("\n"); close(fd); munmap(blocked_random_page,4096);
 }
 int main(void)
 {
@@ -151,6 +188,8 @@ int main(void)
         0x9182736455463728ULL,0xfedcba9876543210ULL}, restored[4]={0};
     __builtin_cpu_init();
     int wide_simd=__builtin_cpu_supports("avx2");
+    pthread_t blocked_reader;
+    int blocked_fault=block_random_read(&blocked_reader);
     int freeze=open("/sys/power/nitro_freeze",O_WRONLY);
     printf("CLONE FREEZE seq=%lu mono=%llu realtime_ns=%llu cpus=%ld\n",frozen_seq,(unsigned long long)before,(unsigned long long)ns(CLOCK_REALTIME),sysconf(_SC_NPROCESSORS_ONLN));
     /* Keep xstate live across the syscall rather than relying on compiler spills. */
@@ -166,6 +205,7 @@ int main(void)
     }
     if(result!=1 || memcmp(sentinel,restored,wide_simd ? 32 : 16)) fail("freeze or SIMD");
     printf("CLONE VECTOR width=%d preserved\n",wide_simd ? 256 : 128);
+    unblock_random_read(blocked_fault,blocked_reader);
     if(ptrace(PTRACE_DETACH,reader,NULL,NULL)) fail("reader detach");
     unsigned char pending_random[32];
     struct pollfd random_ready={.fd=random_pipe[0],.events=POLLIN};

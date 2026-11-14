@@ -151,7 +151,10 @@ def run_child(cpus, source_disk, image, name):
     pending = re.search(r"CLONE PENDING_RANDOM ([0-9a-f]{64}) EVENT=ok", data)
     if pending is None:
         raise RuntimeError(f"missing independent reader/event proof: {name}")
-    return {"cpus": cpus, "name": name, "resume_ms": (userspace-start)/1e6,
+    blocked = re.search(r"CLONE BLOCKED_RANDOM ([0-9a-f]{64})", data)
+    if blocked is None:
+        raise RuntimeError(f"missing blocked random-read proof: {name}")
+    return {"blocked_random": blocked.group(1), "cpus": cpus, "name": name, "resume_ms": (userspace-start)/1e6,
             "private_kib_10s": private_kib, "generation": generation.group(1),
             "random": random.group(1), "pending_random": pending.group(1)}
 
@@ -189,6 +192,8 @@ try:
         raise RuntimeError("duplicate VM generation identifier")
     if len({m["random"] for m in measurements}) != len(measurements):
         raise RuntimeError("duplicate guest random bytes")
+    if len({m["blocked_random"] for m in measurements}) != len(measurements):
+        raise RuntimeError("duplicate blocked-reader random bytes")
     if len({m["pending_random"] for m in measurements}) != len(measurements):
         raise RuntimeError("duplicate independent-reader random bytes")
     try:
