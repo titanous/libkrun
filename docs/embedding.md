@@ -200,6 +200,10 @@ output in a nonblocking embedder writer. Excess bytes are dropped, never queued;
 the lifetime cap does not reset and the rate cap replenishes once per second.
 This is independent of custom virtio-console port sinks. Sink callbacks must not
 block; byte limits cannot bound an arbitrary callback's execution time.
+Sink bytes are raw guest output, including escape sequences, invalid UTF-8 and
+forged line prefixes. The embedder must escape terminal controls and encode bytes
+safely before writing terminals or structured logs. No sink is installed by
+default: output is drained and discarded, never implicitly sent to stdout.
 
 ### Host-owned lifecycle lock
 
