@@ -521,6 +521,8 @@ pub struct Builder {
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     nitro_precreated_stop: Option<Arc<EventFd>>,
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    nitro_descriptor_handoff: Option<std::os::unix::net::UnixStream>,
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     nitro_console_base: Option<u32>,
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     nitro_selected_after_consoles: bool,
@@ -1180,6 +1182,25 @@ impl Builder {
         self
     }
 
+    /// Socket-forwarding flags of the Nitro vsock device: the same decision as the KVM path
+    /// (explicit flags, or inet hijacking implied by internet forwarding; never inet hijacking
+    /// while internet forwarding is off). Also decides the guest command-line switches.
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    fn nitro_tsi_flags(&self) -> TsiFlags {
+        let mut flags = match self.config.vsock_config {
+            VsockConfig::Explicit { tsi_flags } => tsi_flags,
+            VsockConfig::Implicit if self.socket_policy.internet_enabled => TsiFlags::HIJACK_INET,
+            _ => TsiFlags::empty(),
+        };
+        if !self.socket_policy.internet_enabled {
+            flags.remove(TsiFlags::HIJACK_INET);
+        }
+        if matches!(self.config.vsock_config, VsockConfig::Disabled) {
+            flags = TsiFlags::empty();
+        }
+        flags
+    }
+
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     fn create_nitro_vsock(
         cid: u64,
@@ -1325,7 +1346,8 @@ impl Builder {
             }
             let mut args = self.kernel_cmdline.clone();
             args.extend(self.extra_kernel_args.iter().cloned());
-            let cmdline = args.join(" ");
+            // The guest kernel's socket-forwarding switches, as the KVM builder inserts them.
+            let cmdline = nitro_cmdline(&args, self.nitro_tsi_flags());
             let (file, _) = nitro_sandbox::image::cached_files(
                 &kernel.path,
                 kernel.initramfs_path.as_deref(),
@@ -1351,7 +1373,8 @@ impl Builder {
             ram_mib: config.mem_size_mib.unwrap_or(1024) as u32,
         };
         let mut console_id = self.nitro_device_count_before_consoles();
-        let mut runtime = nitro_sandbox::runtime::Runtime::with_lifecycle_lock(
+        let handoff = self.nitro_descriptor_handoff.take();
+        let mut runtime = nitro_sandbox::runtime::Runtime::create(
             image_path
                 .to_str()
                 .ok_or_else(|| StartError::Nitro(std::io::Error::other("non-UTF8 EIF path")))?,
@@ -1360,6 +1383,7 @@ impl Builder {
             options.cid,
             options.watchdog,
             self.nitro_lifecycle_lock.take(),
+            handoff.as_ref(),
         )
         .map_err(StartError::Nitro)?;
         drop(packaged);
@@ -1382,16 +1406,7 @@ impl Builder {
                 .map_err(StartError::Nitro)?;
         }
         if !matches!(self.config.vsock_config, VsockConfig::Disabled) {
-            let mut flags = match self.config.vsock_config {
-                VsockConfig::Explicit { tsi_flags } => tsi_flags,
-                VsockConfig::Implicit if self.socket_policy.internet_enabled => {
-                    TsiFlags::HIJACK_INET
-                }
-                _ => TsiFlags::empty(),
-            };
-            if !self.socket_policy.internet_enabled {
-                flags.remove(TsiFlags::HIJACK_INET);
-            }
+            let flags = self.nitro_tsi_flags();
             let vsock = Self::create_nitro_vsock(
                 options.cid,
                 self.config.tsi_port_map,
@@ -1513,6 +1528,24 @@ impl Builder {
             total_bytes,
             bytes_per_second,
         ));
+        self
+    }
+
+    /// Send a duplicate of the VM descriptor over `socket` (the host daemon's end of a
+    /// connected Unix socket) immediately after the create ioctl returns, inside `build` and
+    /// before any other VM ioctl (one `SCM_RIGHTS` message, payload
+    /// `nitro_sandbox::lifecycle::VM_DESCRIPTOR_MESSAGE`; the daemon can receive it with
+    /// `nitro_sandbox::lifecycle::receive_vm_descriptor`). The interval in which a death of
+    /// this process can make the final close is then only the return of that ioctl. `build`
+    /// fails if the send fails. Acknowledgement is the embedder's protocol: wait for it after
+    /// `build`, before `run`, with a time limit, and never while holding the lifecycle lock
+    /// (use `NitroSerialization::Teardown`). Prefer this to `duplicate_nitro_vm_descriptor`.
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    pub fn nitro_descriptor_handoff(
+        &mut self,
+        socket: std::os::unix::net::UnixStream,
+    ) -> &mut Self {
+        self.nitro_descriptor_handoff = Some(socket);
         self
     }
 
@@ -2466,6 +2499,56 @@ impl VmHandle {
     #[cfg(not(feature = "tee"))]
     pub fn balloon(&self) -> Option<&BalloonHandle> {
         self.balloon.as_ref()
+    }
+}
+
+/// The command line packaged into a Nitro image: the caller's tokens, then the guest kernel's
+/// socket-forwarding switches (`tsi_hijack`, `tsi_hijack_unix`) exactly when the vsock device
+/// forwards those families, as the KVM builder inserts them. Without them the guest never
+/// redirects its sockets and forwarding silently does nothing.
+#[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+fn nitro_cmdline(args: &[String], flags: TsiFlags) -> String {
+    let mut tokens: Vec<&str> = args.iter().map(String::as_str).collect();
+    if flags.contains(TsiFlags::HIJACK_INET) {
+        tokens.push("tsi_hijack");
+    }
+    if flags.contains(TsiFlags::HIJACK_UNIX) {
+        tokens.push("tsi_hijack_unix");
+    }
+    tokens.join(" ")
+}
+
+#[cfg(all(test, target_os = "linux", feature = "nitro-sandbox"))]
+mod nitro_cmdline_tests {
+    use super::*;
+    #[test]
+    fn forwarding_switches_follow_the_vsock_flags() {
+        let args = vec!["panic=-1".to_owned(), "rdinit=/init".to_owned()];
+        assert_eq!(
+            nitro_cmdline(&args, TsiFlags::empty()),
+            "panic=-1 rdinit=/init"
+        );
+        assert_eq!(
+            nitro_cmdline(&args, TsiFlags::HIJACK_INET),
+            "panic=-1 rdinit=/init tsi_hijack"
+        );
+        assert_eq!(
+            nitro_cmdline(&args, TsiFlags::HIJACK_INET | TsiFlags::HIJACK_UNIX),
+            "panic=-1 rdinit=/init tsi_hijack tsi_hijack_unix"
+        );
+    }
+    #[test]
+    fn builder_flags_follow_internet_forwarding() {
+        let mut builder = Builder::new();
+        assert_eq!(
+            builder.nitro_tsi_flags(),
+            TsiFlags::empty(),
+            "off by default"
+        );
+        builder.internet_socket_forwarding(true);
+        assert!(builder.nitro_tsi_flags().contains(TsiFlags::HIJACK_INET));
+        builder.internet_socket_forwarding(false);
+        assert!(!builder.nitro_tsi_flags().contains(TsiFlags::HIJACK_INET));
     }
 }
 

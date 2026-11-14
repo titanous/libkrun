@@ -13,7 +13,7 @@ import time
 
 image, lock_path, count, width, first_cid = sys.argv[1:]
 count, width, first_cid = map(int, (count, width, first_cid))
-assert width in (1, 2) and 200 <= first_cid <= 398
+assert width in (1, 2) and 200 <= first_cid <= 698
 binary = pathlib.Path('target/release/examples/nitro_supervised').resolve()
 root = pathlib.Path('supervised-results')
 root.mkdir(exist_ok=True)
@@ -42,8 +42,9 @@ for trial in range(count):
             connection, _ = listener.accept()
             connection.settimeout(10)
             connections.append(connection)
-            data, ancillary, flags, _ = connection.recvmsg(1, socket.CMSG_SPACE(4), socket.MSG_CMSG_CLOEXEC)
-            assert data == b'F' and not flags & socket.MSG_CTRUNC
+            # Sent from inside build, right after the create ioctl (nitro_descriptor_handoff).
+            data, ancillary, flags, _ = connection.recvmsg(64, socket.CMSG_SPACE(4), socket.MSG_CMSG_CLOEXEC)
+            assert data == b'vm_descriptor\n' and not flags & socket.MSG_CTRUNC, data
             received = array.array('i')
             for level, kind, value in ancillary:
                 if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
