@@ -123,6 +123,11 @@ pub struct Mapping {
     address: NonNull<u8>,
     pub len: usize,
 }
+// SAFETY: a Mapping exclusively owns its shared mmap region; nothing in it is
+// tied to the creating thread (any thread may access or munmap the region),
+// and all accesses go through `&self`/`&mut self` of its single owner. This
+// lets a parked receiver's runtime run in its own thread from build.
+unsafe impl Send for Mapping {}
 impl Mapping {
     fn new(fd: &File, len: usize) -> io::Result<Self> {
         let started = Instant::now();
@@ -182,7 +187,12 @@ pub struct Sandbox {
     start_guard: std::sync::Mutex<Option<crate::lifecycle::Guard>>,
     console_at: std::collections::HashMap<usize, u32>,
     device_regions: Vec<SharedRegion>,
+    /// Per-process VM number for the optional teardown trace.
+    trace_id: u64,
+    /// A duplicate was handed to a daemon: this process's close is not final.
+    handed_off: bool,
 }
+static NEXT_TRACE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 impl Sandbox {
     pub fn new(memory: usize, vcpus: u32) -> io::Result<Self> {
         Self::with_mapping(memory, vcpus, None)
@@ -289,6 +299,14 @@ impl Sandbox {
         };
         let raw = call(&control, 3, 0x30, &mut c)?;
         let vm = unsafe { File::from_raw_fd(raw) };
+        let trace_id = NEXT_TRACE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        crate::lifecycle::trace(format_args!(
+            "CREATE pid={} vm={}:{trace_id} memory={memory} handoff={} ns={}",
+            std::process::id(),
+            std::process::id(),
+            u8::from(handoff.is_some()),
+            crate::lifecycle::monotonic_ns()
+        ));
         // The guard held now (either mode) lives in the sandbox from here on, so that an early
         // return below closes the VM under it: `close_vm` uses `start_guard` instead of taking
         // the lock again. (A guard kept in a local would still be held by this thread when the
@@ -304,6 +322,8 @@ impl Sandbox {
             start_guard: std::sync::Mutex::new(creation_guard.or(window_guard)),
             console_at: Default::default(),
             device_regions: Vec::new(),
+            trace_id,
+            handed_off: handoff.is_some(),
         };
         // Hand the duplicate over before anything else is done with the VM (review backend4
         // N2): a death of this process after this point cannot make the final close.
@@ -358,6 +378,31 @@ impl Sandbox {
         GuestMemoryMmap::from_regions(regions)
             .map_err(|e| io::Error::other(format!("RAM table: {e:?}")))
     }
+    /// Build a capture view restricted to boot-reported guest-owned extents.
+    ///
+    /// # Safety
+    /// Keep this Sandbox alive until every returned memory clone is dropped.
+    /// Snapshot reads require guest freeze and stopped device workers. While
+    /// running, use only the kernel control publication's volatile protocol.
+    #[cfg(feature = "devices")]
+    pub unsafe fn owned_guest_memory(
+        &self,
+        boot: &crate::owned_memory::BootMemory,
+    ) -> io::Result<vm_memory::GuestMemoryMmap> {
+        use vm_memory::{GuestAddress, GuestMemoryMmap, GuestRegionMmap, MmapRegion};
+        let mut regions = Vec::new();
+        for (gpa, offset, len) in boot.ranges(self.ram.len)? {
+            let pointer = unsafe { self.ram.address.as_ptr().add(offset) };
+            let mapping = unsafe { MmapRegion::build_raw(pointer, len, 3, 1) }
+                .map_err(|error| io::Error::other(format!("owned RAM mapping: {error:?}")))?;
+            regions.push(
+                GuestRegionMmap::new(mapping, GuestAddress(gpa))
+                    .ok_or_else(|| io::Error::other("owned RAM region overflow"))?,
+            );
+        }
+        GuestMemoryMmap::from_regions(regions).map_err(io::Error::other)
+    }
+
     pub fn load(&mut self, path: &str) -> io::Result<()> {
         let started = Instant::now();
         let vm = self.vm.as_ref().unwrap();
@@ -654,6 +699,10 @@ impl Sandbox {
     pub fn duplicate_vm_descriptor(&self) -> io::Result<std::os::fd::OwnedFd> {
         Ok(self.vm.as_ref().unwrap().try_clone()?.into())
     }
+    pub fn memory_size(&self) -> usize {
+        self.ram.len
+    }
+
     pub fn vm_fd(&self) -> std::os::fd::RawFd {
         self.vm.as_ref().unwrap().as_raw_fd()
     }
@@ -730,7 +779,7 @@ impl Sandbox {
             .get_mut()
             .unwrap_or_else(|e| e.into_inner())
             .take();
-        let _guard = start_guard.or_else(|| {
+        let guard = start_guard.or_else(|| {
             self.lifecycle_lock.as_ref().map(|lock| {
                 loop {
                     match lock.acquire() {
@@ -744,14 +793,27 @@ impl Sandbox {
                 }
             })
         });
+        let locked = guard.is_some();
+        let lock_ns = crate::lifecycle::monotonic_ns();
         let started = Instant::now();
         drop(self.vm.take());
+        let close_end_ns = crate::lifecycle::monotonic_ns();
         if std::env::var_os("NITRO_PROFILE").is_some() {
             eprintln!(
                 "NITRO_PROFILE vm_close_micros={}",
                 started.elapsed().as_micros()
             );
         }
+        drop(guard);
+        crate::lifecycle::trace(format_args!(
+            "TEARDOWN holder=vmm pid={} vm={}:{} final={} locked={} lock_ns={lock_ns} close_start_ns={lock_ns} close_end_ns={close_end_ns} unlock_ns={}",
+            std::process::id(),
+            std::process::id(),
+            self.trace_id,
+            u8::from(!self.handed_off),
+            u8::from(locked),
+            crate::lifecycle::monotonic_ns()
+        ));
     }
 }
 impl Drop for Sandbox {

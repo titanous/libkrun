@@ -22,6 +22,7 @@ pub struct Console {
     /// The current console line (its last `LINE_KEEP` bytes).
     line: Vec<u8>,
     panic_seen: bool,
+    discovery: Option<crate::freeze_discovery::Discovery>,
 }
 impl Default for Console {
     fn default() -> Self {
@@ -43,6 +44,7 @@ impl Console {
             interval: Instant::now(),
             line: Vec::new(),
             panic_seen: false,
+            discovery: None,
         }
     }
     /// Give every byte the guest writes to `observer` as well, BEFORE the byte budgets: a
@@ -50,6 +52,12 @@ impl Console {
     /// console thread and must not block.
     pub fn set_observer(&mut self, observer: RawObserver) {
         self.observer = Some(observer);
+    }
+    pub fn enable_freeze_discovery(&mut self) {
+        self.discovery = Some(crate::freeze_discovery::Discovery::default());
+    }
+    pub fn freeze_discovery(&self) -> Option<&crate::freeze_discovery::Discovery> {
+        self.discovery.as_ref()
     }
     /// Whether the kernel printed its panic stop line. Only the kernel's line shape counts:
     /// a printk timestamp `[ secs.micros] `, optionally `reboot: `, then
@@ -102,6 +110,9 @@ impl Write for Console {
         if let Some(observer) = &mut self.observer {
             observer(bytes);
         }
+        if let Some(discovery) = &mut self.discovery {
+            discovery.observe(bytes)?;
+        }
         for &byte in bytes {
             if byte == b'\n' {
                 if stop_line(&self.line, b"panic") {
@@ -144,6 +155,22 @@ impl Write for Console {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+    #[test]
+    fn freeze_discovery_is_explicit_and_independent_of_output_budget() {
+        let mut console = Console::default();
+        console
+            .write_all(b"NITRO_FREEZE_CONTROL phys=0x40001000\n")
+            .unwrap();
+        assert!(console.freeze_discovery().is_none());
+        console.enable_freeze_discovery();
+        console
+            .write_all(b"NITRO_FREEZE_CONTROL phys=0x40002000\n")
+            .unwrap();
+        assert_eq!(
+            console.freeze_discovery().unwrap().control,
+            Some(0x40002000)
+        );
+    }
     struct Sink(Arc<Mutex<Vec<u8>>>);
     impl Write for Sink {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {

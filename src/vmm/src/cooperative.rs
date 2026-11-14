@@ -154,6 +154,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_arch = "x86_64")]
     fn reports_kvm_pcid_capability() {
         let kvm = kvm_ioctls::Kvm::new().unwrap();
         let cpuid = kvm
