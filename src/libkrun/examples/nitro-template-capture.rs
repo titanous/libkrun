@@ -20,7 +20,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         707,
         std::time::Duration::from_secs(15),
         Some(LifecycleLock {
-            path: "/run/holodeck/nitro-lifecycle.lock".into(),
+            path: nitro_sandbox::lifecycle::LIFECYCLE_LOCK_PATH.into(),
             serialization: Serialization::StartAndTeardown,
         }),
     )?;
@@ -30,6 +30,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ram_mib: 1024,
         topology: b"diagnostic-no-devices".to_vec(),
         compatibility: b"nitro-arm64-v1".to_vec(),
+        export_path: None,
     }));
     let unarmed = std::env::var_os("CAPTURE_UNARMED").is_some();
     runtime.set_console(nitro_sandbox::console::Console::new(
@@ -69,7 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             1,
             None,
             Some(LifecycleLock {
-                path: "/run/holodeck/nitro-lifecycle.lock".into(),
+                path: nitro_sandbox::lifecycle::LIFECYCLE_LOCK_PATH.into(),
                 serialization: Serialization::StartAndTeardown,
             }),
         )?;
@@ -110,7 +111,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             708,
             std::time::Duration::from_secs(15),
             Some(LifecycleLock {
-                path: "/run/holodeck/nitro-lifecycle.lock".into(),
+                path: nitro_sandbox::lifecycle::LIFECYCLE_LOCK_PATH.into(),
                 serialization: Serialization::StartAndTeardown,
             }),
         )?;

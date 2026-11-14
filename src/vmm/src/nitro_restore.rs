@@ -91,7 +91,8 @@ pub fn validate(
     topology: &[u8],
     compatibility: &[u8],
 ) -> io::Result<()> {
-    if template.vcpus != vcpus
+    if template.architecture != crate::template::Architecture::Aarch64
+        || template.vcpus != vcpus
         || template.ram_mib != ram_mib
         || template.topology != topology
         || template.compatibility != compatibility
@@ -214,12 +215,13 @@ pub unsafe fn copy_and_release(
         .regions
         .iter()
         .find(|&&(gpa, len, _)| {
-            template.control >= gpa && template.control + 4096 <= gpa + len as u64
+            template.control_page_address >= gpa
+                && template.control_page_address + 4096 <= gpa + len as u64
         })
         .ok_or_else(invalid)?;
     template
         .file
-        .read_exact_at(&mut page, file_offset + template.control - gpa)?;
+        .read_exact_at(&mut page, file_offset + template.control_page_address - gpa)?;
     let entry = ResumeEntry::parse(&page, |a, n| {
         template.regions.iter().any(|&(gpa, len, _)| {
             a >= gpa && a.checked_add(n).is_some_and(|end| end <= gpa + len as u64)
@@ -244,10 +246,10 @@ pub unsafe fn copy_and_release(
             position += count;
         }
     }
-    let offset = if template.control < 0x80000000 {
-        template.control - 0x40000000
+    let offset = if template.control_page_address < 0x80000000 {
+        template.control_page_address - 0x40000000
     } else {
-        template.control - 0x400000000 + 0x40000000
+        template.control_page_address - 0x400000000 + 0x40000000
     };
     let guest = unsafe { base.add(offset as usize) } as *mut u64;
     unsafe {

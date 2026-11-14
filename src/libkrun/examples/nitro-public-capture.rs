@@ -17,7 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         watchdog: Duration::from_secs(15),
     });
     builder.nitro_lifecycle_lock(
-        "/run/holodeck/nitro-lifecycle.lock".into(),
+        nitro_sandbox::lifecycle::LIFECYCLE_LOCK_PATH.into(),
         NitroSerialization::StartAndTeardown,
     );
     builder.vm_config(1, 1024)?;
@@ -43,7 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             watchdog: Duration::from_secs(15),
         });
         receiver.nitro_lifecycle_lock(
-            "/run/holodeck/nitro-lifecycle.lock".into(),
+            nitro_sandbox::lifecycle::LIFECYCLE_LOCK_PATH.into(),
             NitroSerialization::StartAndTeardown,
         );
         receiver.vm_config(1, 1024)?;

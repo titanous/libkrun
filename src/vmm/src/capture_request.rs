@@ -3,20 +3,61 @@ use std::io;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+pub struct CaptureOutcome {
+    pub template: crate::template::Template,
+    /// None for descriptor-only capture; Some reports requested publication.
+    pub export: Option<io::Result<std::path::PathBuf>>,
+}
+
+impl std::ops::Deref for CaptureOutcome {
+    type Target = crate::template::Template;
+    fn deref(&self) -> &Self::Target {
+        &self.template
+    }
+}
+
+pub fn refusal_errno(error: &io::Error) -> i32 {
+    match error.kind() {
+        io::ErrorKind::PermissionDenied => -libc::EPERM,
+        io::ErrorKind::TimedOut => -libc::ETIMEDOUT,
+        _ => -libc::EINVAL,
+    }
+}
+
 #[derive(Default)]
 struct State {
     deadline: Option<Instant>,
-    requested: bool,
     accepted: bool,
-    result: Option<io::Result<crate::template::Template>>,
+    marker_confirmed: bool,
+    result: Option<io::Result<CaptureOutcome>>,
 }
 
 #[derive(Clone, Default)]
 pub struct CaptureRequest(Arc<(Mutex<State>, Condvar)>);
 
 impl CaptureRequest {
+    pub fn require_marker(&self) -> io::Result<()> {
+        if !self.0 .0.lock().unwrap().marker_confirmed {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                crate::cooperative::TemplateMarkerMissing,
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn confirm_marker(&self, active: bool) {
+        self.0 .0.lock().unwrap().marker_confirmed = active;
+    }
+
     pub fn arm(&self, timeout: Duration) -> io::Result<()> {
         let mut state = self.0 .0.lock().unwrap();
+        if !state.marker_confirmed {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                crate::cooperative::TemplateMarkerMissing,
+            ));
+        }
         if state.deadline.is_some() || state.accepted {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -26,20 +67,17 @@ impl CaptureRequest {
         state.deadline = Some(Instant::now().checked_add(timeout).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "capture timeout overflow")
         })?);
-        state.requested = true;
         state.result = None;
         Ok(())
     }
 
-    pub fn take_request(&self) -> bool {
-        let mut state = self.0 .0.lock().unwrap();
-        if state
-            .deadline
-            .is_none_or(|deadline| Instant::now() >= deadline)
-        {
-            return false;
+    pub fn authorize(&self) -> io::Result<()> {
+        let state = self.0 .0.lock().unwrap();
+        match state.deadline {
+            Some(deadline) if Instant::now() < deadline => Ok(()),
+            Some(_) => Err(io::Error::from(io::ErrorKind::TimedOut)),
+            None => Err(io::Error::from(io::ErrorKind::PermissionDenied)),
         }
-        std::mem::take(&mut state.requested)
     }
 
     pub fn is_armed(&self) -> bool {
@@ -62,19 +100,17 @@ impl CaptureRequest {
             return false;
         }
         state.accepted = true;
-        state.requested = false;
         true
     }
 
-    pub fn complete(&self, result: io::Result<crate::template::Template>) {
+    pub fn complete(&self, result: io::Result<CaptureOutcome>) {
         let mut state = self.0 .0.lock().unwrap();
         state.result = Some(result);
         state.deadline = None;
-        state.requested = false;
         self.0 .1.notify_all();
     }
 
-    pub fn wait(&self) -> io::Result<crate::template::Template> {
+    pub fn wait(&self) -> io::Result<CaptureOutcome> {
         let mut state = self.0 .0.lock().unwrap();
         loop {
             if let Some(result) = state.result.take() {
@@ -89,7 +125,6 @@ impl CaptureRequest {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 state.deadline = None;
-                state.requested = false;
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     if state.accepted {
@@ -108,8 +143,25 @@ impl CaptureRequest {
 mod tests {
     use super::*;
     #[test]
+    fn guest_refusals_have_distinct_errno() {
+        assert_eq!(
+            refusal_errno(&io::Error::from(io::ErrorKind::PermissionDenied)),
+            -libc::EPERM
+        );
+        assert_eq!(
+            refusal_errno(&io::Error::from(io::ErrorKind::TimedOut)),
+            -libc::ETIMEDOUT
+        );
+        assert_eq!(
+            refusal_errno(&io::Error::from(io::ErrorKind::InvalidData)),
+            -libc::EINVAL
+        );
+    }
+
+    #[test]
     fn acceptance_and_timeout_have_one_terminal_decision() {
         let expired = CaptureRequest::default();
+        expired.confirm_marker(true);
         expired.arm(Duration::ZERO).unwrap();
         assert!(!expired.accept());
         assert!(expired
@@ -121,6 +173,7 @@ mod tests {
         assert!(!expired.accept());
 
         let accepted = CaptureRequest::default();
+        accepted.confirm_marker(true);
         accepted.arm(Duration::from_secs(30)).unwrap();
         assert!(accepted.accept());
         assert!(!accepted.accept());
@@ -138,11 +191,14 @@ mod tests {
     fn timeout_disarms_and_requests_are_consumed_once() {
         let request = CaptureRequest::default();
         assert!(!request.is_armed());
-        assert!(!request.take_request());
+        let error = request.arm(Duration::from_secs(1)).unwrap_err();
+        assert!(error
+            .get_ref()
+            .unwrap()
+            .is::<crate::cooperative::TemplateMarkerMissing>());
+        request.confirm_marker(true);
         request.arm(Duration::from_millis(1)).unwrap();
         assert!(request.arm(Duration::from_secs(1)).is_err());
-        assert!(request.take_request());
-        assert!(!request.take_request());
         assert_eq!(
             request.wait().err().unwrap().kind(),
             io::ErrorKind::TimedOut

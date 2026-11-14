@@ -10,6 +10,7 @@ pub struct Discovery {
     pub memory: BootMemory,
     pub control: Option<u64>,
     pub receiver_reserved: bool,
+    pub marker: Option<bool>,
 }
 impl Discovery {
     pub fn observe(&mut self, bytes: &[u8]) -> io::Result<()> {
@@ -38,6 +39,25 @@ impl Discovery {
         if line.contains("NITRO_RECEIVER_RANGE reserved [0x70000000-0x701fffff]") {
             self.receiver_reserved = true;
         }
+        if let Some(value) = line.split("NITRO_TEMPLATE_MARKER active=").nth(1) {
+            let active = match value.trim() {
+                "0" => false,
+                "1" => true,
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "invalid template marker publication",
+                    ))
+                }
+            };
+            if self.marker.is_some_and(|old| old != active) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "inconsistent template marker publication",
+                ));
+            }
+            self.marker = Some(active);
+        }
         if let Some(value) = line.split("NITRO_FREEZE_CONTROL phys=").nth(1) {
             let address =
                 u64::from_str_radix(value.trim().trim_start_matches("0x"), 16).map_err(|_| {
@@ -60,6 +80,20 @@ impl Discovery {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn template_marker_is_explicit_and_consistent() {
+        let mut discovery = Discovery::default();
+        discovery
+            .observe(b"NITRO_TEMPLATE_MARKER active=1\r\n")
+            .unwrap();
+        assert_eq!(discovery.marker, Some(true));
+        assert!(discovery
+            .observe(b"NITRO_TEMPLATE_MARKER active=0\n")
+            .is_err());
+        assert!(Discovery::default()
+            .observe(b"NITRO_TEMPLATE_MARKER active=2\n")
+            .is_err());
+    }
     #[test]
     fn fragmented_lines_and_oversize_input_are_bounded() {
         let mut discovery = Discovery::default();

@@ -7,15 +7,8 @@ pub use readiness::{GuestReadiness, GuestReadyTimeout};
 
 /// A cooperative template descriptor or owner-only persisted file.
 #[cfg(all(
-    not(feature = "tee"),
-    any(
-        target_arch = "x86_64",
-        all(
-            target_os = "linux",
-            target_arch = "aarch64",
-            feature = "nitro-sandbox"
-        )
-    )
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    not(feature = "tee")
 ))]
 pub enum TemplateSource {
     Descriptor(std::fs::File),
@@ -663,15 +656,8 @@ impl Builder {
     /// Declare a block disk's frozen content identity (digest or snapshot token).
     /// A new guest must declare each disk as a copy of the source token.
     #[cfg(all(
-        not(feature = "tee"),
-        any(
-            target_arch = "x86_64",
-            all(
-                target_os = "linux",
-                target_arch = "aarch64",
-                feature = "nitro-sandbox"
-            )
-        )
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        not(feature = "tee")
     ))]
     pub fn template_disk_identity(
         &mut self,
@@ -687,20 +673,12 @@ impl Builder {
 
     /// Mark this guest as a future cooperative template, retaining descriptor-backed RAM.
     /// Capture remains disarmed until explicitly requested through VmHandle.
-    #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
-    pub fn future_template(&mut self) -> &mut Self {
-        self.config.vmr.cooperative_capture = Some((0, std::path::PathBuf::new()));
-        self
-    }
-
-    /// Mark an arm64 Nitro guest for agent-requested cooperative capture.
     #[cfg(all(
-        target_os = "linux",
-        target_arch = "aarch64",
-        feature = "nitro-sandbox"
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        not(feature = "tee")
     ))]
     pub fn future_template(&mut self) -> &mut Self {
-        self.nitro_capture = Some(vmm::capture_request::CaptureRequest::default());
+        self.config.vmr.cooperative_capture = Some((0, std::path::PathBuf::new()));
         self
     }
 
@@ -708,7 +686,10 @@ impl Builder {
     /// page and emits the cooperative freeze exit. The source never resumes.
     /// Pass zero to discover the GPA from BSP RSI at that exit, or a nonzero
     /// address to require an exact match with the reported GPA.
-    #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        not(feature = "tee")
+    ))]
     pub fn capture_cooperative_template(
         &mut self,
         control_page: u64,
@@ -723,15 +704,8 @@ impl Builder {
     /// The returned deadline starts now, including subsequent build time.
     /// Mark it ready only after validating the new agent's identity/generation.
     #[cfg(all(
-        not(feature = "tee"),
-        any(
-            target_arch = "x86_64",
-            all(
-                target_os = "linux",
-                target_arch = "aarch64",
-                feature = "nitro-sandbox"
-            )
-        )
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        not(feature = "tee")
     ))]
     pub fn start_from_template(
         &mut self,
@@ -755,15 +729,8 @@ impl Builder {
     /// Start a new VM over a sealed template descriptor. Configure the same
     /// device list in the same order, with independent writable disk backends.
     #[cfg(all(
-        not(feature = "tee"),
-        any(
-            target_arch = "x86_64",
-            all(
-                target_os = "linux",
-                target_arch = "aarch64",
-                feature = "nitro-sandbox"
-            )
-        )
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        not(feature = "tee")
     ))]
     pub fn start_from_template_fd(&mut self, file: std::fs::File) -> std::io::Result<&mut Self> {
         self.config.vmr.cooperative_template = Some(vmm::template::Template::open(file)?);
@@ -772,15 +739,8 @@ impl Builder {
 
     /// Load a persisted template into immutable backing before starting a VM.
     #[cfg(all(
-        not(feature = "tee"),
-        any(
-            target_arch = "x86_64",
-            all(
-                target_os = "linux",
-                target_arch = "aarch64",
-                feature = "nitro-sandbox"
-            )
-        )
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        not(feature = "tee")
     ))]
     pub fn start_from_template_path(
         &mut self,
@@ -1360,6 +1320,10 @@ impl Builder {
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     fn build_nitro(mut self, options: NitroBackendConfig) -> Result<Context, StartError> {
         #[cfg(target_arch = "aarch64")]
+        if self.config.vmr.cooperative_capture.is_some() {
+            self.nitro_capture = Some(vmm::capture_request::CaptureRequest::default());
+        }
+        #[cfg(target_arch = "aarch64")]
         if self.nitro_capture.is_some() && self.config.vmr.cooperative_template.is_some() {
             return Err(StartError::Nitro(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -1523,11 +1487,19 @@ impl Builder {
             }
             let mut args = self.kernel_cmdline.clone();
             args.extend(self.extra_kernel_args.iter().cloned());
-            let cmdline = args.join(" ");
+            let mut cmdline = kernel::cmdline::Cmdline::new(65536);
+            cmdline
+                .insert_str(args.join(" "))
+                .map_err(|e| StartError::Nitro(std::io::Error::other(format!("{e:?}"))))?;
+            if self.config.vmr.cooperative_capture.is_some() {
+                cmdline
+                    .insert_kernel_argument("cooperative_template")
+                    .map_err(|e| StartError::Nitro(std::io::Error::other(format!("{e:?}"))))?;
+            }
             let (file, _) = nitro_sandbox::image::cached_files(
                 &kernel.path,
                 kernel.initramfs_path.as_deref(),
-                cmdline.as_bytes(),
+                cmdline.as_str().as_bytes(),
                 memory_mib as u64 * 1024 * 1024,
                 u64::from(config.vcpu_count.unwrap_or(1)),
                 self.nitro_image_cache.as_deref(),
@@ -1713,6 +1685,12 @@ impl Builder {
                 ram_mib: memory_mib as u64,
                 topology: template_topology,
                 compatibility: b"nitro-arm64-v1".to_vec(),
+                export_path: self
+                    .config
+                    .vmr
+                    .cooperative_capture
+                    .as_ref()
+                    .and_then(|(_, path)| (!path.as_os_str().is_empty()).then(|| path.clone())),
             }));
         }
         let context = Context::from_nitro(runtime, device_info)?;
@@ -2672,33 +2650,34 @@ impl VmHandle {
     /// the workload through the agent and authorize its trigger after arming.
     /// The returned template owns a sealed descriptor. For a sequential agent
     /// handshake, use arm_template_capture followed by wait_template_capture.
-    #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        not(feature = "tee")
+    ))]
     pub fn freeze_template(
         &self,
         timeout: std::time::Duration,
-    ) -> std::io::Result<vmm::template::Template> {
-        let request = {
-            let vmm = self
-                .vmm
-                .as_ref()
-                .ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::Unsupported,
-                        "cooperative capture requires Linux KVM",
-                    )
-                })?
-                .lock()
-                .unwrap();
-            vmm.arm_template_capture(timeout)?
-        };
-        request.wait()
+    ) -> std::io::Result<vmm::capture_request::CaptureOutcome> {
+        self.arm_template_capture(timeout)?;
+        self.wait_template_capture()
     }
 
     /// Authorize capture after the agent has quiesced the workload.
     /// After this returns, authorize the agent to write the kernel trigger.
     /// Receive the sealed descriptor with wait_template_capture.
-    #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        not(feature = "tee")
+    ))]
     pub fn arm_template_capture(&self, timeout: std::time::Duration) -> std::io::Result<()> {
+        #[cfg(all(
+            target_os = "linux",
+            target_arch = "aarch64",
+            feature = "nitro-sandbox"
+        ))]
+        if let Some(request) = &self.nitro_capture {
+            return request.arm(timeout);
+        }
         let request = self
             .vmm
             .as_ref()
@@ -2711,50 +2690,24 @@ impl VmHandle {
             .lock()
             .unwrap()
             .arm_template_capture(timeout)?;
-        request.take_request();
+        let _ = request;
         Ok(())
     }
 
-    /// Arm Nitro capture after the agent has quiesced its workload, before asking
-    /// the agent to write the kernel trigger. This never requests a kernel freeze.
-    #[cfg(all(
-        target_os = "linux",
-        target_arch = "aarch64",
-        feature = "nitro-sandbox"
-    ))]
-    pub fn arm_template_capture(&self, timeout: std::time::Duration) -> std::io::Result<()> {
-        self.nitro_capture
-            .as_ref()
-            .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::Unsupported,
-                    "guest was not configured as a Nitro template",
-                )
-            })?
-            .arm(timeout)
-    }
-
-    /// Receive a sealed template from an already armed, agent-triggered capture.
-    #[cfg(all(
-        target_os = "linux",
-        target_arch = "aarch64",
-        feature = "nitro-sandbox"
-    ))]
-    pub fn wait_template_capture(&self) -> std::io::Result<vmm::template::Template> {
-        self.nitro_capture
-            .as_ref()
-            .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::Unsupported,
-                    "guest was not configured as a Nitro template",
-                )
-            })?
-            .wait()
-    }
-
     /// Wait for a previously armed capture using its original deadline.
-    #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
-    pub fn wait_template_capture(&self) -> std::io::Result<vmm::template::Template> {
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        not(feature = "tee")
+    ))]
+    pub fn wait_template_capture(&self) -> std::io::Result<vmm::capture_request::CaptureOutcome> {
+        #[cfg(all(
+            target_os = "linux",
+            target_arch = "aarch64",
+            feature = "nitro-sandbox"
+        ))]
+        if let Some(request) = &self.nitro_capture {
+            return request.wait();
+        }
         let request = self
             .vmm
             .as_ref()

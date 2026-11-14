@@ -1440,10 +1440,6 @@ impl Vcpu {
                 }
                 #[cfg(target_arch = "x86_64")]
                 VcpuExit::IoIn(addr, data) => {
-                    if addr == 0xe8 && data.len() == 1 {
-                        data[0] = self.capture_request.take_request() as u8;
-                        return Ok(VcpuEmulation::Handled);
-                    }
                     // Post-RESTORE wall-clock reads avoid including CPU/device
                     // restoration latency in the guest's new realtime epoch.
                     if (addr == 0xe6 || addr == 0xe7) && data.len() == 4 {
@@ -1467,6 +1463,10 @@ impl Vcpu {
                 }
                 #[cfg(target_arch = "x86_64")]
                 VcpuExit::IoOut(addr, data) => {
+                    if addr == crate::cooperative::MARKER_PORT && data.len() == 1 {
+                        self.capture_request.confirm_marker(data[0] == 1);
+                        return Ok(VcpuEmulation::Handled);
+                    }
                     if addr == crate::cooperative::FREEZE_PORT {
                         if self.id != 0 || data != [1] {
                             return Err(Error::VcpuUnhandledKvmExit);

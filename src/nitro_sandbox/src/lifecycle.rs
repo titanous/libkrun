@@ -5,6 +5,9 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 
+/// Host-wide serialization inode shared by every Holodeck Nitro guest lane.
+pub const LIFECYCLE_LOCK_PATH: &str = "/run/holodeck/nitro-lifecycle.lock";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Serialization {
     Teardown,

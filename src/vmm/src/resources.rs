@@ -194,26 +194,12 @@ pub struct VmResources {
     /// The path to an external kernel, as an alternative to KernelBundle.
     pub external_kernel: Option<ExternalKernel>,
     /// Sealed cooperative RAM image used instead of loading a boot payload.
-    #[cfg(any(
-        target_arch = "x86_64",
-        all(
-            target_os = "linux",
-            target_arch = "aarch64",
-            feature = "nitro-sandbox"
-        )
-    ))]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     pub cooperative_template: Option<crate::template::Template>,
     /// Physical control page and create-new output path for a frozen template.
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     pub cooperative_capture: Option<(u64, PathBuf)>,
-    #[cfg(any(
-        target_arch = "x86_64",
-        all(
-            target_os = "linux",
-            target_arch = "aarch64",
-            feature = "nitro-sandbox"
-        )
-    ))]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     pub template_disk_identities: std::collections::BTreeMap<String, String>,
     /// The parameters for the qboot bundle to be loaded in this microVM.
     #[cfg(feature = "tee")]
@@ -520,25 +506,11 @@ mod tests {
             kernel_cmdline: default_kernel_cmdline(),
             kernel_bundle: Default::default(),
             external_kernel: None,
-            #[cfg(any(
-                target_arch = "x86_64",
-                all(
-                    target_os = "linux",
-                    target_arch = "aarch64",
-                    feature = "nitro-sandbox"
-                )
-            ))]
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             cooperative_template: None,
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             cooperative_capture: None,
-            #[cfg(any(
-                target_arch = "x86_64",
-                all(
-                    target_os = "linux",
-                    target_arch = "aarch64",
-                    feature = "nitro-sandbox"
-                )
-            ))]
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             template_disk_identities: std::collections::BTreeMap::new(),
             fs: Default::default(),
             vsock: Default::default(),

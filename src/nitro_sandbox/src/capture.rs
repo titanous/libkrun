@@ -11,6 +11,8 @@ pub trait PreparedCapture: Send {
 }
 
 pub trait CaptureHandler: Send {
+    /// One boot notification, verified against the published control page.
+    fn marker_confirmed(&mut self, _active: bool) {}
     /// Return None to refuse and recover the source. All memory must be copied
     /// into immutable owned storage before returning a pending acceptance.
     fn prepare(

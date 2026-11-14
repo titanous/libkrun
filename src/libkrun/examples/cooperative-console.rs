@@ -69,6 +69,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "panic=-1",
         "reboot=k",
     ]);
+    if std::env::var_os("CLONE_TEST_INIT_ARGS").is_some() {
+        builder.add_kernel_cmdline_args(&["-- daemon-argument"]);
+    }
     if std::env::var_os("CLONE_FS").is_some_and(|mode| mode == "dax") {
         builder.add_kernel_cmdline_args(&["clone_dax"]);
     }
@@ -102,15 +105,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
     let context = builder.build()?;
-    if args[1] == "freeze" || args[1] == "refuse" || args[1] == "host-freeze" {
-        context
-            .vm_handle()
-            .arm_template_capture(std::time::Duration::from_secs(30))?;
-    }
+    let unmarked_probe =
+        if args[1] == "ordinary" && std::env::var_os("CLONE_TEST_UNMARKED_ARM").is_some() {
+            let handle = context.vm_handle();
+            Some(std::thread::spawn(move || {
+                std::thread::park_timeout(std::time::Duration::from_secs(1));
+                let error = handle
+                    .arm_template_capture(std::time::Duration::from_secs(1))
+                    .unwrap_err();
+                assert!(error
+                    .get_ref()
+                    .is_some_and(|cause| cause.is::<vmm::cooperative::TemplateMarkerMissing>()));
+                eprintln!("UNMARKED ARM typed TemplateMarkerMissing");
+            }))
+        } else {
+            None
+        };
+    let mut arm = if args[1] == "freeze" || args[1] == "refuse" || args[1] == "host-freeze" {
+        let handle = context.vm_handle();
+        Some(std::thread::spawn(move || -> std::io::Result<()> {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                match handle.arm_template_capture(std::time::Duration::from_secs(30)) {
+                    Ok(()) => return Ok(()),
+                    Err(error)
+                        if error.get_ref().is_some_and(|cause| {
+                            cause.is::<vmm::cooperative::TemplateMarkerMissing>()
+                        }) && std::time::Instant::now() < deadline =>
+                    {
+                        std::thread::park_timeout(std::time::Duration::from_millis(1))
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }))
+    } else {
+        None
+    };
     let capture = if args[1] == "host-freeze" {
         let handle = context.vm_handle();
         let path = PathBuf::from(&args[2]);
+        let arm = arm.take().expect("arm worker");
         Some(std::thread::spawn(move || -> std::io::Result<()> {
+            arm.join().expect("arm worker")?;
             let template = handle.wait_template_capture()?;
             vmm::template::Template::open(template.file.try_clone()?)?;
             template.write_to_path(path)?;
@@ -121,6 +158,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
     let result = context.run()?;
+    if let Some(probe) = unmarked_probe {
+        probe.join().expect("unmarked arm probe");
+    }
+    if let Some(arm) = arm {
+        arm.join().expect("arm worker")?;
+    }
     if let Some(probe) = readiness_probe {
         probe.join().expect("readiness probe");
     }
@@ -131,7 +174,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match (args[1].as_str(), result) {
         ("freeze" | "host-freeze", krun::VmExit::Frozen { .. }) => Ok(()),
         (
-            "resume" | "resume-fd" | "refuse" | "unsolicited",
+            "ordinary" | "resume" | "resume-fd" | "refuse" | "unsolicited",
             krun::VmExit::Shutdown { exit_code: 0 },
         ) => Ok(()),
         _ => Err("unexpected VM exit".into()),

@@ -70,7 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         706,
         Duration::from_secs(15),
         Some(LifecycleLock {
-            path: "/run/holodeck/nitro-lifecycle.lock".into(),
+            path: nitro_sandbox::lifecycle::LIFECYCLE_LOCK_PATH.into(),
             serialization: Serialization::StartAndTeardown,
         }),
     )?;

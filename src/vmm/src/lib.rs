@@ -39,14 +39,14 @@ pub mod nitro_restore;
 #[cfg(target_os = "linux")]
 pub mod template_memory;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub mod capture_request;
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub mod cooperative;
 #[cfg(target_arch = "x86_64")]
 mod kernel_identity;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub mod template;
 #[cfg(any(
     target_arch = "x86_64",
@@ -270,11 +270,33 @@ pub struct Vmm {
 }
 
 impl Vmm {
+    #[cfg(target_arch = "aarch64")]
+    pub fn arm_template_capture(
+        &self,
+        _timeout: std::time::Duration,
+    ) -> std::io::Result<crate::capture_request::CaptureRequest> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "cooperative capture is not implemented by this backend",
+        ))
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    pub fn wait_template_capture(&self) -> crate::capture_request::CaptureRequest {
+        let request = crate::capture_request::CaptureRequest::default();
+        request.complete(Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "cooperative capture is not implemented by this backend",
+        )));
+        request
+    }
+
     #[cfg(target_arch = "x86_64")]
     pub fn arm_template_capture(
         &self,
         timeout: std::time::Duration,
     ) -> std::io::Result<crate::capture_request::CaptureRequest> {
+        self.capture_request.require_marker()?;
         if self.cooperative_capture.is_none() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
@@ -547,12 +569,7 @@ impl Subscriber for Vmm {
                 );
                 let mut captured_template = None;
                 let result = (|| -> std::io::Result<std::path::PathBuf> {
-                    if !self.capture_request.is_armed() {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::PermissionDenied,
-                            "cooperative capture is not armed by the host",
-                        ));
-                    }
+                    self.capture_request.authorize()?;
                     let (control, path, vcpus, ram_mib) =
                         self.cooperative_capture.as_ref().ok_or_else(|| {
                             std::io::Error::other("cooperative capture not configured")
@@ -588,6 +605,7 @@ impl Subscriber for Vmm {
                         vm_memory::GuestAddress(reported_control),
                     )
                     .map_err(std::io::Error::other)?;
+                    crate::cooperative::require_template_marker(&control_page)?;
                     use crate::cooperative::word;
                     let build_id_start = word::KERNEL_BUILD_ID * 8;
                     let build_id_len = word::KERNEL_BUILD_ID_LEN * 8;
@@ -625,14 +643,10 @@ impl Subscriber for Vmm {
                             "cooperative freeze timed out during preparation",
                         ));
                     }
-                    if let Some(prepared) = prepared_path {
-                        if let Err(error) = prepared.publish() {
-                            // Acceptance is irreversible. Preserve the sealed descriptor
-                            // instead of incorrectly resuming an accepted source.
-                            eprintln!("accepted template export failed: {error}");
-                        }
-                    }
-                    captured_template = Some(template);
+                    let export =
+                        prepared_path.map(|prepared| prepared.publish().map(|()| path.clone()));
+                    captured_template =
+                        Some(crate::capture_request::CaptureOutcome { template, export });
                     Ok(path.clone())
                 })();
                 let template_path = match result {
@@ -646,7 +660,9 @@ impl Subscriber for Vmm {
                             )));
                         }
                         if let Some(cpu) = self.vcpus_handles.first() {
-                            let _ = cpu.send_event(VcpuEvent::FreezeRejected(-libc::EINVAL));
+                            let _ = cpu.send_event(VcpuEvent::FreezeRejected(
+                                crate::capture_request::refusal_errno(&error),
+                            ));
                         }
                         return;
                     }

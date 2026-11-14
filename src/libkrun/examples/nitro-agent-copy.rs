@@ -144,7 +144,7 @@ mod probe {
             watchdog: Duration::from_secs(20),
         });
         builder.nitro_lifecycle_lock(
-            "/run/holodeck/nitro-lifecycle.lock".into(),
+            nitro_sandbox::lifecycle::LIFECYCLE_LOCK_PATH.into(),
             NitroSerialization::StartAndTeardown,
         );
         let cpus = std::env::var("COPY_CPUS")

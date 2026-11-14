@@ -910,6 +910,7 @@ dependencies = [
  "aws-nitro",
  "crossbeam-channel",
  "devices",
+ "kernel",
  "krun_display",
  "krun_input",
  "kvm-bindings",

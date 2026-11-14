@@ -141,8 +141,13 @@ External vhost-user-vsock plus these controls fails build with
 
 ## Cooperative templates on x86-64 KVM
 
-Mark a source with `Builder::future_template()` before build; ordinary guests
-retain anonymous private RAM. This is a capability reservation, not permission
+Template descriptions use format 4 with an explicit architecture tag. Compatibility
+bytes and clock_state are architecture-owned; embedders must not parse them.
+control_page_address is a guest physical protocol address, not a register contract.
+Mark a source with `Builder::future_template()` before build; its kernel marker
+and generated device arguments are inserted before an unquoted `--` and all init
+arguments. Capture requires the kernel's marker-active confirmation. Ordinary
+guests have no cooperative trigger file and retain anonymous private RAM. This is a capability reservation, not permission
 for a guest to capture itself. Obtain `Context::vm_handle()` and run the context
 on its event-loop thread. Ask the guest agent over its control channel to quiesce
 the workload, and wait for its acknowledgement. Call
@@ -156,7 +161,21 @@ export path but does not arm capture. The existing `freeze_template(timeout)`
 convenience call arms and waits; it does not signal the agent or kernel and
 requires a separately coordinated agent trigger after arming.
 
-`wait_template_capture` returns a `vmm::template::Template` owning the sealed memory
+`wait_template_capture` returns `CaptureOutcome { template, export }`.
+`template` owns the sealed descriptor; `export` is `None` for descriptor-only
+capture or `Some(Result<PathBuf, io::Error>)` for requested publication. Acceptance
+is irreversible even when publication fails: retain the descriptor and inspect
+`export`, never assume the requested path exists. Guest trigger refusal returns
+EPERM when not armed, ETIMEDOUT when the deadline expired, or EINVAL for validation.
+The guest must reconnect its control channel after device freeze/refusal.
+
+Temporary exports are named `.krun-template-<pid>-<counter>` in the destination
+directory. Before accepting captures at daemon startup, exclusively own each
+trusted template directory and sweep `.krun-template-*` leftovers from dead VMMs.
+Never sweep while another publisher can be active. These files contain sensitive
+whole-guest memory; retain owner-only directory access.
+
+The outcome's `template` owns the sealed memory
 file only after source vCPU teardown. Its `file` can be duplicated or sent to
 another process with SCM_RIGHTS; `write_to_path` exports owner-only sensitive
 whole-guest memory. A freeze deadline returns `io::ErrorKind::TimedOut`, distinct
@@ -173,8 +192,11 @@ For a new guest use its own builder: configure matching CPU/RAM and devices,
 independent disk copies, its CID, identifiers and connection policy, then call
 `start_from_template_fd(file)` or `start_from_template_path(path)` before build.
 Path input is copied into sealed memory before use, so later path mutation or
-truncation cannot affect copies. For many copies, import once and pass the sealed
-descriptor to avoid repeating the scan/copy. RAM regions are checked against the
+truncation cannot affect copies. For one-copy-per-build workflows, descriptor starts are required: import once
+and pass duplicated sealed descriptors. Keep the template's memory-charging
+cgroup alive and sized for the template's entire lifetime, even after source
+vCPUs exit. Freeze descriptor-only first; export afterwards with write_to_path
+and check the separate result so the arm deadline does not include disk export. RAM regions are checked against the
 configured architecture layout before mapping.
 Network devices are refused because guest MAC state is retained. Keep templates
 within one trust domain: kernel secrets and address layouts remain shared.

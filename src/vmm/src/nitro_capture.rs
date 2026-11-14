@@ -10,17 +10,28 @@ pub struct NitroCapture {
     pub ram_mib: u64,
     pub topology: Vec<u8>,
     pub compatibility: Vec<u8>,
+    pub export_path: Option<std::path::PathBuf>,
 }
 struct Prepared {
     request: CaptureRequest,
     template: Option<Template>,
+    export_path: Option<std::path::PathBuf>,
 }
 impl PreparedCapture for Prepared {
     fn accept(&mut self) -> bool {
         self.request.accept()
     }
     fn complete(mut self: Box<Self>) {
-        self.request.complete(Ok(self.template.take().unwrap()));
+        let template = self.template.take().unwrap();
+        let export = self
+            .export_path
+            .take()
+            .map(|path| template.write_to_path(&path).map(|()| path));
+        self.request
+            .complete(Ok(crate::capture_request::CaptureOutcome {
+                template,
+                export,
+            }));
     }
 }
 #[cfg(test)]
@@ -37,6 +48,7 @@ mod tests {
             (6, 1),
             (7, 0x40002000),
             (30, 20),
+            (32, 1),
         ] {
             page[n * 8..n * 8 + 8].copy_from_slice(&value.to_le_bytes());
         }
@@ -49,8 +61,11 @@ mod tests {
             ram_mib: 1,
             topology: vec![],
             compatibility: vec![],
+            export_path: None,
         };
         assert!(adapter.prepare(&memory, 0x40000000).unwrap().is_none());
+        assert!(request.arm(std::time::Duration::from_secs(5)).is_err());
+        adapter.marker_confirmed(true);
         request.arm(std::time::Duration::from_secs(5)).unwrap();
         let mut prepared = adapter.prepare(&memory, 0x40000000).unwrap().unwrap();
         assert!(prepared.accept());
@@ -62,6 +77,9 @@ mod tests {
 }
 
 impl CaptureHandler for NitroCapture {
+    fn marker_confirmed(&mut self, active: bool) {
+        self.request.confirm_marker(active);
+    }
     fn prepare(
         &mut self,
         memory: &GuestMemoryMmap,
@@ -69,6 +87,15 @@ impl CaptureHandler for NitroCapture {
     ) -> io::Result<Option<Box<dyn PreparedCapture>>> {
         if !self.request.is_armed() {
             return Ok(None);
+        }
+        let marker: u64 = memory
+            .read_obj(GuestAddress(control + 32 * 8))
+            .map_err(io::Error::other)?;
+        if marker != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                crate::cooperative::TemplateMarkerMissing,
+            ));
         }
         let identity_len: u64 = memory
             .read_obj(GuestAddress(control + 30 * 8))
@@ -97,6 +124,7 @@ impl CaptureHandler for NitroCapture {
         Ok(Some(Box::new(Prepared {
             request: self.request.clone(),
             template: Some(template),
+            export_path: self.export_path.clone(),
         })))
     }
     fn failed(&mut self, error: io::Error) {

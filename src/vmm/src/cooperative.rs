@@ -4,7 +4,32 @@ use std::io;
 
 pub const FROZEN_MAGIC: u64 = 0x4652_4f5a_454e_3031;
 pub const FREEZE_PORT: u16 = 0xe5;
+pub const MARKER_PORT: u16 = 0xe9;
 pub const CONTROL_SIZE: usize = 4096;
+
+#[derive(Debug)]
+pub struct TemplateMarkerMissing;
+impl std::fmt::Display for TemplateMarkerMissing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "guest kernel did not confirm cooperative_template")
+    }
+}
+impl std::error::Error for TemplateMarkerMissing {}
+
+pub fn require_template_marker(page: &[u8; CONTROL_SIZE]) -> io::Result<()> {
+    if u64::from_le_bytes(
+        page[word::MARKER_ACTIVE * 8..(word::MARKER_ACTIVE + 1) * 8]
+            .try_into()
+            .unwrap(),
+    ) != 1
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            TemplateMarkerMissing,
+        ));
+    }
+    Ok(())
+}
 
 /// Word offsets shared with the carried cooperative kernel protocol.
 pub mod word {
@@ -29,6 +54,7 @@ pub mod word {
     pub const KERNEL_BUILD_ID: usize = 27;
     pub const KERNEL_BUILD_ID_LEN: usize = 30;
     pub const TSC: usize = 31;
+    pub const MARKER_ACTIVE: usize = 32;
 }
 
 /// State required before the guest's x86 continuation can execute.
@@ -100,6 +126,15 @@ impl ResumeEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_requires_kernel_marker_confirmation() {
+        let mut page = [0; CONTROL_SIZE];
+        let error = require_template_marker(&page).unwrap_err();
+        assert!(error.get_ref().unwrap().is::<TemplateMarkerMissing>());
+        page[word::MARKER_ACTIVE * 8] = 1;
+        require_template_marker(&page).unwrap();
+    }
 
     fn published() -> [u8; CONTROL_SIZE] {
         let mut page = [0; CONTROL_SIZE];

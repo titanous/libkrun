@@ -62,7 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let lock = || {
         Some(LifecycleLock {
-            path: "/run/holodeck/nitro-lifecycle.lock".into(),
+            path: nitro_sandbox::lifecycle::LIFECYCLE_LOCK_PATH.into(),
             serialization: Serialization::StartAndTeardown,
         })
     };

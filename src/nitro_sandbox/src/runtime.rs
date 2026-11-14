@@ -72,6 +72,7 @@ pub struct Runtime {
     stop_reason: Option<crate::stop_reason::StopReason>,
     capture: Option<Box<dyn crate::capture::CaptureHandler>>,
     accepted_capture: Option<crate::capture::AcceptedCapture>,
+    marker_notified: bool,
     restore: Option<Box<dyn RestoreHandler>>,
     memory_size: usize,
 }
@@ -113,6 +114,7 @@ impl Runtime {
             stop_reason: None,
             capture: None,
             accepted_capture: None,
+            marker_notified: false,
             restore: None,
             memory_size,
         })
@@ -265,6 +267,19 @@ impl Runtime {
             control - 0x400000000 + 0x40000000
         };
         let pointer = (self.sandbox.ram.address() + offset) as *mut u64;
+        if !self.marker_notified {
+            if let Some(active) = discovery.marker {
+                // SAFETY: the entire aligned control page was validated above.
+                let confirmed = unsafe { pointer.add(32).read_volatile() } == 1;
+                if confirmed != active {
+                    return Err(io::Error::other(
+                        "template marker notification disagrees with control page",
+                    ));
+                }
+                self.capture.as_mut().unwrap().marker_confirmed(active);
+                self.marker_notified = true;
+            }
+        }
         if unsafe { pointer.read_volatile() } != crate::cooperative::FROZEN_MAGIC
             || unsafe { pointer.add(1).read_volatile() } != 0
         {
