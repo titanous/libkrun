@@ -22,7 +22,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let vcpus = std::env::var("CLONE_VCPUS")
         .unwrap_or_else(|_| "1".into())
         .parse()?;
-    builder.vm_config(vcpus, 256)?;
+    let memory = std::env::var("CLONE_MEMORY").unwrap_or_else(|_| "256".into()).parse()?;
+    builder.vm_config(vcpus, memory)?;
     if let Some(disk) = std::env::var_os("CLONE_DISK") {
         builder.add_block_cfg(vmm::vmm_config::block::BlockDeviceConfig {
             block_id: "clone-data".into(),
