@@ -1,4 +1,5 @@
 use super::*;
+use libc::{fcntl, F_GETFL};
 use std::io::{Read, Write};
 
 fn emit(fd: RawFd) {
@@ -40,6 +41,14 @@ fn two_writers_on_one_pipe_have_private_nonblocking_descriptions() {
     reader.read_exact(&mut bytes).unwrap();
     assert!(bytes.iter().all(|byte| *byte == b'x'));
     assert_eq!(unsafe { fcntl(writer.as_raw_fd(), F_GETFL) }, original);
+}
+
+#[test]
+fn input_does_not_change_shared_description_flags() {
+    let (reader, _writer) = std::io::pipe().unwrap();
+    let flags = unsafe { fcntl(reader.as_raw_fd(), F_GETFL) };
+    let _input = input_to_raw_fd_dup(reader.as_raw_fd()).unwrap();
+    assert_eq!(unsafe { fcntl(reader.as_raw_fd(), F_GETFL) }, flags);
 }
 
 #[test]

@@ -1,5 +1,5 @@
 use libc::{
-    fcntl, F_GETFL, F_SETFL, O_NONBLOCK, STDERR_FILENO, STDIN_FILENO, STDOUT_FILENO, TIOCGWINSZ,
+    O_NONBLOCK, STDERR_FILENO, STDIN_FILENO, STDOUT_FILENO, TIOCGWINSZ,
 };
 use log::Level;
 use nix::errno::Errno;
@@ -36,15 +36,11 @@ pub trait PortTerminalProperties: Send + Sync {
 }
 
 pub fn stdin() -> Result<Box<dyn PortInput + Send>, nix::Error> {
-    let fd = dup_raw_fd_into_owned(STDIN_FILENO)?;
-    make_non_blocking(&fd)?;
-    Ok(Box::new(PortInputFd(fd)))
+    input_to_raw_fd_dup(STDIN_FILENO)
 }
 
 pub fn input_to_raw_fd_dup(fd: RawFd) -> Result<Box<dyn PortInput + Send>, nix::Error> {
-    let fd = dup_raw_fd_into_owned(fd)?;
-    make_non_blocking(&fd)?;
-    Ok(Box::new(PortInputFd(fd)))
+    Ok(Box::new(PortInputFd(prepare_private_fd(fd, false)?)))
 }
 
 pub fn stdout() -> Result<Box<dyn PortOutput + Send>, nix::Error> {
@@ -88,6 +84,10 @@ pub fn output_to_raw_fd_dup_blocking(fd: RawFd) -> Result<Box<dyn PortOutput + S
 }
 
 fn prepare_output_fd(fd: RawFd) -> Result<OwnedFd, nix::Error> {
+    prepare_private_fd(fd, true)
+}
+
+fn prepare_private_fd(fd: RawFd, output: bool) -> Result<OwnedFd, nix::Error> {
     use std::os::unix::fs::OpenOptionsExt;
     let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
     // SAFETY: fstat initializes stat on success; fd remains owned by caller.
@@ -99,10 +99,14 @@ fn prepare_output_fd(fd: RawFd) -> Result<OwnedFd, nix::Error> {
         // No regular-file offsets or socket identity are reopened. Pipe/tty flags
         // belong to this private description, never the caller's shared one.
         let file = std::fs::OpenOptions::new()
-            .write(true)
-            .custom_flags(O_NONBLOCK)
+            .write(output)
+            .read(!output)
+            .custom_flags(O_NONBLOCK | libc::O_NOCTTY)
             .open(format!("/proc/self/fd/{fd}"))
-            .map_err(|error| Errno::from_raw(error.raw_os_error().unwrap_or(libc::EIO)))?;
+            .map_err(|error| {
+                log::error!("console fd {fd}: cannot obtain a private nonblocking description; refusing unsafe shared-flag or blocking fallback: {error}");
+                Errno::from_raw(error.raw_os_error().unwrap_or(libc::EIO))
+            })?;
         Ok(file.into())
     } else {
         dup_raw_fd_into_owned(fd)
@@ -134,7 +138,14 @@ impl PortInput for PortInputFd {
         // SAFETY: We got a valid file descriptor from `AsRawFd`. The memory pointed to by `dst` is
         // valid for writes of length `buf.len() by the invariants upheld by the constructor
         // of `VolatileSlice`.
-        let bytes_read = unsafe { libc::read(fd, dst, buf.len()) };
+        let received = unsafe { libc::recv(fd, dst, buf.len(), libc::MSG_DONTWAIT) };
+        let bytes_read = if received < 0
+            && io::Error::last_os_error().raw_os_error() == Some(libc::ENOTSOCK)
+        {
+            unsafe { libc::read(fd, dst, buf.len()) }
+        } else {
+            received
+        };
 
         if bytes_read < 0 {
             let err = std::io::Error::last_os_error();
@@ -213,21 +224,6 @@ fn dup_raw_fd_into_owned(raw_fd: RawFd) -> Result<OwnedFd, nix::Error> {
     let borrowed_fd = unsafe { BorrowedFd::borrow_raw(raw_fd) };
     let fd = dup(borrowed_fd)?;
     Ok(fd)
-}
-
-fn make_non_blocking(as_rw_fd: &impl AsRawFd) -> Result<(), nix::Error> {
-    let fd = as_rw_fd.as_raw_fd();
-    unsafe {
-        let flags = fcntl(fd, F_GETFL, 0);
-        if flags < 0 {
-            return Err(Errno::last());
-        }
-
-        if fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0 {
-            return Err(Errno::last());
-        }
-    }
-    Ok(())
 }
 
 // Utility to relay log from the VM (the kernel boot log and messages from init)
