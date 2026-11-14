@@ -50,7 +50,13 @@ impl Mapping {
     pub fn zero(&mut self) { unsafe { std::ptr::write_bytes(self.address.as_ptr(), 0, self.len) } }
     /// Copy hypervisor-written bytes without creating shared Rust references to them.
     pub fn copy(&self) -> Vec<u8> {
-        (0..self.len).map(|i| unsafe { self.address.as_ptr().add(i).read_volatile() }).collect()
+        self.copy_range(0, self.len).expect("entire mapping range")
+    }
+    fn copy_range(&self, offset: usize, length: usize) -> io::Result<Vec<u8>> {
+        if offset.checked_add(length).is_none_or(|end| end > self.len) {
+            return Err(io::Error::other("mapping range overflow"));
+        }
+        Ok((offset..offset + length).map(|i| unsafe { self.address.as_ptr().add(i).read_volatile() }).collect())
     }
 }
 impl Drop for Mapping { fn drop(&mut self) { unsafe { munmap(self.address.as_ptr(), self.len); } } }
@@ -146,16 +152,36 @@ impl Sandbox {
         Ok(DeviceEvents { uid: req.uid, kicks, calls, info })
     }
     pub fn snapshot(&self, uid: u64) -> io::Result<Option<crate::DeviceSnapshot>> {
-        for _ in 0..16 {
-            let first = self.info.copy();
-            std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
-            let a = crate::device_snapshot(&first, uid).map_err(|e| io::Error::other(format!("info page: {e:?}")))?;
-            std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
-            let second = self.info.copy();
-            let b = crate::device_snapshot(&second, uid).map_err(|e| io::Error::other(format!("info page: {e:?}")))?;
-            if a.as_ref().map(|s| (s.generation, s.reset_count)) == b.as_ref().map(|s| (s.generation, s.reset_count)) {
-                return Ok(a);
+        let header = self.info.copy_range(0, 16)?;
+        if crate::u32_at(&header, 0).ok() != Some(0x5343494e) { return Ok(None); }
+        let count = crate::u32_at(&header, 8).unwrap() as usize;
+        if count > (INFO_PAGE_SIZE - 16) / 48 { return Err(io::Error::other("invalid TOC count")); }
+        let toc = self.info.copy_range(16, count * 48)?;
+        for record in toc.chunks_exact(48) {
+            if crate::u16_at(record, 0).unwrap() != 2 || crate::u64_at(record, 16).unwrap() != uid { continue; }
+            let offset = crate::u32_at(record, 4).unwrap() as usize;
+            let size = crate::u64_at(record, 8).unwrap();
+            if size < 2344 || offset.checked_add(2344).is_none_or(|end| end > INFO_PAGE_SIZE) {
+                return Err(io::Error::other("invalid device entry range"));
             }
+            for _ in 0..16 {
+                let before = self.info.copy_range(offset, 12)?;
+                std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+                let entry = self.info.copy_range(offset, 2344)?;
+                std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+                let after = self.info.copy_range(offset, 12)?;
+                if before != after { continue; }
+                // Reuse the checked wire parser with a compact synthetic TOC.
+                let mut copy = vec![0u8; 64 + 2344];
+                copy[..16].copy_from_slice(&header);
+                copy[8..12].copy_from_slice(&1u32.to_le_bytes());
+                copy[16..64].copy_from_slice(record);
+                copy[20..24].copy_from_slice(&64u32.to_le_bytes());
+                copy[24..32].copy_from_slice(&2344u64.to_le_bytes());
+                copy[64..].copy_from_slice(&entry);
+                return crate::device_snapshot(&copy, uid).map_err(|e| io::Error::other(format!("info page: {e:?}")));
+            }
+            return Ok(None);
         }
         Ok(None)
     }
