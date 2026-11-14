@@ -9,6 +9,7 @@ pub struct Console {
     total: usize,
     interval_bytes: usize,
     interval: Instant,
+    dropped: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 impl Default for Console {
     fn default() -> Self {
@@ -16,6 +17,12 @@ impl Default for Console {
     }
 }
 impl Console {
+    pub fn dropped_counter(&self) -> std::sync::Arc<std::sync::atomic::AtomicU64> {
+        self.dropped.clone()
+    }
+    pub fn dropped_bytes(&self) -> u64 {
+        self.dropped.load(std::sync::atomic::Ordering::Relaxed)
+    }
     /// Sink writes must be nonblocking. Budgets bound accepted bytes, not the
     /// runtime of an arbitrary embedder callback. Bytes are raw guest output:
     /// the embedder must escape terminal controls and encode invalid UTF-8.
@@ -27,6 +34,7 @@ impl Console {
             total: 0,
             interval_bytes: 0,
             interval: Instant::now(),
+            dropped: Default::default(),
         }
     }
 }
@@ -40,16 +48,27 @@ impl Write for Console {
             .len()
             .min(self.total_limit.saturating_sub(self.total))
             .min(self.rate_limit.saturating_sub(self.interval_bytes));
-        if let Some(sink) = &mut self.sink {
+        let written = if let Some(sink) = &mut self.sink {
             match sink.write(&bytes[..allowed]) {
                 Ok(written) => {
                     self.total += written;
                     self.interval_bytes += written;
+                    written
                 }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-                Err(error) => return Err(error),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => 0,
+                Err(error) => {
+                    self.dropped
+                        .fetch_add(bytes.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                    return Err(error);
+                }
             }
-        }
+        } else {
+            0
+        };
+        self.dropped.fetch_add(
+            bytes.len().saturating_sub(written) as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         Ok(bytes.len())
     }
     fn flush(&mut self) -> io::Result<()> {
@@ -93,5 +112,6 @@ mod tests {
         console.interval = Instant::now() - Duration::from_secs(2);
         console.write_all(&[b'x'; 10000]).unwrap();
         assert_eq!(captured.lock().unwrap().len(), 12);
+        assert_eq!(console.dropped_bytes(), 29988);
     }
 }

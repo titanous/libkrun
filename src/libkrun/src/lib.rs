@@ -2231,6 +2231,11 @@ impl Context {
             return VmHandle {
                 vmm: None,
                 console_tx_states: Vec::new(),
+                nitro_console_dropped: self
+                    .built_vm
+                    .nitro
+                    .as_ref()
+                    .map(|runtime| runtime.console_dropped_counter()),
                 heartbeat_control: self
                     .built_vm
                     .nitro
@@ -2263,6 +2268,8 @@ impl Context {
                 .clone(),
             #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
             heartbeat_control: None,
+            #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+            nitro_console_dropped: None,
             shutdown_efd: self.shutdown_efd.clone(),
             #[cfg(not(feature = "tee"))]
             balloon: balloon_handle,
@@ -2384,6 +2391,8 @@ pub enum BalloonError {
 pub struct VmHandle {
     vmm: Option<Arc<Mutex<vmm::Vmm>>>,
     console_tx_states: Vec<Arc<devices::virtio::console::ConsoleTxState>>,
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    nitro_console_dropped: Option<Arc<std::sync::atomic::AtomicU64>>,
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     heartbeat_control: Option<nitro_sandbox::heartbeat::DeadlineControl>,
     shutdown_efd: Option<Arc<EventFd>>,
@@ -2543,13 +2552,20 @@ impl Drop for NitroSigtermGuard {
 impl VmHandle {
     /// Cumulative guest console bytes discarded by bounded host output buffers.
     /// Reads shared atomics without locking the VMM, including during teardown.
-    /// Remains readable after `Context::run` returns. Backends without these
-    /// virtio console buffers return zero.
+    /// Remains readable after `Context::run` returns. Includes Nitro diagnostic
+    /// budget and sink losses as well as virtio console output-buffer losses.
     pub fn console_dropped_bytes(&self) -> u64 {
-        self.console_tx_states
+        let total: u64 = self
+            .console_tx_states
             .iter()
             .map(|state| state.dropped_bytes())
-            .sum()
+            .sum();
+        #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+        let total = total
+            + self.nitro_console_dropped.as_ref().map_or(0, |counter| {
+                counter.load(std::sync::atomic::Ordering::Relaxed)
+            });
+        total
     }
 
     /// Suspend Nitro guest heartbeat expiry while the embedder freezes a guest.
@@ -2889,6 +2905,8 @@ mod tests {
             vmm: None,
             console_tx_states: vec![Arc::new(devices::virtio::console::ConsoleTxState::default())],
             heartbeat_control: None,
+            #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+            nitro_console_dropped: Some(Arc::new(std::sync::atomic::AtomicU64::new(17))),
             shutdown_efd: Some(stop.clone()),
             #[cfg(not(feature = "tee"))]
             balloon: None,
@@ -2908,6 +2926,7 @@ mod tests {
         }
         #[cfg(not(feature = "tee"))]
         assert!(handle.balloon().is_none());
+        assert_eq!(handle.console_dropped_bytes(), 17);
         handle.trigger_shutdown_event().unwrap();
         assert_eq!(stop.read().unwrap(), 1);
     }

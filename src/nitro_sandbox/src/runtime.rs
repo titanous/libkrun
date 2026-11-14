@@ -162,6 +162,9 @@ impl Runtime {
     pub fn set_heartbeat(&mut self, heartbeat: crate::heartbeat::Heartbeat) {
         self.heartbeat = Some(heartbeat);
     }
+    pub fn console_dropped_counter(&self) -> Arc<std::sync::atomic::AtomicU64> {
+        self.console.dropped_counter()
+    }
     pub fn set_console(&mut self, console: crate::console::Console) {
         self.console = console;
     }
