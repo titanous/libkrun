@@ -91,6 +91,19 @@ mod tests {
     }
 
     #[test]
+    fn reports_kvm_pcid_capability() {
+        let kvm = kvm_ioctls::Kvm::new().unwrap();
+        let cpuid = kvm
+            .get_supported_cpuid(kvm_bindings::KVM_MAX_CPUID_ENTRIES)
+            .unwrap();
+        let pcid = cpuid
+            .as_slice()
+            .iter()
+            .any(|entry| entry.function == 1 && entry.ecx & (1 << 17) != 0);
+        println!("KVM supported PCID={pcid}");
+    }
+
+    #[test]
     fn accepts_published_long_mode_entry() {
         let entry = ResumeEntry::parse(&published()).unwrap();
         assert_eq!(entry.cr3, 0x2000);
