@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, Default)]
 pub struct TerminalFacts {
+    /// Successful source capture, not a guest stop; set only after source close.
+    pub frozen: bool,
     pub guest_fault: bool,
     pub host_stop: bool,
     pub liveness_expired: bool,

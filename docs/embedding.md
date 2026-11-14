@@ -109,6 +109,20 @@ At reset or final exit, the writer drains for at most 100 ms, then counts and dr
 remaining bytes and joins. No buffer survives the device-reset boundary required
 before a guest-copy template is captured, and no bytes are inherited by copies.
 Guests keep the upstream console driver; no guest console patch is required.
+A boot-control consumer requiring every console byte must parse the raw bytes
+before any diagnostic output policy: on Nitro, at the beginning of
+`Console::write`, before rate/total limits and sink writes; on virtio-console,
+before `BufferedOutput` enqueues or drops copied bytes. It must not parse the
+host descriptor stream after buffering. Keep control parsing bounded and separate
+from terminal-reason classification.
+
+A captured source is `VmExit::Frozen`, not a normal or abnormal guest stop.
+Nitro raw `TerminalFacts::frozen` feeds the shared resolver only after accepted
+capture and source close; host stop/error and final stated stop intent still win.
+A parked receiver has not booted a workload: the copy lane must suspend its boot
+progress watchdog while parked, enforce its separate bounded assignment deadline,
+and restart boot progress timing at release. Parking must not fabricate a guest
+stop reason or disable explicit host stop handling.
 The eight-vCPU continuous-output/unread-pipe regression must return within five
 seconds including its deliberate one-second delay, excluding host CPU starvation
 and unrelated blocking custom output implementations.

@@ -2057,10 +2057,31 @@ fn nitro_terminal_exit(facts: nitro_sandbox::runtime::TerminalFacts) -> VmExit {
         VmExit::LivenessExpired
     } else if facts.device_expired {
         VmExit::DeviceWatchdog
+    } else if facts.frozen {
+        VmExit::Frozen {
+            template_path: std::path::PathBuf::new(),
+        }
     } else {
         VmExit::Fault
     };
     VmExit::resolve(terminal, facts.exit_code, facts.reason)
+}
+
+#[cfg(all(test, target_os = "linux", feature = "nitro-sandbox"))]
+#[test]
+fn nitro_frozen_source_is_not_a_guest_stop() {
+    let facts = nitro_sandbox::runtime::TerminalFacts {
+        frozen: true,
+        ..Default::default()
+    };
+    assert!(matches!(
+        nitro_terminal_exit(facts.clone()),
+        VmExit::Frozen { .. }
+    ));
+    assert_eq!(
+        nitro_terminal_exit(nitro_sandbox::runtime::TerminalFacts { reason: 4, ..facts }),
+        VmExit::Panic
+    );
 }
 
 #[cfg(all(test, target_os = "linux", feature = "nitro-sandbox"))]
