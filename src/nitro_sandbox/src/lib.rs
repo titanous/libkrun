@@ -12,6 +12,7 @@ pub mod host;
 pub mod image;
 #[cfg(target_os = "linux")]
 pub mod lifecycle;
+pub mod owned_memory;
 #[cfg(all(target_os = "linux", feature = "devices"))]
 pub mod runtime;
 #[cfg(all(target_os = "linux", feature = "devices"))]
