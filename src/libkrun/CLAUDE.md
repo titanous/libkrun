@@ -15,4 +15,4 @@ Expose `Builder`, `Context`, `VmHandle`, `StartError`, `VmExit` and the optional
 - vhost-user vsock accepts a socket path or pre-connected UnixStream, mutually exclusive with userspace vsock.
 - Firmware is dynamically loaded by default; `static-firmware` supports static musl launchers.
 
-All API implementation lives in `src/lib.rs`. VMM lifecycle belongs to the vmm crate; device queue ownership/reset belongs to devices. Keep VM generation ID support and guest copy notification. Use the root Nix/just tooling; the integration workspace has a separate lockfile.
+All API implementation lives in `src/lib.rs`. VMM lifecycle belongs to the vmm crate; device queue ownership/reset belongs to devices. `VmHandle::notify_vm_generation_change()` is the copy-notification operation: call on the running copy after memory replacement/start; it writes a fresh ID and raises the device interrupt, returning the new ID or an error. The KVM guest test verifies the kernel reseeds its random pool twice. Use the root Nix/just tooling; the integration workspace has a separate lockfile.

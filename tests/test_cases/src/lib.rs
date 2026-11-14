@@ -1,3 +1,6 @@
+mod test_vm_generation;
+use test_vm_generation::TestVmGenerationChange;
+
 mod test_vm_config;
 use test_vm_config::TestVmConfig;
 
@@ -74,6 +77,7 @@ use test_nested_virt::TestNestedVirt;
 pub fn test_cases() -> Vec<TestCase> {
     // Register your test here:
     vec![
+        TestCase::new("vm-generation-change", Box::new(TestVmGenerationChange)),
         TestCase::new(
             "configure-vm-1cpu-256MiB",
             Box::new(TestVmConfig {

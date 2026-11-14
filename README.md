@@ -33,9 +33,11 @@ Firmware is dynamically loaded by default. `static-firmware` supports static lau
 - Virtio network with asynchronous backends, or socket proxying over virtio-vsock with Transparent Socket Impersonation.
 - Virtio-fs over a generic `FileSystem` implementation, including passthrough and DAX mapping; external vhost-user filesystem and vsock daemons are supported.
 - Virtio balloon inflation, deflation, statistics and free-page reporting, plus virtio RNG and RTC.
-- VM generation ID on x86-64 and aarch64, including GUID updates to notify a guest that it was copied.
+- VM generation ID on x86-64 and aarch64. After starting a copied guest, call `VmHandle::notify_vm_generation_change()` to write a fresh identifier and raise its interrupt; the guest driver reseeds its random pool.
 
-The fork carries guest-kernel patches under `patches`. `src/aws_nitro` is a separate existing crate and is retained independently of KVM.
+Cross-build and lint Linux arm64 with `CARGO_BUILD_JOBS=12 nix develop --max-jobs 12 -c just check-aarch64`; both stages deny warnings.
+
+The fork carries guest-kernel patches under `libkrunfw-patches`. `src/aws_nitro` is a separate existing crate and is retained independently of KVM.
 
 ## Security boundary
 

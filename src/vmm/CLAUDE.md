@@ -10,7 +10,7 @@ Construct and run Linux KVM guests, attach shared virtio devices, and report gue
 - Production `VcpuHandle::drop` kicks and joins its thread; test cleanup has a separate implementation.
 - `register_memory_region` allocates additional KVM slots for DAX windows. vhost-user configurations use memfd-backed guest RAM.
 - `Vmm::get_balloon` exposes the optional balloon device to the public handle API.
-- VM generation ID construction/registration is retained on x86-64 and aarch64 for copy notification.
+- `Vmm::notify_vm_generation_change` writes a fresh generation ID to guest memory then signals the registered interrupt on x86-64/aarch64. The running guest driver reseeds randomness; memory-write errors are returned before signaling.
 - Kernel-bundle host addresses are checked against the host page size during normal resource configuration.
 - Nested virtualization is threaded through VM resources and CPU configuration; boot-time MSR setup remains in the architecture crate.
 

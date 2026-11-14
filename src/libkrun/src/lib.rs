@@ -1548,6 +1548,17 @@ impl BalloonHandle {
 }
 
 impl VmHandle {
+    /// Give a running guest a fresh generation identifier and raise its notification interrupt.
+    /// Call after copying guest memory and starting the copy, so its kernel reseeds randomness.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    pub fn notify_vm_generation_change(&self) -> Result<[u8; 16], StartError> {
+        self.vmm
+            .lock()
+            .expect("Poisoned vmm lock")
+            .notify_vm_generation_change()
+            .map_err(|e| StartError::Microvm(vmm::builder::StartMicrovmError::Internal(e)))
+    }
+
     /// Pause all vCPUs. Blocks until all vCPUs have acknowledged the pause.
     #[mutants::skip] // races with VM exit in mutation tests; tested by integration tests
     pub fn pause(&self) -> Result<(), StartError> {

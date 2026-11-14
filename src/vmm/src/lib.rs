@@ -88,6 +88,10 @@ pub enum Error {
     /// of resource exhaustion.
     #[cfg(target_arch = "x86_64")]
     CreateLegacyDevice(device_manager::legacy::Error),
+    /// The VM has no generation identifier device.
+    VmGenerationUnavailable,
+    /// Cannot update the generation identifier in guest memory.
+    VmGenerationMemory(vm_memory::GuestMemoryError),
     /// Cannot read from an Event file descriptor.
     EventFd(io::Error),
     /// Polly error wrapper.
@@ -141,6 +145,8 @@ impl Display for Error {
             ConfigureSystem(e) => write!(f, "System configuration error: {e:?}"),
             #[cfg(target_arch = "x86_64")]
             CreateLegacyDevice(e) => write!(f, "Error creating legacy device: {e:?}"),
+            VmGenerationUnavailable => write!(f, "VM generation identifier unavailable"),
+            VmGenerationMemory(e) => write!(f, "Cannot update VM generation identifier: {e}"),
             EventFd(e) => write!(f, "Event fd error: {e}"),
             EventManager(e) => write!(f, "Event manager error: {e:?}"),
             I8042Error(e) => write!(f, "I8042 error: {e}"),
@@ -218,6 +224,21 @@ pub struct Vmm {
 }
 
 impl Vmm {
+    /// Write a fresh generation identifier and notify the running guest.
+    /// The guest driver reseeds its random pool when it handles this interrupt.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    pub fn notify_vm_generation_change(&mut self) -> Result<[u8; 16]> {
+        let device = self
+            .vmgenid
+            .as_mut()
+            .ok_or(Error::VmGenerationUnavailable)?;
+        let (_, new_id) = device
+            .update_guid(&self.guest_memory)
+            .map_err(Error::VmGenerationMemory)?;
+        device.signal_interrupt().map_err(Error::EventFd)?;
+        Ok(new_id)
+    }
+
     /// Gets the balloon device reference if available.
     #[cfg(not(feature = "tee"))]
     pub fn get_balloon(
