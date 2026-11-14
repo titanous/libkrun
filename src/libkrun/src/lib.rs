@@ -1239,6 +1239,13 @@ impl Builder {
             return Err(StartError::Nitro(std::io::Error::new(std::io::ErrorKind::Unsupported, "unsupported on this backend: disable the implicit console and configure custom Nitro console ports explicitly")));
         }
         let config = self.config.vmr.vm_config();
+        let memory_mib = config.mem_size_mib.unwrap_or(1024);
+        if memory_mib < 64 || !memory_mib.is_multiple_of(2) || options.watchdog.is_zero() {
+            return Err(StartError::Nitro(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "unsupported on this backend: memory must be at least 64 MiB and a multiple of 2 MiB; watchdog must be nonzero",
+            )));
+        }
         let mut device_info = vmm::resources::VmDeviceInfo {
             console_ports: Vec::new(),
             vcpu_count: config.vcpu_count.unwrap_or(1),

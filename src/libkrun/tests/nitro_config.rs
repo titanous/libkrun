@@ -16,6 +16,13 @@ fn rejected(mut builder: Builder, expected: &str) {
     }
 }
 #[test]
+fn rejects_unsupported_memory_geometry_before_allocating_vm() {
+    let mut builder = Builder::new();
+    builder.disable_implicit_console().unwrap();
+    builder.vm_config(1, 65).unwrap();
+    rejected(builder, "memory must");
+}
+#[test]
 #[cfg(feature = "net")]
 fn rejects_ignored_mac_before_allocating_vm() {
     let mut builder = Builder::new();
