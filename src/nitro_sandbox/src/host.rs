@@ -113,16 +113,23 @@ impl Sandbox {
     ///
     /// # Safety
     /// All returned memory clones and activated devices must be dropped before
-    /// this Sandbox. Supports the first 1 GiB range; larger layouts need splitting.
+    /// this Sandbox. Nitro places the first GiB at 0x40000000 and the
+    /// remaining contiguous host backing at guest address 0x400000000.
     #[cfg(feature = "devices")]
     pub unsafe fn guest_memory(&self) -> io::Result<vm_memory::GuestMemoryMmap> {
         use vm_memory::{GuestAddress, GuestMemoryMmap, GuestRegionMmap, MmapRegion};
-        if self.ram.len > 1024 * 1024 * 1024 { return Err(io::Error::other("split RAM layout required")); }
-        let region = unsafe { MmapRegion::build_raw(self.ram.address.as_ptr(), self.ram.len, 3, 1) }
-            .map_err(|e| io::Error::other(format!("RAM mapping: {e:?}")))?;
-        let region = GuestRegionMmap::new(region, GuestAddress(0x40000000))
-            .ok_or_else(|| io::Error::other("RAM region address overflow"))?;
-        GuestMemoryMmap::from_regions(vec![region]).map_err(|e| io::Error::other(format!("RAM table: {e:?}")))
+        let low = self.ram.len.min(1024 * 1024 * 1024);
+        let mut regions = Vec::new();
+        for (offset, length, gpa) in [(0, low, 0x40000000), (low, self.ram.len - low, 0x400000000)] {
+            if length == 0 { continue; }
+            let pointer = unsafe { self.ram.address.as_ptr().add(offset) };
+            let region = unsafe { MmapRegion::build_raw(pointer, length, 3, 1) }
+                .map_err(|e| io::Error::other(format!("RAM mapping: {e:?}")))?;
+            let region = GuestRegionMmap::new(region, GuestAddress(gpa))
+                .ok_or_else(|| io::Error::other("RAM region address overflow"))?;
+            regions.push(region);
+        }
+        GuestMemoryMmap::from_regions(regions).map_err(|e| io::Error::other(format!("RAM table: {e:?}")))
     }
     pub fn load(&mut self, path: &str) -> io::Result<()> {
         let vm = self.vm.as_ref().unwrap();

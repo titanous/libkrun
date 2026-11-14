@@ -13,8 +13,9 @@ activation alone does not service all queues. Drive lifecycle refresh before dis
 
 Sandbox owns the VM fd and closes it under `/tmp/libkrun-nitro-teardown.lock`
 before releasing mappings. Memory exposed by unsafe `guest_memory()` does not own
-the driver mapping: drop all devices and memory clones before Sandbox. The current
-adapter rejects mappings above 1 GiB rather than guessing split guest ranges.
+the driver mapping: drop all devices and memory clones before Sandbox. The first
+GiB starts at GPA 0x40000000; backing above it starts at GPA 0x400000000, leaving
+the intervening PCI/MMIO hole unmapped.
 
 The crate is a path member of the root workspace. Run `cargo test -p nitro_sandbox`
 from the fork root. Captured m8g device entries are in tests/fixtures with provenance.
