@@ -10,33 +10,166 @@ pub enum Serialization {
     Teardown,
     StartAndTeardown,
 }
+
+/// The host-wide lifecycle lock of the Nitro backend. Two teardowns on one host must never
+/// overlap, and every final close of a VM descriptor happens while holding an flock on this one
+/// file, so every program that starts Nitro guests on a host must use this same path: a second
+/// path would be a second lock. Use this constant instead of repeating the string. The host sets
+/// up the directory (owned by root, not writable by group or others) and the file.
+pub const LIFECYCLE_LOCK_PATH: &str = "/run/holodeck/nitro-lifecycle.lock";
+
 #[derive(Clone, Debug)]
 pub struct LifecycleLock {
     pub path: PathBuf,
     pub serialization: Serialization,
 }
+/// An opened lifecycle lock. Every `OpenLock` of the same file in one process shares one
+/// [`Holder`], so several lifecycles in one process (a daemon with many guests, two sandboxes in
+/// one VMM, a test) serialise among themselves with a mutex and take the flock once, instead of
+/// contending through separate open file descriptions of one file, where a thread that already
+/// holds the lock and asks again would wait for itself forever.
 pub struct OpenLock {
-    file: std::sync::Arc<File>,
+    holder: std::sync::Arc<Holder>,
     pub serialization: Serialization,
 }
-pub struct Guard(std::sync::Arc<File>);
+/// The process-wide holder of one lock file.
+struct Holder {
+    path: PathBuf,
+    state: std::sync::Mutex<HolderState>,
+    released: std::sync::Condvar,
+}
+struct HolderState {
+    /// The open lock file (one open file description for the whole process). Replaced when the
+    /// path turns out to name another file (see `OpenLock::acquire`).
+    file: std::sync::Arc<File>,
+    /// The thread holding the lock, while it is held in this process.
+    owner: Option<std::thread::ThreadId>,
+}
+/// Live holders of this process, one per lock file (found by the device and inode of the file).
+static HOLDERS: std::sync::Mutex<Vec<std::sync::Weak<Holder>>> = std::sync::Mutex::new(Vec::new());
+/// Held lifecycle lock; dropping it releases the flock and lets the next user in this process in.
+pub struct Guard {
+    holder: std::sync::Arc<Holder>,
+    file: std::sync::Arc<File>,
+}
+
+/// Open the lock file at `path` without following a symlink and refuse one that anybody but its
+/// owner could replace or that the wrong user owns:
+/// - the file must be a regular file owned by root or by this process's effective user, with no
+///   execute, set-user-ID, set-group-ID or sticky bit (read and write bits are not checked: an
+///   flock needs only an open descriptor, and hosts that run several users' programs keep the
+///   file writable by all, mode 0666);
+/// - its directory must be owned by root or by this process's effective user and not writable
+///   by group or others, so nobody else can remove or replace the file under running programs.
+fn open_checked(path: &std::path::Path) -> io::Result<File> {
+    use std::os::unix::fs::MetadataExt;
+    let refuse = |what: String| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("lifecycle lock {}: {what}", path.display()),
+        )
+    };
+    // SAFETY: plain syscall without arguments.
+    let me = unsafe { libc::geteuid() };
+    let directory = path.parent().unwrap_or(std::path::Path::new("/"));
+    let directory = if directory.as_os_str().is_empty() {
+        std::path::Path::new(".")
+    } else {
+        directory
+    };
+    let parent = std::fs::symlink_metadata(directory)
+        .map_err(|error| refuse(format!("directory {}: {error}", directory.display())))?;
+    if !parent.is_dir() {
+        return Err(refuse(format!(
+            "{} is not a directory",
+            directory.display()
+        )));
+    }
+    if parent.uid() != 0 && parent.uid() != me {
+        return Err(refuse(format!(
+            "directory {} is owned by uid {} (must be root or uid {me})",
+            directory.display(),
+            parent.uid()
+        )));
+    }
+    if parent.mode() & 0o022 != 0 {
+        return Err(refuse(format!(
+            "directory {} is writable by group or others (mode {:o}): the file could be replaced",
+            directory.display(),
+            parent.mode() & 0o7777
+        )));
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|error| refuse(error.to_string()))?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("lifecycle lock {} must be a regular file", path.display()),
+        ));
+    }
+    if metadata.uid() != 0 && metadata.uid() != me {
+        return Err(refuse(format!(
+            "owned by uid {} (must be root or uid {me})",
+            metadata.uid()
+        )));
+    }
+    if metadata.mode() & 0o7111 != 0 {
+        return Err(refuse(format!(
+            "mode {:o} has execute or special bits",
+            metadata.mode() & 0o7777
+        )));
+    }
+    Ok(file)
+}
+/// Whether `file` is the file `path` names now (same device and inode, not a symlink).
+fn names(file: &File, path: &std::path::Path) -> io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let open = file.metadata()?;
+    let current = std::fs::symlink_metadata(path)?;
+    Ok(current.is_file() && open.dev() == current.dev() && open.ino() == current.ino())
+}
 impl LifecycleLock {
-    /// The daemon creates this file and must not replace its inode while VMMs
-    /// exist. Retain the opened inode even if the pathname is later removed.
+    /// Open the host's lock file (see `open_checked` for what is refused). It is never created
+    /// here. The opened inode is retained, and `acquire` notices if the path is replaced. An
+    /// `OpenLock` for a file this process already has open shares that file's holder.
     pub fn open(&self) -> io::Result<OpenLock> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&self.path)?;
-        if !file.metadata()?.is_file() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "lifecycle lock must be a regular file",
-            ));
-        }
+        use std::os::unix::fs::MetadataExt;
+        let file = open_checked(&self.path)?;
+        let opened = file.metadata()?;
+        let mut holders = HOLDERS.lock().unwrap_or_else(|e| e.into_inner());
+        holders.retain(|holder| holder.strong_count() > 0);
+        let existing = holders
+            .iter()
+            .filter_map(std::sync::Weak::upgrade)
+            .find(|holder| {
+                let state = holder.state.lock().unwrap_or_else(|e| e.into_inner());
+                state
+                    .file
+                    .metadata()
+                    .is_ok_and(|held| held.dev() == opened.dev() && held.ino() == opened.ino())
+            });
+        let holder = match existing {
+            Some(holder) => holder,
+            None => {
+                let holder = std::sync::Arc::new(Holder {
+                    path: self.path.clone(),
+                    state: std::sync::Mutex::new(HolderState {
+                        file: std::sync::Arc::new(file),
+                        owner: None,
+                    }),
+                    released: std::sync::Condvar::new(),
+                });
+                holders.push(std::sync::Arc::downgrade(&holder));
+                holder
+            }
+        };
         Ok(OpenLock {
-            file: std::sync::Arc::new(file),
+            holder,
             serialization: self.serialization,
         })
     }
@@ -52,23 +185,90 @@ impl OpenLock {
         drop(descriptor.take());
         Ok(())
     }
+    /// Take the lock (blocking): first among this process's users of the file (a mutex), then
+    /// against other processes (the flock, taken once by the process). A thread that already
+    /// holds it gets an error at once rather than waiting for itself.
+    ///
+    /// After the flock succeeds the holder checks that the open file is still the file the path
+    /// names: if the file was removed or replaced (a cleanup of the directory, a recreated file),
+    /// other programs now lock the new file, so this process unlocks, reopens the path (with the
+    /// same checks) and locks that file instead. A path that no longer names an acceptable file
+    /// is an error: the caller keeps what it would have closed and retries.
     pub fn acquire(&self) -> io::Result<Guard> {
+        let holder = &self.holder;
+        let me = std::thread::current().id();
+        let mut state = holder.state.lock().unwrap_or_else(|e| e.into_inner());
         loop {
-            if unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_EX) } == 0 {
-                return Ok(Guard(self.file.clone()));
-            }
-            let error = io::Error::last_os_error();
-            if error.kind() != io::ErrorKind::Interrupted {
-                return Err(error);
+            match state.owner {
+                None => break,
+                Some(owner) if owner == me => {
+                    return Err(io::Error::other(format!(
+                        "lifecycle lock {} is already held by this thread",
+                        holder.path.display()
+                    )));
+                }
+                Some(_) => {
+                    state = holder
+                        .released
+                        .wait(state)
+                        .unwrap_or_else(|e| e.into_inner());
+                }
             }
         }
+        state.owner = Some(me);
+        let mut file = state.file.clone();
+        drop(state);
+        // From here this thread owns the holder; every early return gives it back.
+        let give_back = |error: io::Error| {
+            holder.state.lock().unwrap_or_else(|e| e.into_inner()).owner = None;
+            holder.released.notify_all();
+            error
+        };
+        loop {
+            loop {
+                if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+                    break;
+                }
+                let error = io::Error::last_os_error();
+                if error.kind() != io::ErrorKind::Interrupted {
+                    return Err(give_back(error));
+                }
+            }
+            if matches!(names(&file, &holder.path), Ok(true)) {
+                return Ok(Guard {
+                    holder: holder.clone(),
+                    file,
+                });
+            }
+            unsafe {
+                libc::flock(file.as_raw_fd(), libc::LOCK_UN);
+            }
+            let reopened = open_checked(&holder.path).map_err(|error| {
+                give_back(io::Error::new(
+                    error.kind(),
+                    format!("lifecycle lock file was replaced or removed; reopening: {error}"),
+                ))
+            })?;
+            file = std::sync::Arc::new(reopened);
+            holder.state.lock().unwrap_or_else(|e| e.into_inner()).file = file.clone();
+        }
+    }
+    /// The path this lock was opened from.
+    pub fn path(&self) -> &std::path::Path {
+        &self.holder.path
     }
 }
 impl Drop for Guard {
     fn drop(&mut self) {
         unsafe {
-            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
         }
+        self.holder
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .owner = None;
+        self.holder.released.notify_all();
     }
 }
 
@@ -222,33 +422,136 @@ mod tests {
         sender.write_all(VM_DESCRIPTOR_MESSAGE).unwrap();
         assert!(receive_vm_descriptor(&receiver).is_err());
     }
-    #[test]
-    fn independent_open_descriptions_contend_and_release() {
-        let path =
-            std::env::temp_dir().join(format!("nitro-lifecycle-{}.lock", std::process::id()));
-        File::create(&path).unwrap();
-        let config = LifecycleLock {
-            path: path.clone(),
+    /// A private directory (mode 0700) for lock files: /tmp itself is writable by others and
+    /// is refused as a lock directory.
+    fn private_directory(name: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        directory
+    }
+
+    /// Run `work` on its own thread and fail if it does not finish within `limit` (a
+    /// self-deadlock then fails the test instead of hanging it).
+    fn within<T: Send + 'static>(
+        limit: std::time::Duration,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> T {
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(work());
+        });
+        finished
+            .recv_timeout(limit)
+            .expect("did not finish in time: lifecycle lock deadlock")
+    }
+    fn config(path: &std::path::Path) -> LifecycleLock {
+        LifecycleLock {
+            path: path.to_owned(),
             serialization: Serialization::Teardown,
-        };
-        let first = config.open().unwrap();
-        let second = config.open().unwrap();
-        let guard = first.acquire().unwrap();
-        let try_second =
-            || unsafe { libc::flock(second.file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        assert_eq!(try_second(), -1);
-        assert_eq!(io::Error::last_os_error().kind(), io::ErrorKind::WouldBlock);
-        drop(guard);
-        assert_eq!(try_second(), 0);
-        unsafe {
-            libc::flock(second.file.as_raw_fd(), libc::LOCK_UN);
         }
-        std::fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn openers_in_one_process_share_one_holder() {
+        let directory = private_directory("nitro-lifecycle");
+        let path = directory.join("lock");
+        File::create(&path).unwrap();
+        let first = config(&path).open().unwrap();
+        let second = std::sync::Arc::new(config(&path).open().unwrap());
+        let guard = first.acquire().unwrap();
+        // Another process (another open file description) cannot take it meanwhile.
+        let foreign = File::open(&path).unwrap();
+        let try_foreign =
+            || unsafe { libc::flock(foreign.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        assert_eq!(try_foreign(), -1);
+        // Another thread of this process waits for the guard, then gets it.
+        let waiter = second.clone();
+        let (entered, got) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let guard = waiter.acquire().unwrap();
+            entered.send(()).unwrap();
+            drop(guard);
+        });
+        assert!(got
+            .recv_timeout(std::time::Duration::from_millis(200))
+            .is_err());
+        drop(guard);
+        got.recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+        thread.join().unwrap();
+        assert_eq!(try_foreign(), 0);
+        unsafe { libc::flock(foreign.as_raw_fd(), libc::LOCK_UN) };
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn a_thread_that_holds_the_lock_is_refused_at_once() {
+        let directory = private_directory("nitro-reentry");
+        let path = directory.join("lock");
+        File::create(&path).unwrap();
+        let (first, second) = (config(&path).open().unwrap(), config(&path).open().unwrap());
+        let error = within(std::time::Duration::from_secs(10), move || {
+            let _guard = first.acquire().unwrap();
+            second.acquire().err().map(|error| error.to_string())
+        });
+        assert!(error.unwrap().contains("already held by this thread"));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn overlapping_lifecycles_in_one_process_never_overlap_and_never_deadlock() {
+        // Two lifecycles' worth of openers (as two sandboxes or a daemon's guests would open
+        // them), used from 8 threads: create windows and final closes interleave, at most one
+        // holds the lock at a time, and all finish within the limit.
+        let directory = private_directory("nitro-overlap");
+        let path = directory.join("lock");
+        File::create(&path).unwrap();
+        let locks: Vec<_> = (0..2)
+            .map(|_| std::sync::Arc::new(config(&path).open().unwrap()))
+            .collect();
+        let inside = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let most = within(std::time::Duration::from_secs(60), move || {
+            let threads: Vec<_> = (0..8)
+                .map(|index| {
+                    let (lock, inside) = (locks[index % 2].clone(), inside.clone());
+                    std::thread::spawn(move || {
+                        let mut most = 0;
+                        for round in 0..200 {
+                            let mut descriptor = Some(File::open("/dev/null").unwrap().into());
+                            let guard = if round % 2 == 0 {
+                                Some(lock.acquire().unwrap())
+                            } else {
+                                None
+                            };
+                            if guard.is_some() {
+                                let now =
+                                    inside.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
+                                most = most.max(now);
+                                std::thread::yield_now();
+                                inside.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                            }
+                            drop(guard);
+                            if round % 2 == 1 {
+                                // The close path takes the lock itself.
+                                lock.close_vm_descriptor(&mut descriptor).unwrap();
+                            }
+                        }
+                        most
+                    })
+                })
+                .collect();
+            threads
+                .into_iter()
+                .map(|t| t.join().unwrap())
+                .max()
+                .unwrap()
+        });
+        assert_eq!(most, 1, "two holders inside the lock at once");
+        std::fs::remove_dir_all(directory).unwrap();
     }
     #[test]
     fn daemon_close_consumes_descriptor_under_lock() {
-        let path =
-            std::env::temp_dir().join(format!("nitro-daemon-close-{}.lock", std::process::id()));
+        let directory = private_directory("nitro-daemon-close");
+        let path = directory.join("lock");
         File::create(&path).unwrap();
         let lock = LifecycleLock {
             path: path.clone(),
@@ -259,16 +562,96 @@ mod tests {
         let mut descriptor = Some(File::open("/dev/null").unwrap().into());
         lock.close_vm_descriptor(&mut descriptor).unwrap();
         assert!(descriptor.is_none());
-        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
     }
     #[test]
     fn missing_daemon_lock_is_not_created() {
-        let path = std::env::temp_dir().join(format!("nitro-missing-{}.lock", std::process::id()));
+        let directory = private_directory("nitro-missing");
+        let path = directory.join("lock");
         let config = LifecycleLock {
             path: path.clone(),
             serialization: Serialization::Teardown,
         };
         assert!(config.open().is_err());
         assert!(!path.exists());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn replaceable_or_odd_lock_files_are_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let open = |path: &std::path::Path| {
+            LifecycleLock {
+                path: path.to_owned(),
+                serialization: Serialization::Teardown,
+            }
+            .open()
+        };
+        // A directory others can write: anybody could replace the file.
+        let shared = private_directory("nitro-shared-dir");
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+        File::create(shared.join("lock")).unwrap();
+        let error = open(&shared.join("lock")).err().unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(
+            error.to_string().contains("writable by group or others"),
+            "{error}"
+        );
+        // Execute or special bits on the file.
+        let directory = private_directory("nitro-modes");
+        let path = directory.join("lock");
+        File::create(&path).unwrap();
+        for mode in [0o755, 0o4600, 0o1600] {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            assert!(open(&path).is_err(), "mode {mode:o}");
+        }
+        // Read and write bits are not a reason to refuse (shared hosts keep it 0666).
+        for mode in [0o600, 0o644, 0o666] {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            open(&path).unwrap();
+        }
+        // A symlink is never followed.
+        std::os::unix::fs::symlink(&path, directory.join("link")).unwrap();
+        assert!(open(&directory.join("link")).is_err());
+        // A file owned by another user (root can create one to check; others skip this).
+        if unsafe { libc::geteuid() } == 0 {
+            let foreign = directory.join("foreign");
+            File::create(&foreign).unwrap();
+            std::os::unix::fs::chown(&foreign, Some(65534), Some(65534)).unwrap();
+            assert!(open(&foreign).is_err());
+        }
+        std::fs::remove_dir_all(shared).unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn a_replaced_lock_file_is_reopened_after_the_flock() {
+        let directory = private_directory("nitro-replaced");
+        let path = directory.join("lock");
+        File::create(&path).unwrap();
+        let lock = LifecycleLock {
+            path: path.clone(),
+            serialization: Serialization::Teardown,
+        }
+        .open()
+        .unwrap();
+        // The file is replaced under the running program (a cleanup recreated it).
+        std::fs::remove_file(&path).unwrap();
+        File::create(&path).unwrap();
+        let guard = lock.acquire().unwrap();
+        // The guard now holds the new file: another program locking the path must wait.
+        let other = File::open(&path).unwrap();
+        assert_eq!(
+            unsafe { libc::flock(other.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            -1
+        );
+        drop(guard);
+        assert_eq!(
+            unsafe { libc::flock(other.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        unsafe { libc::flock(other.as_raw_fd(), libc::LOCK_UN) };
+        // A removed file with nothing in its place is an error (the caller retries).
+        std::fs::remove_file(&path).unwrap();
+        assert!(lock.acquire().is_err());
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

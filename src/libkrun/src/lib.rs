@@ -494,7 +494,7 @@ pub struct ConsoleDeviceInfo {
 #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
 pub use nitro_sandbox::lifecycle::{
     LifecycleLock as NitroLifecycleLock, OpenLock as NitroOpenLifecycleLock,
-    Serialization as NitroSerialization,
+    Serialization as NitroSerialization, LIFECYCLE_LOCK_PATH as NITRO_LIFECYCLE_LOCK_PATH,
 };
 
 #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
