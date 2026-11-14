@@ -66,7 +66,10 @@ Backend paths, connection policy and server objects are deliberately excluded:
 new guests receive their own configuration and fresh backends. This format is
 same-host/same-kernel only, not a portable or hostile-input migration format.
 Full CPUID/kernel-build compatibility fencing is required before accepting
-untrusted templates. GPU and vhost-user backends are unsupported.
+untrusted templates. GPU and vhost-user backends are unsupported. Network
+devices are refused for both capture and template starts: virtio-net restore
+does not re-read the MAC address, so a fresh backend cannot safely supply a new
+identity. Use guest-initiated vsock with each new guest's own connection policy.
 
 In-process virtio-fs supports plain and DAX mounts with the kernel's cooperative
 FUSE patches (0200/0201). FREEZE revokes DAX mappings; capture excludes those

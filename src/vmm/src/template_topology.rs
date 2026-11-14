@@ -22,6 +22,12 @@ pub fn encode(resources: &VmResources, shm: &ShmManager) -> std::io::Result<Vec<
             "cooperative templates do not support vhost-user backends",
         ));
     }
+    #[cfg(feature = "net")]
+    if !resources.net.list.is_empty() {
+        return Err(std::io::Error::other(
+            "cooperative templates do not support network devices: guest MAC state is retained",
+        ));
+    }
     let mut data = Vec::new();
     let put = |data: &mut Vec<u8>, value: u64| data.extend_from_slice(&value.to_le_bytes());
     // Fixed-order transport families. Backend paths/policy/objects deliberately
@@ -94,4 +100,28 @@ pub fn encode(resources: &VmResources, shm: &ShmManager) -> std::io::Result<Vec<
         }
     }
     Ok(data)
+}
+
+#[cfg(all(test, feature = "net"))]
+mod tests {
+    use super::*;
+    #[test]
+    fn refuses_network_devices() {
+        use std::os::fd::IntoRawFd;
+        let (socket, _peer) = std::os::unix::net::UnixDatagram::pair().unwrap();
+        let mut resources = VmResources::default();
+        resources
+            .add_network_interface(crate::vmm_config::net::NetworkInterfaceConfig {
+                iface_id: "template-net".into(),
+                backend: devices::virtio::net::device::VirtioNetBackend::UnixgramFd(
+                    socket.into_raw_fd(),
+                ),
+                mac: [2, 0, 0, 0, 0, 1],
+                features: 0,
+            })
+            .unwrap();
+        let (info, _) = arch::arch_memory_regions(256 << 20, None, 0, 0, None);
+        let error = encode(&resources, &ShmManager::new(&info)).unwrap_err();
+        assert!(error.to_string().contains("network"));
+    }
 }
