@@ -63,6 +63,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         reopened.regions.len(),
         reopened.compatibility.len()
     );
+    if args.len() == 3 && std::env::var_os("RECEIVER_ID_MISMATCH").is_some() {
+        let mut receiver = nitro_sandbox::host::Sandbox::with_lifecycle_lock(
+            1 << 30,
+            1,
+            None,
+            Some(LifecycleLock {
+                path: "/run/holodeck/nitro-lifecycle.lock".into(),
+                serialization: Serialization::StartAndTeardown,
+            }),
+        )?;
+        receiver.load(&args[2])?;
+        receiver.start(708)?;
+        let base = receiver.ram.address() as usize;
+        let control = (base + nitro_sandbox::receiver::CONTROL_OFFSET) as *const u64;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while unsafe { control.read_volatile() } != nitro_sandbox::receiver::READY {
+            if std::time::Instant::now() >= deadline {
+                return Err("receiver READY timeout".into());
+            }
+            std::thread::yield_now();
+        }
+        let before = unsafe { (base as *const u64).read_volatile() };
+        let mut mismatched = reopened;
+        *mismatched
+            .compatibility
+            .last_mut()
+            .ok_or("missing identity")? ^= 1;
+        if vmm::nitro_restore::validate_parked_receiver(&mismatched, &receiver).is_ok() {
+            return Err("mismatched receiver accepted".into());
+        }
+        if unsafe { control.add(1).read_volatile() } != 0
+            || unsafe { (base as *const u64).read_volatile() } != before
+        {
+            return Err("refusal changed receiver".into());
+        }
+        println!("RECEIVER_ID_MISMATCH_REFUSED release=0 memory_unchanged=1");
+        return Ok(());
+    }
     if args.len() == 3 {
         let compatibility = reopened.compatibility.clone();
         let mut receiver = Runtime::with_lifecycle_lock(

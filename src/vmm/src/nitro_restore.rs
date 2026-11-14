@@ -22,6 +22,7 @@ impl nitro_sandbox::runtime::RestoreHandler for NitroRestore {
             &self.topology,
             &self.compatibility,
         )?;
+        validate_parked_receiver(&self.template, sandbox)?;
         let mut seed = [0u8; 32];
         std::fs::File::open("/dev/urandom")?.read_exact(&mut seed)?;
         let realtime = std::time::SystemTime::now()
@@ -40,6 +41,46 @@ impl nitro_sandbox::runtime::RestoreHandler for NitroRestore {
             )
         }
     }
+}
+
+/// Check the parked receiver's independently injected kernel identity before copy.
+pub fn validate_parked_receiver(
+    template: &Template,
+    sandbox: &nitro_sandbox::host::Sandbox,
+) -> io::Result<()> {
+    if sandbox.memory_size() < 1 << 30 {
+        return Err(invalid());
+    }
+    let control =
+        (sandbox.ram.address() as usize + nitro_sandbox::receiver::CONTROL_OFFSET) as *const u64;
+    // SAFETY: aligned control page lies in the live >=1GiB sandbox allocation.
+    let identity = unsafe {
+        if control.read_volatile() != nitro_sandbox::receiver::READY {
+            return Err(invalid());
+        }
+        std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+        if control.add(1).read_volatile() != 0 || control.add(9).read_volatile() != 20 {
+            return Err(invalid());
+        }
+        let mut identity = [0u8; 20];
+        for (index, byte) in identity.iter_mut().enumerate() {
+            *byte = control.cast::<u8>().add(48 + index).read_volatile();
+        }
+        identity
+    };
+    validate_receiver_identity(&template.compatibility, &identity)
+}
+
+fn validate_receiver_identity(compatibility: &[u8], identity: &[u8; 20]) -> io::Result<()> {
+    const PREFIX: &[u8] = b"nitro-arm64-v1";
+    if !identity.iter().any(|byte| *byte != 0)
+        || compatibility.len() != PREFIX.len() + identity.len()
+        || !compatibility.starts_with(PREFIX)
+        || &compatibility[PREFIX.len()..] != identity
+    {
+        return Err(invalid());
+    }
+    Ok(())
 }
 
 /// Validate all refusable manifest checks before touching receiver memory.
@@ -84,6 +125,16 @@ pub fn validate(
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn receiver_identity_must_match_running_source_kernel() {
+        let mut compatibility = b"nitro-arm64-v1".to_vec();
+        compatibility.extend_from_slice(&[7; 20]);
+        assert!(super::validate_receiver_identity(&compatibility, &[7; 20]).is_ok());
+        assert!(super::validate_receiver_identity(&compatibility, &[8; 20]).is_err());
+        assert!(super::validate_receiver_identity(&compatibility, &[0; 20]).is_err());
+        assert!(super::validate_receiver_identity(&compatibility[..13], &[7; 20]).is_err());
+    }
+
     use super::*;
     fn template() -> Template {
         Template {

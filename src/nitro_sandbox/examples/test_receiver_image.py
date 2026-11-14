@@ -38,6 +38,25 @@ class ReceiverImageTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             receiver_image.inject(self.image(), bytes(0x3000))
 
+    def test_binds_unique_kernel_identity(self):
+        note = struct.pack('<III', 4, 20, 3) + b'GNU\0' + bytes(range(1, 21))
+        image = bytes(self.image()) + note
+        code = b'prefix' + receiver_image.IDENTITY_MARKER + b'suffix'
+        self.assertEqual(receiver_image.bind_identity(image, code, bytes(range(1, 21))),
+                         b'prefix' + bytes(range(1, 21)) + b'suffix')
+        other_note = struct.pack('<III', 4, 20, 3) + b'GNU\0' + bytes([99] * 20)
+        self.assertEqual(receiver_image.bind_identity(image + other_note, code, bytes(range(1, 21))),
+                         b'prefix' + bytes(range(1, 21)) + b'suffix')
+        for bad_identity in [bytes(20), bytes(19), bytes([42] * 20)]:
+            with self.assertRaises(ValueError):
+                receiver_image.bind_identity(image, code, bad_identity)
+        for bad in [bytes(self.image()), image + note, image[:-1]]:
+            with self.assertRaises(ValueError):
+                receiver_image.bind_identity(bad, code, bytes(range(1, 21)))
+        for bad in [b'code', code + code]:
+            with self.assertRaises(ValueError):
+                receiver_image.bind_identity(image, bad, bytes(range(1, 21)))
+
     def test_truncated_headers_refused(self):
         data = self.image()
         for length in range(0x118 + 40):

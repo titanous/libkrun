@@ -2,6 +2,7 @@
 // The kernel reserves [0x70000000,0x70200000); host copies exclude it.
 // R+0x2000 words: ready, release, cpu_resume PA, GIC list PA, count,
 // progress (1 replay, 2 entering kernel, 3 failed register poll).
+// Bytes48..67 publish the injected kernel GNU ID; word9 is its length20.
 // R+0x10000/0x11000 page tables; stack top R+0x20000.
 .text
 .global _start
@@ -92,6 +93,13 @@ relocated:
     msr cntv_ctl_el0, xzr
     isb
     add x21, x20, #0x2000
+    adr x1, kernel_identity
+    ldp x2, x3, [x1]
+    stp x2, x3, [x21, #48]
+    ldr w2, [x1, #16]
+    str w2, [x21, #64]
+    mov x2, #20
+    str x2, [x21, #72]
     ldr x0, =0x5944414552564352
     stlr x0, [x21]
 6:  add x0, x21, #8
@@ -147,6 +155,9 @@ failed:
 14: wfe
     b 14b
 .ltorg
+.balign 8
+kernel_identity:
+    .ascii "NITRO_KERNEL_ID_20___"
 .balign 2048
 vectors:
 .rept 16

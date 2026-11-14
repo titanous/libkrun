@@ -11,6 +11,20 @@ import struct
 import sys
 
 
+IDENTITY_MARKER = b'NITRO_KERNEL_ID_20___'
+
+
+def bind_identity(image, code, identity):
+    # Raw Image also embeds vDSO notes. The kernel build supplies its vmlinux ID;
+    # require that exact note in the Image instead of choosing the first note.
+    note = struct.pack('<III', 4, 20, 3) + b'GNU\0' + identity
+    if len(identity) != 20 or not any(identity) or image.count(note) != 1:
+        raise ValueError('matching nonzero kernel build ID required')
+    if code.count(IDENTITY_MARKER) != 1:
+        raise ValueError('receiver identity field missing or ambiguous')
+    return code.replace(IDENTITY_MARKER, identity)
+
+
 def inject(image, code):
     data = bytearray(image)
     if len(data) < 64 or data[:2] != b'MZ' or not code:
@@ -44,8 +58,11 @@ def inject(image, code):
 
 
 if __name__ == '__main__':
-    if len(sys.argv) != 4:
-        raise SystemExit('usage: receiver-image.py Image receiver.bin output-Image')
-    result = inject(pathlib.Path(sys.argv[1]).read_bytes(), pathlib.Path(sys.argv[2]).read_bytes())
+    if len(sys.argv) != 5:
+        raise SystemExit('usage: receiver-image.py Image receiver.bin output-Image build-id')
+    image = pathlib.Path(sys.argv[1]).read_bytes()
+    identity = bytes.fromhex(pathlib.Path(sys.argv[4]).read_text().strip())
+    code = bind_identity(image, pathlib.Path(sys.argv[2]).read_bytes(), identity)
+    result = inject(image, code)
     pathlib.Path(sys.argv[3]).write_bytes(result)
     print('RECEIVER_IMAGE bytes=%d' % len(result))
