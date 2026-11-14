@@ -41,9 +41,9 @@ integration test="all" jobs="8":
     cd tests && RUST_LOG=trace LD_LIBRARY_PATH="$(realpath ../test-prefix/lib64/)" ./run.sh test --test-case "{{test}}" -j "{{jobs}}"
 
 # Real-KVM cooperative device clone matrix; see docs/cooperative-clone.md.
-cooperative-clone kernel control output cycles="20" concurrent="16":
+cooperative-clone kernel initramfs control output cycles="20" concurrent="16" mode="":
     CARGO_BUILD_JOBS=12 cargo build -p libkrun --example cooperative-console --features net,blk,vhost-user
-    python3 tests/cooperative/run.py --kernel "{{kernel}}" --control "{{control}}" --output "{{output}}" --cycles "{{cycles}}" --concurrent "{{concurrent}}"
+    python3 tests/cooperative/run.py --kernel "{{kernel}}" --initramfs "{{initramfs}}" --control "{{control}}" --output "{{output}}" --cycles "{{cycles}}" --concurrent "{{concurrent}}" {{mode}}
 
 # Benchmark boot-timing-e2e with release builds; prints min/p50/p95/mean/max/stddev.
 # Runs one warmup iteration then N timed samples.

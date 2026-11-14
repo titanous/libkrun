@@ -89,14 +89,26 @@ state are serialized. Child RAM writes cannot modify the source or other clones.
 
 ## Real-KVM tests
 
-Build the maintained shared kernel series plus patches 0100/0101 with
-`tests/cooperative/devices.c` as `/init` in its built-in initramfs. The test
-requires the bundled `libkrunfw.so.5` in the resulting kernel artifact directory.
-Run in the fork's Nix environment with Python and e2fsprogs on PATH:
+Build the maintained shared kernel series plus patches 0100/0101 in holodeck.
+Build a standalone initramfs containing `tests/cooperative/devices.c` as `/init`:
 
 ```
-just cooperative-clone KERNEL_ARTIFACT_DIR CONTROL_GPA_HEX NEW_RESULT_DIR
+nix build --impure --file tests/cooperative/image.nix --arg holodeck /path/to/holodeck -o cooperative-initramfs
 ```
+
+Run in the fork's Nix environment with Python and e2fsprogs on PATH. The launcher
+uses the external ELF kernel/initramfs API; no bundled firmware is needed:
+
+```
+just cooperative-clone /path/to/vmlinux cooperative-initramfs/initramfs.cpio CONTROL_GPA_HEX NEW_RESULT_DIR
+```
+
+Append `20 16 --passed-fd` to exercise one sealed memfd shared by all child VMMs
+instead of path imports. Path mode explicitly starts independent processes after
+the capturing VMM has exited, covering persistent templates across daemon restart.
+The fd test imports each source file once into a sealed memfd and retains that
+same descriptor through all concurrent children; each maps it privately without
+copying its RAM.
 
 Defaults are 20 consecutive source-freeze/new-process-start cycles at each of
 1/4/8 CPUs, then 16 new VMMs from one stopped template. Each child has an

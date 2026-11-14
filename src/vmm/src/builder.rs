@@ -1385,8 +1385,9 @@ pub fn build_microvm(
     }
     #[cfg(target_arch = "x86_64")]
     if vm_resources.cooperative_template.is_some() {
-        vmm.notify_vm_generation_change()
+        let generation = vmm.notify_vm_generation_change()
             .map_err(StartMicrovmError::Internal)?;
+        eprintln!("COOPERATIVE GENERATION {generation:02x?}");
     }
     timer.checkpoint("configure_system");
 

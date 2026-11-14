@@ -82,6 +82,10 @@ int main(void)
         : "=a"(result), "=m"(restored) : "m"(sentinel), "0"(1L), "D"((long)freeze), "S"("1"), "d"(1L)
         : "rcx","r11","memory","xmm15");
     if(result!=1 || memcmp(sentinel,restored,sizeof(sentinel))) fail("freeze or SIMD");
+    unsigned char random_bytes[32];
+    int random_fd=open("/dev/hwrng",O_RDONLY);
+    if(random_fd<0 || read(random_fd,random_bytes,sizeof(random_bytes))!=sizeof(random_bytes)) fail("entropy restore");
+    close(random_fd);
     uint64_t after=ns(CLOCK_MONOTONIC);
     if(after<before || after-before>10000000000ULL) fail("monotonic");
     char byte;

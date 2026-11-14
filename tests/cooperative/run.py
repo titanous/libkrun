@@ -2,6 +2,7 @@
 """Real-KVM cooperative clone matrix; run through just cooperative-clone."""
 import argparse
 import concurrent.futures
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -15,16 +16,29 @@ import time
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--kernel", required=True, type=Path)
+parser.add_argument("--initramfs", required=True, type=Path)
 parser.add_argument("--control", required=True)
 parser.add_argument("--output", required=True, type=Path)
 parser.add_argument("--cycles", type=int, default=20)
 parser.add_argument("--concurrent", type=int, default=16)
+parser.add_argument("--passed-fd", action="store_true", help="share one sealed memfd across new VMM processes")
 args = parser.parse_args()
 args.output.mkdir(parents=True, exist_ok=False)
 launcher = Path("target/debug/examples/cooperative-console").resolve()
 peer_path = args.output / "echo.sock"
 peer = subprocess.Popen(["python3", str(Path(__file__).with_name("echo.py")), str(peer_path)])
 measurements = []
+template_fds = {}
+
+def template_fd(image):
+    if image not in template_fds:
+        fd = os.memfd_create("cooperative-test-template", os.MFD_ALLOW_SEALING)
+        with image.open("rb") as source, os.fdopen(os.dup(fd), "wb") as target:
+            shutil.copyfileobj(source, target)
+        fcntl.fcntl(fd, fcntl.F_ADD_SEALS,
+                    fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL)
+        template_fds[image] = fd
+    return template_fds[image]
 
 def ready():
     deadline = time.monotonic() + 10
@@ -35,8 +49,8 @@ def ready():
         threading.Event().wait(.02)
 
 def environment(cpus, disk):
-    return dict(os.environ, LD_LIBRARY_PATH=str(args.kernel), CLONE_VCPUS=str(cpus),
-                CLONE_DISK=str(disk), CLONE_ECHO_SOCKET=str(peer_path))
+    return dict(os.environ, CLONE_KERNEL=str(args.kernel), CLONE_INITRAMFS=str(args.initramfs),
+                CLONE_VCPUS=str(cpus), CLONE_DISK=str(disk), CLONE_ECHO_SOCKET=str(peer_path))
 
 def run_source(cpus, cycle):
     prefix = args.output / f"cpu{cpus}-{cycle}"
@@ -74,8 +88,11 @@ def run_child(cpus, source_disk, image, name):
     log_path = args.output / f"{name}.resume.log"
     start = time.monotonic_ns()
     with log_path.open("wb") as log:
-        process = subprocess.Popen([str(launcher), "resume", str(image), args.control],
-                                   env=environment(cpus, disk), stdout=log, stderr=log)
+        fd = template_fd(image) if args.passed_fd else None
+        mode, source = ("resume-fd", str(fd)) if fd is not None else ("resume", str(image))
+        process = subprocess.Popen([str(launcher), mode, source, args.control],
+                                   env=environment(cpus, disk), stdout=log, stderr=log,
+                                   pass_fds=(fd,) if fd is not None else ())
         deadline = time.monotonic() + 30
         userspace = None
         private_kib = None
@@ -106,8 +123,11 @@ def run_child(cpus, source_disk, image, name):
     if fsck.returncode:
         raise RuntimeError(f"filesystem check failed: {name}")
     disk.unlink()
+    generation = re.search(r"COOPERATIVE GENERATION (\[[^\n]+\])", data)
+    if generation is None:
+        raise RuntimeError(f"missing generation identifier: {name}")
     return {"cpus": cpus, "name": name, "resume_ms": (userspace-start)/1e6,
-            "private_kib_10s": private_kib}
+            "private_kib_10s": private_kib, "generation": generation.group(1)}
 
 try:
     ready()
@@ -122,6 +142,8 @@ try:
             (args.output / "measurements.json").write_text(json.dumps(measurements, indent=2))
             print(f"PASS cpu={cpus} cycle={cycle}", flush=True)
             if last:
+                if last[1] in template_fds:
+                    os.close(template_fds.pop(last[1]))
                 last[0].unlink(); last[1].unlink()
             last = (disk, image)
     # One stopped template, many independent VMM processes alive concurrently.
@@ -135,8 +157,12 @@ try:
         for field in ("freeze_ms", "resume_ms", "private_kib_10s"):
             values = [m[field] for m in samples]
             print(f"cpu={cpus} {field} median={statistics.median(values)} worst={max(values)}")
+    if len({m["generation"] for m in measurements}) != len(measurements):
+        raise RuntimeError("duplicate VM generation identifier")
     print("ACCEPTANCE PASS", flush=True)
 finally:
+    for fd in template_fds.values():
+        os.close(fd)
     peer.terminate()
     try: peer.wait(timeout=5)
     except subprocess.TimeoutExpired:

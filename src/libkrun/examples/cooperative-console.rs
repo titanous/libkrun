@@ -9,6 +9,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let control = u64::from_str_radix(args[3].trim_start_matches("0x"), 16)?;
     let mut builder = krun::Builder::new();
     builder.omit_balloon_device();
+    if let Some(kernel) = std::env::var_os("CLONE_KERNEL") {
+        let initramfs = std::env::var_os("CLONE_INITRAMFS").map(PathBuf::from);
+        builder.external_kernel(PathBuf::from(kernel), krun::KernelFormat::Elf, initramfs)?;
+    }
     let vcpus = std::env::var("CLONE_VCPUS")
         .unwrap_or_else(|_| "1".into())
         .parse()?;
@@ -46,6 +50,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         builder.capture_cooperative_template(control, PathBuf::from(&args[2]));
     } else if args[1] == "resume" {
         builder.start_from_template_path(&args[2])?;
+    } else if args[1] == "resume-fd" {
+        use std::os::fd::FromRawFd;
+        let fd: i32 = args[2].parse()?;
+        // SAFETY: test parent passes ownership of this inherited descriptor.
+        builder.start_from_template_fd(unsafe { std::fs::File::from_raw_fd(fd) })?;
     } else {
         return Err("invalid mode".into());
     }
@@ -53,7 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("COOPERATIVE HOST result={result:?}");
     match (args[1].as_str(), result) {
         ("freeze", krun::VmExit::Frozen { .. }) => Ok(()),
-        ("resume", krun::VmExit::Shutdown { exit_code: 0 }) => Ok(()),
+        ("resume" | "resume-fd", krun::VmExit::Shutdown { exit_code: 0 }) => Ok(()),
         _ => Err("unexpected VM exit".into()),
     }
 }
