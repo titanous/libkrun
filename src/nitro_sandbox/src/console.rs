@@ -11,6 +11,7 @@ pub struct Console {
     interval: Instant,
     panic_match: usize,
     panic_seen: bool,
+    discovery: Option<crate::freeze_discovery::Discovery>,
 }
 impl Default for Console {
     fn default() -> Self {
@@ -31,16 +32,26 @@ impl Console {
             interval: Instant::now(),
             panic_match: 0,
             panic_seen: false,
+            discovery: None,
         }
     }
 }
 impl Console {
+    pub fn enable_freeze_discovery(&mut self) {
+        self.discovery = Some(crate::freeze_discovery::Discovery::default());
+    }
+    pub fn freeze_discovery(&self) -> Option<&crate::freeze_discovery::Discovery> {
+        self.discovery.as_ref()
+    }
     pub fn panic_seen(&self) -> bool {
         self.panic_seen
     }
 }
 impl Write for Console {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if let Some(discovery) = &mut self.discovery {
+            discovery.observe(bytes)?;
+        }
         const MARKER: &[u8] = b"HOLODECK GUEST STOP panic";
         for &byte in bytes {
             if byte == MARKER[self.panic_match] {
@@ -82,6 +93,22 @@ impl Write for Console {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+    #[test]
+    fn freeze_discovery_is_explicit_and_independent_of_output_budget() {
+        let mut console = Console::default();
+        console
+            .write_all(b"NITRO_FREEZE_CONTROL phys=0x40001000\n")
+            .unwrap();
+        assert!(console.freeze_discovery().is_none());
+        console.enable_freeze_discovery();
+        console
+            .write_all(b"NITRO_FREEZE_CONTROL phys=0x40002000\n")
+            .unwrap();
+        assert_eq!(
+            console.freeze_discovery().unwrap().control,
+            Some(0x40002000)
+        );
+    }
     struct Sink(Arc<Mutex<Vec<u8>>>);
     impl Write for Sink {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
