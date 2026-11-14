@@ -60,7 +60,10 @@ fn main() {
     if args.get(1).map(String::as_str) == Some("child") {
         child(&args[2], &args[3]);
     }
-    let lock = args.get(1).expect("usage: release_order LOCK ROUNDS").clone();
+    let lock = args
+        .get(1)
+        .expect("usage: release_order LOCK ROUNDS")
+        .clone();
     let rounds: usize = args.get(2).and_then(|n| n.parse().ok()).unwrap_or(10);
     for variant in ["low", "high"] {
         for round in 0..rounds {
