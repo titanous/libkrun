@@ -34,6 +34,16 @@ mod tests {
         let reopened = Template::open(template.file.try_clone().unwrap()).unwrap();
         assert_eq!(reopened.topology, topology);
         assert_eq!(reopened.clock_ns, 123);
+        let path = std::env::temp_dir().join(format!("krun-template-path-{}", std::process::id()));
+        reopened.write_to_path(&path).unwrap();
+        let imported = Template::from_path(&path).unwrap();
+        let imported_inode = imported.file.metadata().unwrap().ino();
+        let original_inode = std::fs::metadata(&path).unwrap().ino();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(
+            imported_inode, original_inode,
+            "path import must retain the original file rather than copy RAM"
+        );
         let a = reopened.map_private().unwrap();
         let b = reopened.map_private().unwrap();
         a.write_slice(&[42], GuestAddress(0)).unwrap();
@@ -129,12 +139,25 @@ impl Template {
     }
 
     pub fn from_path(path: impl AsRef<std::path::Path>) -> io::Result<Self> {
-        let mut source = File::open(path)?;
-        let size = usize::try_from(source.metadata()?.len()).map_err(|_| invalid())?;
-        let mut stable = crate::template_memory::create(size)?;
-        std::io::copy(&mut source, &mut stable)?;
-        crate::template_memory::seal(&stable)?;
-        Self::open(stable)
+        use std::os::unix::fs::MetadataExt;
+        let source = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)?;
+        let metadata = source.metadata()?;
+        // Regular files cannot carry memfd seals. Their immutable lifetime is
+        // the trusted owner's responsibility; reject shared or foreign input.
+        // SAFETY: geteuid has no preconditions.
+        if !metadata.is_file()
+            || metadata.mode() & 0o077 != 0
+            || metadata.uid() != unsafe { libc::geteuid() }
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "template path must be an owner-only regular file owned by this user",
+            ));
+        }
+        Self::parse_file(source)
     }
 
     pub fn open(file: File) -> io::Result<Self> {
@@ -145,6 +168,10 @@ impl Template {
         if seals < 0 || seals & required != required {
             return Err(invalid());
         }
+        Self::parse_file(file)
+    }
+
+    fn parse_file(file: File) -> io::Result<Self> {
         let mut header = [0; HEADER];
         file.read_exact_at(&mut header, 0)?;
         let get = |n: usize| u64::from_le_bytes(header[n * 8..n * 8 + 8].try_into().unwrap());
