@@ -190,8 +190,11 @@ impl Sandbox {
             .open("/dev/nitro_enclaves")?;
         // Allocate backing before creating a slot: allocation failures cannot
         // drop a live VM fd outside the host teardown lock.
-        let mut ram = match reused {
-            Some(mapping) if mapping.len == memory => mapping,
+        let ram = match reused {
+            Some(mut mapping) if mapping.len == memory => {
+                mapping.zero();
+                mapping
+            }
             Some(_) => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -200,7 +203,8 @@ impl Sandbox {
             }
             None => Mapping::new(&control, memory)?,
         };
-        ram.zero();
+        // Fresh pool mmap is cleared by the driver before it is returned;
+        // retained mappings are explicitly cleared in the reuse branch above.
         let raw =
             unsafe { memfd_create(c"libkrun-nitro-info".as_ptr().cast(), 1 | 4 | (21 << 26)) };
         if raw < 0 {
