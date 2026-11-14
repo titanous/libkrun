@@ -191,12 +191,16 @@ impl Drop for PreparedTemplatePath {
 impl PreparedTemplatePath {
     pub fn publish(self) -> io::Result<()> {
         std::fs::hard_link(&self.temporary, &self.destination)?;
-        File::open(
+        let result = File::open(
             self.destination
                 .parent()
                 .unwrap_or(std::path::Path::new(".")),
-        )?
-        .sync_all()
+        )
+        .and_then(|directory| directory.sync_all());
+        if result.is_err() {
+            let _ = std::fs::remove_file(&self.destination);
+        }
+        result
     }
 }
 
@@ -212,6 +216,16 @@ impl Template {
         use std::sync::atomic::{AtomicU64, Ordering};
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let path = path.as_ref();
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "template destination exists",
+                ))
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
         let parent = path.parent().unwrap_or(std::path::Path::new("."));
         let temporary = parent.join(format!(
             ".krun-template-{}-{}",
