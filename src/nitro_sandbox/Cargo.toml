@@ -8,6 +8,9 @@ license = "Apache-2.0"
 devices = ["dep:devices", "dep:utils", "dep:vm-memory", "dep:polly"]
 
 [dependencies]
+libc = "0.2"
+sha2 = "0.10"
+crc32fast = "1.5"
 devices = { path = "../devices", features = ["blk"], optional = true }
 utils = { path = "../utils", optional = true }
 polly = { path = "../polly", optional = true }

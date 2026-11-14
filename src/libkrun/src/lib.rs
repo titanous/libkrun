@@ -492,6 +492,9 @@ pub struct ConsoleDeviceInfo {
 }
 
 #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+pub use nitro_sandbox::lifecycle::Serialization as NitroSerialization;
+
+#[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
 pub struct NitroBackendConfig {
     pub image: PathBuf,
     pub cid: u64,
@@ -503,12 +506,23 @@ pub struct Builder {
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     nitro: Option<NitroBackendConfig>,
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    nitro_lifecycle_lock: Option<nitro_sandbox::lifecycle::LifecycleLock>,
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    nitro_console: Option<nitro_sandbox::console::Console>,
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    nitro_heartbeat: Option<(u32, PathBuf, std::time::Duration)>,
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    nitro_image_cache: Option<PathBuf>,
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    nitro_stop_reason: bool,
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     nitro_console_base: Option<u32>,
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     nitro_selected_after_consoles: bool,
     config: ContextConfig,
     kernel_cmdline: Vec<String>,
     kernel_cmdline_configured: bool,
+    configuration_error: Option<std::io::Error>,
     extra_kernel_args: Vec<String>,
     socket_policy: SocketPolicy,
     /// Number of console devices added (for computing device paths)
@@ -726,14 +740,32 @@ impl Builder {
         shm_size: Option<usize>,
         allow_root_dir_delete: bool,
     ) -> &mut Self {
+        match std::fs::metadata(host_path) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => {
+                self.configuration_error = Some(std::io::Error::new(
+                    std::io::ErrorKind::NotADirectory,
+                    "virtio-fs host path is not a directory",
+                ));
+                return self;
+            }
+            Err(error) => {
+                self.configuration_error = Some(error);
+                return self;
+            }
+        }
         let cfg = devices::virtio::fs::passthrough::Config {
             root_dir: host_path.to_string(),
             allow_root_dir_delete,
             ..Default::default()
         };
-        let pt = devices::virtio::fs::passthrough::PassthroughFs::new(cfg)
-            .expect("failed to create PassthroughFs");
-        self.add_virtiofs(tag, Box::new(pt), shm_size)
+        match devices::virtio::fs::passthrough::PassthroughFs::new(cfg) {
+            Ok(pt) => self.add_virtiofs(tag, Box::new(pt), shm_size),
+            Err(error) => {
+                self.configuration_error = Some(error);
+                self
+            }
+        }
     }
 
     /// Configure a vhost-user filesystem device.
@@ -834,7 +866,9 @@ impl Builder {
         } else {
             self.config.block_cfgs.len() as u32
         };
-        blocks + u32::from(!matches!(self.config.vsock_config, VsockConfig::Disabled))
+        blocks
+            + u32::from(!matches!(self.config.vsock_config, VsockConfig::Disabled))
+            + self.config.vmr.fs.len() as u32
     }
 
     fn next_console_device_index(&self) -> u32 {
@@ -1160,15 +1194,13 @@ impl Builder {
         let unsupported = || {
             StartError::Nitro(std::io::Error::new(std::io::ErrorKind::Unsupported, "unsupported on this backend: Nitro supports EIF boot with block, userspace vsock and custom console ports only"))
         };
-        if self.config.vmr.external_kernel.is_some()
-            || self.config.vmr.kernel_bundle.is_some()
-            || self.config.vmr.firmware_config.is_some()
-        {
-            return Err(StartError::Nitro(std::io::Error::new(std::io::ErrorKind::Unsupported, "unsupported on this backend: Nitro requires one EIF v4 image containing kernel, initramfs and command line; separate external_kernel images are not accepted")));
+        if self.config.vmr.kernel_bundle.is_some() || self.config.vmr.firmware_config.is_some() {
+            return Err(unsupported());
         }
-        if self.kernel_cmdline_configured
-            || !self.kernel_cmdline.is_empty()
-            || !self.extra_kernel_args.is_empty()
+        if self.config.vmr.external_kernel.is_none()
+            && (self.kernel_cmdline_configured
+                || !self.kernel_cmdline.is_empty()
+                || !self.extra_kernel_args.is_empty())
         {
             return Err(StartError::Nitro(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
@@ -1181,7 +1213,6 @@ impl Builder {
             || self.config.env.is_some()
             || self.config.args.is_some()
             || self.config.workdir.is_some()
-            || !self.extra_kernel_args.is_empty()
             || self.config.vmr.nested_enabled
             || self.config.gpu_virgl_flags.is_some()
             || !self.config.vmr.serial_consoles.is_empty()
@@ -1211,8 +1242,16 @@ impl Builder {
             return Err(unsupported());
         }
         #[cfg(not(feature = "tee"))]
-        if !self.config.vmr.fs.is_empty() {
-            return Err(unsupported());
+        for mount in &self.config.vmr.fs {
+            if mount.tag.len() > 36
+                || mount.tag.is_empty()
+                || mount.shm_size.is_some_and(|size| {
+                    size == 0 || size > 256 * 1024 * 1024 || !size.is_multiple_of(2 * 1024 * 1024)
+                })
+            {
+                return Err(StartError::Nitro(std::io::Error::new(std::io::ErrorKind::Unsupported,
+                    "unsupported on this backend: virtio-fs requires a 1..36 byte tag and an optional 2 MiB-aligned DAX window up to 256 MiB")));
+            }
         }
         #[cfg(feature = "net")]
         if !self.config.vmr.net.list.is_empty()
@@ -1238,6 +1277,29 @@ impl Builder {
         if !self.config.vmr.disable_implicit_console {
             return Err(StartError::Nitro(std::io::Error::new(std::io::ErrorKind::Unsupported, "unsupported on this backend: disable the implicit console and configure custom Nitro console ports explicitly")));
         }
+        let heartbeat = if let Some((port, path, deadline)) = self.nitro_heartbeat.take() {
+            if matches!(self.config.vsock_config, VsockConfig::Disabled)
+                || self
+                    .config
+                    .unix_ipc_port_map
+                    .as_ref()
+                    .is_some_and(|ports| ports.contains_key(&port))
+            {
+                return Err(StartError::Nitro(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "unsupported on this backend: heartbeat requires an unused mapped vsock port",
+                )));
+            }
+            let heartbeat = nitro_sandbox::heartbeat::Heartbeat::bind(path.clone(), deadline)
+                .map_err(StartError::Nitro)?;
+            self.config
+                .unix_ipc_port_map
+                .get_or_insert_with(HashMap::new)
+                .insert(port, (path, false));
+            Some(heartbeat)
+        } else {
+            None
+        };
         let config = self.config.vmr.vm_config();
         let memory_mib = config.mem_size_mib.unwrap_or(1024);
         if memory_mib < 64 || !memory_mib.is_multiple_of(2) || options.watchdog.is_zero() {
@@ -1246,23 +1308,65 @@ impl Builder {
                 "unsupported on this backend: memory must be at least 64 MiB and a multiple of 2 MiB; watchdog must be nonzero",
             )));
         }
+        let packaged = if let Some(kernel) = self.config.vmr.external_kernel.as_ref() {
+            if !matches!(kernel.format, KernelFormat::Raw) {
+                return Err(StartError::Nitro(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "unsupported on this backend: external_kernel requires an arm64 Raw Image",
+                )));
+            }
+            let kernel_bytes = std::fs::read(&kernel.path).map_err(StartError::Nitro)?;
+            let initrd = kernel
+                .initramfs_path
+                .as_ref()
+                .map(std::fs::read)
+                .transpose()
+                .map_err(StartError::Nitro)?;
+            let mut args = self.kernel_cmdline.clone();
+            args.extend(self.extra_kernel_args.iter().cloned());
+            let cmdline = args.join(" ");
+            let (file, _) = nitro_sandbox::image::cached_in(
+                &kernel_bytes,
+                initrd.as_deref(),
+                cmdline.as_bytes(),
+                memory_mib as u64 * 1024 * 1024,
+                u64::from(config.vcpu_count.unwrap_or(1)),
+                self.nitro_image_cache.as_deref(),
+            )
+            .map_err(StartError::Nitro)?;
+            Some(file)
+        } else {
+            None
+        };
+        let image_path = if let Some(file) = &packaged {
+            use std::os::fd::AsRawFd;
+            PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()))
+        } else {
+            options.image.clone()
+        };
         let mut device_info = vmm::resources::VmDeviceInfo {
             console_ports: Vec::new(),
             vcpu_count: config.vcpu_count.unwrap_or(1),
             ram_mib: config.mem_size_mib.unwrap_or(1024) as u32,
         };
         let mut console_id = self.nitro_device_count_before_consoles();
-        let mut runtime = nitro_sandbox::runtime::Runtime::new(
-            options
-                .image
+        let mut runtime = nitro_sandbox::runtime::Runtime::with_lifecycle_lock(
+            image_path
                 .to_str()
                 .ok_or_else(|| StartError::Nitro(std::io::Error::other("non-UTF8 EIF path")))?,
             config.mem_size_mib.unwrap_or(1024) * 1024 * 1024,
             u32::from(config.vcpu_count.unwrap_or(1)),
             options.cid,
             options.watchdog,
+            self.nitro_lifecycle_lock.take(),
         )
         .map_err(StartError::Nitro)?;
+        if let Some(heartbeat) = heartbeat {
+            runtime.set_heartbeat(heartbeat);
+        }
+        if let Some(console) = self.nitro_console.take() {
+            runtime.set_console(console);
+        }
         for cfg in self.config.take_block_cfg() {
             let block = Arc::new(Mutex::new(
                 vmm::vmm_config::block::BlockBuilder::create_block(cfg)?,
@@ -1294,6 +1398,19 @@ impl Builder {
                 .add_device(Arc::new(Mutex::new(vsock)))
                 .map_err(StartError::Nitro)?;
         }
+        for mount in self.config.vmr.fs.drain(..) {
+            let device = devices::virtio::Fs::new(
+                mount.tag,
+                mount.fs,
+                Arc::new(std::sync::atomic::AtomicI32::new(0)),
+            )
+            .map_err(|error| {
+                StartError::Nitro(std::io::Error::other(format!("virtio-fs: {error:?}")))
+            })?;
+            runtime
+                .add_filesystem(device, mount.shm_size)
+                .map_err(StartError::Nitro)?;
+        }
         for console in self.config.vmr.virtio_consoles {
             let ports = match console {
                 VirtioConsoleConfigMode::Custom(ports) => ports,
@@ -1320,6 +1437,9 @@ impl Builder {
                 .add_device(Arc::new(Mutex::new(console)))
                 .map_err(StartError::Nitro)?;
         }
+        if self.nitro_stop_reason {
+            runtime.enable_stop_reason().map_err(StartError::Nitro)?;
+        }
         Context::from_nitro(runtime, device_info)
     }
 
@@ -1336,8 +1456,74 @@ impl Builder {
         self
     }
 
+    /// Add the maintained guest kernel's privileged terminal-reason device.
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    pub fn nitro_stop_reason(&mut self, enabled: bool) -> &mut Self {
+        self.nitro_stop_reason = enabled;
+        self
+    }
+
+    /// Reuse content-addressed packaged kernels across VMM processes. Directory
+    /// must already exist and be daemon-owned, not group/other-writable. The
+    /// daemon controls eviction; published images are never modified in place.
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    pub fn nitro_image_cache(&mut self, directory: PathBuf) -> &mut Self {
+        self.nitro_image_cache = Some(directory);
+        self
+    }
+
+    /// Require guest-originated heartbeats at CID 2 and the supplied vsock port.
+    /// Guest sends ASCII H periodically; the deadline starts at guest start and
+    /// refreshes on H. The socket path must not exist and remains policy checked.
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    pub fn nitro_heartbeat(
+        &mut self,
+        port: u32,
+        path: PathBuf,
+        deadline: std::time::Duration,
+    ) -> &mut Self {
+        self.nitro_heartbeat = Some((port, path, deadline));
+        self
+    }
+
+    /// Send kernel console diagnostics to a nonblocking embedder sink. Excess
+    /// bytes beyond either lifetime or per-second budget are dropped, not queued.
+    /// Default: discard console diagnostics.
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    pub fn nitro_console_sink(
+        &mut self,
+        sink: Box<dyn std::io::Write + Send>,
+        total_bytes: usize,
+        bytes_per_second: usize,
+    ) -> &mut Self {
+        self.nitro_console = Some(nitro_sandbox::console::Console::new(
+            Some(sink),
+            total_bytes,
+            bytes_per_second,
+        ));
+        self
+    }
+
+    /// Serialize lifecycle operations using a daemon-created regular lock file.
+    /// The daemon must take this same flock before SIGKILL and hold it through reaping.
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    pub fn nitro_lifecycle_lock(
+        &mut self,
+        path: PathBuf,
+        serialization: NitroSerialization,
+    ) -> &mut Self {
+        self.nitro_lifecycle_lock = Some(nitro_sandbox::lifecycle::LifecycleLock {
+            path,
+            serialization,
+        });
+        self
+    }
+
     #[allow(unused_mut)] // Mutability is needed only when Nitro selection is compiled.
     pub fn build(mut self) -> Result<Context, StartError> {
+        if let Some(error) = self.configuration_error.take() {
+            return Err(StartError::Configuration(error));
+        }
         if self
             .config
             .tsi_port_map
@@ -1655,6 +1841,8 @@ pub struct Context {
 
 #[derive(Debug, thiserror::Error)]
 pub enum StartError {
+    #[error("invalid builder configuration: {0}")]
+    Configuration(std::io::Error),
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     #[error("Nitro backend: {0}")]
     Nitro(std::io::Error),
@@ -1785,9 +1973,19 @@ impl Context {
                         vmm::vm_exit::VmExit::Shutdown { exit_code: 0 }
                     }
                     nitro_sandbox::runtime::Exit::Stopped => vmm::vm_exit::VmExit::Stopped,
-                    nitro_sandbox::runtime::Exit::Watchdog => vmm::vm_exit::VmExit::Error {
-                        message: "Nitro guest watchdog expired".into(),
+                    nitro_sandbox::runtime::Exit::StatedReason {
+                        code,
+                        observed_micros,
+                    } => vmm::vm_exit::VmExit::Error {
+                        message: format!(
+                            "Nitro stated terminal reason {code} observed_micros={observed_micros:?}"
+                        ),
                     },
+                    nitro_sandbox::runtime::Exit::Watchdog => vmm::vm_exit::VmExit::DeviceWatchdog,
+                    nitro_sandbox::runtime::Exit::Panic => vmm::vm_exit::VmExit::GuestPanic,
+                    nitro_sandbox::runtime::Exit::LivenessExpired => {
+                        vmm::vm_exit::VmExit::LivenessExpired
+                    }
                 })
                 .map_err(StartError::Nitro);
         }
@@ -1991,7 +2189,43 @@ impl BalloonHandle {
     }
 }
 
+/// Scoped SIGTERM-to-stop registration for a one-guest Nitro VMM process.
+#[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+pub struct NitroSigtermGuard(signal_hook::SigId);
+#[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+impl Drop for NitroSigtermGuard {
+    fn drop(&mut self) {
+        signal_hook::low_level::unregister(self.0);
+    }
+}
+
 impl VmHandle {
+    /// Route SIGTERM through the same orderly stop event as a handle request.
+    /// Keep the returned guard alive while running the guest.
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    pub fn install_sigterm_handler(&self) -> Result<NitroSigtermGuard, StartError> {
+        use std::os::fd::AsRawFd;
+        if self.vmm.is_some() {
+            return Err(StartError::Nitro(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "unsupported on this backend: Nitro SIGTERM registration requires a Nitro handle",
+            )));
+        }
+        let stop = self.shutdown_efd.clone().ok_or_else(|| {
+            StartError::Nitro(std::io::Error::other("Nitro stop event unavailable"))
+        })?;
+        // write(2) is async-signal-safe. Retaining the Arc prevents fd reuse
+        // until signal-hook has unregistered this callback.
+        let id = unsafe {
+            signal_hook::low_level::register(libc::SIGTERM, move || {
+                let value = 1u64;
+                libc::write(stop.as_raw_fd(), (&value as *const u64).cast(), 8);
+            })
+        }
+        .map_err(StartError::Nitro)?;
+        Ok(NitroSigtermGuard(id))
+    }
+
     fn kvm(&self) -> Result<&Arc<Mutex<vmm::Vmm>>, StartError> {
         self.vmm.as_ref().ok_or_else(|| {
             #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
@@ -2069,6 +2303,14 @@ impl VmHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn missing_passthrough_directory_is_a_build_error_not_panic() {
+        let mut builder = Builder::new();
+        builder.add_virtiofs_path("missing", "/does-not-exist/nitro-tree", None, false);
+        assert!(matches!(builder.build(), Err(StartError::Configuration(_))));
+    }
 
     #[test]
     fn inbound_port_map_requires_forwarding_before_allocation() {
@@ -3770,7 +4012,7 @@ mod tests {
     #[cfg(not(feature = "tee"))]
     fn test_add_virtiofs_path_stores_root_dir() {
         let mut builder = Builder::new();
-        builder.add_virtiofs_path("tag", "/tmp/mydir", None, false);
+        builder.add_virtiofs_path("tag", std::env::temp_dir().to_str().unwrap(), None, false);
         assert_eq!(builder.config.vmr.fs.len(), 1);
         // Verify tag is stored
         assert_eq!(builder.config.vmr.fs[0].tag, "tag");

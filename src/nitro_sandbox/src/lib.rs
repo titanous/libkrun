@@ -1,10 +1,19 @@
 //! Host-side protocol primitives for the Nitro Sandbox hypervisor.
 //! This is distinct from running a workload inside a confidential enclave.
 
+pub mod console;
+#[cfg(target_os = "linux")]
+pub mod heartbeat;
 #[cfg(target_os = "linux")]
 pub mod host;
+#[cfg(target_os = "linux")]
+pub mod image;
+#[cfg(target_os = "linux")]
+pub mod lifecycle;
 #[cfg(all(target_os = "linux", feature = "devices"))]
 pub mod runtime;
+#[cfg(all(target_os = "linux", feature = "devices"))]
+pub mod stop_reason;
 #[cfg(all(target_os = "linux", feature = "devices"))]
 pub mod transport;
 

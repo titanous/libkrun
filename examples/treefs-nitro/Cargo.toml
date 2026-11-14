@@ -1,0 +1,17 @@
+[package]
+name = "treefs-nitro-acceptance"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+krun = { package = "libkrun", path = "../../src/libkrun", features = ["nitro-sandbox", "net", "vhost-user"] }
+treefs = { path = "../../target/treefs-source/crates/treefs", features = ["libkrun"] }
+tempfile = "3"
+
+[patch.crates-io]
+linux-loader = { path = "../../vendor/linux-loader" }
+vhost = { path = "../../vendor/vhost" }
+tdx = { path = "../../vendor/tdx" }

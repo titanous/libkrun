@@ -14,7 +14,7 @@ use vm_memory::ByteValued;
 
 use super::super::linux_errno::linux_error;
 use super::bindings;
-use super::dax_mapper::LinuxDaxMapper;
+use super::dax_mapper::{DaxMapper, LinuxDaxMapper};
 use super::descriptor_utils::{Reader, Writer};
 use super::filesystem::{
     Context, DirEntry, Entry, Extensions, FileSystem, GetxattrReply, ListxattrReply, SecContext,
@@ -63,13 +63,18 @@ impl io::Write for ZCWriter<'_> {
 pub struct Server {
     fs: Box<dyn FileSystem + Send + Sync>,
     options: AtomicU64,
+    dax_mapper: Option<Arc<dyn DaxMapper>>,
 }
 
 impl Server {
+    pub fn set_dax_mapper(&mut self, mapper: Option<Arc<dyn DaxMapper>>) {
+        self.dax_mapper = mapper;
+    }
     pub fn new(fs: Box<dyn FileSystem + Send + Sync>) -> Server {
         Server {
             fs,
             options: AtomicU64::new(FsOptions::empty().bits()),
+            dax_mapper: None,
         }
     }
 
@@ -144,12 +149,22 @@ impl Server {
             Some(Opcode::SetupMapping) if shm_region.is_some() => {
                 let shm = shm_region.as_ref().unwrap();
                 let mapper = LinuxDaxMapper::new(shm.host_addr, shm.size as u64);
-                self.setupmapping(in_header, r, w, &mapper)
+                self.setupmapping(
+                    in_header,
+                    r,
+                    w,
+                    self.dax_mapper.as_deref().unwrap_or(&mapper),
+                )
             }
             Some(Opcode::RemoveMapping) if shm_region.is_some() => {
                 let shm = shm_region.as_ref().unwrap();
                 let mapper = LinuxDaxMapper::new(shm.host_addr, shm.size as u64);
-                self.removemapping(in_header, r, w, &mapper)
+                self.removemapping(
+                    in_header,
+                    r,
+                    w,
+                    self.dax_mapper.as_deref().unwrap_or(&mapper),
+                )
             }
             Some(_) | None => reply_error(
                 linux_error(io::Error::from_raw_os_error(libc::ENOSYS)),

@@ -9,6 +9,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("usage: nitro_smoke EIF DISK UNIX_SOCKET".into());
     }
     let mut builder = Builder::new();
+    builder.nitro_console_sink(Box::new(std::io::stdout()), 1024 * 1024, 256 * 1024);
     let memory_mib = std::env::var("NITRO_MEMORY_MIB")
         .unwrap_or_else(|_| "1024".into())
         .parse()?;
@@ -46,9 +47,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         builder.add_virtio_console_with_ports(vec![PortDescription::output_pipe("smoke", output)]);
     assert_eq!(paths, ["/dev/vport2p0"]);
     match builder.build()?.run()? {
-        VmExit::Error { message }
-            if expected_watchdog && message == "Nitro guest watchdog expired" =>
-        {
+        VmExit::DeviceWatchdog if expected_watchdog => {
             eprintln!("REBOOT_WATCHDOG_OK");
             Ok(())
         }

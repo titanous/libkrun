@@ -35,6 +35,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().collect();
     assert_eq!(args.len(), 4, "usage: nitro_reset IMAGE SOCKET deny|allow");
     let mut builder = Builder::new();
+    builder.nitro_console_sink(Box::new(std::io::stdout()), 1024 * 1024, 256 * 1024);
     builder.nitro_backend(NitroBackendConfig {
         image: args[1].clone().into(),
         cid: 210,

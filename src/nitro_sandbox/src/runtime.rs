@@ -13,6 +13,12 @@ pub enum Exit {
     PowerOff,
     Watchdog,
     Stopped,
+    Panic,
+    LivenessExpired,
+    StatedReason {
+        code: u8,
+        observed_micros: Option<u64>,
+    },
 }
 
 #[derive(Default)]
@@ -43,6 +49,9 @@ pub struct Runtime {
     cid: u64,
     observers: ExitObservers,
     stop: Arc<utils::eventfd::EventFd>,
+    console: crate::console::Console,
+    heartbeat: Option<crate::heartbeat::Heartbeat>,
+    stop_reason: Option<crate::stop_reason::StopReason>,
 }
 impl Runtime {
     pub fn new(
@@ -52,7 +61,17 @@ impl Runtime {
         cid: u64,
         timeout: Duration,
     ) -> io::Result<Self> {
-        let mut sandbox = Sandbox::new(memory, vcpus)?;
+        Self::with_lifecycle_lock(image, memory, vcpus, cid, timeout, None)
+    }
+    pub fn with_lifecycle_lock(
+        image: &str,
+        memory: usize,
+        vcpus: u32,
+        cid: u64,
+        timeout: Duration,
+        lock: Option<crate::lifecycle::LifecycleLock>,
+    ) -> io::Result<Self> {
+        let mut sandbox = Sandbox::with_lifecycle_lock(memory, vcpus, None, lock)?;
         sandbox.load(image)?;
         let memory = Some(unsafe { sandbox.guest_memory()? });
         let manager =
@@ -66,7 +85,20 @@ impl Runtime {
             cid,
             observers: ExitObservers::default(),
             stop: Arc::new(utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK)?),
+            console: Default::default(),
+            heartbeat: None,
+            stop_reason: None,
         })
+    }
+    pub fn enable_stop_reason(&mut self) -> io::Result<()> {
+        self.stop_reason = Some(crate::stop_reason::StopReason::register(&mut self.sandbox)?);
+        Ok(())
+    }
+    pub fn set_heartbeat(&mut self, heartbeat: crate::heartbeat::Heartbeat) {
+        self.heartbeat = Some(heartbeat);
+    }
+    pub fn set_console(&mut self, console: crate::console::Console) {
+        self.console = console;
     }
     pub fn stop_event(&self) -> Arc<utils::eventfd::EventFd> {
         self.stop.clone()
@@ -85,6 +117,34 @@ impl Runtime {
             .push(Transport::register(&self.sandbox, device)?);
         Ok(())
     }
+    pub fn add_filesystem(
+        &mut self,
+        mut device: devices::virtio::Fs,
+        dax_size: Option<usize>,
+    ) -> io::Result<()> {
+        let mut regions = Vec::new();
+        if let Some(size) = dax_size {
+            let region = self.sandbox.allocate_region(0, size)?;
+            let address = region.mapping.address();
+            device.set_shm_region(devices::virtio::VirtioShmRegion {
+                host_addr: address,
+                guest_addr: 0,
+                size,
+            });
+            // Sandbox retains the mapping until VM close; transports/workers
+            // stop before Sandbox is dropped.
+            device.set_dax_mapper(Arc::new(unsafe {
+                devices::virtio::fs::dax_mapper::CopyDaxMapper::new(address, size as u64)
+            }));
+            regions.push(region);
+        }
+        self.transports.push(Transport::register_regions(
+            &mut self.sandbox,
+            Arc::new(Mutex::new(device)),
+            regions,
+        )?);
+        Ok(())
+    }
     pub fn add_worker_device<D: VirtioDevice + 'static>(
         &mut self,
         device: Arc<Mutex<D>>,
@@ -93,20 +153,84 @@ impl Runtime {
             .push(Transport::register(&self.sandbox, device)?);
         Ok(())
     }
+    fn wait_events(&self) -> io::Result<()> {
+        use std::os::fd::AsRawFd;
+        let event = |fd| libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let mut descriptors = vec![
+            event(self.sandbox.vm_fd()),
+            event(self.stop.as_raw_fd()),
+            event(self.manager.as_raw_fd()),
+        ];
+        for transport in &self.transports {
+            descriptors.push(event(transport.info_fd()));
+        }
+        if let Some(reason) = &self.stop_reason {
+            descriptors.push(event(reason.fd()));
+        }
+        if let Some(heartbeat) = &self.heartbeat {
+            descriptors.extend(heartbeat.poll_fds().into_iter().map(event));
+        }
+        // Console has no notification descriptor. Bound diagnostic/panic and
+        // deadline observation to 50ms without polling devices every millisecond.
+        let result = unsafe { libc::poll(descriptors.as_mut_ptr(), descriptors.len() as _, 50) };
+        if result < 0 && io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+            return Err(io::Error::last_os_error());
+        }
+        for (index, transport) in self.transports.iter().enumerate() {
+            if descriptors[3 + index].revents & libc::POLLIN != 0 {
+                transport.consume_info_event()?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn run(mut self) -> io::Result<Exit> {
         self.sandbox.start(self.cid)?;
         let start = Instant::now();
+        if let Some(heartbeat) = &mut self.heartbeat {
+            heartbeat.start(start);
+        }
         let mut watchdog = Watchdog::new(Duration::ZERO, self.timeout);
         let mut active = 0usize;
         loop {
+            if let Some(reason) = self.stop_reason.as_ref().and_then(|device| device.reason()) {
+                let observed_micros = self
+                    .stop_reason
+                    .as_ref()
+                    .and_then(|device| device.observation_micros());
+                return Ok(Exit::StatedReason {
+                    code: reason,
+                    observed_micros,
+                });
+            }
             match self.stop.read() {
                 Ok(_) => return Ok(Exit::Stopped),
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
                 Err(error) => return Err(error),
             }
             if self.sandbox.powered_off(0)? {
-                self.sandbox.drain_console(&mut io::stdout())?;
-                return Ok(Exit::PowerOff);
+                self.sandbox.drain_console(&mut self.console)?;
+                if let Some(device) = &self.stop_reason {
+                    if let Some(code) = device.reason() {
+                        let observed_micros = device.observation_micros();
+                        return Ok(Exit::StatedReason {
+                            code,
+                            observed_micros,
+                        });
+                    }
+                    return Err(io::Error::other(
+                        "Nitro guest stopped without stating a terminal reason",
+                    ));
+                }
+                return Ok(if self.console.panic_seen() {
+                    Exit::Panic
+                } else {
+                    Exit::PowerOff
+                });
             }
             for transport in &mut self.transports {
                 match transport.refresh(&self.sandbox, self.memory.as_ref().unwrap())? {
@@ -123,12 +247,25 @@ impl Runtime {
             if !self.transports.is_empty() && active == self.transports.len() {
                 watchdog.devices_ready();
             }
-            self.sandbox.drain_console(&mut io::stdout())?;
+            self.sandbox.drain_console(&mut self.console)?;
+            if self.stop_reason.is_none() && self.console.panic_seen() {
+                return Ok(Exit::Panic);
+            }
+            if self
+                .heartbeat
+                .as_mut()
+                .map(|heartbeat| heartbeat.refresh(Instant::now()))
+                .transpose()?
+                .unwrap_or(false)
+            {
+                return Ok(Exit::LivenessExpired);
+            }
             if watchdog.expired(start.elapsed()) {
                 return Ok(Exit::Watchdog);
             }
+            self.wait_events()?;
             self.manager
-                .run_with_timeout(1)
+                .run_with_timeout(0)
                 .map_err(|e| io::Error::other(format!("dispatch: {e:?}")))?;
         }
     }

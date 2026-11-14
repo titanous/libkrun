@@ -148,12 +148,23 @@ Every backend must honour each configured method, or fail build with a clear
 The Nitro backend (`nitro-sandbox` feature) applies the same socket rule and
 forwarding switch to its shared userspace vsock device. It boots an EIF v4 image
 through `nitro_backend`: the image contains the arm64 Linux Image, initramfs and
-command line, with flags matching PCI virtio and CPU-overcommit mode. Separate
-`external_kernel` inputs, command-line replacement/append (including an empty
-replacement), virtio-fs and unsupported device/configuration methods fail build
-with `unsupported on this backend`; they are never silently discarded. Use the
-EIF builder to package the platform kernel/initramfs and exact command line before
-calling the Nitro builder. Caller-supplied block storage and its read-only setting
+command line, with flags matching PCI virtio and CPU-overcommit mode.
+Alternatively, `external_kernel` accepts an arm64 Raw Image, optional initramfs,
+and the configured replacement/appended command line: the fork packages EIF v4
+internally. Packaged-image command lines cannot be overridden; other
+unsupported device/configuration methods fail build with
+`unsupported on this backend`, never silently discarded. The Rust packager is
+byte-for-byte tested against the kernel lane's deterministic Python builder.
+A SHA-256 content key includes all inputs, memory and CPUs; up to eight immutable
+sealed memfd images are cached per process. Cache hits still read/hash inputs to
+avoid stale path metadata but skip image packaging/CRC/copy. The packaged EIF path
+remains available and bypasses packaging. For one-VMM-per-process services, call
+`nitro_image_cache(directory)` with a pre-created daemon-owned directory that is
+not group/other-writable. Content-addressed EIF files are atomically published
+under an exclusive cache flock and reused across processes; killed writers leave
+no published partial image. The daemon owns disk-cache eviction and must not
+modify published files in place. The trusted cache directory is not a tenant
+input; symlink files are refused. Caller-supplied block storage and its read-only setting
 are shared with KVM unchanged. Select Nitro and configure block/vsock devices
 before adding custom consoles, and call `disable_implicit_console()`. Returned
 console paths follow Nitro's actual block/vsock/console registration order; build
@@ -179,9 +190,54 @@ transport reset. The repeatable real-host regression is
 the `nitro_reset` example and packaging `guest-reset.c` as `/init`.
 `port_map` requires `internet_socket_forwarding(true)` on both backends. The
 `nitro-sandbox` feature cannot be combined with `tee` or legacy `aws-nitro`.
-The current watchdog bounds device readiness/reset recovery, not a hung workload
-whose devices remain ready. General liveness and panic detection are not yet
-provided.
+Kernel-console diagnostics are discarded by default. Set
+`nitro_console_sink(writer, total_bytes, bytes_per_second)` to receive bounded
+output in a nonblocking embedder writer. Excess bytes are dropped, never queued;
+the lifetime cap does not reset and the rate cap replenishes once per second.
+This is independent of custom virtio-console port sinks. Sink callbacks must not
+block; byte limits cannot bound an arbitrary callback's execution time.
+
+### Host-owned lifecycle lock
+
+On hosts requiring serialized teardown, call
+`nitro_lifecycle_lock(path, NitroSerialization::Teardown)` before build.
+`StartAndTeardown` additionally serializes VM creation and start ioctls. The daemon
+creates a regular lock file with service-owned permissions before launching VMMs;
+the library opens it without following symlinks and retains that inode. Do not
+unlink, replace, or rotate the file while any VMM exists. No lock is used by default;
+that default is not safe on hosts requiring serialized teardown, including m9g.
+
+**Before killing a VMM**, the daemon must open this same file and take exclusive
+`flock`, send the kill signal, wait for the process to be reaped and for its guest
+to be gone, then release the lock. Hold it across all those steps. Killing a VMM
+without the lock bypasses library teardown serialization. Prefer a handle stop
+request, which stops workers and closes the VM under the configured lock.
+A one-guest VMM can call `handle.install_sigterm_handler()` and retain the returned
+guard through `run`; SIGTERM then writes the same stop event and returns
+`VmExit::Stopped`. Installation is explicit so the library does not silently
+replace the embedder's process-wide signal policy.
+All cooperating VMMs and the daemon must resolve the path to the same inode,
+including across mount namespaces. Starts/stops in different processes are
+serialized by the kernel's flock, not a process-local mutex.
+
+The device watchdog bounds readiness/reset recovery and returns
+`VmExit::DeviceWatchdog`. For workload liveness, configure
+`nitro_heartbeat(port, socket_path, deadline)`: the VMM binds a new Unix socket and
+reserves that mapped vsock port. The guest agent connects to host CID 2 at the port
+and sends ASCII `H` periodically (recommend at most one third of the deadline).
+The deadline starts after the guest starts and refreshes only on `H`; failure to
+connect or silence returns `VmExit::LivenessExpired`. Reconnection is supported.
+The mapping remains subject to the embedder's Unix-connect policy; allow its exact
+socket path. Existing paths and port collisions are errors, not overwritten.
+
+The following console-marker classification is legacy compatibility only and is
+not the platform's privileged terminal-reason contract. The maintained kernel's
+`HOLODECK GUEST STOP panic` diagnostic marker returns
+`VmExit::GuestPanic` promptly, even when console output is discarded or its budget
+is exhausted. Marker matching handles split reads and kernel prefixes. This text
+is not an authenticated tenant status channel. Missing markers are not evidence
+of clean shutdown; liveness still bounds a hung guest. Use the maintained kernel
+stop convention and `panic=-1` to avoid an indefinite panic halt.
 `backend_must_enforce_configured_rule` is a public-API KVM conformance test using
 a live denied host listener; it fails if the configured rule is ignored. Backend
 integration must run that same semantic test or assert explicit unsupported
@@ -192,3 +248,94 @@ Internet forwarding is **off by default on both backends**, enabled only by
 requests too, not only guest hijack flags. Forwarding tests and embedders requiring
 TSI TCP/UDP/IPv6 must opt in; mapped `vsock-guest-connect` does not require internet
 forwarding and remains subject to its Unix connection rule.
+
+### Privileged terminal-reason channel (API alignment pending)
+
+`nitro_stop_reason(true)` adds a dedicated experimental virtio type 63 device,
+registered after ordinary devices so console indices stay stable. The matching
+kernel patch is 0400 on holodeck `nitro-backend-kernel`, based on kernel lane
+`b94b54c`. It maps private shared region ID 0, stores a one-byte terminal reason,
+orders the store and directly notifies one queue. Panic reporting allocates no
+descriptor, opens no socket, and waits for no interrupt. Panic is sticky across
+its following restart. The VMM wakes on the kick eventfd and reads the byte.
+Console text does not classify exits when this channel is enabled; poweroff
+without a stated byte is an error, not clean shutdown.
+
+Current provisional codes are 1 poweroff, 2 reboot, 3 halt, 4 panic. The KVM
+exit-kind worker must publish the shared codes and public exit variants before
+this is a stable embedding API. Until alignment, `run` deliberately returns an
+`Error` containing the raw stated reason and host observation timestamp; do not
+consume that diagnostic string as a permanent protocol. `nitro_terminal` retains
+the real-host acceptance probe.
+
+Observed m8g panic notification upper bounds: ten trials 0.784--0.845 ms from
+host sending a go byte to VMM observing the privileged reason, before teardown.
+The bound includes vsock delivery and the guest's panic path. Poweroff/reboot/halt
+were 0.360--0.383 ms. Both timestamps use host CLOCK_MONOTONIC. Guest/host virtual
+counter offsets differ and must not be subtracted. VM teardown adds substantial
+time after detection; a prior go-to-run-return sample was 109.33 ms, not the
+notification latency. Silent hangs remain bounded by the running heartbeat.
+
+## Nitro public method support and limits
+
+| Public method(s) | Nitro behavior |
+|---|---|
+| `Builder::new`, `build` | Configure/build one guest; errors are returned before running. |
+| `vm_config` | CPU count and RAM honored; CPU zero rejected by setter. RAM minimum 64 MiB, 2 MiB multiple. Default 1 CPU/1024 MiB. |
+| `nitro_backend` | Select packaged EIF or external-kernel packaging; CID and nonzero readiness watchdog honored. |
+| `external_kernel` | arm64 Raw Image plus optional initramfs, internally packaged; other formats rejected. |
+| `set_kernel_cmdline`, `add_kernel_cmdline_args` | Honored with external kernel; rejected for prepackaged EIF. No implicit command-line rewriting. |
+| `nitro_image_cache` | Optional daemon-owned persistent content-addressed cache across VMM processes; otherwise bounded process-local cache. |
+| `outbound_policy`, `internet_socket_forwarding` | Exact configured policy/switch honored across driver resets. Forwarding defaults off. |
+| `add_vsock_port` | Guest-originated mapped Unix connections/listens, subject to policy. |
+| `port_map` | Honored only with internet forwarding enabled; otherwise build rejects nonempty map. |
+| `add_block_cfg`, `add_block_backend`, `root_block_cfg`, `data_block_cfg` | Shared block backend/read-only semantics and exit callbacks; new list takes precedence over legacy setters. |
+| `add_virtiofs`, `add_virtiofs_path`, `set_root` | In-process FileSystem or passthrough served over virtio-fs; missing host paths are build errors. Tags 1..36 bytes. Optional copy-backed DAX described below. |
+| `disable_implicit_console` | Required; cannot omit an already-configured implicit console silently. |
+| `add_virtio_console`, `add_virtio_console_with_ports`, `add_port`, `add_port_fd`, `add_port_console_fd`, `console_port_path` | Custom ports honored; select backend/configure preceding block/vsock/fs devices first. Incompatible late ordering rejected. |
+| `nitro_console_sink` | Bounded kernel diagnostics, discard by default; independent of custom console ports. |
+| `nitro_heartbeat` | Reserved guest-originated heartbeat mapping and running-guest deadline. |
+| `nitro_stop_reason` | Opt-in privileged byte channel; current raw diagnostic mapping awaits shared KVM exit API alignment. |
+| `nitro_lifecycle_lock` | Daemon-owned flock for teardown or creation/start plus teardown; no fixed-path fallback. |
+| `console_output` | KVM console convenience path rejected; use bounded Nitro sink/custom port. |
+| `workdir`, `exec_path`, `block_root`, `env`, `args`, `rlimits`, `vmm_uid`, `vmm_gid` | Rejected at build; guest agent owns execution and service owns VMM credentials. |
+| `add_net_device`, `net_mac`, `set_rng_backend`, `enable_balloon`, `enable_nested_virt`, `gpu_virgl_flags`, `gpu_shm_size` | Rejected at build. GPU/display/input/sound configurations exposed by feature-specific extensions also rejected. |
+| `add_virtiofs_vhost_user`, `add_vsock_vhost_user`, `add_vsock_vhost_user_fd`, other external vhost-user configuration | Rejected at build; use in-process servers. |
+| `nitro_image`, `nitro_start_flags`, `tee_config_file` | APIs of incompatible legacy/confidential features; combining `aws-nitro` or `tee` with `nitro-sandbox` is a compile-time error. |
+| `Context::device_info`, `vm_handle`, `register_exit_observer`, `run` | Supported without KVM state; metadata, stop handle, exactly-once exit dispatch, typed result. |
+| `VmHandle::trigger_shutdown_event`, `install_sigterm_handler` | Orderly stop and explicit scoped SIGTERM registration; returns `Stopped`. |
+| `VmHandle::pause`, `resume`, `notify_vm_generation_change` | Clear Unsupported error. No running-guest copy support in this backend. |
+| `VmHandle::balloon` | None; therefore BalloonHandle operations are unavailable on Nitro. |
+
+Virtio-fs DAX uses a private pool window per guest, not shared host-cache pages.
+The VMM zeroes every device region before registration and copies file data into
+it; removal zeroes the requested range without replacing its registered mapping.
+One optional window is supported per mount: 2 MiB-aligned, 2..256 MiB. No-DAX
+mounts have no device-region cost. Read-only `map_file`/`map_data` work; writable
+file-backed DAX mapping returns Unsupported instead of silently losing writes.
+Writable filesystem operations use ordinary FUSE requests. Workers stop before
+VM close; window backing remains mapped until VM close, including error paths.
+
+Observed m8g coverage includes mount by tag, correct contents, create/write/rename/
+delete, 1,000 files, complete 64 MiB reads and DAX mmap, and 100 mounted lifecycles
+with unchanged slot/pool accounting. The real treefs read-only/writable adapters
+pass the corresponding no-DAX checks plus 3,000 writable operations and live tree
+replacement. At treefs `c70edfb`, explicit DAX fails because its adapter rejects
+Linux's `fh=u64::MAX` no-handle setupmapping; see `examples/treefs-nitro` for the
+retained reproduction. This is not claimed to pass until the adapter contract is
+resolved.
+
+Limits: memory is bounded by the host's configured pool, CPU admission and guest
+slots by the driver; requested CPU count fits `u8` (1..255) but host capacity can
+reject it. RAM above 1 GiB uses a second GPA range at 0x400000000; both sides of
+the old 1 GiB boundary were tested, not the full pool maximum. Device config is
+at most 64 bytes, 64 queues per device, and low-level registration at most four
+shared ranges of 256 MiB each; public filesystem support uses one range per mount.
+No fixed public total device maximum is claimed beyond driver/info-page capacity.
+
+Measured sustained full-device launch rate on shared m8g: 9,338/9,338 in
+1,200.843 seconds with eight workers, **7.776 launches/s**, effectively unchanged
+from 7.777 before event-driven waiting. Removing millisecond polling does not
+remove the observed launch bottleneck. Firmware, guest work, memory/teardown and
+harness disk-copy costs remain; their exact shares were not profiled. This is
+below the approximate 10/s design target, not a claim of meeting it.
