@@ -3319,16 +3319,6 @@ mod nitro_cmdline_tests {
         );
     }
     #[test]
-    fn builder_vsock_cid_rejects_reserved_values() {
-        let mut builder = Builder::new();
-        assert_eq!(builder.guest_vsock_cid, None);
-        for cid in [0, 1, 2, u32::MAX] {
-            assert!(builder.vsock_cid(cid).is_err());
-        }
-        builder.vsock_cid(41).unwrap();
-        assert_eq!(builder.guest_vsock_cid, Some(41));
-    }
-    #[test]
     fn builder_flags_follow_internet_forwarding() {
         let mut builder = Builder::new();
         assert_eq!(
@@ -3359,6 +3349,17 @@ mod tests {
         );
     }
     use super::*;
+
+    #[test]
+    fn builder_vsock_cid_rejects_reserved_values() {
+        let mut builder = Builder::new();
+        assert_eq!(builder.guest_vsock_cid, None);
+        for cid in [0, 1, 2, u32::MAX] {
+            assert!(builder.vsock_cid(cid).is_err());
+        }
+        builder.vsock_cid(41).unwrap();
+        assert_eq!(builder.guest_vsock_cid, Some(41));
+    }
 
     #[test]
     #[cfg(not(feature = "tee"))]
