@@ -19,6 +19,35 @@ pub mod transport;
 
 use std::time::Duration;
 
+#[derive(Debug)]
+struct GuestDataError(String);
+impl std::fmt::Display for GuestDataError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+impl std::error::Error for GuestDataError {}
+pub(crate) fn guest_data_error(message: impl Into<String>) -> std::io::Error {
+    std::io::Error::other(GuestDataError(message.into()))
+}
+pub(crate) fn is_guest_data_error(error: &std::io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|source| source.is::<GuestDataError>())
+}
+
+#[cfg(test)]
+#[test]
+fn guest_data_errors_are_distinct_from_host_io_failures() {
+    assert!(is_guest_data_error(&guest_data_error("bad console TOC")));
+    assert!(!is_guest_data_error(&std::io::Error::other(
+        "bad console TOC"
+    )));
+    assert!(!is_guest_data_error(&std::io::Error::from_raw_os_error(
+        libc::EIO
+    )));
+}
+
 pub const INFO_PAGE_SIZE: usize = 2 * 1024 * 1024;
 const ENTRY_SIZE: usize = 128 + 2216;
 

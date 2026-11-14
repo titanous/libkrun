@@ -1898,6 +1898,9 @@ pub enum StartError {
 
 #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
 fn nitro_terminal_exit(facts: nitro_sandbox::runtime::TerminalFacts) -> VmExit {
+    if facts.guest_fault && !facts.host_stop {
+        return VmExit::Fault;
+    }
     let terminal = if facts.host_stop {
         VmExit::Stopped
     } else if facts.liveness_expired {
@@ -1908,6 +1911,20 @@ fn nitro_terminal_exit(facts: nitro_sandbox::runtime::TerminalFacts) -> VmExit {
         VmExit::Fault
     };
     VmExit::resolve(terminal, facts.exit_code, facts.reason)
+}
+
+#[cfg(all(test, target_os = "linux", feature = "nitro-sandbox"))]
+#[test]
+fn corrupt_guest_state_is_fault_even_with_stated_poweroff() {
+    assert_eq!(
+        nitro_terminal_exit(nitro_sandbox::runtime::TerminalFacts {
+            guest_fault: true,
+            reason: 1,
+            exit_code: Some(0),
+            ..Default::default()
+        }),
+        VmExit::Fault
+    );
 }
 
 #[cfg(all(test, target_os = "linux", feature = "nitro-sandbox"))]

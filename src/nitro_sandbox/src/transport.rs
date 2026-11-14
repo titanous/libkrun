@@ -71,14 +71,14 @@ impl Transport {
         let action = self
             .lifecycle
             .observe(&snapshot, self.offered)
-            .map_err(|e| io::Error::other(format!("device lifecycle: {e:?}")))?;
+            .map_err(|e| crate::guest_data_error(format!("device lifecycle: {e:?}")))?;
         match action {
             Action::Stop => self.stop()?,
             Action::Start => {
                 let mut device = self.device.lock().unwrap();
                 let config = device.queue_config();
                 if snapshot.queues.len() != config.len() {
-                    return Err(io::Error::other("queue count mismatch"));
+                    return Err(crate::guest_data_error("queue count mismatch"));
                 }
                 let mut queues = Vec::new();
                 for (i, (source, maximum)) in snapshot.queues.iter().zip(config).enumerate() {
@@ -90,7 +90,7 @@ impl Transport {
                                 vm_memory::Permissions::ReadWrite,
                             )
                         })
-                        .map_err(|e| io::Error::other(format!("queue {i}: {e:?}")))?;
+                        .map_err(|e| crate::guest_data_error(format!("queue {i}: {e:?}")))?;
                     let mut q = Queue::new(maximum.size);
                     q.size = source.size;
                     q.ready = true;

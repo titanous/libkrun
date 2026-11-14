@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, Default)]
 pub struct TerminalFacts {
+    pub guest_fault: bool,
     pub host_stop: bool,
     pub liveness_expired: bool,
     pub device_expired: bool,
@@ -235,11 +236,23 @@ impl Runtime {
         self.exit_code.clone()
     }
     pub fn run_facts(mut self) -> io::Result<TerminalFacts> {
-        let result = self.run_inner().map(|mut facts| {
-            let code = self.exit_code.load(std::sync::atomic::Ordering::Acquire);
-            facts.exit_code = (code != i32::MAX).then_some(code);
-            facts
-        });
+        let result = self
+            .run_inner()
+            .or_else(|error| {
+                if crate::is_guest_data_error(&error) {
+                    Ok(TerminalFacts {
+                        guest_fault: true,
+                        ..Default::default()
+                    })
+                } else {
+                    Err(error)
+                }
+            })
+            .map(|mut facts| {
+                let code = self.exit_code.load(std::sync::atomic::Ordering::Acquire);
+                facts.exit_code = (code != i32::MAX).then_some(code);
+                facts
+            });
         let cleanup = self.shutdown();
         match (result, cleanup) {
             (Err(error), _) | (_, Err(error)) => Err(error),

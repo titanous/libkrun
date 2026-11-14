@@ -489,7 +489,7 @@ impl Sandbox {
         }
         let count = crate::u32_at(&header, 8).unwrap() as usize;
         if count > (INFO_PAGE_SIZE - 16) / 48 {
-            return Err(io::Error::other("invalid TOC count"));
+            return Err(crate::guest_data_error("invalid TOC count"));
         }
         let toc = self.info.copy_range(16, count * 48)?;
         for record in toc.chunks_exact(48) {
@@ -503,7 +503,7 @@ impl Sandbox {
                     .checked_add(2344)
                     .is_none_or(|end| end > INFO_PAGE_SIZE)
             {
-                return Err(io::Error::other("invalid device entry range"));
+                return Err(crate::guest_data_error("invalid device entry range"));
             }
             for _ in 0..16 {
                 let before = self.info.copy_range(offset, 12)?;
@@ -533,7 +533,7 @@ impl Sandbox {
                     }
                 }
                 return crate::device_snapshot(&copy, uid)
-                    .map_err(|e| io::Error::other(format!("info page: {e:?}")));
+                    .map_err(|e| crate::guest_data_error(format!("info page: {e:?}")));
             }
             return Ok(None);
         }
@@ -560,7 +560,7 @@ impl Sandbox {
         }
         let count = crate::u32_at(&header, 8).unwrap_or(0) as usize;
         if count > (INFO_PAGE_SIZE - 16) / 48 {
-            return Err(io::Error::other("bad console TOC"));
+            return Err(crate::guest_data_error("bad console TOC"));
         }
         let toc = self.info.copy_range(16, count * 48)?;
         for record in toc.chunks_exact(48) {
@@ -570,13 +570,13 @@ impl Sandbox {
             let off = crate::u32_at(record, 4).unwrap_or(u32::MAX) as usize;
             let size = crate::u64_at(record, 8).unwrap();
             if size < 8 || off > INFO_PAGE_SIZE - 8 {
-                return Err(io::Error::other("bad console entry"));
+                return Err(crate::guest_data_error("bad console entry"));
             }
             let ring = self.info.copy_range(off, 8)?;
             let end = crate::u32_at(&ring, 0).unwrap();
             let cap = crate::u32_at(&ring, 4).unwrap();
             if cap == 0 || cap as usize > INFO_PAGE_SIZE - off - 8 || u64::from(cap) > size - 8 {
-                return Err(io::Error::other("bad console capacity"));
+                return Err(crate::guest_data_error("bad console capacity"));
             }
             std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
             let cursor = self.console_at.entry(off).or_insert(0);
