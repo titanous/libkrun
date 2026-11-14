@@ -1319,8 +1319,8 @@ impl Builder {
     /// Select Nitro direct mode using an EIF image. Configured block devices,
     /// Unix vsock port mappings and custom console ports are reused.
     ///
-    /// The resulting context supports `run`; KVM-only handles, device-info and
-    /// snapshot operations are unavailable. HUP reports shutdown, not a guest
+    /// The resulting context provides device information, exit observers and a
+    /// stop handle. KVM-only controls return Unsupported. HUP reports shutdown, not a guest
     /// application exit status; workloads must report that over their protocol.
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     pub fn nitro_backend(&mut self, config: NitroBackendConfig) -> &mut Self {

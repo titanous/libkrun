@@ -159,6 +159,29 @@ before adding custom consoles, and call `disable_implicit_console()`. Returned
 console paths follow Nitro's actual block/vsock/console registration order; build
 rejects selecting the backend after console paths were returned or changing that
 layout afterward. An implicit console is rejected rather than silently omitted.
+When new `add_block_cfg` entries and legacy root/data setters are mixed, the new
+entries take precedence, matching KVM; console indices count only selected disks.
+
+`Context::device_info()` returns configured CPUs, RAM and actual console paths.
+`Context::vm_handle()` works without KVM state: `pause`, `resume` and
+`notify_vm_generation_change` return an Unsupported error, and `balloon` returns
+None. `trigger_shutdown_event` requests runtime teardown and `run` returns
+`VmExit::Stopped`; it is not a guest workload success report. Exit observers and
+caller-supplied block `on_exit` callbacks run once after workers stop, including
+runtime errors and watchdog exits. Queued custom-console output is drained before
+final shutdown, bounded to one queue of descriptors; guest-controlled device reset
+does not read invalidated rings. Callers must provide nonblocking output callbacks;
+a callback that itself blocks can prevent teardown.
+
+The connection rule and forwarding switch survive guest driver unbind/rebind and
+transport reset. The repeatable real-host regression is
+`python3 src/nitro_sandbox/examples/reset-policy.py IMAGE` (CID 210), after building
+the `nitro_reset` example and packaging `guest-reset.c` as `/init`.
+`port_map` requires `internet_socket_forwarding(true)` on both backends. The
+`nitro-sandbox` feature cannot be combined with `tee` or legacy `aws-nitro`.
+The current watchdog bounds device readiness/reset recovery, not a hung workload
+whose devices remain ready. General liveness and panic detection are not yet
+provided.
 `backend_must_enforce_configured_rule` is a public-API KVM conformance test using
 a live denied host listener; it fails if the configured rule is ignored. Backend
 integration must run that same semantic test or assert explicit unsupported
