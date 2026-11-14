@@ -670,6 +670,18 @@ impl Subscriber for Vmm {
                     } else {
                         Some(template.prepare_path(path)?)
                     };
+                    let final_reason = self
+                        .pio_device_manager
+                        .stop_reason
+                        .0
+                        .load(Ordering::Acquire);
+                    if (1..=4).contains(&final_reason) {
+                        return Err(std::io::Error::other(
+                            crate::capture_request::GuestStoppedDuringCapture(
+                                crate::vm_exit::VmExit::from_stated_reason(final_reason),
+                            ),
+                        ));
+                    }
                     if !self.capture_request.accept() {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::TimedOut,
@@ -685,6 +697,12 @@ impl Subscriber for Vmm {
                 let template_path = match result {
                     Ok(path) => path,
                     Err(error) => {
+                        if let Some(stopped) = error.get_ref().and_then(|cause| cause.downcast_ref::<crate::capture_request::GuestStoppedDuringCapture>()) {
+                            let terminal = stopped.0.clone();
+                            self.capture_request.complete(Err(error));
+                            self.stop(terminal);
+                            return;
+                        }
                         warn!("cooperative freeze refused: {error}");
                         if self.capture_request.is_armed() {
                             self.capture_request.complete(Err(std::io::Error::new(
