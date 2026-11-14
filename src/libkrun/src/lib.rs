@@ -1,3 +1,8 @@
+#[cfg(all(feature = "nitro-sandbox", feature = "tee"))]
+compile_error!("unsupported on this backend: nitro-sandbox cannot be combined with tee");
+#[cfg(all(feature = "nitro-sandbox", feature = "aws-nitro"))]
+compile_error!("unsupported on this backend: nitro-sandbox cannot be combined with aws-nitro");
+
 use crossbeam_channel::unbounded;
 #[cfg(feature = "gpu")]
 use devices::virtio::gpu::display::DisplayInfo;
@@ -1326,6 +1331,15 @@ impl Builder {
 
     #[allow(unused_mut)] // Mutability is needed only when Nitro selection is compiled.
     pub fn build(mut self) -> Result<Context, StartError> {
+        if self
+            .config
+            .tsi_port_map
+            .as_ref()
+            .is_some_and(|ports| !ports.is_empty())
+            && !self.socket_policy.internet_enabled
+        {
+            return Err(StartError::UnsupportedPortMap);
+        }
         #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
         if let Some(config) = self.nitro.take() {
             return self.build_nitro(config);
@@ -1639,6 +1653,10 @@ pub enum StartError {
     Nitro(std::io::Error),
     #[error("host socket policy cannot be enforced by an external vhost-user-vsock server")]
     UnsupportedSocketPolicy,
+    #[error(
+        "unsupported on this backend: inbound port_map requires internet_socket_forwarding(true)"
+    )]
+    UnsupportedPortMap,
     #[error("could not setup event manager: {0:?}")]
     EventManager(polly::event_manager::Error),
     #[cfg(not(feature = "static-firmware"))]
@@ -2044,6 +2062,16 @@ impl VmHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inbound_port_map_requires_forwarding_before_allocation() {
+        let mut builder = Builder::new();
+        builder.config.tsi_port_map = Some(HashMap::from([(8080, 80)]));
+        assert!(matches!(
+            builder.build(),
+            Err(StartError::UnsupportedPortMap)
+        ));
+    }
 
     #[test]
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
