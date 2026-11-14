@@ -115,6 +115,38 @@ impl Runtime {
             .push(Transport::register(&self.sandbox, device)?);
         Ok(())
     }
+    fn wait_events(&self) -> io::Result<()> {
+        use std::os::fd::AsRawFd;
+        let event = |fd| libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let mut descriptors = vec![
+            event(self.sandbox.vm_fd()),
+            event(self.stop.as_raw_fd()),
+            event(self.manager.as_raw_fd()),
+        ];
+        for transport in &self.transports {
+            descriptors.push(event(transport.info_fd()));
+        }
+        if let Some(heartbeat) = &self.heartbeat {
+            descriptors.extend(heartbeat.poll_fds().into_iter().map(event));
+        }
+        // Console has no notification descriptor. Bound diagnostic/panic and
+        // deadline observation to 50ms without polling devices every millisecond.
+        let result = unsafe { libc::poll(descriptors.as_mut_ptr(), descriptors.len() as _, 50) };
+        if result < 0 && io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+            return Err(io::Error::last_os_error());
+        }
+        for (index, transport) in self.transports.iter().enumerate() {
+            if descriptors[3 + index].revents & libc::POLLIN != 0 {
+                transport.consume_info_event()?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn run(mut self) -> io::Result<Exit> {
         self.sandbox.start(self.cid)?;
         let start = Instant::now();
@@ -168,8 +200,9 @@ impl Runtime {
             if watchdog.expired(start.elapsed()) {
                 return Ok(Exit::Watchdog);
             }
+            self.wait_events()?;
             self.manager
-                .run_with_timeout(1)
+                .run_with_timeout(0)
                 .map_err(|e| io::Error::other(format!("dispatch: {e:?}")))?;
         }
     }

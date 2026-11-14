@@ -560,6 +560,9 @@ impl Sandbox {
         }
         output.flush()
     }
+    pub fn vm_fd(&self) -> std::os::fd::RawFd {
+        self.vm.as_ref().unwrap().as_raw_fd()
+    }
     pub fn powered_off(&self, milliseconds: i32) -> io::Result<bool> {
         let mut p = PollFd {
             fd: self.vm.as_ref().unwrap().as_raw_fd(),

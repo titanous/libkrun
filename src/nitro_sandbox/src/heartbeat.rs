@@ -29,6 +29,13 @@ impl Heartbeat {
             last: None,
         })
     }
+    pub fn poll_fds(&self) -> Vec<std::os::fd::RawFd> {
+        use std::os::fd::AsRawFd;
+        match &self.stream {
+            Some(stream) => vec![stream.as_raw_fd()],
+            None => vec![self.listener.as_raw_fd()],
+        }
+    }
     pub fn start(&mut self, now: Instant) {
         self.last = Some(now);
     }

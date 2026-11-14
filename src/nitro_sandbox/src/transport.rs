@@ -90,6 +90,23 @@ impl Transport {
         }
         Ok(action)
     }
+    pub fn info_fd(&self) -> std::os::fd::RawFd {
+        use std::os::fd::AsRawFd;
+        self.events.info.as_raw_fd()
+    }
+    pub fn consume_info_event(&self) -> io::Result<()> {
+        let mut value = 0u64;
+        let result = unsafe { libc::read(self.info_fd(), (&mut value as *mut u64).cast(), 8) };
+        if result < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::WouldBlock
+                && error.kind() != io::ErrorKind::Interrupted
+            {
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
     pub fn prepare_exit(&mut self) {
         self.device.lock().unwrap().prepare_exit();
     }
