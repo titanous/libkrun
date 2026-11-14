@@ -100,11 +100,11 @@ mod tests {
         std::fs::write(&initrd, b"initrd bytes").unwrap();
         for init in [None, Some(initrd.as_path())] {
             let (image, _) =
-                cached_files(&kernel, init, b"console=hvc0", 1024 << 20, 1, None).unwrap();
+                cached_files(&kernel, init, b"console=hvc0 panic=-1", 1024 << 20, 1, None).unwrap();
             let expected = package(
                 b"kernel bytes",
                 init.map(|_| &b"initrd bytes"[..]),
-                b"console=hvc0",
+                b"console=hvc0 panic=-1",
                 1024 << 20,
                 1,
             )
