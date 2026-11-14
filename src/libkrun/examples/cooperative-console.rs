@@ -61,9 +61,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "rdinit=/init",
         "panic=-1",
         "reboot=k",
-        "nokaslr",
-        "initcall_debug",
-        "pm_print_times",
     ]);
     if std::env::var_os("CLONE_FS").is_some_and(|mode| mode == "dax") {
         builder.add_kernel_cmdline_args(&["clone_dax"]);

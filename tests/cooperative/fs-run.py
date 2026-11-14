@@ -10,7 +10,7 @@ p.add_argument("--initramfs",required=True)
 p.add_argument("--output",required=True,type=Path)
 p.add_argument("--children",type=int,default=20)
 a=p.parse_args();a.output.mkdir(parents=True,exist_ok=False)
-launcher=str(Path("target/debug/examples/cooperative-console").resolve())
+launcher=str(Path("target/release/examples/cooperative-console").resolve())
 for mode in ("plain","dax"):
     env=dict(os.environ,CLONE_KERNEL=a.kernel,CLONE_INITRAMFS=a.initramfs,CLONE_VCPUS="2",CLONE_FS=mode)
     image=a.output/f"{mode}.ram"

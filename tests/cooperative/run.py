@@ -24,7 +24,7 @@ parser.add_argument("--concurrent", type=int, default=16)
 parser.add_argument("--passed-fd", action="store_true", help="share one sealed memfd across new VMM processes")
 args = parser.parse_args()
 args.output.mkdir(parents=True, exist_ok=False)
-launcher = Path("target/debug/examples/cooperative-console").resolve()
+launcher = Path("target/release/examples/cooperative-console").resolve()
 peer_path = args.output / "echo.sock"
 peer = subprocess.Popen(["python3", str(Path(__file__).with_name("echo.py")), str(peer_path)])
 tcp_probe = socket.socket()
