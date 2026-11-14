@@ -92,10 +92,8 @@ impl Transport {
     }
     pub fn stop(&mut self) -> io::Result<()> {
         let mut device = self.device.lock().unwrap();
-        if device.is_activated() {
-            if !device.reset() {
-                return Err(io::Error::other("device refused synchronous reset"));
-            }
+        if device.is_activated() && !device.reset() {
+            return Err(io::Error::other("device refused synchronous reset"));
         }
         device.set_acked_features(0);
         Ok(())

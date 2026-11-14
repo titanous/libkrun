@@ -1244,7 +1244,7 @@ impl Builder {
             vcpu_count: config.vcpu_count.unwrap_or(1),
             ram_mib: config.mem_size_mib.unwrap_or(1024) as u32,
         };
-        let mut console_id = self.nitro_device_count_before_consoles() as u32;
+        let mut console_id = self.nitro_device_count_before_consoles();
         let mut runtime = nitro_sandbox::runtime::Runtime::new(
             options
                 .image

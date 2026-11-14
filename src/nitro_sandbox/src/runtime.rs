@@ -15,6 +15,24 @@ pub enum Exit {
     Stopped,
 }
 
+#[derive(Default)]
+struct ExitObservers(Mutex<Vec<Arc<Mutex<dyn VmmExitObserver>>>>);
+impl ExitObservers {
+    fn register(&self, observer: Arc<Mutex<dyn VmmExitObserver>>) {
+        self.0.lock().unwrap().push(observer);
+    }
+    fn notify(&mut self) {
+        for observer in self.0.get_mut().unwrap().drain(..) {
+            observer.lock().unwrap().on_vmm_exit();
+        }
+    }
+}
+impl Drop for ExitObservers {
+    fn drop(&mut self) {
+        self.notify();
+    }
+}
+
 pub struct Runtime {
     // Explicit cleanup in run/Drop stops workers before mappings disappear.
     transports: Vec<Transport>,
@@ -23,7 +41,7 @@ pub struct Runtime {
     sandbox: Sandbox,
     timeout: Duration,
     cid: u64,
-    observers: Mutex<Vec<Arc<Mutex<dyn VmmExitObserver>>>>,
+    observers: ExitObservers,
     stop: Arc<utils::eventfd::EventFd>,
 }
 impl Runtime {
@@ -46,7 +64,7 @@ impl Runtime {
             sandbox,
             timeout,
             cid,
-            observers: Mutex::new(Vec::new()),
+            observers: ExitObservers::default(),
             stop: Arc::new(utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK)?),
         })
     }
@@ -54,7 +72,7 @@ impl Runtime {
         self.stop.clone()
     }
     pub fn register_exit_observer(&self, observer: Arc<Mutex<dyn VmmExitObserver>>) {
-        self.observers.lock().unwrap().push(observer);
+        self.observers.register(observer);
     }
     pub fn add_device<D: VirtioDevice + Subscriber + 'static>(
         &mut self,
@@ -125,9 +143,36 @@ impl Drop for Runtime {
         self.transports.clear();
         // Workers no longer touch guest queues or backend state. Notify on every
         // exit path, including failed start and device-dispatch errors.
-        for observer in self.observers.get_mut().unwrap().drain(..) {
-            observer.lock().unwrap().on_vmm_exit();
-        }
+        self.observers.notify();
         self.memory.take();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn observers_notify_exactly_once_for_all_exit_results() {
+        let outcomes = [
+            Ok(Exit::PowerOff),
+            Ok(Exit::Watchdog),
+            Ok(Exit::Stopped),
+            Err(io::Error::other("device error")),
+        ];
+        for outcome in outcomes {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let counted = calls.clone();
+            let run = || {
+                let observers = ExitObservers::default();
+                observers.register(Arc::new(Mutex::new(move || {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                })));
+                outcome
+            };
+            let _ = run();
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+        }
     }
 }
