@@ -2271,23 +2271,24 @@ impl Context {
             None
         };
 
+        let console_tx_states;
+        #[cfg(target_arch = "x86_64")]
+        let stated_reason;
+        {
+            // Snapshot shared state under one lock. Separate lock temporaries in
+            // struct fields can live until the whole expression ends.
+            let vmm = self.built_vm.vmm().lock().unwrap();
+            console_tx_states = vmm.console_tx_states.clone();
+            #[cfg(target_arch = "x86_64")]
+            {
+                stated_reason = Some(vmm.stated_stop_reason_state());
+            }
+        }
         VmHandle {
             vmm: Some(self.built_vm.vmm().clone()),
             #[cfg(target_arch = "x86_64")]
-            stated_reason: Some(
-                self.built_vm
-                    .vmm()
-                    .lock()
-                    .unwrap()
-                    .stated_stop_reason_state(),
-            ),
-            console_tx_states: self
-                .built_vm
-                .vmm()
-                .lock()
-                .unwrap()
-                .console_tx_states
-                .clone(),
+            stated_reason,
+            console_tx_states,
             #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
             heartbeat_control: None,
             #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
