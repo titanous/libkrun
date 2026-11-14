@@ -1367,6 +1367,12 @@ impl Vcpu {
                 }
                 #[cfg(target_arch = "x86_64")]
                 VcpuExit::IoOut(addr, data) => {
+                    if addr == crate::cooperative::FREEZE_PORT {
+                        if self.id != 0 || data != [1] {
+                            return Err(Error::VcpuUnhandledKvmExit);
+                        }
+                        return Ok(VcpuEmulation::Frozen);
+                    }
                     self.io_bus.write(0, u64::from(addr), data);
                     Ok(VcpuEmulation::Handled)
                 }
@@ -1491,6 +1497,15 @@ impl Vcpu {
                 // So we pause vCPU0 and send a signal to the emulation thread to stop the VMM.
                 Ok(VcpuEmulation::Stopped) => return self.exit(FC_EXIT_CODE_OK),
                 Ok(VcpuEmulation::Rebooted) => return self.exit(FC_EXIT_CODE_REBOOT),
+                Ok(VcpuEmulation::Frozen) => {
+                    self.response_sender
+                        .send(VcpuResponse::Frozen)
+                        .expect("failed to report cooperative freeze");
+                    self.exit_evt
+                        .write(1)
+                        .expect("failed to signal cooperative freeze");
+                    return StateMachine::next(Self::exited);
+                }
                 // Emulation errors lead to vCPU exit.
                 Err(_) => return self.exit(FC_EXIT_CODE_GENERIC_ERROR),
             }
@@ -1598,6 +1613,11 @@ impl Vcpu {
     }
 
     #[cfg(test)]
+    fn exited(&mut self) -> StateMachine<Self> {
+        StateMachine::finish()
+    }
+
+    #[cfg(test)]
     // In tests the main/vmm thread exits without 'exit()'ing the whole process.
     // All channels get closed on the other side while this Vcpu thread is still running.
     // This Vcpu thread should just do a clean finish without reporting back to the main thread.
@@ -1629,6 +1649,8 @@ pub enum VcpuResponse {
     Paused,
     /// Vcpu is resumed.
     Resumed,
+    /// Boot CPU has cooperatively frozen and will never enter KVM again.
+    Frozen,
     /// Vcpu is stopped.
     Exited(u8),
 }
@@ -1704,6 +1726,7 @@ enum VcpuEmulation {
     Interrupted,
     Stopped,
     Rebooted,
+    Frozen,
 }
 
 #[cfg(test)]

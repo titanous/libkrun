@@ -467,6 +467,11 @@ impl Subscriber for Vmm {
                 .iter()
                 .find_map(|handle| match handle.response_receiver().try_recv() {
                     Ok(VcpuResponse::Exited(exit_code)) => Some(exit_code),
+                    Ok(VcpuResponse::Frozen) => {
+                        // Capture is opt-in. Never turn an unconsumed frozen
+                        // notification into a successful ordinary shutdown.
+                        Some(FC_EXIT_CODE_GENERIC_ERROR)
+                    }
                     _ => None,
                 })
                 .unwrap_or(FC_EXIT_CODE_OK);
