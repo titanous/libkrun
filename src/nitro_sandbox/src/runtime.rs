@@ -132,6 +132,67 @@ impl TerminalFacts {
     }
 }
 
+/// How long a run keeps draining the console after the guest kernel stated a
+/// final reason, when the guest does not power off first. On Nitro a reboot or
+/// panic resets the guest in place (no VMM exit event), so the stated reason
+/// itself ends the run.
+const FINAL_REASON_DRAIN: Duration = Duration::from_secs(1);
+
+/// The first final reason the guest kernel stated, kept for the rest of the
+/// run: a guest reset in place boots a new kernel whose driver clears the byte,
+/// which must not undo the ending. A later panic still replaces it (the
+/// observer keeps panic sticky).
+#[derive(Default)]
+struct FinalReason(Option<(Instant, u8, Option<u64>)>);
+impl FinalReason {
+    /// Record or reapply the latched reason; true once the drain bound passed.
+    fn update(&mut self, facts: &mut TerminalFacts, now: Instant) -> bool {
+        match self.0 {
+            None if facts.final_reason() => {
+                self.0 = Some((now, facts.reason, facts.observed_micros));
+                false
+            }
+            None => false,
+            Some((at, reason, micros)) => {
+                if facts.final_reason() {
+                    if facts.reason != reason {
+                        self.0 = Some((at, facts.reason, facts.observed_micros));
+                    }
+                } else {
+                    facts.reason = reason;
+                    facts.observed_micros = micros;
+                }
+                now.duration_since(at) >= FINAL_REASON_DRAIN
+            }
+        }
+    }
+    fn latched(&self) -> bool {
+        self.0.is_some()
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn final_reason_survives_a_reset_in_place_and_ends_after_the_drain() {
+    let start = Instant::now();
+    let mut facts = TerminalFacts::default();
+    let mut latch = FinalReason::default();
+    assert!(!latch.update(&mut facts, start));
+    facts.observe_reason(5, Some(1));
+    assert!(!latch.update(&mut facts, start));
+    assert!(!latch.latched());
+    facts.observe_reason(2, Some(7));
+    assert!(!latch.update(&mut facts, start));
+    // The rebooted kernel's driver clears the byte: the reboot stays stated.
+    facts.observe_reason(0, Some(9));
+    assert!(!latch.update(&mut facts, start + Duration::from_millis(500)));
+    assert_eq!((facts.reason, facts.observed_micros), (2, Some(7)));
+    // A panic during the drain replaces it; the deadline stays the first one.
+    facts.observe_reason(4, Some(11));
+    assert!(latch.update(&mut facts, start + FINAL_REASON_DRAIN));
+    assert_eq!(facts.reason, 4);
+}
+
 type Observer = Arc<Mutex<dyn VmmExitObserver>>;
 /// Registered observers and whether the guest has already exited. An observer
 /// registered after the exit is notified at once.
@@ -717,6 +778,7 @@ impl Runtime {
         let mut watchdog = Watchdog::new(Duration::ZERO, self.timeout);
         let mut active = 0usize;
         let mut facts = TerminalFacts::default();
+        let mut final_reason = FinalReason::default();
         let mut parked = self.park.is_some();
         loop {
             if let Some((slot, wait)) = self.park.take() {
@@ -785,9 +847,14 @@ impl Runtime {
                     }
                 }
             }
-            // A stated reason is recorded but never ends the run by itself: the
-            // run ends on power-off, a host stop, liveness or device expiry.
+            // The reason comes only from the kernel's reason device. A final
+            // reason ends the run at power-off or after a bounded console drain
+            // (a reboot or panic resets a Nitro guest in place).
             self.observe_reason(&mut facts);
+            if final_reason.update(&mut facts, Instant::now()) {
+                self.sandbox.drain_console(&mut self.console)?;
+                return Ok(facts);
+            }
             match self.stop.read() {
                 Ok(_) => {
                     facts.host_stop = true;
@@ -801,6 +868,7 @@ impl Runtime {
                 // The terminal status can become visible just after the loop's
                 // first sample. Read the final ordered byte, including a clear.
                 self.observe_reason(&mut facts);
+                final_reason.update(&mut facts, Instant::now());
                 self.sandbox.drain_console(&mut self.console)?;
                 match self.stop.read() {
                     Ok(_) => facts.host_stop = true,
@@ -826,12 +894,15 @@ impl Runtime {
             }
             self.sandbox.drain_console(&mut self.console)?;
             // `frozen` is set by `run_facts` only after the source has closed.
-            if self.poll_capture(&mut facts)? {
+            // A guest that stated a final reason is never captured.
+            if !final_reason.latched() && self.poll_capture(&mut facts)? {
                 return Ok(facts);
             }
             // Liveness and the device watchdog are suspended while parked and
-            // restart with fresh deadlines at release.
+            // restart with fresh deadlines at release; after a final reason the
+            // stated ending decides.
             if !parked
+                && !final_reason.latched()
                 && self
                     .heartbeat
                     .as_mut()
@@ -842,7 +913,7 @@ impl Runtime {
                 facts.liveness_expired = true;
                 return Ok(facts);
             }
-            if !parked && watchdog.expired(start.elapsed()) {
+            if !parked && !final_reason.latched() && watchdog.expired(start.elapsed()) {
                 facts.device_expired = true;
                 return Ok(facts);
             }
