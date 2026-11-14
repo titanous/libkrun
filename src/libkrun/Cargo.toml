@@ -53,6 +53,7 @@ vm-memory = { version = "0.18", features = ["backend-mmap"] }
 
 [dev-dependencies]
 proptest = "1.4"
+serde_json = "1"
 
 [lib]
 name = "krun"
