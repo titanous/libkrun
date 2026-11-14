@@ -75,7 +75,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var_os("CLONE_HVC_CONSOLE").is_some() {
         builder.add_kernel_cmdline_args(&["console=hvc0"]);
     }
-    if args[1] == "host-freeze" {
+    if args[1] == "ordinary" {
+        // No template reservation: exercise the ordinary anonymous RAM path.
+    } else if args[1] == "host-freeze" {
         builder.future_template();
     } else if args[1] == "freeze" || args[1] == "refuse" || args[1] == "unsolicited" {
         builder.capture_cooperative_template(control, PathBuf::from(&args[2]));
