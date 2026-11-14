@@ -80,7 +80,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("SOURCE_STARTED");
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut control = None;
-    let mut owned = std::collections::BTreeMap::<u64, u64>::new();
+    let mut owned = nitro_sandbox::owned_memory::BootMemory::default();
     let mut freeze_begin = None;
     loop {
         source.drain_console(&mut console)?;
@@ -93,17 +93,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(s) = line.split("NITRO_FREEZE_CONTROL phys=").nth(1) {
                 control = u64::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok();
             }
-            if line.contains("node   0: [mem ") {
-                if let Some(s) = line.split("[mem ").nth(1) {
-                    if let Some((a, b)) = s.trim_end_matches(']').split_once('-') {
-                        if let (Ok(a), Ok(b)) = (
-                            u64::from_str_radix(a.trim_start_matches("0x"), 16),
-                            u64::from_str_radix(b.trim_start_matches("0x"), 16),
-                        ) {
-                            owned.insert(a, b + 1);
-                        }
-                    }
-                }
+            if line.ends_with(']') {
+                owned.observe(line)?;
             }
         }
         if let Some(gpa) = control {
@@ -130,37 +121,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .elapsed()
             .as_micros()
     );
-    let mut merged = std::collections::BTreeMap::new();
-    let mut current: Option<(u64, u64)> = None;
-    for (&start, &end) in &owned {
-        match current {
-            Some((a, b)) if start == b => current = Some((a, end)),
-            Some((_, b)) if start < b => return Err("overlapping owned memory".into()),
-            Some((a, b)) => {
-                merged.insert(a, b);
-                current = Some((start, end));
-            }
-            None => current = Some((start, end)),
-        }
-    }
-    if let Some((a, b)) = current {
-        merged.insert(a, b);
-    }
-    let owned = merged;
-    if owned.len() != if memory_mib == 1024 { 1 } else { 2 } {
-        return Err("missing owned RAM ranges".into());
-    }
-    let ranges = owned
+    let plan = owned.ranges(memory_size)?;
+    let owned = plan
         .iter()
-        .map(|(&a, &b)| {
-            let at = offset(a).ok_or("invalid owned GPA")?;
-            let len = usize::try_from(b - a).map_err(|_| "owned size overflow")?;
-            if at.checked_add(len).is_none_or(|end| end > memory_size) {
-                return Err("owned range outside backing");
-            }
-            Ok((at, len))
-        })
-        .collect::<Result<Vec<_>, &str>>()?;
+        .map(|&(gpa, _, len)| (gpa, gpa + len as u64))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let ranges = plan
+        .iter()
+        .map(|&(_, at, len)| (at, len))
+        .collect::<Vec<_>>();
     let control_offset = offset(control).ok_or("control outside RAM")?;
     let base = source.ram.address() as usize;
     let page = unsafe { std::slice::from_raw_parts((base + control_offset) as *const u8, 4096) };
@@ -233,11 +202,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::ptr::copy_nonoverlapping(seed.as_ptr(), (ctrl + 80) as *mut u8, 32);
         }
         put(ctrl, 112, 1);
-        put(ready, 16, entry.entry);
-        put(ready, 24, entry.gic_list);
-        put(ready, 32, entry.gic_count);
-        std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
-        put(ready, 8, 1);
+        // SAFETY: READY was observed in the live receiver reservation; all
+        // owned RAM was copied, and this diagnostic has no device backends.
+        unsafe {
+            nitro_sandbox::receiver::release(ready as *mut u64, entry)?;
+        }
         let resume = Instant::now();
         let deadline = resume + Duration::from_secs(15);
         let mut verified = false;
