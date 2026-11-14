@@ -735,6 +735,11 @@ pub fn build_microvm(
         kernel_cmdline.insert_str(DEFAULT_KERNEL_CMDLINE)?;
     }
 
+    #[cfg(target_arch = "x86_64")]
+    if vm_resources.cooperative_capture.is_some() {
+        kernel_cmdline.insert_str("cooperative_template")?;
+    }
+
     // if let Some(cmdline) = &vm_resources.kernel_cmdline.krun_env {
     //     kernel_cmdline.insert_str(cmdline.as_str()).unwrap();
     // }
