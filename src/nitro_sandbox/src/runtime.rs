@@ -49,10 +49,13 @@ impl Runtime {
             }
             for transport in &mut self.transports {
                 match transport.refresh(&self.sandbox, self.memory.as_ref().unwrap())? {
-                    Action::Start => { active += 1; watchdog.devices_ready(); }
-                    Action::Stop => { active = active.saturating_sub(1); if active == 0 { watchdog.devices_reset(start.elapsed()); } }
+                    Action::Start => { active += 1; }
+                    Action::Stop => { active = active.saturating_sub(1); watchdog.devices_reset(start.elapsed()); }
                     Action::None => {}
                 }
+            }
+            if !self.transports.is_empty() && active == self.transports.len() {
+                watchdog.devices_ready();
             }
             self.sandbox.drain_console(&mut io::stdout())?;
             if watchdog.expired(start.elapsed()) { return Ok(Exit::Watchdog); }
