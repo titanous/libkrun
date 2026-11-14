@@ -2451,8 +2451,17 @@ impl VmHandle {
         timeout: std::time::Duration,
     ) -> std::io::Result<vmm::template::Template> {
         let request = {
-            let vmm = self.vmm.as_ref().ok_or_else(|| std::io::Error::new(
-                std::io::ErrorKind::Unsupported, "cooperative capture requires Linux KVM"))?.lock().unwrap();
+            let vmm = self
+                .vmm
+                .as_ref()
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::Unsupported,
+                        "cooperative capture requires Linux KVM",
+                    )
+                })?
+                .lock()
+                .unwrap();
             vmm.arm_template_capture(timeout)?
         };
         request.wait()
@@ -2461,8 +2470,18 @@ impl VmHandle {
     /// Authorize a test-triggered capture without requesting it from the guest.
     #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
     pub fn arm_template_capture(&self, timeout: std::time::Duration) -> std::io::Result<()> {
-        let request = self.vmm.as_ref().ok_or_else(|| std::io::Error::new(
-            std::io::ErrorKind::Unsupported, "cooperative capture requires Linux KVM"))?.lock().unwrap().arm_template_capture(timeout)?;
+        let request = self
+            .vmm
+            .as_ref()
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "cooperative capture requires Linux KVM",
+                )
+            })?
+            .lock()
+            .unwrap()
+            .arm_template_capture(timeout)?;
         request.take_request();
         Ok(())
     }
