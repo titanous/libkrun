@@ -26,6 +26,9 @@ pub mod vm_exit;
 
 #[cfg(target_os = "linux")]
 pub mod template_memory;
+
+#[cfg(target_arch = "x86_64")]
+pub mod cooperative;
 /// Wrappers over structures used to configure the VMM.
 pub mod vmm_config;
 

@@ -1154,6 +1154,74 @@ impl Vcpu {
         Ok(())
     }
 
+    /// Enter a cooperatively frozen kernel without running boot setup or
+    /// writing page tables into its RAM. Call after CPUID configuration.
+    #[cfg(target_arch = "x86_64")]
+    pub fn configure_cooperative_entry(
+        &mut self,
+        entry: &crate::cooperative::ResumeEntry,
+    ) -> Result<()> {
+        use kvm_bindings::{kvm_dtable, kvm_regs, kvm_segment};
+        let mut sregs = self.fd.get_sregs().map_err(Error::VcpuGetSregs)?;
+        let code = kvm_segment {
+            base: 0,
+            limit: u32::MAX,
+            selector: 0x10,
+            type_: 11,
+            present: 1,
+            dpl: 0,
+            db: 0,
+            s: 1,
+            l: 1,
+            g: 1,
+            avl: 0,
+            unusable: 0,
+            padding: 0,
+        };
+        let data = kvm_segment {
+            selector: 0x18,
+            type_: 3,
+            l: 0,
+            db: 1,
+            ..code
+        };
+        sregs.cs = code;
+        sregs.ds = data;
+        sregs.es = data;
+        sregs.ss = data;
+        sregs.fs = data;
+        sregs.gs = kvm_segment {
+            base: entry.gs_base,
+            ..data
+        };
+        sregs.gdt = kvm_dtable {
+            base: entry.gdt_base,
+            limit: entry.gdt_limit,
+            padding: [0; 3],
+        };
+        sregs.idt = kvm_dtable {
+            base: entry.idt_base,
+            limit: entry.idt_limit,
+            padding: [0; 3],
+        };
+        sregs.cr0 = entry.cr0;
+        sregs.cr3 = entry.cr3;
+        sregs.cr4 = entry.cr4;
+        sregs.efer = entry.efer;
+        self.fd.set_sregs(&sregs).map_err(Error::VcpuSetSregs)?;
+        self.fd
+            .set_regs(&kvm_regs {
+                rip: entry.rip,
+                rsp: entry.stack,
+                rflags: 2,
+                ..Default::default()
+            })
+            .map_err(Error::VcpuSetRegs)?;
+        arch::x86_64::regs::setup_fpu(&self.fd).map_err(Error::FPUConfiguration)?;
+        arch::x86_64::msr::setup_msrs(&self.fd).map_err(Error::MSRSConfiguration)?;
+        Ok(())
+    }
+
     #[cfg(target_arch = "aarch64")]
     /// Configures an aarch64 specific vcpu.
     ///
