@@ -544,6 +544,7 @@ pub struct Builder {
     configuration_error: Option<std::io::Error>,
     extra_kernel_args: Vec<String>,
     socket_policy: SocketPolicy,
+    guest_vsock_cid: Option<u32>,
     /// Number of console devices added (for computing device paths)
     console_count: u32,
 }
@@ -644,6 +645,18 @@ impl Builder {
     }
 
     /// Disable internet socket forwarding without disabling mapped vsock ports.
+    /// Select the guest-visible userspace-vsock CID (default 3). Copies need fresh CIDs.
+    pub fn vsock_cid(&mut self, cid: u32) -> std::io::Result<&mut Self> {
+        if cid <= 2 || cid == u32::MAX {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "guest vsock CID is reserved",
+            ));
+        }
+        self.guest_vsock_cid = Some(cid);
+        Ok(self)
+    }
+
     pub fn internet_socket_forwarding(&mut self, enabled: bool) -> &mut Self {
         self.socket_policy.internet_enabled = enabled;
         self
@@ -1820,7 +1833,7 @@ impl Builder {
                 VsockConfig::Explicit { tsi_flags } => {
                     let vsock_device_config = VsockDeviceConfig {
                         vsock_id: "vsock0".to_string(),
-                        guest_cid: 3,
+                        guest_cid: self.guest_vsock_cid.unwrap_or(3),
                         host_port_map: ctx_cfg.tsi_port_map,
                         unix_ipc_port_map: ctx_cfg.unix_ipc_port_map.clone(),
                         tsi_flags: if self.socket_policy.internet_enabled {
@@ -1856,7 +1869,7 @@ impl Builder {
 
                         let vsock_device_config = VsockDeviceConfig {
                             vsock_id: "vsock0".to_string(),
-                            guest_cid: 3,
+                            guest_cid: self.guest_vsock_cid.unwrap_or(3),
                             host_port_map,
                             unix_ipc_port_map: ctx_cfg.unix_ipc_port_map.clone(),
                             tsi_flags,
@@ -2664,6 +2677,16 @@ mod nitro_cmdline_tests {
             nitro_cmdline(&args, TsiFlags::HIJACK_INET | TsiFlags::HIJACK_UNIX),
             "panic=-1 rdinit=/init tsi_hijack tsi_hijack_unix"
         );
+    }
+    #[test]
+    fn builder_vsock_cid_rejects_reserved_values() {
+        let mut builder = Builder::new();
+        assert_eq!(builder.guest_vsock_cid, None);
+        for cid in [0, 1, 2, u32::MAX] {
+            assert!(builder.vsock_cid(cid).is_err());
+        }
+        builder.vsock_cid(41).unwrap();
+        assert_eq!(builder.guest_vsock_cid, Some(41));
     }
     #[test]
     fn builder_flags_follow_internet_forwarding() {
