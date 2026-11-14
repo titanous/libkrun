@@ -10,7 +10,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let args: Vec<_> = std::env::args().collect();
     if !(2..=3).contains(&args.len()) {
-        return Err("usage: nitro-template-capture identity-source.eif [receiver.eif]".into());
+        return Err(
+            "usage: nitro-template-capture marked-source.eif [receiver.eif] (source command line must include cooperative_template)"
+                .into(),
+        );
     }
     let request = vmm::capture_request::CaptureRequest::default();
     let mut runtime = Runtime::with_lifecycle_lock(
@@ -38,10 +41,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         1024 * 1024,
         1024 * 1024,
     ));
-    if !unarmed {
-        request.arm(std::time::Duration::from_secs(15))?;
-    }
+    // Arm only after the runtime has confirmed the guest's boot marker
+    // (cooperative_template on the image's command line). Never before.
+    let arm_request = request.clone();
+    let armer = (!unarmed).then(|| {
+        std::thread::spawn(move || -> std::io::Result<()> {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+            while arm_request.require_marker().is_err() {
+                if std::time::Instant::now() >= deadline {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "boot marker was never confirmed; image must carry cooperative_template",
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            arm_request.arm(std::time::Duration::from_secs(15))
+        })
+    });
     let exit = runtime.run()?;
+    if let Some(armer) = armer {
+        armer.join().map_err(|_| "arming thread panicked")??;
+    }
     if unarmed {
         if exit != Exit::PowerOff {
             return Err("unarmed source did not recover and power off".into());

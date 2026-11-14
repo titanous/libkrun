@@ -25,8 +25,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     builder.future_template();
     let context = builder.build()?;
     let handle = context.vm_handle();
-    handle.arm_template_capture(Duration::from_secs(15))?;
-    if !matches!(context.run()?, VmExit::Frozen { .. }) {
+    // Arming is refused with TemplateMarkerMissing until the runtime confirms
+    // the boot marker; retry only that refusal, bounded, from another thread.
+    let arm_handle = context.vm_handle();
+    let armer = std::thread::spawn(move || -> std::io::Result<()> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            match arm_handle.arm_template_capture(Duration::from_secs(15)) {
+                Err(error)
+                    if error
+                        .get_ref()
+                        .is_some_and(|e| e.is::<vmm::cooperative::TemplateMarkerMissing>())
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(5))
+                }
+                result => return result,
+            }
+        }
+    });
+    let exit = context.run()?;
+    armer.join().map_err(|_| "arming thread panicked")??;
+    if !matches!(exit, VmExit::Frozen { .. }) {
         return Err("expected frozen exit".into());
     }
     let template = handle.wait_template_capture()?;

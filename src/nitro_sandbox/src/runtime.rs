@@ -15,6 +15,60 @@ pub trait RestoreHandler: Send {
     fn restore(self: Box<Self>, sandbox: &Sandbox) -> io::Result<()>;
 }
 
+/// Why a parked receiver ended without importing a template.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParkedReceiverError {
+    /// No template was assigned and released within the park window.
+    Expired,
+    /// Every assignment handle was dropped while the receiver waited.
+    Abandoned,
+    /// The receiver already took an assignment, expired or ended.
+    Closed,
+}
+impl std::fmt::Display for ParkedReceiverError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Expired => "parked receiver was not given a template before its wait expired",
+            Self::Abandoned => "parked receiver was dropped before a template was assigned",
+            Self::Closed => "parked receiver no longer accepts a template",
+        })
+    }
+}
+impl std::error::Error for ParkedReceiverError {}
+
+struct ParkSlot {
+    state: Mutex<(Option<Box<dyn RestoreHandler>>, bool)>,
+    wake: utils::eventfd::EventFd,
+    ready: std::sync::atomic::AtomicBool,
+}
+
+/// Hands one template import to a receiver started with `park_for_restore`.
+/// Dropping every handle while the receiver waits ends it with `Abandoned`.
+#[derive(Clone)]
+pub struct RestoreAssignment(Arc<ParkSlot>);
+impl RestoreAssignment {
+    /// Accept at most one handler; refused with `ParkedReceiverError::Closed`
+    /// once the receiver has taken an assignment, expired or ended.
+    pub fn assign(&self, handler: Box<dyn RestoreHandler>) -> io::Result<()> {
+        let mut state = self.0.state.lock().unwrap();
+        if state.1 || state.0.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                ParkedReceiverError::Closed,
+            ));
+        }
+        state.0 = Some(handler);
+        drop(state);
+        self.0.wake.write(1)?;
+        Ok(())
+    }
+    /// True once the parked receiver has published READY (observed within
+    /// the runtime's 50ms event bound).
+    pub fn receiver_ready(&self) -> bool {
+        self.0.ready.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Exit {
     PowerOff,
@@ -74,6 +128,7 @@ pub struct Runtime {
     accepted_capture: Option<crate::capture::AcceptedCapture>,
     marker_notified: bool,
     restore: Option<Box<dyn RestoreHandler>>,
+    park: Option<(Arc<ParkSlot>, Duration)>,
     memory_size: usize,
 }
 impl Runtime {
@@ -129,6 +184,7 @@ impl Runtime {
             accepted_capture: None,
             marker_notified: false,
             restore: None,
+            park: None,
             memory_size,
         })
     }
@@ -152,8 +208,39 @@ impl Runtime {
                 "parked receiver requires at least1GiB",
             ));
         }
+        if self.park.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "receiver is parked for a deferred template",
+            ));
+        }
         self.restore = Some(handler);
         Ok(())
+    }
+    /// Start as a parked receiver with no template chosen. `wait`, counted from
+    /// start, bounds both assignment and release; on expiry `run` returns
+    /// `ParkedReceiverError::Expired` (TimedOut) after the normal teardown.
+    /// The boot watchdog is suspended while parked and restarts at release.
+    pub fn park_for_restore(&mut self, wait: Duration) -> io::Result<RestoreAssignment> {
+        if self.memory_size < 1 << 30 || self.restore.is_some() || self.park.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "parking requires at least1GiB and no other restore",
+            ));
+        }
+        if wait.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "zero park wait",
+            ));
+        }
+        let slot = Arc::new(ParkSlot {
+            state: Mutex::new((None, false)),
+            wake: utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK)?,
+            ready: Default::default(),
+        });
+        self.park = Some((slot.clone(), wait));
+        Ok(RestoreAssignment(slot))
     }
     pub fn set_capture_handler(&mut self, handler: Box<dyn crate::capture::CaptureHandler>) {
         self.capture = Some(handler);
@@ -230,6 +317,9 @@ impl Runtime {
         }
         if let Some(heartbeat) = &self.heartbeat {
             descriptors.extend(heartbeat.poll_fds().into_iter().map(event));
+        }
+        if let Some((slot, _)) = &self.park {
+            descriptors.push(event(slot.wake.as_raw_fd()));
         }
         // Console has no notification descriptor. Bound diagnostic/panic and
         // deadline observation to 50ms without polling devices every millisecond.
@@ -364,7 +454,42 @@ impl Runtime {
         let mut watchdog = Watchdog::new(Duration::ZERO, self.timeout);
         let mut active = 0usize;
         let mut stated = None;
+        let mut parked = self.park.is_some();
         loop {
+            if let Some((slot, wait)) = self.park.take() {
+                let expired = start.elapsed() >= wait;
+                let abandoned = Arc::strong_count(&slot) == 1;
+                let address = self.sandbox.ram.address() + crate::receiver::CONTROL_OFFSET as u64;
+                // SAFETY: parking requires >=1GiB; the aligned control page lies in
+                // the receiver reservation inside the live RAM mapping.
+                if unsafe { (address as *const u64).read_volatile() } == crate::receiver::READY {
+                    slot.ready.store(true, std::sync::atomic::Ordering::Release);
+                }
+                let mut state = slot.state.lock().unwrap();
+                let _ = slot.wake.read();
+                if self.restore.is_none() {
+                    if let Some(handler) = state.0.take() {
+                        state.1 = true;
+                        self.restore = Some(handler);
+                    }
+                }
+                if self.restore.is_none() && abandoned {
+                    state.1 = true;
+                    return Err(io::Error::new(
+                        io::ErrorKind::ConnectionAborted,
+                        ParkedReceiverError::Abandoned,
+                    ));
+                }
+                if expired {
+                    state.1 = true;
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        ParkedReceiverError::Expired,
+                    ));
+                }
+                drop(state);
+                self.park = Some((slot, wait));
+            }
             if self.restore.is_some() {
                 let address = self.sandbox.ram.address() + crate::receiver::CONTROL_OFFSET as u64;
                 // SAFETY: restore is installed only for >=1GiB parked receiver
@@ -378,6 +503,11 @@ impl Runtime {
                         );
                     }
                     self.restore.take().unwrap().restore(&self.sandbox)?;
+                    if parked {
+                        parked = false;
+                        self.park = None;
+                        watchdog = Watchdog::new(start.elapsed(), self.timeout);
+                    }
                     if std::env::var_os("NITRO_COPY_TIMINGS").is_some() {
                         eprintln!(
                             "NITRO_RELEASE_TIMING host_ns={}",
@@ -471,7 +601,7 @@ impl Runtime {
             {
                 return Ok(Exit::LivenessExpired);
             }
-            if stated.is_none() && watchdog.expired(start.elapsed()) {
+            if stated.is_none() && !parked && watchdog.expired(start.elapsed()) {
                 return Ok(Exit::Watchdog);
             }
             self.wait_events()?;
@@ -515,6 +645,40 @@ impl Drop for Runtime {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Unused;
+    impl RestoreHandler for Unused {
+        fn restore(self: Box<Self>, _: &Sandbox) -> io::Result<()> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn parked_receiver_accepts_one_assignment_then_refuses_typed() {
+        let slot = Arc::new(ParkSlot {
+            state: Mutex::new((None, false)),
+            wake: utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
+            ready: Default::default(),
+        });
+        let handle = RestoreAssignment(slot.clone());
+        handle.assign(Box::new(Unused)).unwrap();
+        assert_eq!(slot.wake.read().unwrap(), 1);
+        let refused = handle.assign(Box::new(Unused)).unwrap_err();
+        assert_eq!(
+            refused
+                .get_ref()
+                .unwrap()
+                .downcast_ref::<ParkedReceiverError>(),
+            Some(&ParkedReceiverError::Closed)
+        );
+        // Once the runtime closes the slot (taken, expired or ended) nothing is accepted.
+        let closed = RestoreAssignment(Arc::new(ParkSlot {
+            state: Mutex::new((None, true)),
+            wake: utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
+            ready: Default::default(),
+        }));
+        assert!(closed.assign(Box::new(Unused)).is_err());
+    }
 
     #[test]
     fn panicking_observer_does_not_skip_later_observers_or_double_panic() {

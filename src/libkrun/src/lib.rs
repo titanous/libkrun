@@ -509,6 +509,63 @@ pub use nitro_sandbox::lifecycle::{
     Serialization as NitroSerialization,
 };
 
+#[cfg(all(
+    target_os = "linux",
+    target_arch = "aarch64",
+    feature = "nitro-sandbox"
+))]
+pub use nitro_sandbox::runtime::ParkedReceiverError;
+
+/// Gives a parked Nitro receiver its template, once. See
+/// `Builder::park_for_template`.
+#[cfg(all(
+    target_os = "linux",
+    target_arch = "aarch64",
+    feature = "nitro-sandbox"
+))]
+pub struct TemplateAssignment {
+    slot: nitro_sandbox::runtime::RestoreAssignment,
+    vcpus: u8,
+    ram_mib: u64,
+    topology: Vec<u8>,
+}
+#[cfg(all(
+    target_os = "linux",
+    target_arch = "aarch64",
+    feature = "nitro-sandbox"
+))]
+impl TemplateAssignment {
+    /// Open and check the template against this receiver's CPU count, memory
+    /// and device list, then hand it over. The receiver's own kernel identity
+    /// is compared before any memory is written. Refused with a
+    /// `ParkedReceiverError::Closed` error after an assignment, expiry or end.
+    pub fn assign(&self, source: TemplateSource) -> std::io::Result<()> {
+        let template = match source {
+            TemplateSource::Descriptor(file) => vmm::template::Template::open(file)?,
+            TemplateSource::Path(path) => vmm::template::Template::from_path(path)?,
+        };
+        let compatibility = template.compatibility.clone();
+        vmm::nitro_restore::validate(
+            &template,
+            self.vcpus,
+            self.ram_mib,
+            &self.topology,
+            &compatibility,
+        )?;
+        self.slot.assign(Box::new(vmm::nitro_restore::NitroRestore {
+            template,
+            vcpus: self.vcpus,
+            ram_mib: self.ram_mib,
+            topology: self.topology.clone(),
+            compatibility,
+        }))
+    }
+    /// True once the parked receiver has booted and published READY.
+    pub fn receiver_ready(&self) -> bool {
+        self.slot.receiver_ready()
+    }
+}
+
 #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
 pub struct NitroBackendConfig {
     pub image: PathBuf,
@@ -544,6 +601,12 @@ pub struct Builder {
         feature = "nitro-sandbox"
     ))]
     nitro_capture: Option<vmm::capture_request::CaptureRequest>,
+    #[cfg(all(
+        target_os = "linux",
+        target_arch = "aarch64",
+        feature = "nitro-sandbox"
+    ))]
+    nitro_park: Option<std::time::Duration>,
     config: ContextConfig,
     kernel_cmdline: Vec<String>,
     kernel_cmdline_configured: bool,
@@ -726,6 +789,25 @@ impl Builder {
         }
         configure(self)?;
         Ok(readiness)
+    }
+
+    /// Nitro arm64 only: build a receiving VM that boots its parked receiver
+    /// before any template is chosen. Configure the shape and the same device
+    /// list, in the same order, that the template's source used; backends stay
+    /// idle until release. Take the handle with
+    /// `Context::take_template_assignment` and give it a template later. `wait`
+    /// counts from start and bounds assignment and release; on expiry `run`
+    /// tears the VM down under the configured lifecycle lock and returns a
+    /// `TimedOut` error carrying `ParkedReceiverError::Expired`. Dropping the
+    /// handle unassigned ends it the same way with `Abandoned`.
+    #[cfg(all(
+        target_os = "linux",
+        target_arch = "aarch64",
+        feature = "nitro-sandbox"
+    ))]
+    pub fn park_for_template(&mut self, wait: std::time::Duration) -> &mut Self {
+        self.nitro_park = Some(wait);
+        self
     }
 
     /// Start a new VM over a sealed template descriptor. Configure the same
@@ -1351,8 +1433,19 @@ impl Builder {
                 "template capture and restore are mutually exclusive",
             )));
         }
+        #[cfg(target_arch = "aarch64")]
+        if self.nitro_park.is_some()
+            && (self.nitro_capture.is_some() || self.config.vmr.cooperative_template.is_some())
+        {
+            return Err(StartError::Nitro(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "a parked receiver cannot also capture or take a template at build",
+            )));
+        }
         #[cfg(all(target_arch = "aarch64", not(feature = "tee")))]
-        if (self.nitro_capture.is_some() || self.config.vmr.cooperative_template.is_some())
+        if (self.nitro_capture.is_some()
+            || self.config.vmr.cooperative_template.is_some()
+            || self.nitro_park.is_some())
             && (self.console_count != 0
                 || self
                     .config
@@ -1543,8 +1636,9 @@ impl Builder {
             ram_mib: config.mem_size_mib.unwrap_or(1024) as u32,
         };
         #[cfg(target_arch = "aarch64")]
-        let template_enabled =
-            self.nitro_capture.is_some() || self.config.vmr.cooperative_template.is_some();
+        let template_enabled = self.nitro_capture.is_some()
+            || self.config.vmr.cooperative_template.is_some()
+            || self.nitro_park.is_some();
         #[cfg(target_arch = "aarch64")]
         let mut template_topology = {
             let mut bytes = b"nitro-devices-v2".to_vec();
@@ -1693,6 +1787,16 @@ impl Builder {
                 .map_err(StartError::Nitro)?;
         }
         #[cfg(target_arch = "aarch64")]
+        let park = match self.nitro_park {
+            Some(wait) => Some(TemplateAssignment {
+                slot: runtime.park_for_restore(wait).map_err(StartError::Nitro)?,
+                vcpus: capture_vcpus,
+                ram_mib: memory_mib as u64,
+                topology: template_topology.clone(),
+            }),
+            None => None,
+        };
+        #[cfg(target_arch = "aarch64")]
         if let Some(request) = &self.nitro_capture {
             runtime.set_capture_handler(Box::new(vmm::nitro_capture::NitroCapture {
                 request: request.clone(),
@@ -1713,6 +1817,7 @@ impl Builder {
         let context = {
             let mut context = context;
             context.built_vm.nitro_capture = self.nitro_capture.take();
+            context.built_vm.nitro_park = park;
             context
         };
         Ok(context)
@@ -2126,6 +2231,12 @@ struct ContextVm {
         feature = "nitro-sandbox"
     ))]
     nitro_capture: Option<vmm::capture_request::CaptureRequest>,
+    #[cfg(all(
+        target_os = "linux",
+        target_arch = "aarch64",
+        feature = "nitro-sandbox"
+    ))]
+    nitro_park: Option<TemplateAssignment>,
 }
 impl Deref for ContextVm {
     type Target = vmm::builder::BuiltVm;
@@ -2156,6 +2267,12 @@ impl From<vmm::builder::BuiltVm> for ContextVm {
                 feature = "nitro-sandbox"
             ))]
             nitro_capture: None,
+            #[cfg(all(
+                target_os = "linux",
+                target_arch = "aarch64",
+                feature = "nitro-sandbox"
+            ))]
+            nitro_park: None,
         }
     }
 }
@@ -2269,11 +2386,23 @@ impl Context {
                 nitro_device_info: device_info,
                 #[cfg(all(target_arch = "aarch64", feature = "nitro-sandbox"))]
                 nitro_capture: None,
+                #[cfg(all(target_arch = "aarch64", feature = "nitro-sandbox"))]
+                nitro_park: None,
             },
             event_manager: EventManager::new().map_err(StartError::EventManager)?,
             shutdown_efd: Some(runtime_stop),
             vm_exit: Arc::new(Mutex::new(None)),
         })
+    }
+    /// Take the handle that gives this parked Nitro receiver its template.
+    /// Present once, only for contexts built with `Builder::park_for_template`.
+    #[cfg(all(
+        target_os = "linux",
+        target_arch = "aarch64",
+        feature = "nitro-sandbox"
+    ))]
+    pub fn take_template_assignment(&mut self) -> Option<TemplateAssignment> {
+        self.built_vm.nitro_park.take()
     }
     /// Access device information (console port paths, etc.).
     ///
