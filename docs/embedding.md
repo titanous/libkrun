@@ -201,21 +201,39 @@ block; byte limits cannot bound an arbitrary callback's execution time.
 
 On hosts requiring serialized teardown, call
 `nitro_lifecycle_lock(path, NitroSerialization::Teardown)` before build.
-`StartAndTeardown` additionally serializes VM creation and start ioctls. The daemon
+`StartAndTeardown` holds one lock continuously from VM creation through a
+successful start, including loading and device setup. The daemon
 creates a regular lock file with service-owned permissions before launching VMMs;
 the library opens it without following symlinks and retains that inode. Do not
 unlink, replace, or rotate the file while any VMM exists. No lock is used by default;
 that default is not safe on hosts requiring serialized teardown, including m9g.
 
-**Before killing a VMM**, the daemon must open this same file and take exclusive
-`flock`, send the kill signal, wait for the process to be reaped and for its guest
-to be gone, then release the lock. Hold it across all those steps. Killing a VMM
-without the lock bypasses library teardown serialization. Prefer a handle stop
-request, which stops workers and closes the VM under the configured lock.
-A one-guest VMM can call `handle.install_sigterm_handler()` and retain the returned
-guard through `run`; SIGTERM then writes the same stop event and returns
-`VmExit::Stopped`. Installation is explicit so the library does not silently
-replace the embedder's process-wide signal policy.
+**The host daemon retains a VM descriptor for every guest.** After `build` and
+before `run`, call `Context::duplicate_nitro_vm_descriptor()` and transfer the
+owned descriptor to the daemon with `SCM_RIGHTS`. Wait for the daemon's
+acknowledgment before starting. A VM lives until the last duplicate is closed:
+SIGKILL, a crash, OOM, or a panicking destructor in the VMM cannot perform the
+final close while the daemon retains its duplicate. This handoff is required on
+hosts with serialized teardown. The interval before handoff is not protected
+against an unexpected process death; supervise creation accordingly.
+
+The daemon opens the same inode using `NitroLifecycleLock::open`, reaps the VMM,
+then calls `NitroOpenLifecycleLock::close_vm_descriptor(&mut descriptor)` off its
+event loop. The helper acquires exclusive flock before consuming the descriptor;
+on lock failure ownership stays with the caller, which must retry. Close all
+retained duplicates serially. Reaping alone is not guest destruction while a
+duplicate remains. Never drop a retained descriptor outside the lock. Prefer
+handle stop for orderly worker shutdown. See `nitro_supervised` and
+`supervised-lifecycles.py` for bounded handoff/kill/reap/close fixtures.
+
+Call `builder.install_nitro_sigterm_handler()` before `build` and retain the
+returned guard through build and run. SIGTERM received during build is retained
+as a stop request; during run it returns `VmExit::Stopped`. Registration is
+explicit because it changes process-wide signal policy. The post-build handle
+method remains available, but cannot protect the creation interval. On teardown
+backend refusal, `run` returns an error after locked close and retains mappings
+that a worker may still access until the one-guest process exits. Exit observer
+panics are contained so cleanup reaches the locked close.
 All cooperating VMMs and the daemon must resolve the path to the same inode,
 including across mount namespaces. Starts/stops in different processes are
 serialized by the kernel's flock, not a process-local mutex.

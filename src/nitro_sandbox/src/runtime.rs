@@ -28,8 +28,18 @@ impl ExitObservers {
         self.0.lock().unwrap().push(observer);
     }
     fn notify(&mut self) {
-        for observer in self.0.get_mut().unwrap().drain(..) {
-            observer.lock().unwrap().on_vmm_exit();
+        for observer in self
+            .0
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
+        {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                observer
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .on_vmm_exit();
+            }));
         }
     }
 }
@@ -90,6 +100,9 @@ impl Runtime {
             stop_reason: None,
         })
     }
+    pub fn duplicate_vm_descriptor(&self) -> io::Result<std::os::fd::OwnedFd> {
+        self.sandbox.duplicate_vm_descriptor()
+    }
     pub fn enable_stop_reason(&mut self) -> io::Result<()> {
         self.stop_reason = Some(crate::stop_reason::StopReason::register(&mut self.sandbox)?);
         Ok(())
@@ -99,6 +112,9 @@ impl Runtime {
     }
     pub fn set_console(&mut self, console: crate::console::Console) {
         self.console = console;
+    }
+    pub fn set_stop_event(&mut self, stop: Arc<utils::eventfd::EventFd>) {
+        self.stop = stop;
     }
     pub fn stop_event(&self) -> Arc<utils::eventfd::EventFd> {
         self.stop.clone()
@@ -183,6 +199,19 @@ impl Runtime {
     }
 
     pub fn run(mut self) -> io::Result<Exit> {
+        let result = self.run_inner();
+        let cleanup = self.shutdown();
+        match (result, cleanup) {
+            (Err(error), _) | (_, Err(error)) => Err(error),
+            (Ok(exit), Ok(())) => Ok(exit),
+        }
+    }
+    fn run_inner(&mut self) -> io::Result<Exit> {
+        match self.stop.read() {
+            Ok(_) => return Ok(Exit::Stopped),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(error) => return Err(error),
+        }
         self.sandbox.start(self.cid)?;
         let start = Instant::now();
         if let Some(heartbeat) = &mut self.heartbeat {
@@ -280,20 +309,34 @@ impl Runtime {
                 .map_err(|e| io::Error::other(format!("dispatch: {e:?}")))?;
         }
     }
+    fn shutdown(&mut self) -> io::Result<()> {
+        let mut failure = None;
+        for transport in &mut self.transports {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                transport.prepare_exit();
+                transport.stop()
+            }));
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => failure = Some(error),
+                Err(_) => failure = Some(io::Error::other("device panicked during teardown")),
+            }
+        }
+        if let Some(error) = failure {
+            self.sandbox.close_retaining_worker_mappings();
+            std::mem::forget(std::mem::take(&mut self.transports));
+            std::mem::forget(self.memory.take());
+            return Err(error);
+        }
+        self.transports.clear();
+        self.observers.notify();
+        self.memory.take();
+        Ok(())
+    }
 }
 impl Drop for Runtime {
     fn drop(&mut self) {
-        for t in &mut self.transports {
-            t.prepare_exit();
-            if t.stop().is_err() {
-                std::process::abort();
-            }
-        }
-        self.transports.clear();
-        // Workers no longer touch guest queues or backend state. Notify on every
-        // exit path, including failed start and device-dispatch errors.
-        self.observers.notify();
-        self.memory.take();
+        let _ = self.shutdown();
     }
 }
 
@@ -302,6 +345,18 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    #[test]
+    fn panicking_observer_does_not_skip_later_observers_or_double_panic() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        let mut observers = ExitObservers::default();
+        observers.register(Arc::new(Mutex::new(|| panic!("observer failure"))));
+        observers.register(Arc::new(Mutex::new(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+        })));
+        observers.notify();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
     #[test]
     fn observers_notify_exactly_once_for_all_exit_results() {
         let outcomes = [

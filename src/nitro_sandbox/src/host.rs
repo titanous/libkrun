@@ -164,6 +164,7 @@ pub struct Sandbox {
     _control: File,
     _info_file: File,
     lifecycle_lock: Option<crate::lifecycle::OpenLock>,
+    start_guard: std::sync::Mutex<Option<crate::lifecycle::Guard>>,
     console_at: std::collections::HashMap<usize, u32>,
     device_regions: Vec<SharedRegion>,
 }
@@ -237,7 +238,6 @@ impl Sandbox {
         };
         let raw = call(&control, 3, 0x30, &mut c)?;
         let vm = unsafe { File::from_raw_fd(raw) };
-        drop(creation_guard);
         let sb = Self {
             vm: Some(vm),
             ram,
@@ -245,6 +245,7 @@ impl Sandbox {
             _control: control,
             _info_file: info_file,
             lifecycle_lock,
+            start_guard: std::sync::Mutex::new(creation_guard),
             console_at: Default::default(),
             device_regions: Vec::new(),
         };
@@ -517,12 +518,7 @@ impl Sandbox {
         Ok(None)
     }
     pub fn start(&self, cid: u64) -> io::Result<()> {
-        let _guard = self
-            .lifecycle_lock
-            .as_ref()
-            .filter(|lock| lock.serialization == crate::lifecycle::Serialization::StartAndTeardown)
-            .map(|lock| lock.acquire())
-            .transpose()?;
+        let mut start_guard = self.start_guard.lock().unwrap_or_else(|e| e.into_inner());
         call(
             self.vm.as_ref().unwrap(),
             3,
@@ -532,6 +528,7 @@ impl Sandbox {
                 second: cid,
             },
         )?;
+        start_guard.take();
         Ok(())
     }
     pub fn drain_console(&mut self, output: &mut impl Write) -> io::Result<()> {
@@ -575,6 +572,11 @@ impl Sandbox {
             }
         }
         output.flush()
+    }
+    /// Duplicate the VM descriptor for a supervising daemon. The VM survives
+    /// until its last duplicate is closed; the daemon must close under its lock.
+    pub fn duplicate_vm_descriptor(&self) -> io::Result<std::os::fd::OwnedFd> {
+        Ok(self.vm.as_ref().unwrap().try_clone()?.into())
     }
     pub fn vm_fd(&self) -> std::os::fd::RawFd {
         self.vm.as_ref().unwrap().as_raw_fd()
@@ -626,21 +628,44 @@ impl Sandbox {
         };
         std::mem::replace(&mut self.ram, empty)
     }
+    pub(crate) fn close_retaining_worker_mappings(&mut self) {
+        self.close_vm();
+        // A backend that refused reset may still access queues. Keep these
+        // process mappings valid until the supervising daemon reaps the VMM.
+        let empty_ram = Mapping {
+            address: NonNull::dangling(),
+            len: 0,
+        };
+        std::mem::forget(std::mem::replace(&mut self.ram, empty_ram));
+        let empty = Mapping {
+            address: NonNull::dangling(),
+            len: 0,
+        };
+        std::mem::forget(std::mem::replace(&mut self.info, empty));
+        std::mem::forget(std::mem::take(&mut self.device_regions));
+    }
     fn close_vm(&mut self) {
         if self.vm.is_none() {
             return;
         }
-        let _guard = self.lifecycle_lock.as_ref().map(|lock| {
-            loop {
-                match lock.acquire() {
-                    Ok(guard) => break guard,
-                    Err(_) => {
-                        // Keep VM and backing memory alive. The daemon must
-                        // repair its lock path or reap us under the same lock.
-                        std::thread::park_timeout(Duration::from_secs(1));
+        let start_guard = self
+            .start_guard
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        let _guard = start_guard.or_else(|| {
+            self.lifecycle_lock.as_ref().map(|lock| {
+                loop {
+                    match lock.acquire() {
+                        Ok(guard) => break guard,
+                        Err(_) => {
+                            // Keep VM and backing memory alive. The daemon must
+                            // repair its lock path or reap us under the same lock.
+                            std::thread::park_timeout(Duration::from_secs(1));
+                        }
                     }
                 }
-            }
+            })
         });
         drop(self.vm.take());
     }

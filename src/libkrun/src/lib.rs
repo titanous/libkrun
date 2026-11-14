@@ -492,7 +492,10 @@ pub struct ConsoleDeviceInfo {
 }
 
 #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
-pub use nitro_sandbox::lifecycle::Serialization as NitroSerialization;
+pub use nitro_sandbox::lifecycle::{
+    LifecycleLock as NitroLifecycleLock, OpenLock as NitroOpenLifecycleLock,
+    Serialization as NitroSerialization,
+};
 
 #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
 pub struct NitroBackendConfig {
@@ -515,6 +518,8 @@ pub struct Builder {
     nitro_image_cache: Option<PathBuf>,
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     nitro_stop_reason: bool,
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    nitro_precreated_stop: Option<Arc<EventFd>>,
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     nitro_console_base: Option<u32>,
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
@@ -1364,6 +1369,9 @@ impl Builder {
             self.nitro_lifecycle_lock.take(),
         )
         .map_err(StartError::Nitro)?;
+        if let Some(stop) = self.nitro_precreated_stop.take() {
+            runtime.set_stop_event(stop);
+        }
         if let Some(heartbeat) = heartbeat {
             runtime.set_heartbeat(heartbeat);
         }
@@ -1457,6 +1465,17 @@ impl Builder {
         self.nitro_selected_after_consoles |= self.console_count != 0 && self.nitro.is_none();
         self.nitro = Some(config);
         self
+    }
+
+    /// Install SIGTERM handling before `build` creates a Nitro guest. Keep the
+    /// returned guard alive through build and run. A signal during build is
+    /// retained as a stop request. This explicitly changes process signal policy.
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    pub fn install_nitro_sigterm_handler(&mut self) -> Result<NitroSigtermGuard, StartError> {
+        let stop = Arc::new(EventFd::new(utils::eventfd::EFD_NONBLOCK).map_err(StartError::Nitro)?);
+        let guard = NitroSigtermGuard::for_stop_event(stop.clone())?;
+        self.nitro_precreated_stop = Some(stop);
+        Ok(guard)
     }
 
     /// Add the maintained guest kernel's privileged terminal-reason device.
@@ -1918,6 +1937,18 @@ fn nitro_stated_exit_table() {
 }
 
 impl Context {
+    /// Duplicate a created Nitro VM descriptor before running it. Pass it to the
+    /// host daemon with SCM_RIGHTS before permitting this process to start.
+    /// The VM remains alive until the last duplicate is closed; after reaping the
+    /// VMM the daemon closes its duplicate under the same lifecycle lock.
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    pub fn duplicate_nitro_vm_descriptor(&self) -> std::io::Result<std::os::fd::OwnedFd> {
+        self.built_vm
+            .nitro
+            .as_ref()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Unsupported, "not a Nitro VM"))?
+            .duplicate_vm_descriptor()
+    }
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     fn from_nitro(
         runtime: nitro_sandbox::runtime::Runtime,
@@ -2221,6 +2252,20 @@ impl BalloonHandle {
 /// Scoped SIGTERM-to-stop registration for a one-guest Nitro VMM process.
 #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
 pub struct NitroSigtermGuard(signal_hook::SigId);
+#[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+impl NitroSigtermGuard {
+    fn for_stop_event(stop: Arc<EventFd>) -> Result<Self, StartError> {
+        use std::os::fd::AsRawFd;
+        let id = unsafe {
+            signal_hook::low_level::register(libc::SIGTERM, move || {
+                let value = 1u64;
+                libc::write(stop.as_raw_fd(), (&value as *const u64).cast(), 8);
+            })
+        }
+        .map_err(StartError::Nitro)?;
+        Ok(Self(id))
+    }
+}
 #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
 impl Drop for NitroSigtermGuard {
     fn drop(&mut self) {
