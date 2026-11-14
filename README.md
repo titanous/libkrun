@@ -6,6 +6,9 @@ The platform targets Linux KVM and a separate Nitro backend being developed alon
 
 ## Build and test
 
+See [Embedding through the Rust API](docs/embedding.md) for external kernels,
+caller-owned block and filesystem backends, and host socket authorization.
+
 Use the pinned Nix development environment on x86-64 Linux:
 
 ```sh

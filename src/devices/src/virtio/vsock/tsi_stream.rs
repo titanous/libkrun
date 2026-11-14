@@ -11,7 +11,6 @@ use std::sync::{Arc, Mutex};
 
 #[cfg(target_os = "linux")]
 use libc::EINVAL;
-use nix::errno::Errno;
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use nix::sys::socket::{
     accept, bind, connect, getpeername, listen, recv, send, setsockopt, shutdown, socket, sockopt,
@@ -33,6 +32,7 @@ use utils::epoll::EventSet;
 use vm_memory::GuestMemoryMmap;
 
 pub struct TsiStreamProxy {
+    pub(crate) socket_policy: super::policy::SocketPolicy,
     id: u64,
     cid: u64,
     parent_id: u64,
@@ -98,6 +98,7 @@ impl TsiStreamProxy {
         }
 
         Ok(TsiStreamProxy {
+            socket_policy: Default::default(),
             id,
             cid,
             parent_id: 0,
@@ -136,6 +137,7 @@ impl TsiStreamProxy {
     ) -> Self {
         debug!("new_reverse: id={id} local_port={local_port} peer_port={peer_port}");
         TsiStreamProxy {
+            socket_policy: Default::default(),
             id,
             cid,
             parent_id,
@@ -204,6 +206,25 @@ impl TsiStreamProxy {
             req.addr
         };
 
+        use super::policy::SocketOperation;
+        let bind_op = if addr.as_unix_addr().is_some() {
+            SocketOperation::UnixBind
+        } else {
+            SocketOperation::Bind
+        };
+        if self.socket_policy.check(bind_op, &addr).is_err()
+            || self
+                .socket_policy
+                .check(SocketOperation::Listen, &addr)
+                .is_err()
+            || (addr.as_unix_addr().is_some()
+                && self
+                    .socket_policy
+                    .check(SocketOperation::UnixRemove, &addr)
+                    .is_err())
+        {
+            return -libc::EACCES;
+        }
         let unixsock_path = self.get_unixsock_path(&addr);
         // If the userspace process in the guest has already created the socket,
         // we need to unlink it to take ownership of the node in the filesystem.
@@ -447,7 +468,16 @@ impl Proxy for TsiStreamProxy {
     fn connect(&mut self, _pkt: &VsockPacket, req: TsiConnectReq) -> ProxyUpdate {
         let mut update = ProxyUpdate::default();
 
-        let result = match connect(self.fd.as_raw_fd(), &req.addr) {
+        let operation = if req.addr.as_unix_addr().is_some() {
+            super::policy::SocketOperation::UnixConnect
+        } else {
+            super::policy::SocketOperation::TcpConnect
+        };
+        let result = match self
+            .socket_policy
+            .check(operation, &req.addr)
+            .and_then(|()| connect(self.fd.as_raw_fd(), &req.addr))
+        {
             Ok(()) => {
                 debug!("connect: Connected");
                 self.switch_to_connected();
@@ -461,7 +491,7 @@ impl Proxy for TsiStreamProxy {
             Err(e) => {
                 debug!("TcpProxy: Error connecting: {e}");
                 #[cfg(target_os = "linux")]
-                let errno = -Errno::last_raw();
+                let errno = -(e as i32);
                 errno
             }
         };
@@ -865,7 +895,19 @@ impl AsRawFd for TsiStreamProxy {
 impl Drop for TsiStreamProxy {
     fn drop(&mut self) {
         if let Some(path) = &self.unixsock_path {
-            _ = fs::remove_file(path);
+            if let Ok(addr) = nix::sys::socket::UnixAddr::new(path) {
+                // SAFETY: addr owns a valid sockaddr_un for its reported length.
+                let storage =
+                    unsafe { SockaddrStorage::from_raw(addr.as_ptr().cast(), Some(addr.len())) }
+                        .unwrap();
+                if self
+                    .socket_policy
+                    .check(super::policy::SocketOperation::UnixRemove, &storage)
+                    .is_ok()
+                {
+                    _ = fs::remove_file(path);
+                }
+            }
         }
     }
 }

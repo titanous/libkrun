@@ -55,12 +55,17 @@ pub struct DiscardWriteData {
 // SAFETY: DiscardWriteData is #[repr(C)] with no padding bytes; all bit patterns are valid for all fields.
 unsafe impl ByteValued for DiscardWriteData {}
 
+#[cfg(test)]
+#[path = "read_only_tests.rs"]
+mod read_only_tests;
+
 pub struct BlockWorker<B: BlockBackend> {
     device_queue: DeviceQueue,
     interrupt: InterruptTransport,
     mem: GuestMemoryMmap,
     disk: B,
     stop_fd: EventFd,
+    pub(crate) read_only: bool,
 }
 
 impl<B: BlockBackend + 'static> BlockWorker<B> {
@@ -78,6 +83,7 @@ impl<B: BlockBackend + 'static> BlockWorker<B> {
             mem,
             disk,
             stop_fd,
+            read_only: false,
         }
     }
 
@@ -271,6 +277,19 @@ impl<B: BlockBackend + 'static> BlockWorker<B> {
         reader: &mut Reader,
         writer: &mut Writer,
     ) -> result::Result<usize, RequestError> {
+        if self.read_only
+            && matches!(
+                request_header.request_type,
+                VIRTIO_BLK_T_OUT
+                    | VIRTIO_BLK_T_DISCARD
+                    | VIRTIO_BLK_T_WRITE_ZEROES
+                    | VIRTIO_BLK_T_FLUSH
+            )
+        {
+            return Err(RequestError::ReadingFromDescriptor(
+                io::Error::from_raw_os_error(libc::EROFS),
+            ));
+        }
         match request_header.request_type {
             VIRTIO_BLK_T_IN => {
                 let data_len = writer.available_bytes() - 1;

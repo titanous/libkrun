@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use nix::sys::socket::{
     bind, connect, getpeername, recv, send, sendto, socket, AddressFamily, MsgFlags, SockFlag,
-    SockType, SockaddrIn, SockaddrLike, SockaddrStorage,
+    SockType, SockaddrLike, SockaddrStorage,
 };
 
 use super::super::Queue as VirtQueue;
@@ -19,11 +19,13 @@ use super::muxer_rxq::MuxerRxQ;
 use super::packet::{
     TsiAcceptReq, TsiConnectReq, TsiGetnameRsp, TsiListenReq, TsiSendtoAddr, VsockPacket,
 };
+use super::policy::SocketOperation;
 use super::proxy::{Proxy, ProxyError, ProxyRemoval, ProxyStatus, ProxyUpdate, RecvPkt};
 use utils::epoll::EventSet;
 use vm_memory::GuestMemoryMmap;
 
 pub struct TsiDgramProxy {
+    pub(crate) socket_policy: super::policy::SocketPolicy,
     pub id: u64,
     cid: u64,
     local_port: u32,
@@ -76,6 +78,7 @@ impl TsiDgramProxy {
         };
 
         Ok(TsiDgramProxy {
+            socket_policy: Default::default(),
             id,
             cid,
             local_port: 0,
@@ -227,7 +230,11 @@ impl Proxy for TsiDgramProxy {
 
     fn connect(&mut self, pkt: &VsockPacket, req: TsiConnectReq) -> ProxyUpdate {
         debug!("connect: addr={}", req.addr);
-        let res = match connect(self.fd.as_raw_fd(), &req.addr) {
+        let res = match self
+            .socket_policy
+            .check(SocketOperation::UdpConnect, &req.addr)
+            .and_then(|()| connect(self.fd.as_raw_fd(), &req.addr))
+        {
             Ok(()) => {
                 debug!("connect: Connected");
                 self.status = ProxyStatus::Connected;
@@ -296,7 +303,9 @@ impl Proxy for TsiDgramProxy {
             #[cfg(target_os = "linux")]
             let flags = MsgFlags::MSG_NOSIGNAL;
 
-            match send(self.fd.as_raw_fd(), buf, flags) {
+            let authorization = getpeername::<SockaddrStorage>(self.fd.as_raw_fd())
+                .and_then(|addr| self.socket_policy.check(SocketOperation::UdpSend, &addr));
+            match authorization.and_then(|()| send(self.fd.as_raw_fd(), buf, flags)) {
                 Ok(sent) => {
                     self.tx_cnt += Wrapping(sent as u32);
                     sent as i32
@@ -308,6 +317,12 @@ impl Proxy for TsiDgramProxy {
         };
 
         debug!("sendmsg ret={ret}");
+        if ret == -libc::EACCES {
+            self.push_pkt(MuxerRx::Reset {
+                local_port: pkt.dst_port(),
+                peer_port: pkt.src_port(),
+            });
+        }
 
         ProxyUpdate::default()
     }
@@ -319,12 +334,20 @@ impl Proxy for TsiDgramProxy {
 
         self.sendto_addr = Some(req.addr);
         if !self.listening {
-            match bind(self.fd.as_raw_fd(), &SockaddrIn::new(0, 0, 0, 0, 0)) {
+            let addr: SockaddrStorage = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0).into();
+            match self
+                .socket_policy
+                .check(SocketOperation::Bind, &addr)
+                .and_then(|()| bind(self.fd.as_raw_fd(), &addr))
+            {
                 Ok(_) => {
                     self.listening = true;
                     update.polling = Some((self.id, self.fd.as_raw_fd(), EventSet::IN));
                 }
-                Err(e) => debug!("couldn't bind socket: {e}"),
+                Err(e) => {
+                    self.sendto_addr = None;
+                    debug!("couldn't bind socket: {e}");
+                }
             }
         }
 
@@ -342,11 +365,23 @@ impl Proxy for TsiDgramProxy {
                 #[cfg(target_os = "linux")]
                 let flags = MsgFlags::MSG_NOSIGNAL;
 
-                match sendto(self.fd.as_raw_fd(), buf, &addr, flags) {
+                match self
+                    .socket_policy
+                    .check(SocketOperation::UdpSend, &addr)
+                    .and_then(|()| sendto(self.fd.as_raw_fd(), buf, &addr, flags))
+                {
                     Ok(sent) => {
                         self.tx_cnt += Wrapping(sent as u32);
                     }
-                    Err(err) => debug!("error in sendto: {err}"),
+                    Err(err) => {
+                        debug!("error in sendto: {err}");
+                        if err == nix::errno::Errno::EACCES {
+                            self.push_pkt(MuxerRx::Reset {
+                                local_port: pkt.dst_port(),
+                                peer_port: pkt.src_port(),
+                            });
+                        }
+                    }
                 }
             } else {
                 debug!("sendto_data pkt without buffer");

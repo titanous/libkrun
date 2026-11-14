@@ -28,6 +28,7 @@ pub struct MuxerThread {
     interrupt: InterruptTransport,
     reaper_sender: Sender<u64>,
     unix_ipc_port_map: HashMap<u32, (PathBuf, bool)>,
+    pub(crate) socket_policy: super::policy::SocketPolicy,
 }
 
 impl MuxerThread {
@@ -53,6 +54,7 @@ impl MuxerThread {
             interrupt,
             reaper_sender,
             unix_ipc_port_map,
+            socket_policy: Default::default(),
         }
     }
 
@@ -155,6 +157,25 @@ impl MuxerThread {
                 continue;
             }
             let id = ((*port as u64) << 32) | (defs::TSI_PROXY_PORT as u64);
+            use super::policy::SocketOperation;
+            use nix::sys::socket::{SockaddrLike, SockaddrStorage, UnixAddr};
+            let Ok(addr) = UnixAddr::new(path) else {
+                continue;
+            };
+            // SAFETY: addr owns a valid sockaddr_un for its reported length.
+            let storage =
+                unsafe { SockaddrStorage::from_raw(addr.as_ptr().cast(), Some(addr.len())) }
+                    .unwrap();
+            if [
+                SocketOperation::UnixRemove,
+                SocketOperation::UnixBind,
+                SocketOperation::Listen,
+            ]
+            .iter()
+            .any(|op| self.socket_policy.check(*op, &storage).is_err())
+            {
+                continue;
+            }
             let proxy = match UnixAcceptorProxy::new(id, path, *port) {
                 Ok(proxy) => proxy,
                 Err(e) => {

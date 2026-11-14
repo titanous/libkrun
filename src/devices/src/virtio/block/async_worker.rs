@@ -31,6 +31,7 @@ pub struct AsyncBlockWorker {
     mem: GuestMemoryMmap,
     factory: Box<dyn AsyncBlockBackendFactory>,
     stop_fd: EventFd,
+    pub(crate) read_only: bool,
 }
 
 impl AsyncBlockWorker {
@@ -50,6 +51,7 @@ impl AsyncBlockWorker {
             mem,
             factory,
             stop_fd,
+            read_only: false,
         }
     }
 
@@ -92,6 +94,7 @@ impl AsyncBlockWorker {
             mem,
             factory,
             stop_fd,
+            read_only,
         } = self;
 
         // Create the backend from the factory (inside this runtime)
@@ -257,6 +260,14 @@ impl AsyncBlockWorker {
                                         queue.next_avail().0, queue.next_used().0);
 
                                     for parsed in requests {
+                                        if read_only && !matches!(&parsed.request, Request::Read { .. } | Request::GetId { .. }) {
+                                            // SAFETY: parsed retains the validated writable status descriptor.
+                                            unsafe { std::ptr::write_volatile(parsed.status_ptr.as_ptr(), VIRTIO_BLK_S_IOERR as u8); }
+                                            complete_request(&mut queue, &mem, &interrupt, RequestResult {
+                                                index: parsed.index, status: VIRTIO_BLK_S_IOERR as u8, len: 0,
+                                            });
+                                            continue;
+                                        }
                                         metrics.in_flight.fetch_add(1, Ordering::Relaxed);
 
                                         // Extract write metadata before matching (to avoid borrow issues)
@@ -362,6 +373,14 @@ impl AsyncBlockWorker {
                                 if !requests.is_empty() {
                                     warn!("async block worker [ns={}]: recovered {} missed requests!", worker_nsectors, requests.len());
                                     for parsed in requests {
+                                        if read_only && !matches!(&parsed.request, Request::Read { .. } | Request::GetId { .. }) {
+                                            // SAFETY: parsed retains the validated writable status descriptor.
+                                            unsafe { std::ptr::write_volatile(parsed.status_ptr.as_ptr(), VIRTIO_BLK_S_IOERR as u8); }
+                                            complete_request(&mut queue, &mem, &interrupt, RequestResult {
+                                                index: parsed.index, status: VIRTIO_BLK_S_IOERR as u8, len: 0,
+                                            });
+                                            continue;
+                                        }
                                         metrics.in_flight.fetch_add(1, Ordering::Relaxed);
                                         match &parsed.request {
                                             Request::Read { .. } | Request::GetId { .. } |

@@ -112,6 +112,7 @@ pub struct VsockMuxer {
     reaper_sender: Option<Sender<u64>>,
     unix_ipc_port_map: Option<HashMap<u32, (PathBuf, bool)>>,
     tsi_flags: TsiFlags,
+    pub(crate) socket_policy: super::policy::SocketPolicy,
 }
 
 impl VsockMuxer {
@@ -133,6 +134,7 @@ impl VsockMuxer {
             reaper_sender: None,
             unix_ipc_port_map,
             tsi_flags,
+            socket_policy: Default::default(),
         }
     }
 
@@ -154,7 +156,7 @@ impl VsockMuxer {
 
         let (sender, receiver) = unbounded();
 
-        let thread = MuxerThread::new(
+        let mut thread = MuxerThread::new(
             self.cid,
             self.epoll.clone(),
             self.rxq.clone(),
@@ -165,6 +167,7 @@ impl VsockMuxer {
             sender.clone(),
             self.unix_ipc_port_map.clone().unwrap_or_default(),
         );
+        thread.socket_policy = self.socket_policy.clone();
         thread.run();
 
         self.reaper_sender = Some(sender);
@@ -315,7 +318,8 @@ impl VsockMuxer {
                         queue.clone(),
                         self.rxq.clone(),
                     ) {
-                        Ok(proxy) => {
+                        Ok(mut proxy) => {
+                            proxy.socket_policy = self.socket_policy.clone();
                             self.proxy_map
                                 .write()
                                 .unwrap()
@@ -348,7 +352,8 @@ impl VsockMuxer {
                         queue.clone(),
                         self.rxq.clone(),
                     ) {
-                        Ok(proxy) => {
+                        Ok(mut proxy) => {
+                            proxy.socket_policy = self.socket_policy.clone();
                             self.proxy_map
                                 .write()
                                 .unwrap()
@@ -571,6 +576,36 @@ impl VsockMuxer {
                     push_packet(self.cid, rx, &self.rxq, queue, mem);
                     return;
                 }
+                use nix::sys::socket::{SockaddrLike, UnixAddr};
+                let allowed = UnixAddr::new(path)
+                    .ok()
+                    .and_then(|addr| {
+                        // SAFETY: addr owns a valid sockaddr_un of the supplied length.
+                        unsafe {
+                            nix::sys::socket::SockaddrStorage::from_raw(
+                                addr.as_ptr().cast(),
+                                Some(addr.len()),
+                            )
+                        }
+                    })
+                    .is_some_and(|addr| {
+                        self.socket_policy
+                            .check(super::policy::SocketOperation::UnixConnect, &addr)
+                            .is_ok()
+                    });
+                if !allowed {
+                    push_packet(
+                        self.cid,
+                        MuxerRx::Reset {
+                            local_port: pkt.dst_port(),
+                            peer_port: pkt.src_port(),
+                        },
+                        &self.rxq,
+                        queue,
+                        mem,
+                    );
+                    return;
+                }
                 let rxq = self.rxq.clone();
 
                 let mut unix = UnixProxy::new(
@@ -584,6 +619,7 @@ impl VsockMuxer {
                     path.to_path_buf(),
                 )
                 .unwrap();
+                unix.socket_policy = self.socket_policy.clone();
                 let tsi = TsiConnectReq {
                     peer_port: 0,
                     addr: SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0).into(),
