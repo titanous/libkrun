@@ -71,6 +71,12 @@ platform liveness checks; no VMM timer samples or periodically pauses CPUs.
 Reason state starts empty in each VMM and must be cleared if in-process restart
 is introduced. Copy/import must not serialize terminal reason state.
 
+Caller output descriptors are duplicated, never reopened by path; existing file
+position and append semantics are preserved. Socket writes use MSG_DONTWAIT.
+Pipe writes briefly enable and restore O_NONBLOCK on the shared open description;
+callers must serialize other I/O and flag changes on that description while the
+console owns it. The caller's final descriptor flags are unchanged.
+
 Console backpressure never retains a guest TX descriptor for more than 100 ms:
 if a host reader does not keep up, the unwritable remainder is discarded and the
 descriptor completed. This also applies before terminal exit: guest console close

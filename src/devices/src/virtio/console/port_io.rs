@@ -12,7 +12,11 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use utils::eventfd::EventFd;
 use utils::eventfd::EFD_NONBLOCK;
 use vm_memory::bitmap::Bitmap;
-use vm_memory::{VolatileMemoryError, VolatileSlice, WriteVolatile};
+use vm_memory::{VolatileSlice, WriteVolatile};
+
+#[cfg(test)]
+#[path = "port_io_tests.rs"]
+mod descriptor_tests;
 
 pub trait PortInput {
     fn read_volatile(&mut self, buf: &mut VolatileSlice) -> Result<usize, io::Error>;
@@ -80,15 +84,9 @@ pub fn output_to_raw_fd_dup(fd: RawFd) -> Result<Box<dyn PortOutput + Send>, nix
     Ok(Box::new(PortOutputFd(fd)))
 }
 
-/// Open an independent nonblocking description without changing caller stdio.
+/// Preserve the supplied open description, including offset and append semantics.
 pub fn output_to_raw_fd_dup_blocking(fd: RawFd) -> Result<Box<dyn PortOutput + Send>, nix::Error> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .custom_flags(O_NONBLOCK)
-        .open(format!("/proc/self/fd/{fd}"))
-        .map_err(|error| Errno::from_raw(error.raw_os_error().unwrap_or(libc::EIO)))?;
-    Ok(Box::new(PortOutputFd(file.into())))
+    Ok(Box::new(PortOutputFd(dup_raw_fd_into_owned(fd)?)))
 }
 
 pub fn output_to_log_as_err() -> Box<dyn PortOutput + Send> {
@@ -155,13 +153,44 @@ impl AsRawFd for PortOutputFd {
 
 impl PortOutput for PortOutputFd {
     fn write_volatile(&mut self, buf: &VolatileSlice) -> Result<usize, io::Error> {
-        self.0.write_volatile(buf).map_err(|e| match e {
-            VolatileMemoryError::IOError(e) => e,
-            e => {
-                log::error!("Unsuported error from write_volatile: {e:?}");
-                io::Error::other(e)
-            }
-        })
+        let fd = self.as_raw_fd();
+        let guard = buf.ptr_guard();
+        // Socket nonblocking behavior is per call and does not alter caller flags.
+        let sent = unsafe {
+            libc::send(
+                fd,
+                guard.as_ptr().cast(),
+                buf.len(),
+                libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL,
+            )
+        };
+        if sent >= 0 {
+            return Ok(sent as usize);
+        }
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ENOTSOCK) {
+            return Err(error);
+        }
+        // Pipes have no per-write nonblocking flag. Keep the original open
+        // description (offset/O_APPEND), temporarily enabling nonblocking only
+        // around this write. Callers must serialize shared-description I/O.
+        let flags = unsafe { fcntl(fd, F_GETFL) };
+        if flags < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if unsafe { fcntl(fd, F_SETFL, flags | O_NONBLOCK) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let written = unsafe { libc::write(fd, guard.as_ptr().cast(), buf.len()) };
+        let result = if written < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(written as usize)
+        };
+        if unsafe { fcntl(fd, F_SETFL, flags) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        result
     }
 
     fn wait_until_writable(&self) {
