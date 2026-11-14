@@ -1031,6 +1031,11 @@ pub fn build_microvm(
                 .configure_cooperative_entry(&entry)
                 .map_err(Error::Vcpu)
                 .map_err(StartMicrovmError::Internal)?;
+            for cpu in &vcpus {
+                cpu.restore_cooperative_tsc(entry.tsc)
+                    .map_err(Error::Vcpu)
+                    .map_err(StartMicrovmError::Internal)?;
+            }
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?

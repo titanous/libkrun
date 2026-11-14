@@ -20,6 +20,7 @@ pub struct ResumeEntry {
     pub gdt_limit: u16,
     pub idt_base: u64,
     pub idt_limit: u16,
+    pub tsc: u64,
 }
 
 impl ResumeEntry {
@@ -65,6 +66,7 @@ impl ResumeEntry {
             gdt_limit: word(24) as u16,
             idt_base: word(25),
             idt_limit: word(26) as u16,
+            tsc: word(31),
         })
     }
 }

@@ -1261,6 +1261,20 @@ impl Vcpu {
         Ok(())
     }
 
+    #[cfg(target_arch = "x86_64")]
+    pub fn restore_cooperative_tsc(&self, tsc: u64) -> Result<()> {
+        let msrs = kvm_bindings::Msrs::from_entries(&[kvm_bindings::kvm_msr_entry {
+            index: 0x10, // IA32_TSC
+            data: tsc,
+            ..Default::default()
+        }])
+        .expect("one MSR fits");
+        if self.fd.set_msrs(&msrs).map_err(Error::VcpuSetMsrs)? != 1 {
+            return Err(Error::VcpuSetMsrs(kvm_ioctls::Error::new(libc::EIO)));
+        }
+        Ok(())
+    }
+
     #[cfg(target_arch = "aarch64")]
     /// Configures an aarch64 specific vcpu.
     ///

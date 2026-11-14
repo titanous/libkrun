@@ -183,6 +183,7 @@ int main(void)
     while(atomic_load(&sequence)<100 && !atomic_load(&errors)) usleep(1000);
     if(atomic_load(&errors)) fail("writer before freeze");
     uint64_t before=ns(CLOCK_MONOTONIC);
+    uint64_t tsc_before=__builtin_ia32_rdtsc();
     unsigned long frozen_seq=atomic_load(&sequence);
     uint64_t sentinel[4]={0x1020304050607080ULL,0x90a0b0c0d0e0f001ULL,
         0x9182736455463728ULL,0xfedcba9876543210ULL}, restored[4]={0};
@@ -204,6 +205,8 @@ int main(void)
             : "rcx","r11","memory","xmm15");
     }
     if(result!=1 || memcmp(sentinel,restored,wide_simd ? 32 : 16)) fail("freeze or SIMD");
+    if(__builtin_ia32_rdtsc()<tsc_before) fail("TSC went backwards");
+    printf("CLONE TSC nondecreasing\n");
     printf("CLONE VECTOR width=%d preserved\n",wide_simd ? 256 : 128);
     unblock_random_read(blocked_fault,blocked_reader);
     if(ptrace(PTRACE_DETACH,reader,NULL,NULL)) fail("reader detach");
