@@ -533,6 +533,12 @@ pub struct Builder {
     nitro_console_base: Option<u32>,
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     nitro_selected_after_consoles: bool,
+    #[cfg(all(
+        target_os = "linux",
+        target_arch = "aarch64",
+        feature = "nitro-sandbox"
+    ))]
+    nitro_capture: Option<vmm::capture_request::CaptureRequest>,
     config: ContextConfig,
     kernel_cmdline: Vec<String>,
     kernel_cmdline_configured: bool,
@@ -664,6 +670,17 @@ impl Builder {
     #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
     pub fn future_template(&mut self) -> &mut Self {
         self.config.vmr.cooperative_capture = Some((0, std::path::PathBuf::new()));
+        self
+    }
+
+    /// Mark an arm64 Nitro guest for agent-requested cooperative capture.
+    #[cfg(all(
+        target_os = "linux",
+        target_arch = "aarch64",
+        feature = "nitro-sandbox"
+    ))]
+    pub fn future_template(&mut self) -> &mut Self {
+        self.nitro_capture = Some(vmm::capture_request::CaptureRequest::default());
         self
     }
 
@@ -1292,6 +1309,18 @@ impl Builder {
 
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     fn build_nitro(mut self, options: NitroBackendConfig) -> Result<Context, StartError> {
+        #[cfg(all(target_arch = "aarch64", not(feature = "tee")))]
+        if self.nitro_capture.is_some()
+            && (self.nitro_device_count_before_consoles()
+                != u32::from(!matches!(self.config.vsock_config, VsockConfig::Disabled))
+                || self.console_count != 0
+                || !self.config.vmr.fs.is_empty())
+        {
+            return Err(StartError::Nitro(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Nitro template device manifest integration is not available yet",
+            )));
+        }
         let unsupported = || {
             StartError::Nitro(std::io::Error::new(std::io::ErrorKind::Unsupported, "unsupported on this backend: Nitro supports EIF boot with block, userspace vsock and custom console ports only"))
         };
@@ -1404,8 +1433,12 @@ impl Builder {
         } else {
             None
         };
+        #[cfg(target_arch = "aarch64")]
+        let capture_has_vsock = !matches!(self.config.vsock_config, VsockConfig::Disabled);
         let config = self.config.vmr.vm_config();
         let memory_mib = config.mem_size_mib.unwrap_or(1024);
+        #[cfg(target_arch = "aarch64")]
+        let capture_vcpus = config.vcpu_count.unwrap_or(1);
         if memory_mib < 64 || !memory_mib.is_multiple_of(2) || options.watchdog.is_zero() {
             return Err(StartError::Nitro(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
@@ -1541,7 +1574,28 @@ impl Builder {
         if self.nitro_stop_reason {
             runtime.enable_stop_reason().map_err(StartError::Nitro)?;
         }
-        Context::from_nitro(runtime, device_info)
+        #[cfg(target_arch = "aarch64")]
+        if let Some(request) = &self.nitro_capture {
+            runtime.set_capture_handler(Box::new(vmm::nitro_capture::NitroCapture {
+                request: request.clone(),
+                vcpus: capture_vcpus,
+                ram_mib: memory_mib as u64,
+                topology: if capture_has_vsock {
+                    b"nitro-vsock-v1".to_vec()
+                } else {
+                    b"nitro-no-devices-v1".to_vec()
+                },
+                compatibility: b"nitro-arm64-v1".to_vec(),
+            }));
+        }
+        let context = Context::from_nitro(runtime, device_info)?;
+        #[cfg(target_arch = "aarch64")]
+        let context = {
+            let mut context = context;
+            context.built_vm.nitro_capture = self.nitro_capture.take();
+            context
+        };
+        Ok(context)
     }
 
     /// Select Nitro direct mode using an EIF image. Configured block devices,
@@ -1633,6 +1687,17 @@ impl Builder {
 
     #[allow(unused_mut)] // Mutability is needed only when Nitro selection is compiled.
     pub fn build(mut self) -> Result<Context, StartError> {
+        #[cfg(all(
+            target_os = "linux",
+            target_arch = "aarch64",
+            feature = "nitro-sandbox"
+        ))]
+        if self.nitro_capture.is_some() && self.nitro.is_none() {
+            return Err(StartError::Configuration(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "arm64 cooperative capture requires Nitro backend",
+            )));
+        }
         if let Some(error) = self.configuration_error.take() {
             return Err(StartError::Configuration(error));
         }
@@ -1915,6 +1980,12 @@ struct ContextVm {
     nitro: Option<nitro_sandbox::runtime::Runtime>,
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     nitro_device_info: vmm::resources::VmDeviceInfo,
+    #[cfg(all(
+        target_os = "linux",
+        target_arch = "aarch64",
+        feature = "nitro-sandbox"
+    ))]
+    nitro_capture: Option<vmm::capture_request::CaptureRequest>,
 }
 impl Deref for ContextVm {
     type Target = vmm::builder::BuiltVm;
@@ -1939,6 +2010,12 @@ impl From<vmm::builder::BuiltVm> for ContextVm {
             nitro: None,
             #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
             nitro_device_info: Default::default(),
+            #[cfg(all(
+                target_os = "linux",
+                target_arch = "aarch64",
+                feature = "nitro-sandbox"
+            ))]
+            nitro_capture: None,
         }
     }
 }
@@ -2050,6 +2127,8 @@ impl Context {
                 kvm: None,
                 nitro: Some(runtime),
                 nitro_device_info: device_info,
+                #[cfg(all(target_arch = "aarch64", feature = "nitro-sandbox"))]
+                nitro_capture: None,
             },
             event_manager: EventManager::new().map_err(StartError::EventManager)?,
             shutdown_efd: Some(runtime_stop),
@@ -2074,6 +2153,8 @@ impl Context {
         if self.built_vm.nitro.is_some() {
             return VmHandle {
                 vmm: None,
+                #[cfg(target_arch = "aarch64")]
+                nitro_capture: self.built_vm.nitro_capture.clone(),
                 heartbeat_control: self
                     .built_vm
                     .nitro
@@ -2099,6 +2180,12 @@ impl Context {
             vmm: Some(self.built_vm.vmm().clone()),
             #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
             heartbeat_control: None,
+            #[cfg(all(
+                target_os = "linux",
+                target_arch = "aarch64",
+                feature = "nitro-sandbox"
+            ))]
+            nitro_capture: None,
             shutdown_efd: self.shutdown_efd.clone(),
             #[cfg(not(feature = "tee"))]
             balloon: balloon_handle,
@@ -2221,6 +2308,12 @@ pub struct VmHandle {
     vmm: Option<Arc<Mutex<vmm::Vmm>>>,
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     heartbeat_control: Option<nitro_sandbox::heartbeat::DeadlineControl>,
+    #[cfg(all(
+        target_os = "linux",
+        target_arch = "aarch64",
+        feature = "nitro-sandbox"
+    ))]
+    nitro_capture: Option<vmm::capture_request::CaptureRequest>,
     shutdown_efd: Option<Arc<EventFd>>,
     #[cfg(not(feature = "tee"))]
     balloon: Option<BalloonHandle>,
@@ -2489,6 +2582,43 @@ impl VmHandle {
         Ok(())
     }
 
+    /// Arm Nitro capture after the agent has quiesced its workload, before asking
+    /// the agent to write the kernel trigger. This never requests a kernel freeze.
+    #[cfg(all(
+        target_os = "linux",
+        target_arch = "aarch64",
+        feature = "nitro-sandbox"
+    ))]
+    pub fn arm_template_capture(&self, timeout: std::time::Duration) -> std::io::Result<()> {
+        self.nitro_capture
+            .as_ref()
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "guest was not configured as a Nitro template",
+                )
+            })?
+            .arm(timeout)
+    }
+
+    /// Receive a sealed template from an already armed, agent-triggered capture.
+    #[cfg(all(
+        target_os = "linux",
+        target_arch = "aarch64",
+        feature = "nitro-sandbox"
+    ))]
+    pub fn wait_template_capture(&self) -> std::io::Result<vmm::template::Template> {
+        self.nitro_capture
+            .as_ref()
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "guest was not configured as a Nitro template",
+                )
+            })?
+            .wait()
+    }
+
     /// Give a running guest a fresh generation identifier and raise its notification interrupt.
     /// Call after copying guest memory and starting the copy, so its kernel reseeds randomness.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -2550,6 +2680,19 @@ impl VmHandle {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(
+        target_os = "linux",
+        target_arch = "aarch64",
+        feature = "nitro-sandbox"
+    ))]
+    #[test]
+    fn arm64_template_mark_requires_nitro_backend() {
+        let mut builder = super::Builder::new();
+        builder.future_template();
+        assert!(
+            matches!(builder.build(),Err(super::StartError::Configuration(error)) if error.kind()==std::io::ErrorKind::Unsupported)
+        );
+    }
     use super::*;
 
     #[test]
@@ -2631,6 +2774,12 @@ mod tests {
         let handle = VmHandle {
             vmm: None,
             heartbeat_control: None,
+            #[cfg(all(
+                target_os = "linux",
+                target_arch = "aarch64",
+                feature = "nitro-sandbox"
+            ))]
+            nitro_capture: None,
             shutdown_efd: Some(stop.clone()),
             #[cfg(not(feature = "tee"))]
             balloon: None,
