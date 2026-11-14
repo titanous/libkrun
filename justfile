@@ -32,6 +32,7 @@ build: build-init
 test:
     cargo test -p devices --features net,blk,vhost-user
     cargo test -p vmm --features net,blk,vhost-user
+    cargo test -p libkrun --lib --features net,blk
 
 # Requires libkrunfw.so in test-prefix/lib64/ (nix shellHook creates this symlink).
 # Usage: just integration [<name>] [jobs]
