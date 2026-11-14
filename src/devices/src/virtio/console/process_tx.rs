@@ -209,7 +209,6 @@ fn write_desc_to_output(
 ) -> Result<usize, io::Error> {
     let mut total = 0;
     let mut stop_started = None;
-    let mut stalled_since = None;
     for slice_result in desc.mem.get_slices(desc.addr, desc.len as usize) {
         let src = slice_result.map_err(io::Error::other)?;
         let slice_len = src.len();
@@ -278,7 +277,6 @@ fn write_desc_to_output(
                             );
                         }
                     }
-                    stalled_since = None;
                     written_in_slice += n;
                     total += n;
                     if written_in_slice >= slice_len {
@@ -292,21 +290,6 @@ fn write_desc_to_output(
                             .dropped
                             .fetch_add((desc.len as usize - total) as u64, Ordering::Relaxed);
                         return Err(io::ErrorKind::TimedOut.into());
-                    }
-                    // Backpressure must not retain guest buffers forever: console
-                    // close during reboot waits for these descriptors to complete.
-                    if state.ending.load(Ordering::Acquire) || stop.load(Ordering::Acquire) {
-                        let since = stalled_since.get_or_insert_with(std::time::Instant::now);
-                        if since.elapsed() >= std::time::Duration::from_millis(100) {
-                            let dropped = desc.len as usize - total;
-                            state.dropped.fetch_add(dropped as u64, Ordering::Relaxed);
-                            log::warn!(
-                                "console port {port_id}: discarded {dropped} bytes while ending"
-                            );
-                            return Err(io::ErrorKind::TimedOut.into());
-                        }
-                    } else {
-                        stalled_since = None;
                     }
                     output.wait_until_writable();
                 }
@@ -607,7 +590,7 @@ mod tests {
     }
 
     #[test]
-    fn ending_discards_and_counts_only_unwritten_bytes() {
+    fn stop_discards_and_counts_only_unwritten_bytes() {
         struct Stalled;
         impl PortOutput for Stalled {
             fn write_volatile(&mut self, _: &VolatileSlice) -> io::Result<usize> {
@@ -618,24 +601,6 @@ mod tests {
             }
         }
         let payload = b"pending output";
-        let (mem, mut queue, _) = make_mem_and_queue(payload);
-        let desc = queue.pop(&mem).unwrap();
-        let state = super::super::ConsoleTxState::default();
-        state.set_ending(true);
-        let started = std::time::Instant::now();
-        let result = write_desc_to_output(
-            desc,
-            &mut Stalled,
-            &make_interrupt(),
-            0,
-            0,
-            0,
-            &AtomicBool::new(false),
-            &state,
-        );
-        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
-        assert_eq!(state.dropped_bytes(), payload.len() as u64);
-        assert!(started.elapsed() < std::time::Duration::from_secs(1));
         let (mem, mut queue, _) = make_mem_and_queue(payload);
         let desc = queue.pop(&mem).unwrap();
         let state = super::super::ConsoleTxState::default();

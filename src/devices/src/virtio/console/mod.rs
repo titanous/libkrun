@@ -12,17 +12,12 @@ pub use self::defs::uapi::VIRTIO_ID_CONSOLE as TYPE_CONSOLE;
 pub use self::device::Console;
 pub use self::port::PortDescription;
 
-/// Shared console shutdown policy and observable cumulative discarded-byte count.
+/// Observable cumulative discarded-byte count shared with the VM handle.
 #[derive(Default)]
 pub struct ConsoleTxState {
-    ending: std::sync::atomic::AtomicBool,
     dropped: std::sync::atomic::AtomicU64,
 }
 impl ConsoleTxState {
-    pub fn set_ending(&self, ending: bool) {
-        self.ending
-            .store(ending, std::sync::atomic::Ordering::Release);
-    }
     pub fn dropped_bytes(&self) -> u64 {
         self.dropped.load(std::sync::atomic::Ordering::Relaxed)
     }
