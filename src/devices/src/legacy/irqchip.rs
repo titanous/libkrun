@@ -35,16 +35,6 @@ impl IrqChipDevice {
     ) -> Result<(), DeviceError> {
         self.inner.set_irq(irq_line, interrupt_evt)
     }
-
-    /// Save interrupt controller register state for snapshot.
-    pub fn save_snapshot_state(&self) -> Option<Vec<u8>> {
-        self.inner.save_snapshot_state()
-    }
-
-    /// Restore interrupt controller register state from snapshot.
-    pub fn restore_snapshot_state(&mut self, data: &[u8]) {
-        self.inner.restore_snapshot_state(data)
-    }
 }
 
 impl BusDevice for IrqChipDevice {
@@ -131,14 +121,6 @@ pub trait IrqChipT: BusDevice {
         irq_line: Option<u32>,
         interrupt_evt: Option<&EventFd>,
     ) -> Result<(), DeviceError>;
-
-    /// Save interrupt controller register state for snapshot. Default: no state.
-    fn save_snapshot_state(&self) -> Option<Vec<u8>> {
-        None
-    }
-
-    /// Restore interrupt controller register state from snapshot. Default: no-op.
-    fn restore_snapshot_state(&mut self, _data: &[u8]) {}
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -150,14 +132,6 @@ pub trait IrqChipT: BusDevice + GICDevice {
         irq_line: Option<u32>,
         interrupt_evt: Option<&EventFd>,
     ) -> Result<(), DeviceError>;
-
-    /// Save interrupt controller register state for snapshot. Default: no state.
-    fn save_snapshot_state(&self) -> Option<Vec<u8>> {
-        None
-    }
-
-    /// Restore interrupt controller register state from snapshot. Default: no-op.
-    fn restore_snapshot_state(&mut self, _data: &[u8]) {}
 }
 
 #[cfg(target_arch = "riscv64")]
@@ -169,14 +143,6 @@ pub trait IrqChipT: BusDevice + AIADevice {
         irq_line: Option<u32>,
         interrupt_evt: Option<&EventFd>,
     ) -> Result<(), DeviceError>;
-
-    /// Save interrupt controller register state for snapshot. Default: no state.
-    fn save_snapshot_state(&self) -> Option<Vec<u8>> {
-        None
-    }
-
-    /// Restore interrupt controller register state from snapshot. Default: no-op.
-    fn restore_snapshot_state(&mut self, _data: &[u8]) {}
 }
 
 #[cfg(any(test, feature = "test_utils"))]

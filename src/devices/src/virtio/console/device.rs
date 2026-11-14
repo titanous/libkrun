@@ -6,7 +6,7 @@ use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::Arc;
 
 use utils::eventfd::EventFd;
-use vm_memory::{Address, ByteValued, Bytes, GuestMemoryMmap};
+use vm_memory::{ByteValued, Bytes, GuestMemoryMmap};
 
 use super::super::{
     ActivateError, ActivateResult, DeviceQueue, DeviceState, Queue, QueueConfig, VirtioDevice,
@@ -296,28 +296,6 @@ impl Console {
 
         raise_irq
     }
-
-    pub(crate) fn restore_ports_after_snapshot(&mut self) {
-        let (mem, interrupt) = match &self.device_state {
-            DeviceState::Activated(mem, interrupt) => (mem.clone(), interrupt.clone()),
-            DeviceState::Inactive => return,
-        };
-
-        for port_id in 0..self.ports.len() {
-            let rx_idx = port_id_to_queue_idx(QueueDirection::Rx, port_id);
-            let tx_idx = port_id_to_queue_idx(QueueDirection::Tx, port_id);
-            let (Some(rx_dq), Some(tx_dq)) = (&self.queues[rx_idx], &self.queues[tx_idx]) else {
-                continue;
-            };
-            self.ports[port_id].start(
-                mem.clone(),
-                rx_dq.queue.clone(),
-                tx_dq.queue.clone(),
-                interrupt.clone(),
-                self.control.clone(),
-            );
-        }
-    }
 }
 
 impl VirtioDevice for Console {
@@ -419,132 +397,6 @@ impl VirtioDevice for Console {
         self.queue_events.clear();
         self.device_state = DeviceState::Inactive;
         true
-    }
-
-    fn begin_snapshot_quiesce(
-        &mut self,
-        _timeout: std::time::Duration,
-    ) -> Result<(), crate::snapshot::SnapshotError> {
-        // Shut down port threads so they stop reading/writing guest memory.
-        // This is critical for restore: without it, TX threads continue to
-        // read from guest RAM while load_memory overwrites it, causing stale
-        // descriptors to be processed (leaking binary data to the console).
-        for port in &mut self.ports {
-            port.shutdown();
-        }
-        Ok(())
-    }
-
-    fn abort_snapshot_quiesce(&mut self) {
-        // Restart port threads after a snapshot save (normal path).
-        // Port threads took queues via .take() before quiesce shut them down,
-        // so self.queues entries are None. Rebuild from snapshot_queues
-        // (which sync_queues_for_snapshot already updated with live indices).
-        for (i, opt_dq) in self.queues.iter_mut().enumerate() {
-            if opt_dq.is_none() && i < self.snapshot_queues.len() && i < self.queue_events.len() {
-                *opt_dq = Some(DeviceQueue::new(
-                    self.snapshot_queues[i].clone(),
-                    self.queue_events[i].clone(),
-                ));
-            }
-        }
-        // For restore, ports are restarted by post_restore_kick() instead.
-        self.restore_ports_after_snapshot();
-    }
-
-    fn sync_queues_for_snapshot(&mut self) {
-        let DeviceState::Activated(ref mem, _) = self.device_state else {
-            return;
-        };
-
-        for opt_dq in &mut self.queues {
-            let Some(ref mut dq) = opt_dq else {
-                continue;
-            };
-            if !dq.queue.ready {
-                continue;
-            }
-
-            let Some(avail_idx_addr) = dq.queue.avail_ring.checked_add(2) else {
-                continue;
-            };
-            let Some(used_idx_addr) = dq.queue.used_ring.checked_add(2) else {
-                continue;
-            };
-
-            let Ok(avail_idx) = mem.read_obj::<u16>(avail_idx_addr) else {
-                continue;
-            };
-            let Ok(used_idx) = mem.read_obj::<u16>(used_idx_addr) else {
-                continue;
-            };
-
-            dq.queue.set_next_avail(avail_idx);
-            dq.queue.set_next_used(used_idx);
-        }
-
-        // Copy live queue state into the snapshot buffer for serialization.
-        for (i, opt_dq) in self.queues.iter().enumerate() {
-            if let Some(dq) = opt_dq {
-                self.snapshot_queues[i] = dq.queue.clone();
-            }
-        }
-
-        // For queues taken by port threads (None in self.queues), the snapshot
-        // buffer already has the correct static config (addresses, ready flag)
-        // from activate(). Sync the dynamic indices from guest memory.
-        for (i, opt_dq) in self.queues.iter().enumerate() {
-            if opt_dq.is_none() {
-                let sq = &mut self.snapshot_queues[i];
-                if !sq.ready {
-                    continue;
-                }
-                let Some(avail_idx_addr) = sq.avail_ring.checked_add(2) else {
-                    continue;
-                };
-                let Some(used_idx_addr) = sq.used_ring.checked_add(2) else {
-                    continue;
-                };
-                if let Ok(avail_idx) = mem.read_obj::<u16>(avail_idx_addr) {
-                    sq.set_next_avail(avail_idx);
-                }
-                if let Ok(used_idx) = mem.read_obj::<u16>(used_idx_addr) {
-                    sq.set_next_used(used_idx);
-                }
-            }
-        }
-    }
-
-    fn post_snapshot_restore(&mut self) {
-        self.restore_ports_after_snapshot();
-    }
-
-    fn post_restore_kick(&mut self) {
-        // During restore_state(), post_snapshot_restore() is called while the
-        // device is still Inactive (activation is deferred to complete_restore),
-        // so restore_ports_after_snapshot() bails out without starting any port
-        // threads. By the time post_restore_kick() runs (from complete_restore),
-        // the device has been activated, so we can start ports now.
-        self.restore_ports_after_snapshot();
-
-        // Kick all ready queues so the event handler can deliver any pending
-        // notifications to the newly-started port threads.
-        if !self.device_state.is_activated() {
-            return;
-        }
-        for (i, evt) in self.queue_events.iter().enumerate() {
-            let ready = self
-                .queues
-                .get(i)
-                .and_then(|opt| opt.as_ref())
-                .is_some_and(|dq| dq.queue.ready);
-            if !ready {
-                continue;
-            }
-            if let Err(e) = evt.write(1) {
-                error!("console: post_restore_kick queue {i} failed: {e}");
-            }
-        }
     }
 }
 

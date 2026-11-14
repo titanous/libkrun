@@ -17,9 +17,6 @@ mod bus;
 #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 pub mod fdt;
 pub mod legacy;
-pub mod snapshot;
-#[cfg(feature = "snapshot")]
-pub mod snapshot_serde;
 pub mod virtio;
 pub mod vmgenid;
 

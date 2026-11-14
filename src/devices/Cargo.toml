@@ -9,7 +9,6 @@ build = "build.rs"
 tee = []
 amd-sev = ["blk", "tee"]
 tdx = ["blk", "tee"]
-snapshot = ["bincode-next"]
 net = ["tokio", "bytes"]
 blk = ["tokio", "futures"]
 efi = ["blk", "net"]
@@ -25,7 +24,6 @@ vhost-user = ["vhost"]
 shuttle = ["dep:shuttle"]
 
 [dependencies]
-bincode-next = { version = "3.0.0-rc.5", optional = true }
 bitflags = "1.2.0"
 capng = "0.2.3"
 crossbeam-channel = ">=0.5.15"

@@ -11,7 +11,6 @@ dynamic-firmware = ["dep:libloading"]
 tee = ["vmm/tee"]
 amd-sev = [ "blk", "tee", "vmm/amd-sev" ]
 tdx = [ "blk", "tee", "vmm/tdx" ]
-snapshot = [ "vmm/snapshot", "tokio" ]
 net = [ "devices/net", "vmm/net" ]
 blk = [ "devices/blk", "vmm/blk" ]
 efi = [ "blk", "net", "vmm/efi" ]
@@ -23,7 +22,6 @@ aws-nitro = [ "dep:aws-nitro", "dep:nitro-enclaves" ]
 # Embed the init binary. Disable if you provide a custom init.
 embedded_init = ["devices/embedded_init"]
 vhost-user = ["vmm/vhost-user", "devices/vhost-user"]
-uffd = ["vmm/uffd"]
 # Link libkrunfw statically instead of dlopen. Used for static musl binaries
 # (e.g. guest-agent in nested virt tests) that cannot use dlopen.
 static-firmware = []
@@ -36,13 +34,12 @@ log = "0.4.0"
 krun_display = { path = "../krun_display", optional = true, features = ["bindgen_clang_runtime"] }
 krun_input = { path = "../krun_input", optional = true, features = ["bindgen_clang_runtime"] }
 
-devices = { path = "../devices", features = ["snapshot"] }
+devices = { path = "../devices" }
 mutants = "0.0.3"
 polly = { path = "../polly" }
 utils = { path = "../utils" }
 vmm = { path = "../vmm" }
 thiserror = "1"
-tokio = { version = "1", features = ["rt", "macros"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 kvm-bindings = { version = ">=0.11", features = ["fam-wrappers"] }

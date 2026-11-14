@@ -51,10 +51,6 @@ use utils::eventfd::EventFd;
 use vmm::builder::StartMicrovmError;
 pub use vmm::resources::VirtioConsoleConfigMode;
 use vmm::resources::{TsiFlags, VmResources, VsockConfig};
-#[cfg(feature = "snapshot")]
-pub use vmm::snapshot::{save_vmstate, SnapshotHeader, VmSnapshot};
-#[cfg(feature = "snapshot")]
-pub use vmm::snapshot_store;
 pub use vmm::vm_exit::VmExit;
 #[cfg(feature = "blk")]
 pub use vmm::vmm_config::block::{BlockConfigError, BlockDeviceConfig, BlockRootConfig};
@@ -1385,142 +1381,6 @@ impl Context {
             }
         }
     }
-
-    /// Restore a VM from a SnapshotStore and run the event loop.
-    ///
-    /// On Linux with `uffd` feature: Creates a store from the factory, sets up UFFD
-    /// demand-paging, then resumes vCPUs. Page faults are resolved on-demand.
-    ///
-    /// On Linux without `uffd`: Creates a store, reads vmstate, drains the preload
-    /// stream to eagerly populate memory, then resumes vCPUs.
-    ///
-    /// On other platforms: Returns error (use `restore_and_run` instead).
-    #[cfg(feature = "snapshot")]
-    pub fn restore_and_run_with_store(
-        mut self,
-        factory: Box<dyn vmm::snapshot_store::SnapshotStoreFactory>,
-    ) -> Result<vmm::vm_exit::VmExit, StartError> {
-        #[cfg(target_os = "linux")]
-        {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| {
-                    StartError::Microvm(vmm::builder::StartMicrovmError::Internal(
-                        vmm::Error::Snapshot(e.to_string()),
-                    ))
-                })?;
-
-            let store: Box<dyn vmm::snapshot_store::SnapshotStore> = rt.block_on(async {
-                factory.create().await.map_err(|e| {
-                    StartError::Microvm(vmm::builder::StartMicrovmError::Internal(
-                        vmm::Error::Snapshot(e.to_string()),
-                    ))
-                })
-            })?;
-
-            // When uffd feature is enabled, use demand-paging; otherwise eager restore
-            #[cfg(feature = "uffd")]
-            let uffd_thread = {
-                // Read vmstate up front so it can be validated before UFFD/vCPU setup
-                let vmstate_bytes = rt.block_on(async {
-                    store.read_vmstate().await.map_err(|e| {
-                        StartError::Microvm(vmm::builder::StartMicrovmError::Internal(
-                            vmm::Error::Snapshot(e.to_string()),
-                        ))
-                    })
-                })?;
-
-                let (handler, shutdown_tx) =
-                    self.built_vm
-                        .restore_from_store_with_uffd(vmstate_bytes, store, rt)?;
-                Some((handler, shutdown_tx))
-            };
-
-            #[cfg(not(feature = "uffd"))]
-            let uffd_thread: Option<(
-                std::thread::JoinHandle<()>,
-                tokio::sync::oneshot::Sender<()>,
-            )> = {
-                let vmstate_bytes = rt.block_on(async {
-                    store.read_vmstate().await.map_err(|e| {
-                        StartError::Microvm(vmm::builder::StartMicrovmError::Internal(
-                            vmm::Error::Snapshot(e.to_string()),
-                        ))
-                    })
-                })?;
-
-                self.built_vm
-                    .restore_from_store(vmstate_bytes, store, &rt)?;
-                None
-            };
-
-            loop {
-                self.event_manager
-                    .run()
-                    .map_err(StartError::EventManagerRun)?;
-
-                // Check if the VM has exited
-                if let Some(vm_exit) = self.vm_exit.lock().expect("Poisoned vm_exit lock").take() {
-                    if let Some((handler, shutdown_tx)) = uffd_thread {
-                        // Signal shutdown, then join the handler thread
-                        drop(shutdown_tx);
-                        handler.join().ok();
-                    }
-                    return Ok(vm_exit);
-                }
-            }
-        }
-
-        #[cfg(not(target_os = "linux"))]
-        {
-            // Phase 2+ (eager restore with FsSnapshotStore) is Linux-only.
-            // On other platforms, use the backward-compatible restore_from_snapshot path.
-            // TODO: Extend restore_from_store to all platforms in Phase 3+.
-            Err(StartError::Microvm(vmm::builder::StartMicrovmError::Internal(
-                vmm::Error::Snapshot(
-                    "restore_and_run_with_store is not available on this platform; use restore_and_run instead".to_string()
-                )
-            )))
-        }
-    }
-
-    /// Restore a VM from a snapshot directory and run the event loop.
-    ///
-    /// This delegates to `restore_and_run_with_store` on Linux, or uses the
-    /// backward-compatible `restore_from_snapshot` path on other platforms.
-    #[cfg(feature = "snapshot")]
-    #[allow(unused_mut)]
-    pub fn restore_and_run(
-        mut self,
-        base_path: &std::path::Path,
-        incremental_paths: &[&std::path::Path],
-    ) -> Result<vmm::vm_exit::VmExit, StartError> {
-        #[cfg(target_os = "linux")]
-        {
-            let factory =
-                vmm::snapshot_store::FsSnapshotStoreFactory::new(base_path, incremental_paths);
-            self.restore_and_run_with_store(Box::new(factory))
-        }
-
-        #[cfg(not(target_os = "linux"))]
-        {
-            // On macOS/other platforms, use the cold restore path
-            self.built_vm
-                .restore_from_snapshot(base_path, incremental_paths)?;
-
-            loop {
-                self.event_manager
-                    .run()
-                    .map_err(StartError::EventManagerRun)?;
-
-                // Check if the VM has exited
-                if let Some(vm_exit) = self.vm_exit.lock().expect("Poisoned vm_exit lock").take() {
-                    return Ok(vm_exit);
-                }
-            }
-        }
-    }
 }
 
 #[cfg(not(feature = "tee"))]
@@ -1693,15 +1553,8 @@ impl BalloonHandle {
 }
 
 impl VmHandle {
-    #[cfg(feature = "snapshot")]
-    fn snapshot_err_to_start_error(e: vmm::snapshot::SnapshotError) -> StartError {
-        StartError::Microvm(vmm::builder::StartMicrovmError::Internal(
-            vmm::Error::Snapshot(e.to_string()),
-        ))
-    }
-
     /// Pause all vCPUs. Blocks until all vCPUs have acknowledged the pause.
-    #[mutants::skip] // races with VM exit in mutation tests; tested by integration tests (snapshot)
+    #[mutants::skip] // races with VM exit in mutation tests; tested by integration tests
     pub fn pause(&self) -> Result<(), StartError> {
         self.vmm
             .lock()
@@ -1711,7 +1564,7 @@ impl VmHandle {
     }
 
     /// Resume all vCPUs. Blocks until all vCPUs have acknowledged the resume.
-    #[mutants::skip] // races with VM exit in mutation tests; tested by integration tests (snapshot)
+    #[mutants::skip] // races with VM exit in mutation tests; tested by integration tests
     pub fn resume(&self) -> Result<(), StartError> {
         self.vmm
             .lock()
@@ -1738,113 +1591,6 @@ impl VmHandle {
                 )),
             )),
         }
-    }
-
-    /// Create a full snapshot of the VM. Pauses vCPUs, takes snapshot, resumes vCPUs.
-    #[cfg(feature = "snapshot")]
-    #[mutants::skip] // tested by integration tests (snapshot test cases)
-    pub fn snapshot(&self, path: &std::path::Path) -> Result<(), StartError> {
-        let mut vmm = self.vmm.lock().expect("Poisoned vmm lock");
-        vmm.pause_vcpus()
-            .map_err(|e| StartError::Microvm(vmm::builder::StartMicrovmError::Internal(e)))?;
-        let result = vmm
-            .create_snapshot(path)
-            .map_err(Self::snapshot_err_to_start_error);
-        vmm.resume_vcpus()
-            .map_err(|e| StartError::Microvm(vmm::builder::StartMicrovmError::Internal(e)))?;
-        result
-    }
-
-    /// Restore a full snapshot into the running VM. Pauses vCPUs, restores, resumes vCPUs.
-    #[cfg(feature = "snapshot")]
-    #[mutants::skip] // tested by integration tests (snapshot test cases)
-    pub fn restore_snapshot(&self, path: &std::path::Path) -> Result<(), StartError> {
-        let mut vmm = self.vmm.lock().expect("Poisoned vmm lock");
-        vmm.pause_vcpus()
-            .map_err(|e| StartError::Microvm(vmm::builder::StartMicrovmError::Internal(e)))?;
-        let result = vmm
-            .restore_snapshot(path)
-            .map_err(Self::snapshot_err_to_start_error);
-        vmm.resume_vcpus()
-            .map_err(|e| StartError::Microvm(vmm::builder::StartMicrovmError::Internal(e)))?;
-        result
-    }
-
-    /// Enable dirty page tracking for incremental snapshots.
-    #[cfg(feature = "snapshot")]
-    #[mutants::skip] // tested by integration tests (snapshot test cases)
-    pub fn enable_dirty_tracking(&self) -> Result<(), StartError> {
-        let mut vmm = self.vmm.lock().expect("Poisoned vmm lock");
-        vmm.enable_dirty_tracking()
-            .map_err(|e| StartError::Microvm(vmm::builder::StartMicrovmError::Internal(e)))
-    }
-
-    /// Create an incremental snapshot (dirty pages only).
-    #[cfg(feature = "snapshot")]
-    #[mutants::skip] // tested by integration tests (snapshot test cases)
-    pub fn incremental_snapshot(&self, path: &std::path::Path) -> Result<(), StartError> {
-        let mut vmm = self.vmm.lock().expect("Poisoned vmm lock");
-        vmm.pause_vcpus()
-            .map_err(|e| StartError::Microvm(vmm::builder::StartMicrovmError::Internal(e)))?;
-        let result = vmm
-            .create_incremental_snapshot(path)
-            .map_err(Self::snapshot_err_to_start_error);
-        vmm.resume_vcpus()
-            .map_err(|e| StartError::Microvm(vmm::builder::StartMicrovmError::Internal(e)))?;
-        result
-    }
-
-    /// Restore an incremental snapshot into the running VM.
-    ///
-    /// This applies dirty pages and state on top of the current memory image.
-    #[cfg(feature = "snapshot")]
-    #[mutants::skip] // tested by integration tests (snapshot test cases)
-    pub fn restore_incremental_snapshot(&self, path: &std::path::Path) -> Result<(), StartError> {
-        let mut vmm = self.vmm.lock().expect("Poisoned vmm lock");
-        vmm.pause_vcpus()
-            .map_err(|e| StartError::Microvm(vmm::builder::StartMicrovmError::Internal(e)))?;
-        let result = vmm
-            .restore_incremental_snapshot(path)
-            .map_err(Self::snapshot_err_to_start_error);
-        vmm.resume_vcpus()
-            .map_err(|e| StartError::Microvm(vmm::builder::StartMicrovmError::Internal(e)))?;
-        result
-    }
-
-    /// Create a full snapshot using a SnapshotStore. Pauses vCPUs, takes snapshot, resumes vCPUs.
-    #[cfg(feature = "snapshot")]
-    #[mutants::skip] // tested by integration tests (snapshot test cases)
-    pub fn snapshot_to_store(
-        &self,
-        mut store: Box<dyn vmm::snapshot_store::SnapshotStore>,
-    ) -> Result<(), StartError> {
-        let mut vmm = self.vmm.lock().expect("Poisoned vmm lock");
-        vmm.pause_vcpus()
-            .map_err(|e| StartError::Microvm(vmm::builder::StartMicrovmError::Internal(e)))?;
-        let result = vmm
-            .snapshot_to_store(&mut *store)
-            .map_err(Self::snapshot_err_to_start_error);
-        vmm.resume_vcpus()
-            .map_err(|e| StartError::Microvm(vmm::builder::StartMicrovmError::Internal(e)))?;
-        result
-    }
-
-    /// Create an incremental snapshot using a SnapshotStore. Pauses vCPUs, takes snapshot, resumes vCPUs.
-    #[cfg(feature = "snapshot")]
-    #[mutants::skip] // tested by integration tests (snapshot test cases)
-    pub fn incremental_snapshot_to_store(
-        &self,
-        mut store: Box<dyn vmm::snapshot_store::SnapshotStore>,
-    ) -> Result<(), StartError> {
-        let mut vmm = self.vmm.lock().expect("Poisoned vmm lock");
-        vmm.pause_vcpus()
-            .map_err(|e| StartError::Microvm(vmm::builder::StartMicrovmError::Internal(e)))?;
-        let result = vmm
-            .incremental_snapshot_to_store(&mut *store)
-            .map_err(Self::snapshot_err_to_start_error);
-        vmm.resume_vcpus()
-            .map_err(|e| StartError::Microvm(vmm::builder::StartMicrovmError::Internal(e)))?;
-        result
     }
 
     /// Returns a handle for controlling the memory balloon device, if enabled.

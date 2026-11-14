@@ -1,5 +1,5 @@
 # Feature set used by all targets.
-features := "embedded_init,snapshot,uffd,blk,vhost-user"
+features := "embedded_init,blk,vhost-user"
 
 # Build the guest init binary (static musl, nightly for panic=immediate-abort + build-std).
 # RUSTFLAGS overrides config.toml to add the nightly-only flags without breaking
@@ -25,8 +25,8 @@ build: build-init
 
 # Unit tests for all crates
 test:
-    cargo test -p devices --features net,snapshot,vhost-user
-    cargo test -p vmm --features uffd,snapshot
+    cargo test -p devices --features net,blk,vhost-user
+    cargo test -p vmm --features net,blk,vhost-user
 
 # Requires libkrunfw.so in test-prefix/lib64/ (nix shellHook creates this symlink).
 # Usage: just integration [<name>] [jobs]

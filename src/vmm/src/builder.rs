@@ -661,170 +661,6 @@ impl BuiltVm {
             .map_err(StartMicrovmError::Internal)?;
         Ok(self.vmm.clone())
     }
-
-    /// Cold restore: start vCPU threads paused, load snapshot, then resume.
-    ///
-    /// Unlike `run()` which boots from the kernel entry point, this skips
-    /// kernel boot entirely and restores the VM from a previously-taken
-    /// snapshot. Optionally applies a chain of incremental snapshots on
-    /// top of the base before resuming.
-    ///
-    /// The flow is:
-    ///
-    /// 1. Start vCPU threads (paused in initial event loop)
-    /// 2. Unblock secondary vCPUs (they wait for PSCI CPU_ON which never comes)
-    /// 3. Restore full snapshot (memory, devices, interrupts, vCPU state)
-    /// 4. Apply each incremental snapshot in order (dirty pages, updated
-    ///    device/interrupt/vCPU state — each RestoreState overwrites the last)
-    /// 5. Resume all vCPUs — they continue from the final restored state
-    #[cfg(feature = "snapshot")]
-    pub fn restore_from_snapshot(
-        &mut self,
-        base_path: &std::path::Path,
-        incremental_paths: &[&std::path::Path],
-    ) -> std::result::Result<Arc<Mutex<Vmm>>, StartMicrovmError> {
-        let mut vcpus = self
-            .vcpus
-            .take()
-            .ok_or(StartMicrovmError::MicroVMAlreadyRunning)?;
-
-        let mut vmm = self.vmm.lock().expect("Poisoned vmm lock");
-
-        // Step 1: Start vCPU threads — they park in the initial event loop
-        // waiting for Resume or RestoreState.
-        vmm.start_vcpus_paused(&mut vcpus)
-            .map_err(StartMicrovmError::Internal)?;
-
-        let snapshot_err = |e: super::snapshot::SnapshotError| {
-            StartMicrovmError::Internal(super::Error::Snapshot(e.to_string()))
-        };
-
-        // Step 3: Load the full base snapshot (memory, devices, interrupts, vCPU state).
-        // vCPU threads receive RestoreState but stay in the initial event loop.
-        vmm.restore_snapshot(base_path).map_err(snapshot_err)?;
-
-        // Step 4: Apply incremental snapshots in order. Each one patches dirty
-        // pages and sends a fresh RestoreState that overwrites the previous.
-        // Device workers are quiesced/resumed around each incremental to avoid
-        // races with guest memory writes.
-        for inc_path in incremental_paths {
-            vmm.restore_incremental_snapshot(inc_path)
-                .map_err(snapshot_err)?;
-        }
-
-        // Step 5: Resume all vCPUs — they leave the initial event loop and
-        // enter the main execution loop with the final restored state.
-        vmm.resume_vcpus().map_err(StartMicrovmError::Internal)?;
-
-        drop(vmm);
-        Ok(self.vmm.clone())
-    }
-
-    /// Restore from a SnapshotStore (eager restore with preload).
-    /// vCPUs must not yet be started; they will be started paused, memory populated, then resumed.
-    #[cfg(all(target_os = "linux", feature = "snapshot"))]
-    pub fn restore_from_store(
-        &mut self,
-        vmstate_bytes: Vec<u8>,
-        store: Box<dyn super::snapshot_store::SnapshotStore>,
-        rt: &tokio::runtime::Runtime,
-    ) -> std::result::Result<Arc<Mutex<Vmm>>, StartMicrovmError> {
-        let mut vcpus = self
-            .vcpus
-            .take()
-            .ok_or(StartMicrovmError::MicroVMAlreadyRunning)?;
-
-        let mut vmm = self.vmm.lock().expect("Poisoned vmm lock");
-
-        // Step 1: Start vCPU threads — they park in the initial event loop
-        // waiting for Resume or RestoreState.
-        vmm.start_vcpus_paused(&mut vcpus)
-            .map_err(StartMicrovmError::Internal)?;
-
-        // Note: Step 2 (macOS secondary vCPU unblocking) is not needed here because
-        // this method is only available on Linux (gated by #[cfg(all(target_os = "linux", ...))]).
-        // For reference: on macOS we would unblock secondary vCPUs that block on boot_receiver.recv(),
-        // but on KVM they are powered off via KVM_ARM_VCPU_POWER_OFF and don't need unblocking.
-
-        let snapshot_err = |e: super::snapshot::SnapshotError| {
-            StartMicrovmError::Internal(super::Error::Snapshot(e.to_string()))
-        };
-
-        // Step 3: Restore using store (eager restore, drains preload to populate memory)
-        vmm.restore_from_store(vmstate_bytes, store, rt)
-            .map_err(snapshot_err)?;
-
-        // Step 4: Resume all vCPUs — they leave the initial event loop and
-        // enter the main execution loop with the final restored state.
-        vmm.resume_vcpus().map_err(StartMicrovmError::Internal)?;
-
-        drop(vmm);
-        Ok(self.vmm.clone())
-    }
-
-    /// Restore from a SnapshotStore using UFFD demand-paging.
-    /// vCPUs must not yet be started. Vmstate is validated before starting vCPU threads
-    /// or UFFD handler, so validation failures have no cleanup cost.
-    /// Returns `(handler_thread, shutdown_tx)`.
-    #[cfg(all(target_os = "linux", feature = "uffd"))]
-    pub fn restore_from_store_with_uffd(
-        &mut self,
-        vmstate_bytes: Vec<u8>,
-        store: Box<dyn super::snapshot_store::SnapshotStore>,
-        rt: tokio::runtime::Runtime,
-    ) -> std::result::Result<
-        (
-            std::thread::JoinHandle<()>,
-            tokio::sync::oneshot::Sender<()>,
-        ),
-        StartMicrovmError,
-    > {
-        let mut vmm = self.vmm.lock().expect("Poisoned vmm lock");
-
-        let snapshot_err = |e: super::snapshot::SnapshotError| {
-            StartMicrovmError::Internal(super::Error::Snapshot(e.to_string()))
-        };
-
-        // Step 1: Pre-validate vmstate before starting any threads or UFFD.
-        // Use vcpus.len() since vcpus_handles isn't populated until start_vcpus_paused.
-        let vcpu_count = self.vcpus.as_ref().map(|v| v.len()).unwrap_or(0);
-        let vmstate: super::snapshot::VmSnapshot = bincode_next::decode_from_slice(
-            &vmstate_bytes,
-            bincode_next::config::standard()
-                .with_limit::<{ super::snapshot::VMSTATE_MAX_SIZE as usize }>(),
-        )
-        .map(|(val, _)| val)
-        .map_err(|e| snapshot_err(super::snapshot::SnapshotError::Deserialize(e.to_string())))?;
-        super::snapshot::validate_header_for_vm(
-            &vmstate.header,
-            &vmm.guest_memory,
-            vcpu_count,
-            vmm.nested_enabled,
-        )
-        .map_err(snapshot_err)?;
-        // Validation passed — vmstate will be validated again inside Vmm for defense-in-depth.
-        // Re-serialize is wasteful, so pass the bytes through.
-
-        // Step 2: Start vCPU threads — they park in the initial event loop
-        // waiting for Resume or RestoreState.
-        let mut vcpus = self
-            .vcpus
-            .take()
-            .ok_or(StartMicrovmError::MicroVMAlreadyRunning)?;
-        vmm.start_vcpus_paused(&mut vcpus)
-            .map_err(StartMicrovmError::Internal)?;
-
-        // Step 3: Set up UFFD handler, restore device/vCPU states
-        let (handler_thread, shutdown_tx) = vmm
-            .restore_from_store_with_uffd(vmstate_bytes, store, rt)
-            .map_err(snapshot_err)?;
-
-        // Step 4: Resume all vCPUs — page faults will be resolved by the UFFD handler
-        vmm.resume_vcpus().map_err(StartMicrovmError::Internal)?;
-
-        drop(vmm);
-        Ok((handler_thread, shutdown_tx))
-    }
 }
 
 struct BootTimer {
@@ -1259,10 +1095,6 @@ pub fn build_microvm(
         mmio_device_manager,
         #[cfg(target_arch = "x86_64")]
         pio_device_manager,
-        nested_enabled: vm_resources.nested_enabled,
-        dirty_tracking_enabled: false,
-        #[cfg(all(target_os = "linux", target_arch = "aarch64", feature = "snapshot"))]
-        intc: intc.clone(),
         #[cfg(not(feature = "tee"))]
         balloon: None,
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -2271,7 +2103,6 @@ fn create_vcpus_x86_64(
             cpu_index,
             vm.fd(),
             vm.supported_cpuid().clone(),
-            vm.supported_msrs().clone(),
             io_bus.clone(),
             exit_evt.try_clone().map_err(Error::EventFd)?,
             should_exit.clone(),

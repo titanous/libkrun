@@ -13,7 +13,6 @@ use std::path::PathBuf;
 #[cfg(feature = "tee")]
 use serde::{Deserialize, Serialize};
 
-use crate::snapshot::system_page_size;
 #[cfg(feature = "blk")]
 use crate::vmm_config::block::{BlockBuilder, BlockConfigError, BlockDeviceConfig};
 use crate::vmm_config::external_kernel::ExternalKernel;
@@ -333,7 +332,7 @@ impl VmResources {
     }
 
     pub fn set_kernel_bundle(&mut self, kernel_bundle: KernelBundle) -> Result<KernelBundleError> {
-        let page_size = system_page_size() as usize;
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
 
         if (kernel_bundle.host_addr.get() as usize) & (page_size - 1) != 0 {
             return Err(KernelBundleError::InvalidHostAddress);

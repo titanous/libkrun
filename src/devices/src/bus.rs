@@ -14,7 +14,6 @@ use std::io;
 use std::result;
 use std::sync::{Arc, Mutex};
 
-use crate::snapshot::{SnapshotError, Snapshottable};
 use crate::virtio::AsAny;
 
 /// Trait for devices that respond to reads or writes in an arbitrary address space.
@@ -29,28 +28,6 @@ pub trait BusDevice: AsAny + Send {
     fn write(&mut self, vcpuid: u64, offset: u64, data: &[u8]) {}
     /// Triggers the `irq_mask` interrupt on this device
     fn interrupt(&self, irq_mask: u32) -> io::Result<()> {
-        Ok(())
-    }
-    /// Returns a reference to this device as a Snapshottable, if it supports snapshots.
-    fn as_snapshottable(&self) -> Option<&dyn Snapshottable> {
-        None
-    }
-    /// Returns a mutable reference to this device as a Snapshottable, if it supports snapshots.
-    fn as_snapshottable_mut(&mut self) -> Option<&mut dyn Snapshottable> {
-        None
-    }
-    /// Quiesce async workers before snapshot restore overwrites guest memory.
-    fn quiesce_workers(&self, timeout: std::time::Duration) -> result::Result<(), SnapshotError> {
-        Ok(())
-    }
-    /// Resume async workers after snapshot restore completes.
-    fn resume_workers(&self) {}
-    /// Activate device and kick workers after all snapshot state is loaded.
-    ///
-    /// Called after restore_state() and interrupt controller restore. This is
-    /// the point where device threads are spawned. Default is a no-op for
-    /// devices that don't defer activation.
-    fn complete_restore(&mut self) -> result::Result<(), SnapshotError> {
         Ok(())
     }
 }

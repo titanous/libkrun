@@ -10,8 +10,6 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use devices;
-#[cfg(feature = "snapshot")]
-use devices::BusDevice;
 use utils::eventfd::EventFd;
 
 /// Errors corresponding to the `PortIODeviceManager`.
@@ -21,8 +19,6 @@ pub enum Error {
     BusError(devices::BusError),
     /// Cannot create EventFd.
     EventFd(std::io::Error),
-    /// Snapshot state error.
-    SnapshotState(String),
 }
 
 impl fmt::Display for Error {
@@ -32,7 +28,6 @@ impl fmt::Display for Error {
         match *self {
             BusError(ref err) => write!(f, "Failed to add legacy device to Bus: {err}"),
             EventFd(ref err) => write!(f, "Failed to create EventFd: {err}"),
-            SnapshotState(ref msg) => write!(f, "Snapshot state error: {msg}"),
         }
     }
 }
@@ -149,119 +144,6 @@ impl PortIODeviceManager {
             .map_err(Error::BusError)?;
         Ok(())
     }
-
-    /// Save all device states for snapshot.
-    #[cfg(feature = "snapshot")]
-    pub fn save_all_device_states(&self) -> std::result::Result<Vec<(String, Vec<u8>)>, Error> {
-        let mut states = Vec::new();
-
-        // Save CMOS state
-        {
-            let device = self.cmos.lock().unwrap();
-            if let Some(snapshottable) = device.as_snapshottable() {
-                let state = snapshottable
-                    .save_state()
-                    .map_err(|e| Error::SnapshotState(format!("Failed to save CMOS state: {e}")))?;
-                states.push((snapshottable.snapshot_id().to_string(), state));
-            }
-        }
-
-        // Save serial states
-        for (i, serial) in self.stdio_serial.iter().enumerate() {
-            let device = serial.lock().unwrap();
-            if let Some(snapshottable) = device.as_snapshottable() {
-                let id = format!("{}:{}", snapshottable.snapshot_id(), i);
-                let state = snapshottable.save_state().map_err(|e| {
-                    Error::SnapshotState(format!("Failed to save serial {i} state: {e}"))
-                })?;
-                states.push((id, state));
-            }
-        }
-
-        // Save i8042 state
-        {
-            let device = self.i8042.lock().unwrap();
-            if let Some(snapshottable) = device.as_snapshottable() {
-                let state = snapshottable.save_state().map_err(|e| {
-                    Error::SnapshotState(format!("Failed to save i8042 state: {e}"))
-                })?;
-                states.push((snapshottable.snapshot_id().to_string(), state));
-            }
-        }
-
-        Ok(states)
-    }
-
-    /// Restore all device states from snapshot.
-    #[cfg(feature = "snapshot")]
-    pub fn restore_all_device_states(
-        &self,
-        states: &[(String, Vec<u8>)],
-    ) -> std::result::Result<(), Error> {
-        for (id, data) in states {
-            // Try CMOS
-            {
-                let mut device = self.cmos.lock().unwrap();
-                if let Some(snapshottable) = device.as_snapshottable() {
-                    if snapshottable.snapshot_id() == id {
-                        device
-                            .as_snapshottable_mut()
-                            .unwrap()
-                            .restore_state(data)
-                            .map_err(|e| {
-                                Error::SnapshotState(format!("Failed to restore {id}: {e}"))
-                            })?;
-                        continue;
-                    }
-                }
-            }
-
-            // Try serials (match "serial-16550:N" pattern)
-            let mut matched = false;
-            for (i, serial) in self.stdio_serial.iter().enumerate() {
-                let mut device = serial.lock().unwrap();
-                if let Some(snapshottable) = device.as_snapshottable() {
-                    let expected_id = format!("{}:{}", snapshottable.snapshot_id(), i);
-                    if &expected_id == id {
-                        device
-                            .as_snapshottable_mut()
-                            .unwrap()
-                            .restore_state(data)
-                            .map_err(|e| {
-                                Error::SnapshotState(format!("Failed to restore {id}: {e}"))
-                            })?;
-                        matched = true;
-                        break;
-                    }
-                }
-            }
-            if matched {
-                continue;
-            }
-
-            // Try i8042
-            {
-                let mut device = self.i8042.lock().unwrap();
-                if let Some(snapshottable) = device.as_snapshottable() {
-                    if snapshottable.snapshot_id() == id {
-                        device
-                            .as_snapshottable_mut()
-                            .unwrap()
-                            .restore_state(data)
-                            .map_err(|e| {
-                                Error::SnapshotState(format!("Failed to restore {id}: {e}"))
-                            })?;
-                        continue;
-                    }
-                }
-            }
-
-            // Unknown PortIO device state — skip silently (forward compat)
-            debug!("Skipping unknown PortIO device state: {id}");
-        }
-
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -298,145 +180,5 @@ mod tests {
                 std::io::Error::from_raw_os_error(1)
             )
         );
-        assert_eq!(
-            format!("{}", Error::SnapshotState("test error".to_string())),
-            "Snapshot state error: test error"
-        );
-    }
-
-    #[test]
-    #[cfg(feature = "snapshot")]
-    fn test_pio_save_device_states() {
-        let serial =
-            devices::legacy::Serial::new_sink(EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap());
-        let cmos = devices::legacy::Cmos::new(0, 0);
-        let ldm = PortIODeviceManager::new(
-            Arc::new(Mutex::new(cmos)),
-            vec![Arc::new(Mutex::new(serial))],
-            EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
-        );
-        assert!(ldm.is_ok());
-        let ldm = ldm.unwrap();
-
-        // AC1.6: verify save_all_device_states returns entries for "cmos", "serial-16550:0", "i8042"
-        let states = ldm.save_all_device_states();
-        assert!(states.is_ok());
-        let states = states.unwrap();
-
-        // Collect device IDs for easier checking
-        let ids: Vec<&String> = states.iter().map(|(id, _)| id).collect();
-
-        // Verify expected device entries exist
-        assert!(
-            ids.contains(&&"cmos".to_string()),
-            "Expected 'cmos' device in states"
-        );
-        assert!(
-            ids.contains(&&"serial-16550:0".to_string()),
-            "Expected 'serial-16550:0' device in states"
-        );
-        assert!(
-            ids.contains(&&"i8042".to_string()),
-            "Expected 'i8042' device in states"
-        );
-
-        // Verify each device state has non-empty bytes
-        for (id, data) in &states {
-            assert!(
-                !data.is_empty(),
-                "Device {} should have non-empty state bytes",
-                id
-            );
-        }
-    }
-
-    #[test]
-    #[cfg(feature = "snapshot")]
-    fn test_pio_restore_device_states() {
-        let serial =
-            devices::legacy::Serial::new_sink(EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap());
-        let cmos = devices::legacy::Cmos::new(0, 0);
-        let ldm = PortIODeviceManager::new(
-            Arc::new(Mutex::new(cmos)),
-            vec![Arc::new(Mutex::new(serial))],
-            EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
-        );
-        assert!(ldm.is_ok());
-        let ldm = ldm.unwrap();
-
-        // AC1.8: verify restore_all_device_states with empty slice succeeds
-        let result = ldm.restore_all_device_states(&[]);
-        assert!(
-            result.is_ok(),
-            "restore_all_device_states should succeed with empty slice"
-        );
-
-        // AC1.8: verify unknown ID is skipped silently (no error)
-        let unknown_state = vec![("unknown-device".to_string(), vec![1, 2, 3])];
-        let result = ldm.restore_all_device_states(&unknown_state);
-        assert!(
-            result.is_ok(),
-            "restore_all_device_states should silently skip unknown device IDs"
-        );
-    }
-
-    #[test]
-    #[cfg(feature = "snapshot")]
-    fn test_pio_roundtrip_snapshot() {
-        // Create first PortIODeviceManager and save states
-        let serial1 =
-            devices::legacy::Serial::new_sink(EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap());
-        let cmos1 = devices::legacy::Cmos::new(0, 0);
-        let ldm1 = PortIODeviceManager::new(
-            Arc::new(Mutex::new(cmos1)),
-            vec![Arc::new(Mutex::new(serial1))],
-            EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
-        );
-        assert!(ldm1.is_ok());
-        let ldm1 = ldm1.unwrap();
-
-        // Save states from first manager
-        let states1 = ldm1.save_all_device_states();
-        assert!(states1.is_ok());
-        let states1 = states1.unwrap();
-
-        // Create second PortIODeviceManager with fresh state
-        let serial2 =
-            devices::legacy::Serial::new_sink(EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap());
-        let cmos2 = devices::legacy::Cmos::new(0, 0);
-        let ldm2 = PortIODeviceManager::new(
-            Arc::new(Mutex::new(cmos2)),
-            vec![Arc::new(Mutex::new(serial2))],
-            EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
-        );
-        assert!(ldm2.is_ok());
-        let ldm2 = ldm2.unwrap();
-
-        // Restore states into second manager
-        let restore_result = ldm2.restore_all_device_states(&states1);
-        assert!(restore_result.is_ok(), "Restore should succeed");
-
-        // Save states from second manager
-        let states2 = ldm2.save_all_device_states();
-        assert!(states2.is_ok());
-        let states2 = states2.unwrap();
-
-        // Verify roundtrip: both snapshots should have same number of device entries with same IDs
-        assert_eq!(
-            states1.len(),
-            states2.len(),
-            "Roundtrip snapshot should have same number of device entries"
-        );
-
-        let ids1: Vec<&String> = states1.iter().map(|(id, _)| id).collect();
-        let ids2: Vec<&String> = states2.iter().map(|(id, _)| id).collect();
-
-        for id in &ids1 {
-            assert!(
-                ids2.contains(id),
-                "Device {} should exist in roundtrip snapshot",
-                id
-            );
-        }
     }
 }
