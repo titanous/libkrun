@@ -27,6 +27,20 @@ fn mismatch(reason: RestoreMismatch) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, reason)
 }
 
+/// Host write operations into receiver RAM made by this process's imports.
+static RECEIVER_WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Number of host write operations into receiver RAM (template memory copies,
+/// control-page time and entropy writes, and the release of the parked stub)
+/// performed by imports in this process so far. Every such write goes through
+/// `copy_and_release`; acceptance tests use this to show that a refused
+/// assignment wrote nothing.
+pub fn receiver_writes() -> u64 {
+    RECEIVER_WRITES.load(std::sync::atomic::Ordering::SeqCst)
+}
+fn record_receiver_write() {
+    RECEIVER_WRITES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
 pub struct NitroRestore {
     pub template: Template,
     pub vcpus: u8,
@@ -246,6 +260,8 @@ mod tests {
         assert!(unsafe { std::slice::from_raw_parts(base, 4096) }
             .iter()
             .all(|b| *b == 0xa5));
+        // No test in this process performs a successful import.
+        assert_eq!(receiver_writes(), 0);
         assert_eq!(unsafe { libc::munmap(mapping, 1 << 30) }, 0);
     }
     #[test]
@@ -351,6 +367,7 @@ pub unsafe fn copy_and_release(
             // straddles either boundary (independent of buffer alignment/size).
             for (skip, len) in copy_spans(at, count)? {
                 if len != 0 {
+                    record_receiver_write();
                     unsafe {
                         std::ptr::copy_nonoverlapping(
                             buffer.as_ptr().add(skip),
@@ -382,6 +399,9 @@ pub unsafe fn copy_and_release(
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(io::Error::other)?
         .as_nanos() as u64;
+    // Time, entropy and the resume flag, then the release of the stub.
+    record_receiver_write();
+    record_receiver_write();
     unsafe {
         guest.add(8).write_volatile(realtime);
         std::ptr::copy_nonoverlapping(seed.as_ptr(), guest.add(10) as *mut u8, 32);

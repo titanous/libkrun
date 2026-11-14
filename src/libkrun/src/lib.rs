@@ -516,6 +516,16 @@ pub use nitro_sandbox::lifecycle::{
 ))]
 pub use nitro_sandbox::runtime::ParkedReceiverError;
 
+/// Why a Nitro template was refused for a receiver (CPU count, memory size,
+/// device list or receiver kernel identity), before any receiver memory is
+/// written. Carried inside the `std::io::Error` (`InvalidInput`).
+#[cfg(all(
+    target_os = "linux",
+    target_arch = "aarch64",
+    feature = "nitro-sandbox"
+))]
+pub use vmm::nitro_restore::RestoreMismatch;
+
 #[cfg(all(
     target_os = "linux",
     target_arch = "aarch64",
@@ -545,8 +555,11 @@ impl TemplateAssignment {
     /// Open and check the template against this receiver's CPU count, memory
     /// and device list, then hand it over. The receiver's own kernel identity
     /// is compared before any memory is written. Refused with a
-    /// `ParkedReceiverError::Closed` error after an assignment, expiry or end.
+    /// `ParkedReceiverError::Closed` error after an assignment, expiry or end
+    /// (checked first, whatever the template); a template that does not fit
+    /// is refused with `RestoreMismatch` and the receiver stays parked.
     pub fn assign(&self, source: TemplateSource) -> std::io::Result<()> {
+        self.slot.check_open()?;
         let template = match source {
             TemplateSource::Descriptor(file) => vmm::template::Template::open(file)?,
             TemplateSource::Path(path) => vmm::template::Template::from_path(path)?,

@@ -58,8 +58,8 @@ an overlap prints a clear disabled line and leaves the source usable.
 | Console devices or virtio-fs DAX windows on a template or copy | Refused at build |
 | Block device without `template_disk_identity` | Refused at build |
 | Template with another architecture tag, or format 3 | Refused when opened |
-| CPU count, memory size, or device list differing from the template | Refused before the VM is created (`start_from_template`) or at `TemplateAssignment::assign` |
-| Receiver kernel build ID differing from the template's | Refused before any memory is written to the receiver |
+| CPU count, memory size, or device list differing from the template | Refused before the VM is created (`start_from_template`) or at `TemplateAssignment::assign`, with `RestoreMismatch::CpuCount`, `MemorySize` or `DeviceList` (`InvalidInput`); nothing is written to the receiver, which stays parked |
+| Receiver kernel build ID differing from the template's | Refused after READY and before any memory is written to the receiver, with `RestoreMismatch::KernelIdentity`; the receiver ends (torn down under the lock) |
 
 ## Receiving VMs and the parked receiver
 
@@ -111,8 +111,8 @@ Parked receiver contract:
 - The boot watchdog and heartbeat are suspended while parked and restart at
   release. `assign` returning `Ok` means handoff, not successful import: a race
   with the park deadline can still end with `Expired`. A kernel mismatch ends
-  and consumes the receiver with the typed `vmm::nitro_restore::RestoreMismatch::KernelIdentity`
-  error (available through the VMM crate; not re-exported by `libkrun`).
+  and consumes the receiver: `run` returns the typed
+  `RestoreMismatch::KernelIdentity` error (`krun::RestoreMismatch`).
 - Configure the parked VM with the same device list, in the same order, as
   the template's source. Backends may receive their contents (for example a
   disk snapshot written in place into the already-open file) at any time

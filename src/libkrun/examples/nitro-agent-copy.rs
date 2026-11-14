@@ -469,6 +469,152 @@ mod probe {
             Err(failures.join("; ").into())
         }
     }
+    /// Open the template the parent offered in `directory` (a fresh descriptor).
+    fn offered_template(directory: &Path) -> io::Result<std::fs::File> {
+        let offer = directory.join("template-ready");
+        wait_until("template offer", Duration::from_secs(90), || offer.exists())?;
+        let offer = std::fs::read_to_string(offer)?;
+        let fields: Vec<_> = offer.lines().collect();
+        let [pid, fd, _] = fields[..] else {
+            return Err(io::Error::other("malformed template offer"));
+        };
+        std::fs::File::open(format!("/proc/{pid}/fd/{fd}"))
+    }
+    fn typed<T: std::error::Error + Copy + 'static>(error: &io::Error) -> Option<T> {
+        error.get_ref().and_then(|e| e.downcast_ref::<T>()).copied()
+    }
+    /// PARK_MODE=mismatch MISMATCH_KIND=cpu|memory|devices|kernel: a parked
+    /// receiver whose shape, device list or kernel differs from the offered
+    /// template. CPU, memory and device differences must be refused by
+    /// `assign` with their `RestoreMismatch` while the receiver stays parked;
+    /// a different kernel is refused after READY with `KernelIdentity` and
+    /// ends the receiver. In every case no host write reaches receiver memory
+    /// (`receiver_writes` stays 0) and the receiver's descriptors and pool
+    /// mapping are released. Late assignments after the end must be refused
+    /// with `Closed`: after a stop request (memory case) and after the
+    /// mismatch error (kernel case).
+    fn mismatch_child(
+        receiver: Builder,
+        cid: u64,
+        directory: &Path,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let kind = std::env::var("MISMATCH_KIND")?;
+        let expected = match kind.as_str() {
+            "cpu" => krun::RestoreMismatch::CpuCount,
+            "memory" => krun::RestoreMismatch::MemorySize,
+            "devices" => krun::RestoreMismatch::DeviceList,
+            "kernel" => krun::RestoreMismatch::KernelIdentity,
+            _ => return Err(format!("unknown MISMATCH_KIND {kind}").into()),
+        };
+        let before = own_nitro_resources()?;
+        let mut context = receiver.build()?;
+        let handle = context.vm_handle();
+        let assignment = context
+            .take_template_assignment()
+            .ok_or("parked context has no assignment handle")?;
+        wait_until("receiver READY", Duration::from_secs(15), || {
+            assignment.receiver_ready()
+        })?;
+        std::fs::write(directory.join(format!("parked-{cid}")), b"parked")?;
+        let parked = own_nitro_resources()?;
+        let template = offered_template(directory)?;
+        let mut failures = Vec::new();
+        let writes_before = vmm::nitro_restore::receiver_writes();
+        let assigned = assignment.assign(TemplateSource::Descriptor(template));
+        let mut assignment = Some(assignment);
+        let late_mode;
+        let run_result = match (&assigned, kind.as_str()) {
+            (Ok(()), "kernel") => {
+                late_mode = "errored";
+                let result = context.run();
+                match &result {
+                    Err(krun::StartError::Nitro(error))
+                        if typed::<krun::RestoreMismatch>(error) == Some(expected) =>
+                    {
+                        println!("MISMATCH_REFUSED cid={cid} kind={kind} where=runtime typed={expected:?}");
+                    }
+                    other => failures.push(format!("kernel mismatch run ended {other:?}")),
+                }
+                format!("{result:?}")
+            }
+            (Err(error), _)
+                if kind != "kernel" && typed::<krun::RestoreMismatch>(error) == Some(expected) =>
+            {
+                let still_parked = assignment.as_ref().is_some_and(|a| a.receiver_ready())
+                    && own_nitro_resources()?.1 == parked.1;
+                println!(
+                    "MISMATCH_REFUSED cid={cid} kind={kind} where=assign typed={expected:?} still_parked={still_parked}"
+                );
+                if !still_parked {
+                    failures.push("receiver did not stay parked after the refusal".into());
+                }
+                if kind == "cpu" {
+                    // End it by dropping the only handle: typed Abandoned.
+                    late_mode = "";
+                    drop(assignment.take());
+                    let result = context.run();
+                    match &result {
+                        Err(krun::StartError::Nitro(error))
+                            if typed::<krun::ParkedReceiverError>(error)
+                                == Some(krun::ParkedReceiverError::Abandoned) => {}
+                        other => failures.push(format!("abandoned after refusal ended {other:?}")),
+                    }
+                    format!("{result:?}")
+                } else {
+                    // End it by a stop request, then try a late assignment.
+                    late_mode = "stopped";
+                    handle.trigger_shutdown_event()?;
+                    let result = context.run();
+                    if !matches!(result, Ok(VmExit::Stopped)) {
+                        failures.push(format!("stop after refusal ended {result:?}"));
+                    }
+                    format!("{result:?}")
+                }
+            }
+            other => {
+                late_mode = "";
+                failures.push(format!("assign returned {:?}", other.0));
+                let _ = handle.trigger_shutdown_event();
+                format!("{:?}", context.run())
+            }
+        };
+        let writes = vmm::nitro_restore::receiver_writes() - writes_before;
+        if writes != 0 {
+            failures.push(format!(
+                "{writes} receiver writes after a refused assignment"
+            ));
+        }
+        if let (false, Some(assignment)) = (late_mode.is_empty(), assignment.as_ref()) {
+            let late = assignment.assign(TemplateSource::Descriptor(offered_template(directory)?));
+            match &late {
+                Err(error)
+                    if typed::<krun::ParkedReceiverError>(error)
+                        == Some(krun::ParkedReceiverError::Closed) =>
+                {
+                    println!("LATE_ASSIGN_REFUSED cid={cid} after={late_mode} typed=Closed");
+                }
+                other => failures.push(format!("late assign after {late_mode} returned {other:?}")),
+            }
+        }
+        drop(assignment);
+        let after = own_nitro_resources()?;
+        println!(
+            "MISMATCH_RESULT cid={cid} kind={kind} run={run_result} receiver_writes={writes} own_before={:?} own_parked={:?} own_after={:?}",
+            (before.0, before.1),
+            (parked.0, parked.1),
+            (after.0, after.1)
+        );
+        if (after.0, after.1) != (before.0, before.1) || parked.1 == 0 {
+            failures.push("receiver resources not released".into());
+        }
+        if failures.is_empty() {
+            println!("MISMATCH_PASS cid={cid} kind={kind}");
+            Ok(())
+        } else {
+            println!("MISMATCH_FAIL cid={cid} kind={kind} {failures:?}");
+            Err(failures.join("; ").into())
+        }
+    }
     /// One receiver parked before any template exists. PARK_MODE=assign (default)
     /// waits for the parent's template, expire never assigns, drop releases the
     /// handle unassigned. PARK_WAIT_SECS bounds the park (default 60).
@@ -506,6 +652,11 @@ mod probe {
         receiver.park_for_template(wait);
         if mode.starts_with("unrun") {
             let result = unrun_child(receiver, &mode, wait, cid);
+            let _ = std::fs::remove_file(&socket);
+            return result;
+        }
+        if mode == "mismatch" {
+            let result = mismatch_child(receiver, cid, &directory);
             let _ = std::fs::remove_file(&socket);
             return result;
         }
@@ -561,7 +712,8 @@ mod probe {
             std::fs::remove_file(&socket)?;
             return Ok(());
         }
-        let worker = std::thread::spawn(move || -> io::Result<()> {
+        let late_directory = directory.clone();
+        let worker = std::thread::spawn(move || -> io::Result<krun::TemplateAssignment> {
             wait_until("receiver READY", Duration::from_secs(15), || {
                 assignment.receiver_ready()
             })?;
@@ -617,11 +769,36 @@ mod probe {
             })?;
             send(&mut connection, json!({"type":"power_off","request":4}))?;
             response(&mut connection, "ack")?;
-            Ok(())
+            Ok(assignment)
         });
         let run = context.run();
-        worker.join().map_err(|_| "parked worker panicked")??;
-        run?;
+        let assignment = worker.join().map_err(|_| "parked worker panicked")??;
+        let exit = run?;
+        // Positive control for the refusal tests: a real import writes.
+        println!(
+            "IMPORT_RECEIVER_WRITES cid={cid} writes={} exit={exit:?}",
+            vmm::nitro_restore::receiver_writes()
+        );
+        if vmm::nitro_restore::receiver_writes() == 0 {
+            return Err("an accepted import recorded no receiver writes".into());
+        }
+        if std::env::var_os("LATE_ASSIGN").is_some() {
+            // The copy has shut down: a late assignment must be refused, never Ok.
+            let late = assignment.assign(TemplateSource::Descriptor(offered_template(
+                &late_directory,
+            )?));
+            match &late {
+                Err(error)
+                    if typed::<krun::ParkedReceiverError>(error)
+                        == Some(krun::ParkedReceiverError::Closed) =>
+                {
+                    println!("LATE_ASSIGN_REFUSED cid={cid} after=shutdown typed=Closed");
+                }
+                other => {
+                    return Err(format!("late assign after shutdown returned {other:?}").into())
+                }
+            }
+        }
         std::fs::remove_file(socket)?;
         Ok(())
     }
@@ -1014,6 +1191,69 @@ mod probe {
                 if !child.wait()?.success() {
                     return Err("parked copy failed".into());
                 }
+            }
+            if std::env::var_os("AGENT_MISMATCH").is_some() {
+                // One mismatching parked receiver at a time, template still offered.
+                let kernel_eif = std::env::var("AGENT_MISMATCH_KERNEL_EIF")
+                    .map_err(|_| "AGENT_MISMATCH needs AGENT_MISMATCH_KERNEL_EIF")?;
+                let base_mib = std::env::var("COPY_MEMORY_MIB").unwrap_or_else(|_| "1024".into());
+                let base_cpus = std::env::var("COPY_CPUS").unwrap_or_else(|_| "1".into());
+                if base_mib != "1024" || base_cpus != "1" || !full_devices {
+                    return Err("AGENT_MISMATCH expects a 1 GiB, 1 CPU source with devices".into());
+                }
+                // (kind, CID, receiver EIF, environment overrides, without devices)
+                type Case<'a> = (&'a str, u64, &'a str, &'a [(&'a str, &'a str)], bool);
+                let cases: [Case; 4] = [
+                    (
+                        "cpu",
+                        793,
+                        "takeover-receiver-1024-4.eif",
+                        &[("COPY_CPUS", "4")],
+                        false,
+                    ),
+                    (
+                        "memory",
+                        794,
+                        "takeover-receiver-4096-1.eif",
+                        &[("COPY_MEMORY_MIB", "4096")],
+                        false,
+                    ),
+                    ("devices", 795, &args[2], &[], true),
+                    ("kernel", 796, &kernel_eif, &[], false),
+                ];
+                for (kind, cid, eif, envs, without_devices) in cases {
+                    let mut command = std::process::Command::new(std::env::current_exe()?);
+                    command
+                        .args(["--parked-child", eif, &cid.to_string()])
+                        .arg(directory)
+                        .env("PARK_MODE", "mismatch")
+                        .env("MISMATCH_KIND", kind)
+                        .env("PARK_WAIT_SECS", "60");
+                    for (key, value) in envs {
+                        command.env(key, value);
+                    }
+                    if without_devices {
+                        command.env_remove("AGENT_DEVICES");
+                    }
+                    let mut child = command.spawn()?;
+                    let deadline = Instant::now() + Duration::from_secs(90);
+                    let status = loop {
+                        if let Some(status) = child.try_wait()? {
+                            break status;
+                        }
+                        if Instant::now() >= deadline {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            return Err(format!("mismatch case {kind} timed out").into());
+                        }
+                        std::thread::sleep(Duration::from_millis(20));
+                    };
+                    if !status.success() {
+                        return Err(format!("mismatch case {kind} failed: {status:?}").into());
+                    }
+                    println!("AGENT_MISMATCH_CASE_PASS kind={kind} cid={cid}");
+                }
+                println!("AGENT_MISMATCH_COMPLETED count=4");
             }
             drop(template);
             std::fs::remove_dir_all(directory)?;

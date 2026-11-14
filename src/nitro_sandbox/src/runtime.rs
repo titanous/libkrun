@@ -62,6 +62,18 @@ impl RestoreAssignment {
         self.0.wake.write(1)?;
         Ok(())
     }
+    /// Refused with `ParkedReceiverError::Closed` if the receiver has already
+    /// taken an assignment, expired or ended (the same check `assign` makes).
+    pub fn check_open(&self) -> io::Result<()> {
+        let state = self.0.state.lock().unwrap();
+        if state.1 || state.0.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                ParkedReceiverError::Closed,
+            ));
+        }
+        Ok(())
+    }
     /// True once the parked receiver has published READY (observed within
     /// the runtime's 50ms event bound).
     pub fn receiver_ready(&self) -> bool {
@@ -801,6 +813,22 @@ mod tests {
             ready: Default::default(),
         }));
         assert!(closed.assign(Box::new(Unused)).is_err());
+        assert_eq!(
+            closed
+                .check_open()
+                .unwrap_err()
+                .get_ref()
+                .unwrap()
+                .downcast_ref::<ParkedReceiverError>(),
+            Some(&ParkedReceiverError::Closed)
+        );
+        let open = RestoreAssignment(Arc::new(ParkSlot {
+            state: Mutex::new((None, false)),
+            wake: utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
+            ready: Default::default(),
+        }));
+        assert!(open.check_open().is_ok());
+        assert!(handle.check_open().is_err());
     }
 
     #[test]
