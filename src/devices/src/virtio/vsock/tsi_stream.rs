@@ -189,7 +189,7 @@ impl TsiStreamProxy {
                 .as_ref()
                 .is_some_and(|map| map.contains_key(&port))
             {
-                // Published kernels use EPERM to select their native listener.
+                // EPERM selects the guest's native listener without a host socket.
                 return -libc::EPERM;
             }
         }
@@ -935,6 +935,38 @@ impl Proxy for TsiStreamProxy {
         }
 
         update
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vm_memory::GuestAddress;
+
+    #[test]
+    fn refused_listen_returns_eperm_and_never_opens_host_socket() {
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let mut proxy = TsiStreamProxy::new(
+            1, 42, defs::LINUX_AF_INET, 1234, 5678, 9012, mem,
+            Arc::new(Mutex::new(VirtQueue::new(256))),
+            Arc::new(Mutex::new(MuxerRxQ::new())),
+        ).unwrap();
+        let req = TsiListenReq {
+            peer_port: 5678,
+            vm_port: 1234,
+            backlog: 8,
+            addr: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 34567).into(),
+        };
+        // Unmapped listen must be rejected even when Internet forwarding is enabled.
+        proxy.socket_policy.internet_enabled = true;
+        assert_eq!(proxy.try_listen(&req, &None), -libc::EPERM);
+        assert!(proxy.fd.is_none());
+        assert_eq!(proxy.status, ProxyStatus::Idle);
+        // A mapping does not bypass the independent policy refusal.
+        proxy.socket_policy.internet_enabled = false;
+        let mapping = Some(HashMap::from([(34567, 34568)]));
+        assert_eq!(proxy.try_listen(&req, &mapping), -libc::EPERM);
+        assert!(proxy.fd.is_none());
     }
 }
 
