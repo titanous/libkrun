@@ -11,7 +11,6 @@ use std::sync::{Arc, Mutex};
 
 #[cfg(target_os = "linux")]
 use libc::EINVAL;
-use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use nix::sys::socket::{
     accept, bind, connect, getpeername, listen, recv, setsockopt, shutdown, socket, sockopt,
     AddressFamily, Backlog, MsgFlags, Shutdown, SockFlag, SockType, SockaddrLike, SockaddrStorage,
@@ -40,7 +39,7 @@ pub struct TsiStreamProxy {
     local_port: u32,
     peer_port: u32,
     control_port: u32,
-    fd: OwnedFd,
+    fd: Option<OwnedFd>,
     pub status: ProxyStatus,
     mem: GuestMemoryMmap,
     queue: Arc<Mutex<VirtQueue>>,
@@ -77,28 +76,6 @@ impl TsiStreamProxy {
             defs::LINUX_AF_UNIX => AddressFamily::Unix,
             _ => return Err(ProxyError::InvalidFamily),
         };
-        let fd = socket(family, SockType::Stream, SockFlag::empty(), None)
-            .map_err(ProxyError::CreatingSocket)?;
-
-        // Set non-blocking mode before using the socket.
-        match fcntl(&fd, FcntlArg::F_GETFL) {
-            Ok(flags) => match OFlag::from_bits(flags) {
-                Some(flags) => {
-                    if let Err(e) = fcntl(&fd, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK)) {
-                        warn!("error switching to non-blocking: id={id}, err={e}");
-                    }
-                }
-                None => error!("invalid fd flags id={id}"),
-            },
-            Err(e) => error!("couldn't obtain fd flags id={id}, err={e}"),
-        };
-
-        if family == AddressFamily::Unix {
-            setsockopt(&fd, sockopt::ReuseAddr, &true).map_err(ProxyError::SettingReuseAddr)?;
-        } else {
-            setsockopt(&fd, sockopt::ReusePort, &true).map_err(ProxyError::SettingReusePort)?;
-        }
-
         Ok(TsiStreamProxy {
             socket_policy: Default::default(),
             id,
@@ -108,7 +85,7 @@ impl TsiStreamProxy {
             local_port,
             peer_port,
             control_port,
-            fd,
+            fd: None,
             status: ProxyStatus::Idle,
             mem,
             queue,
@@ -149,7 +126,7 @@ impl TsiStreamProxy {
             local_port,
             peer_port,
             control_port: 0,
-            fd,
+            fd: Some(fd),
             status: ProxyStatus::ReverseInit,
             mem,
             queue,
@@ -165,6 +142,21 @@ impl TsiStreamProxy {
             pending: Default::default(),
             rx_paused: false,
         }
+    }
+
+    // A proxy can exist solely to reject a guest-local listen. Do not allocate a
+    // host socket until an authorized operation actually needs one.
+    fn ensure_socket(&mut self) -> nix::Result<()> {
+        if self.fd.is_none() {
+            let fd = socket(self.family, SockType::Stream, SockFlag::SOCK_NONBLOCK, None)?;
+            if self.family == AddressFamily::Unix {
+                setsockopt(&fd, sockopt::ReuseAddr, &true)?;
+            } else {
+                setsockopt(&fd, sockopt::ReusePort, &true)?;
+            }
+            self.fd = Some(fd);
+        }
+        Ok(())
     }
 
     fn init_data_pkt(&self, pkt: &mut VsockPacket) {
@@ -185,6 +177,21 @@ impl TsiStreamProxy {
     fn try_listen(&mut self, req: &TsiListenReq, host_port_map: &Option<HashMap<u16, u16>>) -> i32 {
         if self.status == ProxyStatus::Listening || self.status == ProxyStatus::WaitingOnAccept {
             return 0;
+        }
+
+        let guest_port = req
+            .addr
+            .as_sockaddr_in()
+            .map(|a| a.port())
+            .or_else(|| req.addr.as_sockaddr_in6().map(|a| a.port()));
+        if let Some(port) = guest_port {
+            if !host_port_map
+                .as_ref()
+                .is_some_and(|map| map.contains_key(&port))
+            {
+                // EPERM selects the guest's native listener without a host socket.
+                return -libc::EPERM;
+            }
         }
 
         let addr: SockaddrStorage = if let Some(port_map) = host_port_map {
@@ -229,7 +236,10 @@ impl TsiStreamProxy {
                     .check(SocketOperation::UnixRemove, &addr)
                     .is_err())
         {
-            return -libc::EACCES;
+            return -libc::EPERM;
+        }
+        if let Err(error) = self.ensure_socket() {
+            return -(error as i32);
         }
         let unixsock_path = self.get_unixsock_path(&addr);
         // If the userspace process in the guest has already created the socket,
@@ -240,7 +250,7 @@ impl TsiStreamProxy {
             }
         }
 
-        match bind(self.fd.as_raw_fd(), &addr) {
+        match bind(self.as_raw_fd(), &addr) {
             Ok(_) => {
                 debug!("tcp bind: id={}", self.id);
 
@@ -252,7 +262,10 @@ impl TsiStreamProxy {
                 // The nix crate's Backlog::new() rejects values above SOMAXCONN with EINVAL.
                 let clamped_backlog = req.backlog.clamp(0, libc::SOMAXCONN);
                 match Backlog::new(clamped_backlog) {
-                    Ok(backlog) => match listen(&self.fd, backlog) {
+                    Ok(backlog) => match listen(
+                        self.fd.as_ref().expect("authorized listener has a socket"),
+                        backlog,
+                    ) {
                         Ok(_) => {
                             debug!("proxy: id={}", self.id);
                             0
@@ -303,7 +316,7 @@ impl TsiStreamProxy {
             }
 
             match recv(
-                self.fd.as_raw_fd(),
+                self.as_raw_fd(),
                 &mut buf[..max_len],
                 MsgFlags::MSG_DONTWAIT,
             ) {
@@ -427,14 +440,14 @@ impl TsiStreamProxy {
 
     fn flush_pending(&mut self) -> ProxyUpdate {
         let mut update = ProxyUpdate::default();
-        match self.pending.flush(self.fd.as_raw_fd()) {
+        match self.pending.flush(self.as_raw_fd()) {
             Ok(count) => self.tx_cnt += Wrapping(count as u32),
             Err(_) => {
                 self.push_reset();
                 self.status = ProxyStatus::Closed;
                 update.signal_queue = true;
                 update.remove_proxy = ProxyRemoval::Deferred;
-                update.polling = Some((self.id, self.fd.as_raw_fd(), EventSet::empty()));
+                update.polling = Some((self.id, self.as_raw_fd(), EventSet::empty()));
                 return update;
             }
         }
@@ -447,7 +460,7 @@ impl TsiStreamProxy {
             });
             update.signal_queue = true;
         }
-        update.polling = Some((self.id, self.fd.as_raw_fd(), self.stream_events()));
+        update.polling = Some((self.id, self.as_raw_fd(), self.stream_events()));
         update
     }
 
@@ -510,10 +523,10 @@ impl Proxy for TsiStreamProxy {
         } else {
             super::policy::SocketOperation::TcpConnect
         };
-        let result = match self
-            .socket_policy
-            .check(operation, &req.addr)
-            .and_then(|()| connect(self.fd.as_raw_fd(), &req.addr))
+        let permitted = self.socket_policy.check(operation, &req.addr);
+        let result = match permitted
+            .and_then(|()| self.ensure_socket())
+            .and_then(|()| connect(self.as_raw_fd(), &req.addr))
         {
             Ok(()) => {
                 debug!("connect: Connected");
@@ -536,12 +549,12 @@ impl Proxy for TsiStreamProxy {
         if self.status == ProxyStatus::Connecting {
             update.polling = Some((
                 self.id,
-                self.fd.as_raw_fd(),
+                self.as_raw_fd(),
                 EventSet::OUT | EventSet::EDGE_TRIGGERED,
             ));
         } else {
             if self.status == ProxyStatus::Connected {
-                update.polling = Some((self.id, self.fd.as_raw_fd(), EventSet::IN));
+                update.polling = Some((self.id, self.as_raw_fd(), EventSet::IN));
             }
             self.push_connect_rsp(result);
         }
@@ -574,7 +587,7 @@ impl Proxy for TsiStreamProxy {
         // Now that the vsock transport is fully established, start listening
         // for events in the TCP socket again.
         Some(ProxyUpdate {
-            polling: Some((self.id, self.fd.as_raw_fd(), EventSet::IN)),
+            polling: Some((self.id, self.as_raw_fd(), EventSet::IN)),
             ..Default::default()
         })
     }
@@ -583,7 +596,7 @@ impl Proxy for TsiStreamProxy {
         debug!("getpeername: id={}", self.id);
 
         let (result, addr_len, addr): (i32, u32, SockaddrStorage) =
-            match getpeername(self.fd.as_raw_fd()) {
+            match getpeername(self.as_raw_fd()) {
                 Ok(addr) => {
                     if let Some(addr_len) = self.get_addr_len(&addr) {
                         (0, addr_len, addr)
@@ -632,7 +645,7 @@ impl Proxy for TsiStreamProxy {
             return ProxyUpdate {
                 signal_queue: true,
                 remove_proxy: ProxyRemoval::Deferred,
-                polling: Some((self.id, self.fd.as_raw_fd(), EventSet::empty())),
+                polling: Some((self.id, self.as_raw_fd(), EventSet::empty())),
                 ..Default::default()
             };
         }
@@ -664,11 +677,12 @@ impl Proxy for TsiStreamProxy {
             result,
         };
         self.push_pkt(rx);
+        update.signal_queue = true;
 
         if result == 0 {
             self.peer_port = req.vm_port;
             self.status = ProxyStatus::Listening;
-            update.polling = Some((self.id, self.fd.as_raw_fd(), EventSet::IN));
+            update.polling = Some((self.id, self.as_raw_fd(), EventSet::IN));
         }
 
         update
@@ -717,7 +731,7 @@ impl Proxy for TsiStreamProxy {
         }
         ProxyUpdate {
             signal_queue: request,
-            polling: Some((self.id, self.fd.as_raw_fd(), self.stream_events())),
+            polling: Some((self.id, self.as_raw_fd(), self.stream_events())),
             ..Default::default()
         }
     }
@@ -750,7 +764,7 @@ impl Proxy for TsiStreamProxy {
         self.switch_to_connected();
 
         ProxyUpdate {
-            polling: Some((self.id, self.fd.as_raw_fd(), EventSet::IN)),
+            polling: Some((self.id, self.as_raw_fd(), EventSet::IN)),
             push_accept: Some((self.id, self.parent_id)),
             ..Default::default()
         }
@@ -787,10 +801,10 @@ impl Proxy for TsiStreamProxy {
         let send_off = pkt.flags() & uapi::VSOCK_FLAGS_SHUTDOWN_SEND != 0;
 
         if send_off {
-            self.pending.shutdown_write(self.fd.as_raw_fd());
+            self.pending.shutdown_write(self.as_raw_fd());
         }
         if recv_off {
-            if let Err(e) = shutdown(self.fd.as_raw_fd(), Shutdown::Read) {
+            if let Err(e) = shutdown(self.as_raw_fd(), Shutdown::Read) {
                 debug!("error sending shutdown to socket: {e}");
             }
         }
@@ -818,7 +832,7 @@ impl Proxy for TsiStreamProxy {
         }
         self.rx_paused = false;
         Some(ProxyUpdate {
-            polling: Some((self.id, self.fd.as_raw_fd(), self.stream_events())),
+            polling: Some((self.id, self.as_raw_fd(), self.stream_events())),
             ..Default::default()
         })
     }
@@ -835,7 +849,7 @@ impl Proxy for TsiStreamProxy {
             }
 
             self.status = ProxyStatus::Closed;
-            update.polling = Some((self.id, self.fd.as_raw_fd(), EventSet::empty()));
+            update.polling = Some((self.id, self.as_raw_fd(), EventSet::empty()));
             update.signal_queue = true;
             update.remove_proxy = if self.status == ProxyStatus::Listening {
                 ProxyRemoval::Immediate
@@ -850,7 +864,7 @@ impl Proxy for TsiStreamProxy {
             if self.status == ProxyStatus::Connected {
                 let (signal_queue, wait_credit) = self.recv_pkt();
                 update.signal_queue = signal_queue;
-                update.polling = Some((self.id, self.fd.as_raw_fd(), self.stream_events()));
+                update.polling = Some((self.id, self.as_raw_fd(), self.stream_events()));
 
                 if wait_credit && self.status != ProxyStatus::WaitingCreditUpdate {
                     self.status = ProxyStatus::WaitingCreditUpdate;
@@ -869,20 +883,20 @@ impl Proxy for TsiStreamProxy {
                     );
                     self.push_reset();
                     update.signal_queue = true;
-                    update.polling = Some((self.id(), self.fd.as_raw_fd(), EventSet::empty()));
+                    update.polling = Some((self.id(), self.as_raw_fd(), EventSet::empty()));
                     return update;
                 } else if self.status == ProxyStatus::WaitingCreditUpdate {
                     debug!("process_event: WaitingCreditUpdate");
-                    update.polling = Some((self.id(), self.fd.as_raw_fd(), self.stream_events()));
+                    update.polling = Some((self.id(), self.as_raw_fd(), self.stream_events()));
                 }
             } else if self.status == ProxyStatus::Listening
                 || self.status == ProxyStatus::WaitingOnAccept
             {
-                match accept(self.fd.as_raw_fd()) {
+                match accept(self.as_raw_fd()) {
                     Ok(accept_fd) => {
                         // Safe because we've just obtained the FD from the `accept` call above.
                         let new_fd = unsafe { OwnedFd::from_raw_fd(accept_fd) };
-                        if getpeername::<SockaddrStorage>(accept_fd).map_or(true, |addr| {
+                        if nix::sys::socket::getsockname::<SockaddrStorage>(accept_fd).map_or(true, |addr| {
                             self.socket_policy
                                 .check(super::policy::SocketOperation::Accept, &addr)
                                 .is_err()
@@ -909,7 +923,7 @@ impl Proxy for TsiStreamProxy {
                 update.signal_queue = true;
                 // Stop listening for events in the TCP socket until we receive
                 // OP_REQUEST and the vsock transport is fully established.
-                update.polling = Some((self.id(), self.fd.as_raw_fd(), EventSet::empty()));
+                update.polling = Some((self.id(), self.as_raw_fd(), EventSet::empty()));
             } else if self.status == ProxyStatus::Connected
                 || self.status == ProxyStatus::WaitingCreditUpdate
             {
@@ -924,9 +938,41 @@ impl Proxy for TsiStreamProxy {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vm_memory::GuestAddress;
+
+    #[test]
+    fn refused_listen_returns_eperm_and_never_opens_host_socket() {
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let mut proxy = TsiStreamProxy::new(
+            1, 42, defs::LINUX_AF_INET, 1234, 5678, 9012, mem,
+            Arc::new(Mutex::new(VirtQueue::new(256))),
+            Arc::new(Mutex::new(MuxerRxQ::new())),
+        ).unwrap();
+        let req = TsiListenReq {
+            peer_port: 5678,
+            vm_port: 1234,
+            backlog: 8,
+            addr: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 34567).into(),
+        };
+        // Unmapped listen must be rejected even when Internet forwarding is enabled.
+        proxy.socket_policy.internet_enabled = true;
+        assert_eq!(proxy.try_listen(&req, &None), -libc::EPERM);
+        assert!(proxy.fd.is_none());
+        assert_eq!(proxy.status, ProxyStatus::Idle);
+        // A mapping does not bypass the independent policy refusal.
+        proxy.socket_policy.internet_enabled = false;
+        let mapping = Some(HashMap::from([(34567, 34568)]));
+        assert_eq!(proxy.try_listen(&req, &mapping), -libc::EPERM);
+        assert!(proxy.fd.is_none());
+    }
+}
+
 impl AsRawFd for TsiStreamProxy {
     fn as_raw_fd(&self) -> RawFd {
-        self.fd.as_raw_fd()
+        self.fd.as_ref().map_or(-1, AsRawFd::as_raw_fd)
     }
 }
 
