@@ -31,8 +31,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         topology: b"diagnostic-no-devices".to_vec(),
         compatibility: b"nitro-arm64-v1".to_vec(),
     }));
-    request.arm(std::time::Duration::from_secs(15))?;
-    if runtime.run()? != Exit::Frozen {
+    let unarmed = std::env::var_os("CAPTURE_UNARMED").is_some();
+    runtime.set_console(nitro_sandbox::console::Console::new(
+        Some(Box::new(std::fs::File::create("shared-console.log")?)),
+        1024 * 1024,
+        1024 * 1024,
+    ));
+    if !unarmed {
+        request.arm(std::time::Duration::from_secs(15))?;
+    }
+    let exit = runtime.run()?;
+    if unarmed {
+        if exit != Exit::PowerOff {
+            return Err("unarmed source did not recover and power off".into());
+        }
+        let console = std::fs::read_to_string("shared-console.log")?;
+        if !console.contains("COPY_VERIFY ok=1") || !console.contains("NITRO_RESUMED path=1") {
+            return Err("unarmed source recovery markers missing".into());
+        }
+        println!("UNARMED_SOURCE_RECOVERED");
+        return Ok(());
+    }
+    if exit != Exit::Frozen {
         return Err("capture did not freeze source".into());
     }
     let template = request.wait()?;
