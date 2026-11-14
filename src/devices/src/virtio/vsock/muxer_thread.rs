@@ -186,10 +186,14 @@ impl MuxerThread {
             .iter()
             .any(|op| self.socket_policy.check(*op, &storage).is_err())
             {
+                warn!("Socket policy refused listening Unix mapping at {path:?}");
                 continue;
             }
             let proxy = match UnixAcceptorProxy::new(id, path, *port) {
-                Ok(proxy) => proxy,
+                Ok(mut proxy) => {
+                    proxy.socket_policy = self.socket_policy.clone();
+                    proxy
+                }
                 Err(e) => {
                     warn!("Failed to create listening proxy at {path:?}: {e:?}");
                     continue;

@@ -192,7 +192,7 @@ impl TsiStreamProxy {
             } else if let Some(sin6) = req.addr.as_sockaddr_in6() {
                 debug!("sockaddr is ipv6");
                 if let Some(port) = port_map.get(&sin6.port()) {
-                    SocketAddrV6::new(sin6.ip(), *port, sin6.flowinfo(), sin6.flowinfo()).into()
+                    SocketAddrV6::new(sin6.ip(), *port, sin6.flowinfo(), sin6.scope_id()).into()
                 } else {
                     req.addr
                 }
@@ -856,6 +856,13 @@ impl Proxy for TsiStreamProxy {
                     Ok(accept_fd) => {
                         // Safe because we've just obtained the FD from the `accept` call above.
                         let new_fd = unsafe { OwnedFd::from_raw_fd(accept_fd) };
+                        if getpeername::<SockaddrStorage>(accept_fd).map_or(true, |addr| {
+                            self.socket_policy
+                                .check(super::policy::SocketOperation::Accept, &addr)
+                                .is_err()
+                        }) {
+                            return update;
+                        }
                         update.new_proxy =
                             Some((self.peer_port, new_fd, self.family, NewProxyType::Tcp));
                     }

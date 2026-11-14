@@ -63,9 +63,101 @@ fn outbound_policy_and_disabled_forwarding() {
     std::fs::remove_file(socket).unwrap();
     assert!(matches!(allowed.accept(),Err(e) if e.kind()==std::io::ErrorKind::WouldBlock));
 }
+/// Backend conformance: a configured deny rule must be enforced, never ignored.
+/// Run this same public-API case when adding a backend; unsupported configuration
+/// must fail build explicitly rather than boot with an unrestricted device.
+#[cfg(target_arch = "x86_64")]
+#[test]
+#[ignore = "requires KVM and external artifacts"]
+fn backend_must_enforce_configured_rule() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:18080").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let mut builder = krun::Builder::new();
+    builder.outbound_policy(std::sync::Arc::new(krun::AllowlistPolicy::new([])));
+    assert!(run(builder, "embed_deny_all").contains("EMBED_DENY_ALL_OK"));
+    assert!(matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
+}
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+#[ignore = "requires KVM and external artifacts"]
+fn udp_policy_delivery_and_refusal() {
+    use std::sync::{Arc, Mutex};
+    struct Policy(Arc<Mutex<Vec<(krun::SocketOperation, String)>>>);
+    impl krun::OutboundPolicy for Policy {
+        fn allow(&self, op: krun::SocketOperation, addr: &krun::SocketAddress) -> bool {
+            self.0.lock().unwrap().push((op, addr.to_string()));
+            addr.as_sockaddr_in()
+                .is_none_or(|addr| addr.port() != 18081)
+        }
+    }
+    let allowed = std::net::UdpSocket::bind("127.0.0.1:18082").unwrap();
+    let denied = std::net::UdpSocket::bind("127.0.0.1:18081").unwrap();
+    let ipv6 = std::net::UdpSocket::bind("[::1]:18083").unwrap();
+    ipv6.set_read_timeout(Some(std::time::Duration::from_secs(1)))
+        .unwrap();
+    allowed
+        .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+        .unwrap();
+    denied.set_nonblocking(true).unwrap();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut builder = krun::Builder::new();
+    builder.outbound_policy(Arc::new(Policy(calls.clone())));
+    let refused_source = denied.try_clone().unwrap();
+    let peer = std::thread::spawn(move || {
+        let mut data = [0; 32];
+        let (len, source) = allowed.recv_from(&mut data).unwrap();
+        assert_eq!(&data[..len], b"allowed");
+        refused_source.send_to(b"forbidden", source).unwrap();
+        allowed.send_to(b"reply", source).unwrap();
+    });
+    assert!(run(builder, "embed_udp").contains("EMBED_UDP_OK"));
+    peer.join().unwrap();
+    let mut data = [0; 32];
+    let mut ipv6_builder = krun::Builder::new();
+    ipv6_builder.outbound_policy(std::sync::Arc::new(krun::AllowlistPolicy::new([
+        (
+            krun::SocketOperation::Bind,
+            "[::]:0".parse::<std::net::SocketAddr>().unwrap().into(),
+        ),
+        (
+            krun::SocketOperation::UdpSend,
+            "[::1]:18083"
+                .parse::<std::net::SocketAddr>()
+                .unwrap()
+                .into(),
+        ),
+    ])));
+    assert!(run(ipv6_builder, "embed_dgram_families").contains("EMBED_DGRAM_FAMILIES_OK"));
+    let (len, _) = ipv6.recv_from(&mut data).unwrap();
+    assert_eq!(&data[..len], b"ipv6");
+    assert!(
+        matches!(denied.recv_from(&mut data), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock)
+    );
+    let calls = calls.lock().unwrap();
+    assert!(calls.iter().any(
+        |(op, addr)| *op == krun::SocketOperation::ReceiveDatagram && addr == "127.0.0.1:18082"
+    ));
+    assert!(calls
+        .iter()
+        .any(|(op, addr)| *op == krun::SocketOperation::UdpSend && addr == "127.0.0.1:18081"));
+    assert!(calls
+        .iter()
+        .any(|(op, addr)| *op == krun::SocketOperation::UdpConnect && addr == "127.0.0.1:18081"));
+}
+
 #[cfg(all(target_arch = "x86_64", feature = "blk"))]
 #[path = "embed_backends.rs"]
 mod backends;
+
+#[cfg(all(target_arch = "x86_64", feature = "blk"))]
+#[test]
+#[ignore = "requires KVM and external artifacts"]
+fn filesystem_initialization_failure_is_reported() {
+    let mut builder = krun::Builder::new();
+    builder.add_virtiofs("embed_bad", Box::new(backends::FailingTree), None);
+    assert!(run(builder, "embed_fs_error").contains("EMBED_FS_ERROR_OK"));
+}
 
 #[cfg(target_arch = "x86_64")]
 fn run(mut builder: krun::Builder, mode: &str) -> String {
