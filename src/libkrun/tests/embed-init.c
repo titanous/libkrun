@@ -58,9 +58,26 @@ static void reset_connection_check(int allowed) {
 int main(void) {
     setbuf(stdout, NULL);
     mkdir("/dev",0755); mount("devtmpfs","/dev","devtmpfs",0,NULL);
+    int console=-1;
+    for (int attempt=0;attempt<100 && console<0;attempt++) {
+        console=open("/dev/hvc0",O_RDWR);
+        if (console<0) usleep(10000);
+    }
+    check(console>=0,"open ready console");
+    check(dup2(console,1)>=0 && dup2(console,2)>=0,"bind console output");
+    if (console>2) close(console);
     mkdir("/proc",0755); mount("proc","/proc","proc",0,NULL);
     char cmdline[4096]={0}; int c=open("/proc/cmdline",O_RDONLY); read(c,cmdline,sizeof(cmdline)-1); close(c);
     puts("EMBED_USERSPACE_OK");
+    if (strstr(cmdline,"console_burst")) {
+        for (int i=0;i<4096;i++) {
+            check(printf("CONSOLE_BURST_%04d_abcdefghijklmnopqrstuvwxyz_0123456789_END\n",i)>0,"console burst write");
+        }
+    }
+    if (strstr(cmdline,"embed_stop_poweroff")) reboot(RB_POWER_OFF);
+    if (strstr(cmdline,"embed_stop_reboot")) reboot(RB_AUTOBOOT);
+    if (strstr(cmdline,"embed_stop_halt")) reboot(RB_HALT_SYSTEM);
+    if (strstr(cmdline,"embed_stop_panic")) return 0;
     if (strstr(cmdline,"embed_reset_")) {
         int allowed=strstr(cmdline,"embed_reset_allow")!=NULL;
         reset_connection_check(allowed); puts("EMBED_RESET_BEFORE_OK");

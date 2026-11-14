@@ -364,6 +364,19 @@ impl VirtioDevice for Console {
     }
 
     fn reset(&mut self) -> bool {
+        // Guest shutdown can reset the device before the event loop sees the
+        // final control kick. Start pending ports before draining their output.
+        if self.device_state.is_activated() && self.queues.len() > CONTROL_TXQ_INDEX {
+            self.process_control_tx();
+        }
+        if let DeviceState::Activated(mem, interrupt) = &self.device_state {
+            for port in &self.ports {
+                let tx_idx = port_id_to_queue_idx(QueueDirection::Tx, port.port_id as usize);
+                if let Some(queue) = self.queues.get_mut(tx_idx).and_then(Option::take) {
+                    port.drain_pending_output(mem.clone(), queue.queue, interrupt.clone());
+                }
+            }
+        }
         // Shutdown ports and clear queues.
         for port in &mut self.ports {
             port.shutdown();

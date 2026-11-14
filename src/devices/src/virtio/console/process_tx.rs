@@ -433,6 +433,24 @@ mod tests {
     }
 
     #[test]
+    fn stopped_tx_drains_already_published_output() {
+        let payload = b"output published immediately before stop";
+        let (mem, queue, _) = make_mem_and_queue(payload);
+        let (recording, received) = RecordingPortOutput::new();
+        let output: Arc<Mutex<Box<dyn PortOutput + Send>>> =
+            Arc::new(Mutex::new(Box::new(recording)));
+        process_tx(
+            0,
+            mem,
+            queue,
+            make_interrupt(),
+            output,
+            Arc::new(AtomicBool::new(true)),
+        );
+        assert_eq!(received.lock().unwrap().as_slice(), payload);
+    }
+
+    #[test]
     fn test_tx_data_forwarded_to_output() {
         let payload = b"hello console";
         let (mem, queue, _) = make_mem_and_queue(payload);

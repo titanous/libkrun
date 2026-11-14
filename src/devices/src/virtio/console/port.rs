@@ -170,6 +170,24 @@ impl Port {
         }
     }
 
+    pub(crate) fn drain_pending_output(
+        &self,
+        mem: GuestMemoryMmap,
+        queue: Queue,
+        interrupt: InterruptTransport,
+    ) {
+        if let Some(output) = &self.output {
+            process_tx(
+                self.port_id,
+                mem,
+                queue,
+                interrupt,
+                output.clone(),
+                Arc::new(AtomicBool::new(true)),
+            );
+        }
+    }
+
     pub fn shutdown(&mut self) {
         if let PortState::Active {
             stopfd,

@@ -74,6 +74,14 @@ The AWS backend must transport these same codes over its own privileged channel
 and combine them with its liveness signal; missing intent after confirmed loss
 of liveness is fault-class. This branch does not modify that backend.
 
+Console device reset consumes pending control messages and synchronously drains
+published TX descriptors whose ports have not started workers; active workers
+drain and join before `run()` returns. Guest programs must first have a valid
+console descriptor: the test init explicitly opens `/dev/hvc0` with a bounded
+readiness retry, since an early inherited `/dev/console` may not yet be bound.
+`console_output_before_stop_50_times` checks all 4096 numbered lines immediately
+before each declared stop, 50 times per action (200 guests), without a drain sleep.
+
 Real KVM tests are in `tests/stop.rs`. Build `tests/stop-fixture.S` with
 `-nostdlib -static -no-pie -Wl,-Ttext=0x100000,-e,_start` and respectively
 `-DSTOP_FAULT`, `-DSTOP_MISMATCH`, and `-DSTOP_HALT` to files `fault`, `mismatch`,
