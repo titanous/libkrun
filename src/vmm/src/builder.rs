@@ -731,6 +731,9 @@ pub fn build_microvm(
         kernel_cmdline.insert_str(DEFAULT_KERNEL_CMDLINE)?;
     }
 
+    #[cfg(target_arch = "x86_64")]
+    kernel_cmdline.insert_str("holodeck.stop_port=1")?;
+
     // if let Some(cmdline) = &vm_resources.kernel_cmdline.krun_env {
     //     kernel_cmdline.insert_str(cmdline.as_str()).unwrap();
     // }
