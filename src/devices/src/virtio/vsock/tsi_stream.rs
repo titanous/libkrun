@@ -896,7 +896,7 @@ impl Proxy for TsiStreamProxy {
                     Ok(accept_fd) => {
                         // Safe because we've just obtained the FD from the `accept` call above.
                         let new_fd = unsafe { OwnedFd::from_raw_fd(accept_fd) };
-                        if getpeername::<SockaddrStorage>(accept_fd).map_or(true, |addr| {
+                        if nix::sys::socket::getsockname::<SockaddrStorage>(accept_fd).map_or(true, |addr| {
                             self.socket_policy
                                 .check(super::policy::SocketOperation::Accept, &addr)
                                 .is_err()
