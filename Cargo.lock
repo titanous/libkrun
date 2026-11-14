@@ -1056,7 +1056,6 @@ dependencies = [
 [[package]]
 name = "linux-loader"
 version = "0.13.2"
-source = "git+https://github.com/theoparis/linux-loader?rev=af90928dcfa1666d47a5269061ef77857eff46d3#af90928dcfa1666d47a5269061ef77857eff46d3"
 dependencies = [
  "vm-memory",
 ]
