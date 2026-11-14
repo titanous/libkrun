@@ -115,6 +115,16 @@ pub struct VsockMuxer {
     reaper_sender: Option<Sender<u64>>,
     unix_ipc_port_map: Option<HashMap<u32, (PathBuf, bool)>>,
     tsi_flags: TsiFlags,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    wake: Option<(EventFd, EventFd)>,
+    worker: Option<std::thread::JoinHandle<()>>,
+    reaper: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for VsockMuxer {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
 }
 
 impl VsockMuxer {
@@ -136,6 +146,10 @@ impl VsockMuxer {
             reaper_sender: None,
             unix_ipc_port_map,
             tsi_flags,
+            stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            wake: None,
+            worker: None,
+            reaper: None,
         }
     }
 
@@ -177,6 +191,11 @@ impl VsockMuxer {
 
         let (sender, receiver) = unbounded();
 
+        self.stop.store(false, std::sync::atomic::Ordering::Release);
+        self.wake = Some((
+            muxer_quiesce_fd.try_clone().unwrap(),
+            muxer_resume_fd.try_clone().unwrap(),
+        ));
         let thread = MuxerThread::new(
             self.cid,
             self.epoll.clone(),
@@ -190,12 +209,33 @@ impl VsockMuxer {
             muxer_quiesce_fd,
             muxer_resume_fd,
             muxer_quiesce_ack,
+            self.stop.clone(),
         );
-        thread.run();
+        self.worker = Some(thread.run());
 
         self.reaper_sender = Some(sender);
         let reaper = ReaperThread::new(receiver, self.proxy_map.clone());
-        reaper.run();
+        self.reaper = Some(reaper.run());
+    }
+
+    pub(crate) fn shutdown(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
+        if let Some((quiesce, resume)) = &self.wake {
+            let _ = resume.write(1);
+            let _ = quiesce.write(1);
+        }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+        self.reaper_sender.take();
+        if let Some(reaper) = self.reaper.take() {
+            let _ = reaper.join();
+        }
+        self.wake.take();
+        self.proxy_map.write().unwrap().clear();
+        self.queue.take();
+        self.mem.take();
+        self.interrupt.take();
     }
 
     pub(crate) fn has_pending_rx(&self) -> bool {

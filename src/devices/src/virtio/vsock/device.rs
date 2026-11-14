@@ -387,6 +387,7 @@ impl VirtioDevice for Vsock {
     }
 
     fn reset(&mut self) -> bool {
+        self.muxer.shutdown();
         self.device_state = DeviceState::Inactive;
         self.queue_rx = None;
         self.queue_tx = None;

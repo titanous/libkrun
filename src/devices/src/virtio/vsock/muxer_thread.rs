@@ -32,6 +32,7 @@ pub struct MuxerThread {
     quiesce_fd: EventFd,
     resume_fd: EventFd,
     quiesce_ack: Arc<(Mutex<bool>, Condvar)>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl MuxerThread {
@@ -49,6 +50,7 @@ impl MuxerThread {
         quiesce_fd: EventFd,
         resume_fd: EventFd,
         quiesce_ack: Arc<(Mutex<bool>, Condvar)>,
+        stop: Arc<std::sync::atomic::AtomicBool>,
     ) -> Self {
         MuxerThread {
             cid,
@@ -63,14 +65,15 @@ impl MuxerThread {
             quiesce_fd,
             resume_fd,
             quiesce_ack,
+            stop,
         }
     }
 
-    pub fn run(self) {
+    pub fn run(self) -> std::thread::JoinHandle<()> {
         thread::Builder::new()
             .name("vsock muxer".into())
             .spawn(|| self.work())
-            .unwrap();
+            .unwrap()
     }
 
     fn send_credit_request(&self, credit_rx: MuxerRx) {
@@ -211,6 +214,9 @@ impl MuxerThread {
         let mut thread_rng = rng();
         self.create_lisening_ipc_sockets();
         loop {
+            if self.stop.load(std::sync::atomic::Ordering::Acquire) {
+                return;
+            }
             let mut epoll_events = vec![EpollEvent::new(EventSet::empty(), 0); 32];
             match self
                 .epoll
@@ -218,6 +224,9 @@ impl MuxerThread {
             {
                 Ok(ev_cnt) => {
                     for ev in &epoll_events[0..ev_cnt] {
+                        if self.stop.load(std::sync::atomic::Ordering::Acquire) {
+                            return;
+                        }
                         let evset = EventSet::from_bits(ev.events).unwrap();
                         let id = ev.data();
                         debug!("vsock: muxer_thread event: id={id} evset={evset:?}");
