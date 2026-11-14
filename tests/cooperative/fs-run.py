@@ -23,7 +23,7 @@ for mode in ("plain","dax"):
         raise RuntimeError(f"{mode} source freeze failed")
     wrong=dict(env,CLONE_FS="plain" if mode=="dax" else "dax")
     mismatch=run("resume",f"{mode}-mismatch",wrong)
-    if not mismatch.returncode or b"topology mismatch" not in mismatch.stdout:
+    if not mismatch.returncode or b"TemplateTopologyMismatch" not in mismatch.stdout:
         raise RuntimeError("mismatched DAX topology was not rejected")
     for i in range(a.children):
         result=run("resume",f"{mode}-child-{i}")
