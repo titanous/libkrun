@@ -94,9 +94,13 @@ fn pop_head_blocking<'mem>(
     stop: &AtomicBool,
 ) -> Option<DescriptorChain<'mem>> {
     loop {
+        // Reset invalidates the old rings. Do not inspect them after shutdown
+        // has been requested, even if the guest left descriptors available.
+        if stop.load(Ordering::Acquire) {
+            break None;
+        }
         match queue.pop(mem) {
             Some(descriptor) => break Some(descriptor),
-            None if stop.load(Ordering::Acquire) => break None,
             None => {
                 interrupt.signal_used_queue();
                 thread::park();
