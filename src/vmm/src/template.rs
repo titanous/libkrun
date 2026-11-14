@@ -39,6 +39,29 @@ mod tests {
     }
 
     #[test]
+    fn exports_owner_only_template() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory =
+            std::env::temp_dir().join(format!("krun-template-mode-{}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("guest.ram");
+        let template = Template {
+            file: crate::template_memory::create(4096).unwrap(),
+            control: 0,
+            vcpus: 1,
+            ram_mib: 1,
+            clock_ns: 0,
+            regions: Vec::new(),
+            topology: Vec::new(),
+        };
+        template.write_to_path(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
     fn rejects_bad_header_and_truncated_file() {
         let file = crate::template_memory::create(4096).unwrap();
         assert!(Template::open(file.try_clone().unwrap()).is_err());
@@ -55,7 +78,7 @@ mod tests {
 
 use std::fs::File;
 use std::io;
-use std::os::unix::fs::FileExt;
+use std::os::unix::fs::{FileExt, OpenOptionsExt};
 use vm_memory::{
     Address, Bytes, GuestAddress, GuestMemoryBackend, GuestMemoryMmap, GuestMemoryRegion,
     GuestRegionMmap,
@@ -85,6 +108,7 @@ impl Template {
         let mut destination = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
+            .mode(0o600)
             .open(path)?;
         let mut offset = 0;
         let mut buffer = vec![0; 1024 * 1024];

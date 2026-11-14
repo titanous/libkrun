@@ -108,6 +108,15 @@ not a host XSAVE/device-state snapshot.
 
 ## Template file
 
+A template contains the whole guest's memory, including tenant data, credentials,
+kernel secrets and random-generator state. Treat it as sensitive tenant data,
+not as a boot image. Export creates a new file with owner-only permissions
+(0600, further restricted by the caller's umask) at the caller-supplied path.
+The caller must name a directory it owns and controls, prevent untrusted writes
+to that directory, and apply the tenant's retention and deletion policy. Never
+import a template from an untrusted writer. Templates must remain within one
+trust domain: siblings retain the source kernel address layout and secrets.
+
 Page 0 is a little-endian header: words 0..6 are magic bytes `KRUNFRZ1`,
 version 2, control GPA, vCPU count, configured RAM MiB, extent count, and KVM
 clock nanoseconds. Word 7 is topology-manifest length (at most4096 bytes);
