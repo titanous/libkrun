@@ -486,8 +486,17 @@ pub struct ConsoleDeviceInfo {
     pub device_index: u32,
 }
 
+#[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+pub struct NitroBackendConfig {
+    pub image: PathBuf,
+    pub cid: u64,
+    pub watchdog: std::time::Duration,
+}
+
 #[derive(Default)]
 pub struct Builder {
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    nitro: Option<NitroBackendConfig>,
     config: ContextConfig,
     kernel_cmdline: Vec<String>,
     extra_kernel_args: Vec<String>,
@@ -1031,7 +1040,53 @@ impl Builder {
         self
     }
 
-    pub fn build(self) -> Result<Context, StartError> {
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    fn build_nitro(mut self, options: NitroBackendConfig) -> Result<Context, StartError> {
+        let config = self.config.vmr.vm_config();
+        let mut runtime = nitro_sandbox::runtime::Runtime::new(
+            options.image.to_str().ok_or_else(|| StartError::Nitro(std::io::Error::other("non-UTF8 EIF path")))?,
+            config.mem_size_mib.unwrap_or(1024) * 1024 * 1024,
+            u32::from(config.vcpu_count.unwrap_or(1)), options.cid, options.watchdog,
+        ).map_err(StartError::Nitro)?;
+        for cfg in self.config.take_block_cfg() {
+            let block = vmm::vmm_config::block::BlockBuilder::create_block(cfg)?;
+            runtime.add_worker_device(Arc::new(Mutex::new(block))).map_err(StartError::Nitro)?;
+        }
+        if !matches!(self.config.vsock_config, VsockConfig::Disabled) {
+            let flags = match self.config.vsock_config { VsockConfig::Explicit { tsi_flags } => tsi_flags, _ => TsiFlags::empty() };
+            let vsock = devices::virtio::Vsock::new(options.cid, self.config.tsi_port_map, self.config.unix_ipc_port_map, flags)
+                .map_err(|e| StartError::Nitro(std::io::Error::other(format!("vsock: {e:?}"))))?;
+            runtime.add_device(Arc::new(Mutex::new(vsock))).map_err(StartError::Nitro)?;
+        }
+        for console in self.config.vmr.virtio_consoles {
+            let ports = match console {
+                VirtioConsoleConfigMode::Custom(ports) => ports,
+                _ => return Err(StartError::Nitro(std::io::Error::other("Nitro console requires custom port descriptions"))),
+            };
+            let console = devices::virtio::Console::new(ports).map_err(|e| StartError::Nitro(std::io::Error::other(format!("console: {e:?}"))))?;
+            runtime.add_device(Arc::new(Mutex::new(console))).map_err(StartError::Nitro)?;
+        }
+        Context::from_nitro(runtime)
+    }
+
+    /// Select Nitro direct mode using an EIF image. Configured block devices,
+    /// Unix vsock port mappings and custom console ports are reused.
+    ///
+    /// The resulting context supports `run`; KVM-only handles, device-info and
+    /// snapshot operations are unavailable. HUP reports shutdown, not a guest
+    /// application exit status; workloads must report that over their protocol.
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    pub fn nitro_backend(&mut self, config: NitroBackendConfig) -> &mut Self {
+        self.nitro = Some(config);
+        self
+    }
+
+    #[allow(unused_mut)] // Mutability is needed only when Nitro selection is compiled.
+    pub fn build(mut self) -> Result<Context, StartError> {
+        #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+        if let Some(config) = self.nitro.take() {
+            return self.build_nitro(config);
+        }
         // Helper constants and functions for legacy network configuration
         #[cfg(feature = "net")]
         const NET_FEATURE_CSUM: u32 = 1 << 0;
@@ -1255,7 +1310,7 @@ impl Builder {
 
         Ok(Context {
             vm_exit: built_vm.vm_exit().clone(),
-            built_vm,
+            built_vm: built_vm.into(),
             event_manager,
             shutdown_efd: shutdown_efd_clone,
         })
@@ -1275,8 +1330,26 @@ pub enum BuilderError {
     ConsoleAlreadyAdded,
 }
 
+struct ContextVm {
+    kvm: Option<vmm::builder::BuiltVm>,
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    nitro: Option<nitro_sandbox::runtime::Runtime>,
+}
+impl Deref for ContextVm {
+    type Target = vmm::builder::BuiltVm;
+    fn deref(&self) -> &Self::Target { self.kvm.as_ref().expect("this control operation is only available on KVM") }
+}
+impl DerefMut for ContextVm {
+    fn deref_mut(&mut self) -> &mut Self::Target { self.kvm.as_mut().expect("this control operation is only available on KVM") }
+}
+impl From<vmm::builder::BuiltVm> for ContextVm {
+    fn from(vm: vmm::builder::BuiltVm) -> Self {
+        Self { kvm: Some(vm), #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))] nitro: None }
+    }
+}
+
 pub struct Context {
-    built_vm: vmm::builder::BuiltVm,
+    built_vm: ContextVm,
     event_manager: EventManager,
     /// Cloned shutdown eventfd for host-initiated GPIO shutdown.
     shutdown_efd: Option<Arc<EventFd>>,
@@ -1285,6 +1358,9 @@ pub struct Context {
 
 #[derive(Debug, thiserror::Error)]
 pub enum StartError {
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    #[error("Nitro backend: {0}")]
+    Nitro(std::io::Error),
     #[error("could not setup event manager: {0:?}")]
     EventManager(polly::event_manager::Error),
     #[cfg(not(feature = "static-firmware"))]
@@ -1318,6 +1394,15 @@ pub enum StartError {
 }
 
 impl Context {
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    fn from_nitro(runtime: nitro_sandbox::runtime::Runtime) -> Result<Self, StartError> {
+        Ok(Self {
+            built_vm: ContextVm { kvm: None, nitro: Some(runtime) },
+            event_manager: EventManager::new().map_err(StartError::EventManager)?,
+            shutdown_efd: None,
+            vm_exit: Arc::new(Mutex::new(None)),
+        })
+    }
     /// Access device information (console port paths, etc.).
     ///
     /// This returns the actual device paths from the built VM.
@@ -1362,6 +1447,13 @@ impl Context {
 
     /// Start the VM and run the event loop. This blocks until the VM exits.
     pub fn run(mut self) -> Result<vmm::vm_exit::VmExit, StartError> {
+        #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+        if let Some(runtime) = self.built_vm.nitro.take() {
+            return runtime.run().map(|exit| match exit {
+                nitro_sandbox::runtime::Exit::PowerOff => vmm::vm_exit::VmExit::Shutdown { exit_code: 0 },
+                nitro_sandbox::runtime::Exit::Watchdog => vmm::vm_exit::VmExit::Error { message: "Nitro guest watchdog expired".into() },
+            }).map_err(StartError::Nitro);
+        }
         let t_run_start = std::time::Instant::now();
         // Start the vCPUs
         self.built_vm.run()?;
