@@ -22,9 +22,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let vcpus = std::env::var("CLONE_VCPUS")
         .unwrap_or_else(|_| "1".into())
         .parse()?;
-    let memory = std::env::var("CLONE_MEMORY").unwrap_or_else(|_| "256".into()).parse()?;
+    let memory = std::env::var("CLONE_MEMORY")
+        .unwrap_or_else(|_| "256".into())
+        .parse()?;
     builder.vm_config(vcpus, memory)?;
     if let Some(disk) = std::env::var_os("CLONE_DISK") {
+        builder.template_disk_identity(
+            "clone-data",
+            std::env::var("CLONE_DISK_ID").unwrap_or_else(|_| "cooperative-test-snapshot".into()),
+        );
         builder.add_block_cfg(vmm::vmm_config::block::BlockDeviceConfig {
             block_id: "clone-data".into(),
             cache_type: devices::virtio::CacheType::Writeback,

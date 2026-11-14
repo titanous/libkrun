@@ -635,6 +635,21 @@ impl Builder {
         self
     }
 
+    /// Declare a block disk's frozen content identity (digest or snapshot token).
+    /// A new guest must declare each disk as a copy of the source token.
+    #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
+    pub fn template_disk_identity(
+        &mut self,
+        block_id: impl Into<String>,
+        content_id: impl Into<String>,
+    ) -> &mut Self {
+        self.config
+            .vmr
+            .template_disk_identities
+            .insert(block_id.into(), content_id.into());
+        self
+    }
+
     /// Mark this guest as a future cooperative template, retaining descriptor-backed RAM.
     /// Capture remains disarmed until explicitly requested through VmHandle.
     #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]

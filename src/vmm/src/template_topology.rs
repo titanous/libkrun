@@ -64,7 +64,19 @@ pub fn encode(resources: &VmResources, shm: &ShmManager) -> std::io::Result<Vec<
     {
         put(&mut data, resources.block.list.len() as u64);
         for device in &resources.block.list {
-            encode_device(&mut data, &*device.lock().unwrap());
+            let device = device.lock().unwrap();
+            encode_device(&mut data, &*device);
+            let identity = resources
+                .template_disk_identities
+                .get(device.id())
+                .filter(|id| !id.is_empty() && id.len() <= 1024)
+                .ok_or_else(|| {
+                    std::io::Error::other("template disk content identity is required")
+                })?;
+            put(&mut data, identity.len() as u64);
+            data.extend_from_slice(identity.as_bytes());
+            put(&mut data, device.template_capacity()?);
+            put(&mut data, device.is_read_only() as u64);
         }
     }
     #[cfg(feature = "net")]
@@ -100,6 +112,68 @@ pub fn encode(resources: &VmResources, shm: &ShmManager) -> std::io::Result<Vec<
         }
     }
     Ok(data)
+}
+
+#[cfg(all(test, feature = "blk"))]
+mod disk_tests {
+    use super::*;
+
+    #[test]
+    fn disk_identity_capacity_and_mode_are_required() {
+        use crate::vmm_config::block::BlockDeviceConfig;
+        use devices::virtio::block::{device::BlockDeviceType, ImageType, SyncMode};
+        let path = std::env::temp_dir().join(format!("clone-disk-{}", std::process::id()));
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        file.set_len(4096).unwrap();
+        let make = |readonly| {
+            let mut resources = VmResources::default();
+            resources
+                .add_block_device(BlockDeviceConfig {
+                    block_id: "data".into(),
+                    cache_type: devices::virtio::CacheType::Writeback,
+                    disk_type: BlockDeviceType::Image {
+                        path: path.to_str().unwrap().into(),
+                        format: ImageType::Raw,
+                        sync_mode: SyncMode::Full,
+                    },
+                    is_disk_read_only: readonly,
+                    direct_io: false,
+                })
+                .unwrap();
+            resources
+        };
+        let (info, _) = arch::arch_memory_regions(256 << 20, None, 0, 0, None);
+        let shm = ShmManager::new(&info);
+        let mut source = make(false);
+        assert!(encode(&source, &shm)
+            .unwrap_err()
+            .to_string()
+            .contains("identity"));
+        source
+            .template_disk_identities
+            .insert("data".into(), "snapshot-a".into());
+        let original = encode(&source, &shm).unwrap();
+        source
+            .template_disk_identities
+            .insert("data".into(), "snapshot-b".into());
+        assert_ne!(original, encode(&source, &shm).unwrap());
+        let mut readonly = make(true);
+        readonly
+            .template_disk_identities
+            .insert("data".into(), "snapshot-a".into());
+        assert_ne!(original, encode(&readonly, &shm).unwrap());
+        file.set_len(8192).unwrap();
+        let mut larger = make(false);
+        larger
+            .template_disk_identities
+            .insert("data".into(), "snapshot-a".into());
+        assert_ne!(original, encode(&larger, &shm).unwrap());
+        std::fs::remove_file(path).unwrap();
+    }
 }
 
 #[cfg(all(test, feature = "net"))]

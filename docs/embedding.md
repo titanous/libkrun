@@ -48,6 +48,15 @@ guest feature negotiation. Those features are not advertised on read-only disks.
 `add_block_cfg(BlockDeviceConfig)` retains image and async-factory support.
 Backends must bounds-check requests and must not block indefinitely.
 
+For a cooperative source and every guest started from it, declare each block
+ID with `template_disk_identity(block_id, content_id)`. Use an immutable content
+digest or storage snapshot name; each new disk must be a private copy of that
+snapshot. The VMM compares the declaration, capacity, and read-only mode before
+starting a new guest. It cannot authenticate caller declarations or make storage
+snapshots itself. Capture flushes and synchronizes synchronous backends before
+acceptance; asynchronous backends are unsupported for templates. Never reuse a
+writable source disk concurrently with its copies.
+
 ## Caller-supplied filesystem and readiness
 
 Outside TEE builds:

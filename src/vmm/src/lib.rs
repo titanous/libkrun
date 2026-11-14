@@ -226,6 +226,8 @@ pub struct Vmm {
     cooperative_topology: Vec<u8>,
     #[cfg(target_arch = "x86_64")]
     cooperative_compatibility: Vec<u8>,
+    #[cfg(all(target_arch = "x86_64", feature = "blk"))]
+    cooperative_disks: Vec<Arc<Mutex<devices::virtio::Block>>>,
     #[cfg(target_arch = "x86_64")]
     cooperative_shm: Vec<(vm_memory::GuestAddress, usize)>,
     vm: Vm,
@@ -540,6 +542,10 @@ impl Subscriber for Vmm {
                         return Err(std::io::Error::other(
                             "guest froze with an active virtio device",
                         ));
+                    }
+                    #[cfg(feature = "blk")]
+                    for disk in &self.cooperative_disks {
+                        disk.lock().unwrap().sync_for_template()?;
                     }
                     let clock = self.vm.fd().get_clock().map_err(std::io::Error::other)?;
                     // DAX mappings have been revoked by FREEZE. They are not RAM

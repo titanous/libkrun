@@ -1154,6 +1154,8 @@ pub fn build_microvm(
             }),
         #[cfg(target_arch = "x86_64")]
         cooperative_shm: _shm_manager.regions(),
+        #[cfg(all(target_arch = "x86_64", feature = "blk"))]
+        cooperative_disks: vm_resources.block.list.iter().cloned().collect(),
         #[cfg(target_arch = "x86_64")]
         cooperative_compatibility: if vm_resources.cooperative_capture.is_some()
             || vm_resources.cooperative_template.is_some()
