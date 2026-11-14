@@ -1,7 +1,7 @@
 //! Adapter from Nitro's PCI mirror to the fork's existing virtio devices.
 use std::io;
 use std::os::fd::{FromRawFd, IntoRawFd};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use devices::virtio::{DeviceQueue, InterruptTransport, Queue, VirtioDevice};
 use utils::eventfd::EventFd;
 use vm_memory::{GuestAddress, GuestMemory, GuestMemoryMmap};
@@ -9,7 +9,7 @@ use crate::{Action, DeviceLifecycle};
 use crate::host::{DeviceEvents, Sandbox};
 
 pub struct Transport {
-    device: Box<dyn VirtioDevice>,
+    device: Arc<Mutex<dyn VirtioDevice>>,
     events: DeviceEvents,
     lifecycle: DeviceLifecycle,
     offered: u64,
@@ -18,12 +18,15 @@ fn event(file: &std::fs::File) -> io::Result<EventFd> {
     Ok(unsafe { EventFd::from_raw_fd(file.try_clone()?.into_raw_fd()) })
 }
 impl Transport {
-    pub fn register(sandbox: &Sandbox, device: Box<dyn VirtioDevice>) -> io::Result<Self> {
-        let offered = (device.avail_features() | (1 << 32))
+    pub fn register(sandbox: &Sandbox, device: Arc<Mutex<dyn VirtioDevice>>) -> io::Result<Self> {
+        let guard = device.lock().unwrap();
+        let offered = (guard.avail_features() | (1 << 32))
             & !((1 << 28) | (1 << 29) | (1 << 34) | (1 << 40));
         let mut config = [0u8; 64];
-        device.read_config(0, &mut config);
-        let events = sandbox.add_device(device.device_type(), device.queue_config().len(), offered, &config)?;
+        let config_size = if guard.device_type() == 19 { 8 } else { 64 };
+        guard.read_config(0, &mut config[..config_size]);
+        let events = sandbox.add_device(guard.device_type(), guard.queue_config().len(), offered, &config[..config_size])?;
+        drop(guard);
         Ok(Self { device, events, lifecycle: DeviceLifecycle::default(), offered })
     }
     pub fn refresh(&mut self, sandbox: &Sandbox, memory: &GuestMemoryMmap) -> io::Result<Action> {
@@ -33,7 +36,8 @@ impl Transport {
         match action {
             Action::Stop => self.stop()?,
             Action::Start => {
-                let config = self.device.queue_config();
+                let mut device = self.device.lock().unwrap();
+                let config = device.queue_config();
                 if snapshot.queues.len() != config.len() { return Err(io::Error::other("queue count mismatch")); }
                 let mut queues = Vec::new();
                 for (i, (source, maximum)) in snapshot.queues.iter().zip(config).enumerate() {
@@ -49,9 +53,9 @@ impl Transport {
                     queues.push(DeviceQueue::new(q, Arc::new(event(&self.events.kicks[i])?)));
                 }
                 let calls = self.events.calls.iter().map(event).collect::<io::Result<Vec<_>>>()?;
-                let interrupt = InterruptTransport::new_nitro(calls, self.device.device_name().into())?;
-                self.device.set_acked_features(snapshot.negotiated_features);
-                self.device.activate(memory.clone(), interrupt, queues)
+                let interrupt = InterruptTransport::new_nitro(calls, device.device_name().into())?;
+                device.set_acked_features(snapshot.negotiated_features);
+                device.activate(memory.clone(), interrupt, queues)
                     .map_err(|e| io::Error::other(format!("activate: {e:?}")))?;
             }
             Action::None => {}
@@ -59,10 +63,11 @@ impl Transport {
         Ok(action)
     }
     pub fn stop(&mut self) -> io::Result<()> {
-        if self.device.is_activated() && !self.device.reset() {
+        let mut device = self.device.lock().unwrap();
+        if device.is_activated() && !device.reset() {
             return Err(io::Error::other("device refused synchronous reset"));
         }
-        self.device.set_acked_features(0);
+        device.set_acked_features(0);
         Ok(())
     }
 }

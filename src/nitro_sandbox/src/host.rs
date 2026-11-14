@@ -184,6 +184,11 @@ impl Sandbox {
         }
         output.flush()
     }
+    pub fn powered_off(&self, milliseconds: i32) -> io::Result<bool> {
+        let mut p = PollFd { fd: self.vm.as_ref().unwrap().as_raw_fd(), events: 0x10, revents: 0 };
+        if unsafe { poll(&mut p, 1, milliseconds) } < 0 { return Err(io::Error::last_os_error()); }
+        Ok(p.revents & 0x10 != 0)
+    }
     /// Poll the VM fd with a deadline. Console text is diagnostic, never the
     /// power-off signal. A reboot/no-start is reclaimed on deadline expiry.
     pub fn wait(&mut self, timeout: Duration) -> io::Result<bool> {

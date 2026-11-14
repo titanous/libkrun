@@ -5,11 +5,16 @@ edition = "2021"
 license = "Apache-2.0"
 
 [features]
-devices = ["dep:devices", "dep:utils", "dep:vm-memory"]
+devices = ["dep:devices", "dep:utils", "dep:vm-memory", "dep:polly"]
 
 [dependencies]
 devices = { path = "../devices", features = ["blk"], optional = true }
 utils = { path = "../utils", optional = true }
+polly = { path = "../polly", optional = true }
 vm-memory = { version = "0.18", features = ["backend-mmap"], optional = true }
+
+[[example]]
+name = "devices"
+required-features = ["devices"]
 
 [workspace]
