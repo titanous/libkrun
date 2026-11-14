@@ -74,6 +74,37 @@ impl ReadOnlyTree {
     }
 }
 impl FileSystem for ReadOnlyTree {
+    fn setupmapping(
+        &self,
+        _: FilesystemContext,
+        _: Inode,
+        _: Handle,
+        offset: u64,
+        len: u64,
+        _: u64,
+        mapped: u64,
+        mapper: &dyn krun::dax_mapper::DaxMapper,
+    ) -> io::Result<()> {
+        let mut bytes = vec![0; usize::try_from(len).map_err(io::Error::other)?];
+        let data = b"embed-fs-data";
+        let offset = usize::try_from(offset).map_err(io::Error::other)?;
+        if offset < data.len() {
+            let count = bytes.len().min(data.len() - offset);
+            bytes[..count].copy_from_slice(&data[offset..offset + count]);
+        }
+        mapper.map_data(mapped, &bytes)
+    }
+    fn removemapping(
+        &self,
+        _: FilesystemContext,
+        requests: Vec<devices::virtio::fs::filesystem::RemovemappingOne>,
+        mapper: &dyn krun::dax_mapper::DaxMapper,
+    ) -> io::Result<()> {
+        for request in requests {
+            mapper.unmap(request.moffset, request.len)?;
+        }
+        Ok(())
+    }
     fn lookup(
         &self,
         _: FilesystemContext,
