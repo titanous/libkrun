@@ -635,6 +635,14 @@ impl Builder {
         self
     }
 
+    /// Mark this guest as a future cooperative template, retaining descriptor-backed RAM.
+    /// Capture remains disarmed until explicitly requested through VmHandle.
+    #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
+    pub fn future_template(&mut self) -> &mut Self {
+        self.config.vmr.cooperative_capture = Some((0, std::path::PathBuf::new()));
+        self
+    }
+
     /// Capture a template only after the guest publishes its frozen control
     /// page and emits the cooperative freeze exit. The source never resumes.
     /// Pass zero to discover the GPA from BSP RSI at that exit, or a nonzero
@@ -2386,6 +2394,31 @@ impl VmHandle {
             }
         })
     }
+    /// Arm capture and request cooperative freeze from the guest kernel.
+    /// The returned template owns a sealed descriptor and may be exported or
+    /// passed to another process. TimedOut is distinct from refusal/failure.
+    #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
+    pub fn freeze_template(
+        &self,
+        timeout: std::time::Duration,
+    ) -> std::io::Result<vmm::template::Template> {
+        let request = {
+            let vmm = self.vmm.as_ref().ok_or_else(|| std::io::Error::new(
+                std::io::ErrorKind::Unsupported, "cooperative capture requires Linux KVM"))?.lock().unwrap();
+            vmm.arm_template_capture(timeout)?
+        };
+        request.wait()
+    }
+
+    /// Authorize a test-triggered capture without requesting it from the guest.
+    #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
+    pub fn arm_template_capture(&self, timeout: std::time::Duration) -> std::io::Result<()> {
+        let request = self.vmm.as_ref().ok_or_else(|| std::io::Error::new(
+            std::io::ErrorKind::Unsupported, "cooperative capture requires Linux KVM"))?.lock().unwrap().arm_template_capture(timeout)?;
+        request.take_request();
+        Ok(())
+    }
+
     /// Give a running guest a fresh generation identifier and raise its notification interrupt.
     /// Call after copying guest memory and starting the copy, so its kernel reseeds randomness.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]

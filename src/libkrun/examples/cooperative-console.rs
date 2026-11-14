@@ -68,7 +68,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var_os("CLONE_HVC_CONSOLE").is_some() {
         builder.add_kernel_cmdline_args(&["console=hvc0"]);
     }
-    if args[1] == "freeze" || args[1] == "refuse" {
+    if args[1] == "host-freeze" {
+        builder.future_template();
+    } else if args[1] == "freeze" || args[1] == "refuse" || args[1] == "unsolicited" {
         builder.capture_cooperative_template(control, PathBuf::from(&args[2]));
     } else if args[1] == "resume" {
         builder.start_from_template_path(&args[2])?;
@@ -80,11 +82,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         return Err("invalid mode".into());
     }
-    let result = builder.build()?.run()?;
+    let context = builder.build()?;
+    if args[1] == "freeze" || args[1] == "refuse" {
+        context
+            .vm_handle()
+            .arm_template_capture(std::time::Duration::from_secs(30))?;
+    }
+    let capture = if args[1] == "host-freeze" {
+        let handle = context.vm_handle();
+        let path = PathBuf::from(&args[2]);
+        Some(std::thread::spawn(move || -> std::io::Result<()> {
+            let template = handle.freeze_template(std::time::Duration::from_secs(30))?;
+            vmm::template::Template::open(template.file.try_clone()?)?;
+            template.write_to_path(path)?;
+            eprintln!("HOSTREQUEST SEALED TEMPLATE received");
+            Ok(())
+        }))
+    } else {
+        None
+    };
+    let result = context.run()?;
+    if let Some(capture) = capture {
+        capture.join().expect("capture thread")?;
+    }
     eprintln!("COOPERATIVE HOST result={result:?}");
     match (args[1].as_str(), result) {
-        ("freeze", krun::VmExit::Frozen { .. }) => Ok(()),
-        ("resume" | "resume-fd" | "refuse", krun::VmExit::Shutdown { exit_code: 0 }) => Ok(()),
+        ("freeze" | "host-freeze", krun::VmExit::Frozen { .. }) => Ok(()),
+        (
+            "resume" | "resume-fd" | "refuse" | "unsolicited",
+            krun::VmExit::Shutdown { exit_code: 0 },
+        ) => Ok(()),
         _ => Err("unexpected VM exit".into()),
     }
 }

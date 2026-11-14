@@ -1110,7 +1110,15 @@ pub fn build_microvm(
     // Shared VM exit state.
     let vm_exit: crate::vm_exit::SharedVmExit = Arc::new(Mutex::new(None));
 
+    #[cfg(target_arch = "x86_64")]
+    let capture_request = crate::capture_request::CaptureRequest::default();
+    #[cfg(target_arch = "x86_64")]
+    for cpu in &mut vcpus {
+        cpu.capture_request = capture_request.clone();
+    }
     let mut vmm = Vmm {
+        #[cfg(target_arch = "x86_64")]
+        capture_request,
         guest_memory,
         arch_memory_info,
         kernel_cmdline,

@@ -13,7 +13,11 @@ and enter the kernel's saved continuation over private file-backed RAM.
    Zero selects control-page discovery from BSP RSI at the trapped frozen exit;
    a nonzero GPA is an optional exact-match expectation. Console text is never
    used for discovery or memory bounds.
-3. Root writes `1` to `/sys/power/nitro_freeze` (0600/CAP_SYS_ADMIN; an active
+3. The embedder explicitly arms the test trigger with
+   `VmHandle::arm_template_capture(timeout)`, or requests a host-driven freeze
+   with `VmHandle::freeze_template(timeout)` (see embedding.md). Without arming,
+   capture is refused and the source recovers. For the test trigger, root
+   writes `1` to `/sys/power/nitro_freeze` (0600/CAP_SYS_ADMIN; an active
    transition is refused). The generic core checks hibernation availability,
    runs PM prepare notifiers, syncs and freezes configured filesystems, locks
    device hotplug and restricts GFP allocations during device freeze. It freezes tasks,

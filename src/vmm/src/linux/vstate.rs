@@ -860,6 +860,8 @@ pub struct Vcpu {
     exit_evt: EventFd,
     #[cfg(target_arch = "x86_64")]
     pub(crate) cooperative_generation_irq: Option<EventFd>,
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) capture_request: crate::capture_request::CaptureRequest,
 
     #[cfg(target_arch = "x86_64")]
     io_bus: devices::Bus,
@@ -1007,6 +1009,7 @@ impl Vcpu {
             mmio_bus: None,
             exit_evt,
             cooperative_generation_irq: None,
+            capture_request: crate::capture_request::CaptureRequest::default(),
             io_bus,
             cpuid,
             kernel_enomem_workaround,
@@ -1365,6 +1368,10 @@ impl Vcpu {
                 }
                 #[cfg(target_arch = "x86_64")]
                 VcpuExit::IoIn(addr, data) => {
+                    if addr == 0xe8 && data.len() == 1 {
+                        data[0] = self.capture_request.take_request() as u8;
+                        return Ok(VcpuEmulation::Handled);
+                    }
                     // Post-RESTORE wall-clock reads avoid including CPU/device
                     // restoration latency in the guest's new realtime epoch.
                     if (addr == 0xe6 || addr == 0xe7) && data.len() == 4 {

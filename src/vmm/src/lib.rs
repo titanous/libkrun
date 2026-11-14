@@ -28,6 +28,8 @@ pub mod vm_exit;
 pub mod template_memory;
 
 #[cfg(target_arch = "x86_64")]
+pub mod capture_request;
+#[cfg(target_arch = "x86_64")]
 pub mod cooperative;
 
 #[cfg(target_arch = "x86_64")]
@@ -217,6 +219,8 @@ pub struct Vmm {
     #[cfg(target_arch = "x86_64")]
     cooperative_capture: Option<(u64, std::path::PathBuf, u8, u64)>,
     #[cfg(target_arch = "x86_64")]
+    pub capture_request: crate::capture_request::CaptureRequest,
+    #[cfg(target_arch = "x86_64")]
     cooperative_topology: Vec<u8>,
     #[cfg(target_arch = "x86_64")]
     cooperative_shm: Vec<(vm_memory::GuestAddress, usize)>,
@@ -241,6 +245,21 @@ pub struct Vmm {
 }
 
 impl Vmm {
+    #[cfg(target_arch = "x86_64")]
+    pub fn arm_template_capture(
+        &self,
+        timeout: std::time::Duration,
+    ) -> std::io::Result<crate::capture_request::CaptureRequest> {
+        if self.cooperative_capture.is_none() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "guest was not marked as a future template",
+            ));
+        }
+        self.capture_request.arm(timeout)?;
+        Ok(self.capture_request.clone())
+    }
+
     /// Write a fresh generation identifier and notify the running guest.
     /// The guest driver reseeds its random pool when it handles this interrupt.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -496,7 +515,14 @@ impl Subscriber for Vmm {
                         .unwrap()
                         .as_nanos()
                 );
+                let mut captured_template = None;
                 let result = (|| -> std::io::Result<std::path::PathBuf> {
+                    if !self.capture_request.is_armed() {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            "cooperative capture is not armed by the host",
+                        ));
+                    }
                     let (control, path, vcpus, ram_mib) =
                         self.cooperative_capture.as_ref().ok_or_else(|| {
                             std::io::Error::other("cooperative capture not configured")
@@ -529,13 +555,28 @@ impl Subscriber for Vmm {
                         clock.clock,
                         &self.cooperative_topology,
                     )?;
-                    template.write_to_path(path)?;
+                    if !path.as_os_str().is_empty() {
+                        template.write_to_path(path)?;
+                    }
+                    if !self.capture_request.is_armed() {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "cooperative freeze timed out during preparation",
+                        ));
+                    }
+                    captured_template = Some(template);
                     Ok(path.clone())
                 })();
                 let template_path = match result {
                     Ok(path) => path,
                     Err(error) => {
                         warn!("cooperative freeze refused: {error}");
+                        if self.capture_request.is_armed() {
+                            self.capture_request.complete(Err(std::io::Error::new(
+                                error.kind(),
+                                error.to_string(),
+                            )));
+                        }
                         if let Some(cpu) = self.vcpus_handles.first() {
                             let _ = cpu.send_event(VcpuEvent::FreezeRejected(-libc::EINVAL));
                         }
@@ -547,6 +588,8 @@ impl Subscriber for Vmm {
                 }
                 self.vcpu_exit_flag.store(true, Ordering::Release);
                 self.vcpus_handles.clear();
+                self.capture_request
+                    .complete(Ok(captured_template.expect("validated template")));
                 self.stop(crate::vm_exit::VmExit::Frozen { template_path });
                 return;
             }

@@ -130,6 +130,40 @@ ports still work subject to Unix rules. This is not a firewall for virtio-net.
 External vhost-user-vsock plus these controls fails build with
 `UnsupportedSocketPolicy`, not silent omission.
 
+## Cooperative templates on x86-64 KVM
+
+Mark a source with `Builder::future_template()` before build; ordinary guests
+retain anonymous private RAM. This is a capability reservation, not permission
+for a guest to capture itself. Obtain `Context::vm_handle()` and run the context
+on its event-loop thread. From another thread call
+`handle.freeze_template(Duration::from_secs(30))`. The host arms capture and
+signals the maintained guest kernel through its request port. The kernel
+quiesces itself; the host validates and prepares capture before accepting the
+source's terminal freeze. An unsolicited sysfs trigger is refused and recovers.
+`arm_template_capture(timeout)` authorizes only the test sysfs trigger without
+sending a request. `capture_cooperative_template(control, path)` reserves an
+optional caller-chosen export path but likewise does not arm capture.
+
+`freeze_template` returns a `vmm::template::Template` owning the sealed memory
+file only after source vCPU teardown. Its `file` can be duplicated or sent to
+another process with SCM_RIGHTS; `write_to_path` exports owner-only sensitive
+whole-guest memory. A freeze deadline returns `io::ErrorKind::TimedOut`, distinct
+from unsupported capture and validation failures. The daemon must destroy a
+source that does not recover promptly after timeout; kernel device callbacks
+can block indefinitely. Do not retry a timed-out request until the source's
+state has been resolved.
+
+For a new guest use its own builder: configure matching CPU/RAM and devices,
+independent disk copies, its CID, identifiers and connection policy, then call
+`start_from_template_fd(file)` or `start_from_template_path(path)` before build.
+Path input stays mapped read-only with private copy-on-write child mappings;
+the caller must prevent file mutation/truncation until all users release it.
+Network devices are refused because guest MAC state is retained. Keep templates
+within one trust domain: kernel secrets and address layouts remain shared.
+The daemon must impose a separate start-to-valid-agent-Hello deadline and
+destroy an unready copy; kernel continuation is not proof of application ready.
+A typed builder readiness deadline is not supplied by this API yet.
+
 ## Contract for every hypervisor backend
 
 Every backend must honour each configured method, or fail build with a clear
