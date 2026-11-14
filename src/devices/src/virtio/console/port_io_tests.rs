@@ -136,6 +136,47 @@ fn output_descriptor_pipe() {
     assert_eq!(unsafe { fcntl(writer.as_raw_fd(), F_GETFL) }, flags);
 }
 
+/// A pseudo-terminal master (the embedder holds the terminal's other end) must
+/// receive the console output on ITS terminal: reopening the master by path
+/// would allocate a new, unconnected terminal and lose every byte.
+#[test]
+fn output_descriptor_pty_master_reaches_its_own_terminal() {
+    unsafe {
+        let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+        assert!(master >= 0);
+        assert_eq!(libc::grantpt(master), 0);
+        assert_eq!(libc::unlockpt(master), 0);
+        let name = std::ffi::CStr::from_ptr(libc::ptsname(master)).to_owned();
+        let slave = libc::open(name.as_ptr(), libc::O_RDWR | libc::O_NOCTTY | O_NONBLOCK);
+        assert!(slave >= 0);
+        let mut termios: libc::termios = std::mem::zeroed();
+        assert_eq!(libc::tcgetattr(slave, &mut termios), 0);
+        libc::cfmakeraw(&mut termios);
+        assert_eq!(libc::tcsetattr(slave, libc::TCSANOW, &termios), 0);
+        let flags = fcntl(master, F_GETFL);
+        emit(master);
+        let mut received = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while received.len() < 7 && std::time::Instant::now() < deadline {
+            let mut poll = libc::pollfd {
+                fd: slave,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            libc::poll(&mut poll, 1, 100);
+            let mut bytes = [0u8; 16];
+            let n = libc::read(slave, bytes.as_mut_ptr().cast(), bytes.len());
+            if n > 0 {
+                received.extend_from_slice(&bytes[..n as usize]);
+            }
+        }
+        assert_eq!(received, b"console");
+        assert_eq!(fcntl(master, F_GETFL), flags);
+        libc::close(slave);
+        libc::close(master);
+    }
+}
+
 #[test]
 fn output_descriptor_preserves_append_and_existing_content() {
     let path = std::env::temp_dir().join(format!("console-append-{}", std::process::id()));

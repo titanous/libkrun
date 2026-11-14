@@ -93,8 +93,8 @@ fn prepare_private_fd(fd: RawFd, output: bool) -> Result<OwnedFd, nix::Error> {
         return Err(Errno::last());
     }
     let mode = unsafe { stat.assume_init() }.st_mode & libc::S_IFMT;
-    if mode == libc::S_IFIFO || mode == libc::S_IFCHR {
-        // No regular-file offsets or socket identity are reopened. Pipe/tty flags
+    if mode == libc::S_IFIFO {
+        // No regular-file offsets or socket identity are reopened. Pipe flags
         // belong to this private description, never the caller's shared one.
         let file = std::fs::OpenOptions::new()
             .write(output)
@@ -106,9 +106,53 @@ fn prepare_private_fd(fd: RawFd, output: bool) -> Result<OwnedFd, nix::Error> {
                 Errno::from_raw(error.raw_os_error().unwrap_or(libc::EIO))
             })?;
         Ok(file.into())
+    } else if mode == libc::S_IFCHR {
+        // A character device is reopened only when the new description provably
+        // names the same device: some devices allow one open (a virtio console
+        // port answers EBUSY) and cloning devices (a pseudo-terminal master
+        // opened through /dev/ptmx) would hand out a new, unconnected device.
+        // Otherwise the caller's description is shared unchanged: its flags are
+        // never modified, so writes may block while the reader stalls.
+        match reopen_same_character_device(fd, output) {
+            Some(file) => Ok(file),
+            None => {
+                log::warn!("console fd {fd}: character device cannot be reopened as itself; sharing the caller's description (writes may block)");
+                dup_raw_fd_into_owned(fd)
+            }
+        }
     } else {
         dup_raw_fd_into_owned(fd)
     }
+}
+
+/// Open a private nonblocking description of the character device behind `fd`,
+/// or None when that is refused or would name a different device.
+fn reopen_same_character_device(fd: RawFd, output: bool) -> Option<OwnedFd> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .write(output)
+        .read(!output)
+        .custom_flags(O_NONBLOCK | libc::O_NOCTTY)
+        .open(format!("/proc/self/fd/{fd}"))
+        .ok()?;
+    let reopened: OwnedFd = file.into();
+    let rdev = |fd: RawFd| {
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: fstat initializes stat on success.
+        (unsafe { libc::fstat(fd, stat.as_mut_ptr()) } == 0)
+            .then(|| unsafe { stat.assume_init() }.st_rdev)
+    };
+    // A pseudo-terminal master answers TIOCGPTN with its terminal number; every
+    // master shares the device number of /dev/ptmx, so compare the numbers too.
+    let pty = |fd: RawFd| {
+        let mut number: libc::c_uint = 0;
+        // SAFETY: TIOCGPTN writes one unsigned int.
+        (unsafe { libc::ioctl(fd, libc::TIOCGPTN, &mut number) } == 0).then_some(number)
+    };
+    (rdev(fd).is_some()
+        && rdev(fd) == rdev(reopened.as_raw_fd())
+        && pty(fd) == pty(reopened.as_raw_fd()))
+    .then_some(reopened)
 }
 
 pub fn output_to_log_as_err() -> Box<dyn PortOutput + Send> {
