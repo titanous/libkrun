@@ -17,7 +17,7 @@
 //! ```
 //! KRUN_INIT_BIN=$(realpath init/init) \
 //! LD_LIBRARY_PATH=$(realpath test-prefix/lib64/) \
-//! cargo test --features embedded_init,net,snapshot,uffd,blk,vhost-user \
+//! cargo test --features embedded_init,net,blk,vhost-user \
 //!            -p libkrun --test vm_boot -- --include-ignored --test-threads 1
 //! ```
 

@@ -80,9 +80,8 @@ async fn main() -> anyhow::Result<()> {
 
     let ctx_id = {
         // Create the configuration context.
-        let ctx_id = krun_create_ctx(Some(
-            "/Users/jerome/.cache/sprites/components/firmware/4.9.0-2/libkrunfw.4.dylib",
-        ));
+        let firmware = std::env::var("LIBKRUN_FIRMWARE").ok();
+        let ctx_id = krun_create_ctx(firmware.as_deref());
         if ctx_id < 0 {
             let err = Errno::from_raw_os_error(-ctx_id);
             return Err(err.into());
@@ -101,8 +100,7 @@ async fn main() -> anyhow::Result<()> {
     }
     println!("configured basic vpcus and memory");
 
-    let root =
-        CString::new("/Users/jerome/src/github.com/superfly/libkrun/examples/rootfs_debian")?;
+    let root = CString::new(std::env::var("LIBKRUN_ROOTFS")?)?;
     let ret = unsafe { krun::krun_set_root(ctx_id, root.as_ptr()) };
     if ret < 0 {
         let err = Errno::from_raw_os_error(-ret);

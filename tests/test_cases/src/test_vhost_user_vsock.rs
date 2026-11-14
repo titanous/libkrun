@@ -2,7 +2,6 @@ use macros::{guest, host};
 
 pub struct TestVhostUserVsockEcho;
 pub struct TestVhostUserVsockFd;
-pub struct TestVhostUserVsockSnapshot;
 
 #[allow(dead_code)]
 const ECHO_PORT: u32 = 9999;
@@ -43,21 +42,6 @@ mod host_helpers {
         }
         panic!("test-vsock-proxy did not create socket within 5 seconds");
     }
-
-    /// Wait for a file to appear with timeout.
-    pub fn wait_for_file(path: &Path, timeout_secs: u64) {
-        let start = std::time::Instant::now();
-        let timeout = Duration::from_secs(timeout_secs);
-        loop {
-            if path.exists() {
-                return;
-            }
-            if start.elapsed() > timeout {
-                panic!("Timeout waiting for file: {:?}", path);
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
-    }
 }
 
 #[guest]
@@ -74,37 +58,6 @@ mod guest_helpers {
         response
     }
 
-    /// Query the proxy's byte counter.
-    pub fn query_counter() -> u64 {
-        let mut sock = crate::vsock_helpers::vsock_connect(super::COUNTER_PORT);
-        // Send dummy byte to trigger counter response
-        sock.write_all(&[0u8])
-            .expect("failed to write counter query");
-        let mut counter_bytes = [0u8; 8];
-        sock.read_exact(&mut counter_bytes)
-            .expect("failed to read counter");
-        u64::from_le_bytes(counter_bytes)
-    }
-
-    /// Signal ready by creating a file on root virtiofs.
-    pub fn signal_ready() {
-        std::fs::write("/ready", "").expect("failed to write /ready");
-    }
-
-    /// Wait for check signal (file appears on root virtiofs).
-    pub fn wait_for_check() {
-        let start = std::time::Instant::now();
-        let timeout = std::time::Duration::from_secs(30);
-        loop {
-            if std::path::Path::new("/check").exists() {
-                return;
-            }
-            if start.elapsed() > timeout {
-                panic!("Timeout waiting for /check file");
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-    }
 }
 
 // =============================================================================
@@ -221,105 +174,6 @@ mod fd_guest {
             // AC3.1: Basic echo test
             let resp = guest_helpers::echo_roundtrip(super::ECHO_PORT, b"hello");
             assert_eq!(&resp, b"hello", "echo roundtrip failed");
-
-            println!("OK");
-        }
-    }
-}
-
-// =============================================================================
-// Test 3: VhostUserVsockSnapshot
-// =============================================================================
-
-#[host]
-mod snapshot_host {
-    use super::*;
-    use crate::{Test, TestSetup};
-
-    impl Test for TestVhostUserVsockSnapshot {
-        fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
-            use crate::krun_rust::setup_fs_builder;
-            use std::thread;
-
-            let socket_path = test_setup.tmp_dir.join("proxy.sock");
-            let snap_dir = test_setup.tmp_dir.join("snapshot");
-            let root_dir = test_setup.tmp_dir.join("root");
-
-            // 1. Start proxy
-            let mut proxy = host_helpers::start_proxy(&socket_path, 3);
-
-            // 2. Configure VM
-            let mut builder = krun::Builder::new();
-            builder.vm_config(1, 512)?;
-            setup_fs_builder(&mut builder, &test_setup)?;
-            builder.add_vsock_vhost_user(socket_path.to_str().unwrap())?;
-
-            let context = builder.build()?;
-            let handle = context.vm_handle();
-            let vm_thread = thread::spawn(move || context.run());
-
-            // 3. Wait for guest ready signal
-            host_helpers::wait_for_file(&root_dir.join("ready"), 30);
-
-            // 4. Snapshot
-            handle.snapshot(&snap_dir)?;
-
-            // 5. Kill and restart proxy
-            proxy.kill()?;
-            proxy.wait()?;
-            std::fs::remove_file(&socket_path).ok();
-            proxy = host_helpers::start_proxy(&socket_path, 3);
-
-            // 6. Restore
-            handle.restore_snapshot(&snap_dir)?;
-
-            // 7. Signal guest to verify
-            std::fs::write(root_dir.join("check"), "")?;
-
-            // 8. Wait for VM
-            vm_thread.join().ok();
-
-            // 9. Clean up
-            proxy.kill().ok();
-            proxy.wait().ok();
-
-            Ok(())
-        }
-    }
-}
-
-#[guest]
-mod snapshot_guest {
-    use super::*;
-    use crate::Test;
-
-    impl Test for TestVhostUserVsockSnapshot {
-        fn in_guest(self: Box<Self>) {
-            // Pre-snapshot echo and counter
-            let data = vec![0xABu8; 100];
-            let resp = guest_helpers::echo_roundtrip(super::ECHO_PORT, &data);
-            assert_eq!(resp, data, "pre-snapshot echo failed");
-
-            let pre_counter = guest_helpers::query_counter();
-            assert_eq!(pre_counter, 100, "pre-snapshot counter should be 100");
-
-            // Signal ready
-            guest_helpers::signal_ready();
-
-            // Wait for restore
-            guest_helpers::wait_for_check();
-
-            // AC4.2: Post-restore echo works
-            let data2 = vec![0xCDu8; 50];
-            let resp2 = guest_helpers::echo_roundtrip(super::ECHO_PORT, &data2);
-            assert_eq!(resp2, data2, "post-restore echo failed");
-
-            // AC4.3: Counter continued from pre-snapshot
-            let post_counter = guest_helpers::query_counter();
-            assert_eq!(
-                post_counter, 150,
-                "counter should continue from pre-snapshot value"
-            );
 
             println!("OK");
         }

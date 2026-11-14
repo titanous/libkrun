@@ -28,6 +28,7 @@ mod host {
             thread::spawn(move || self.tcp_tester.run_server(listener));
 
             let mut builder = krun::Builder::new();
+            builder.internet_socket_forwarding(true);
             builder.vm_config(1, 512)?;
             setup_fs_builder(&mut builder, &test_setup)?;
             let context = builder.build()?;

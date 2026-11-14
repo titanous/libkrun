@@ -4,9 +4,8 @@ use std::os::unix::io::RawFd;
 /// Abstracts platform-specific DAX window operations.
 ///
 /// FileSystem implementations call DaxMapper methods instead of
-/// libc::mmap directly. This enables different DAX backends
-/// (Linux mmap, HVF mapping messages, etc.) without changing the
-/// FileSystem trait.
+/// libc::mmap directly. This enables different DAX backends without
+/// changing the FileSystem trait.
 pub trait DaxMapper: Send + Sync {
     fn map_file(
         &self,

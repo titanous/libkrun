@@ -32,6 +32,7 @@ mod host {
             });
 
             let mut builder = krun::Builder::new();
+            builder.internet_socket_forwarding(true);
             let mut port_mapping = HashMap::new();
             port_mapping.insert(PORT, PORT);
             builder

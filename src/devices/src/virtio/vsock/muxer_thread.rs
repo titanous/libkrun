@@ -1,7 +1,7 @@
 use std::collections::HashMap;
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::unix::io::RawFd;
 use std::path::PathBuf;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use super::super::Queue as VirtQueue;
@@ -16,12 +16,11 @@ use crate::virtio::InterruptTransport;
 use crossbeam_channel::Sender;
 use rand::{rng, rngs::ThreadRng, Rng};
 use utils::epoll::{ControlOperation, Epoll, EpollEvent, EventSet};
-use utils::eventfd::EventFd;
 use vm_memory::GuestMemoryMmap;
 
 pub struct MuxerThread {
     cid: u64,
-    pub epoll: Epoll,
+    pub epoll: Arc<Epoll>,
     rxq: Arc<Mutex<MuxerRxQ>>,
     proxy_map: ProxyMap,
     mem: GuestMemoryMmap,
@@ -29,17 +28,14 @@ pub struct MuxerThread {
     interrupt: InterruptTransport,
     reaper_sender: Sender<u64>,
     unix_ipc_port_map: HashMap<u32, (PathBuf, bool)>,
-    quiesce_fd: EventFd,
-    resume_fd: EventFd,
-    quiesce_ack: Arc<(Mutex<bool>, Condvar)>,
-    stop: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) socket_policy: super::policy::SocketPolicy,
 }
 
 impl MuxerThread {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         cid: u64,
-        epoll: Epoll,
+        epoll: Arc<Epoll>,
         rxq: Arc<Mutex<MuxerRxQ>>,
         proxy_map: ProxyMap,
         mem: GuestMemoryMmap,
@@ -47,10 +43,6 @@ impl MuxerThread {
         interrupt: InterruptTransport,
         reaper_sender: Sender<u64>,
         unix_ipc_port_map: HashMap<u32, (PathBuf, bool)>,
-        quiesce_fd: EventFd,
-        resume_fd: EventFd,
-        quiesce_ack: Arc<(Mutex<bool>, Condvar)>,
-        stop: Arc<std::sync::atomic::AtomicBool>,
     ) -> Self {
         MuxerThread {
             cid,
@@ -62,17 +54,26 @@ impl MuxerThread {
             interrupt,
             reaper_sender,
             unix_ipc_port_map,
-            quiesce_fd,
-            resume_fd,
-            quiesce_ack,
-            stop,
+            socket_policy: Default::default(),
         }
     }
 
-    pub fn run(self) -> std::thread::JoinHandle<()> {
+    pub fn run(self, stop: utils::eventfd::EventFd) -> thread::JoinHandle<()> {
+        use std::os::fd::AsRawFd;
+        // Proxy identifiers contain nonzero ports; zero is reserved for shutdown.
+        self.epoll
+            .ctl(
+                ControlOperation::Add,
+                stop.as_raw_fd(),
+                &EpollEvent::new(EventSet::IN, 0),
+            )
+            .unwrap();
         thread::Builder::new()
             .name("vsock muxer".into())
-            .spawn(|| self.work())
+            .spawn(move || {
+                self.work();
+                drop(stop);
+            })
             .unwrap()
     }
 
@@ -168,8 +169,31 @@ impl MuxerThread {
                 continue;
             }
             let id = ((*port as u64) << 32) | (defs::TSI_PROXY_PORT as u64);
+            use super::policy::SocketOperation;
+            use nix::sys::socket::{SockaddrLike, SockaddrStorage, UnixAddr};
+            let Ok(addr) = UnixAddr::new(path) else {
+                continue;
+            };
+            // SAFETY: addr owns a valid sockaddr_un for its reported length.
+            let storage =
+                unsafe { SockaddrStorage::from_raw(addr.as_ptr().cast(), Some(addr.len())) }
+                    .unwrap();
+            if [
+                SocketOperation::UnixRemove,
+                SocketOperation::UnixBind,
+                SocketOperation::Listen,
+            ]
+            .iter()
+            .any(|op| self.socket_policy.check(*op, &storage).is_err())
+            {
+                warn!("Socket policy refused listening Unix mapping at {path:?}");
+                continue;
+            }
             let proxy = match UnixAcceptorProxy::new(id, path, *port) {
-                Ok(proxy) => proxy,
+                Ok(mut proxy) => {
+                    proxy.socket_policy = self.socket_policy.clone();
+                    proxy
+                }
                 Err(e) => {
                     warn!("Failed to create listening proxy at {path:?}: {e:?}");
                     continue;
@@ -185,38 +209,10 @@ impl MuxerThread {
         }
     }
 
-    fn handle_quiesce(&self) {
-        let _ = self.quiesce_fd.read();
-        debug!("vsock: muxer_thread quiesced");
-
-        // Signal the device that we're quiesced.
-        let (lock, cvar) = &*self.quiesce_ack;
-        {
-            let mut acked = lock.lock().unwrap();
-            *acked = true;
-            cvar.notify_one();
-        }
-
-        // Park until resume_fd is signalled.
-        let _ = self.resume_fd.read();
-        debug!("vsock: muxer_thread resumed");
-    }
-
     fn work(self) {
-        // Register quiesce_fd with a sentinel data value (0) that won't
-        // collide with any proxy ID.
-        let _ = self.epoll.ctl(
-            ControlOperation::Add,
-            self.quiesce_fd.as_raw_fd(),
-            &EpollEvent::new(EventSet::IN, 0),
-        );
-
         let mut thread_rng = rng();
         self.create_lisening_ipc_sockets();
         loop {
-            if self.stop.load(std::sync::atomic::Ordering::Acquire) {
-                return;
-            }
             let mut epoll_events = vec![EpollEvent::new(EventSet::empty(), 0); 32];
             match self
                 .epoll
@@ -224,17 +220,12 @@ impl MuxerThread {
             {
                 Ok(ev_cnt) => {
                     for ev in &epoll_events[0..ev_cnt] {
-                        if self.stop.load(std::sync::atomic::Ordering::Acquire) {
-                            return;
-                        }
                         let evset = EventSet::from_bits(ev.events).unwrap();
                         let id = ev.data();
-                        debug!("vsock: muxer_thread event: id={id} evset={evset:?}");
-
                         if id == 0 {
-                            self.handle_quiesce();
-                            continue;
+                            return;
                         }
+                        debug!("vsock: muxer_thread event: id={id} evset={evset:?}");
 
                         let update = self.proxy_map.read().unwrap().get(&id).map(|proxy_lock| {
                             let mut proxy = proxy_lock.lock().unwrap();

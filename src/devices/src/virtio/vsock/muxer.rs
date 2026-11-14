@@ -11,8 +11,6 @@ use super::muxer_thread::MuxerThread;
 use super::packet::{TsiConnectReq, TsiGetnameRsp, VsockPacket};
 use super::proxy::{Proxy, ProxyRemoval, ProxyUpdate};
 use super::reaper::ReaperThread;
-#[cfg(target_os = "macos")]
-use super::timesync::TimesyncThread;
 use super::tsi_dgram::TsiDgramProxy;
 use super::tsi_stream::TsiStreamProxy;
 use super::unix::UnixProxy;
@@ -24,7 +22,6 @@ use vm_memory::GuestMemoryMmap;
 
 use crate::virtio::InterruptTransport;
 use std::net::{Ipv4Addr, SocketAddrV4};
-use std::sync::Condvar;
 use utils::eventfd::EventFd;
 
 pub type ProxyMap = Arc<RwLock<HashMap<u64, Mutex<Box<dyn Proxy>>>>>;
@@ -109,22 +106,15 @@ pub struct VsockMuxer {
     queue: Option<Arc<Mutex<VirtQueue>>>,
     mem: Option<GuestMemoryMmap>,
     rxq: Arc<Mutex<MuxerRxQ>>,
-    epoll: Epoll,
+    epoll: Arc<Epoll>,
     interrupt: Option<InterruptTransport>,
     proxy_map: ProxyMap,
     reaper_sender: Option<Sender<u64>>,
     unix_ipc_port_map: Option<HashMap<u32, (PathBuf, bool)>>,
     tsi_flags: TsiFlags,
-    stop: Arc<std::sync::atomic::AtomicBool>,
-    wake: Option<(EventFd, EventFd)>,
-    worker: Option<std::thread::JoinHandle<()>>,
-    reaper: Option<std::thread::JoinHandle<()>>,
-}
-
-impl Drop for VsockMuxer {
-    fn drop(&mut self) {
-        self.shutdown();
-    }
+    pub(crate) socket_policy: super::policy::SocketPolicy,
+    muxer_thread: Option<std::thread::JoinHandle<()>>,
+    reaper_thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl VsockMuxer {
@@ -140,16 +130,15 @@ impl VsockMuxer {
             queue: None,
             mem: None,
             rxq: Arc::new(Mutex::new(MuxerRxQ::new())),
-            epoll: Epoll::new().unwrap(),
+            epoll: Arc::new(Epoll::new().unwrap()),
             interrupt: None,
             proxy_map: Arc::new(RwLock::new(HashMap::new())),
             reaper_sender: None,
             unix_ipc_port_map,
             tsi_flags,
-            stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            wake: None,
-            worker: None,
-            reaper: None,
+            socket_policy: Default::default(),
+            muxer_thread: None,
+            reaper_thread: None,
         }
     }
 
@@ -160,12 +149,7 @@ impl VsockMuxer {
         queue: Arc<Mutex<VirtQueue>>,
         interrupt: InterruptTransport,
         rxq_kick: EventFd,
-        muxer_quiesce_fd: EventFd,
-        muxer_resume_fd: EventFd,
-        muxer_quiesce_ack: Arc<(Mutex<bool>, Condvar)>,
-        _timesync_quiesce_fd: EventFd,
-        _timesync_resume_fd: EventFd,
-        _timesync_quiesce_ack: Arc<(Mutex<bool>, Condvar)>,
+        stop: EventFd,
     ) {
         self.queue = Some(queue.clone());
         self.mem = Some(mem.clone());
@@ -175,28 +159,9 @@ impl VsockMuxer {
         // packets even when they come from the muxer thread.
         self.rxq.lock().unwrap().set_kick_fd(rxq_kick);
 
-        #[cfg(target_os = "macos")]
-        {
-            let timesync = TimesyncThread::new(
-                self.cid,
-                mem.clone(),
-                queue.clone(),
-                interrupt.clone(),
-                timesync_quiesce_fd,
-                timesync_resume_fd,
-                timesync_quiesce_ack,
-            );
-            timesync.run();
-        }
-
         let (sender, receiver) = unbounded();
 
-        self.stop.store(false, std::sync::atomic::Ordering::Release);
-        self.wake = Some((
-            muxer_quiesce_fd.try_clone().unwrap(),
-            muxer_resume_fd.try_clone().unwrap(),
-        ));
-        let thread = MuxerThread::new(
+        let mut thread = MuxerThread::new(
             self.cid,
             self.epoll.clone(),
             self.rxq.clone(),
@@ -206,36 +171,27 @@ impl VsockMuxer {
             interrupt.clone(),
             sender.clone(),
             self.unix_ipc_port_map.clone().unwrap_or_default(),
-            muxer_quiesce_fd,
-            muxer_resume_fd,
-            muxer_quiesce_ack,
-            self.stop.clone(),
         );
-        self.worker = Some(thread.run());
+        thread.socket_policy = self.socket_policy.clone();
+        self.muxer_thread = Some(thread.run(stop));
 
         self.reaper_sender = Some(sender);
         let reaper = ReaperThread::new(receiver, self.proxy_map.clone());
-        self.reaper = Some(reaper.run());
+        self.reaper_thread = Some(reaper.run());
     }
 
-    pub(crate) fn shutdown(&mut self) {
-        self.stop.store(true, std::sync::atomic::Ordering::Release);
-        if let Some((quiesce, resume)) = &self.wake {
-            let _ = resume.write(1);
-            let _ = quiesce.write(1);
+    pub(crate) fn stop(&mut self, stop: &EventFd) {
+        if let Some(thread) = self.muxer_thread.take() {
+            stop.write(1).expect("wake vsock muxer for shutdown");
+            thread.join().expect("vsock muxer panicked");
         }
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
-        self.reaper_sender.take();
-        if let Some(reaper) = self.reaper.take() {
-            let _ = reaper.join();
-        }
-        self.wake.take();
+        // Proxies may retain reaper senders; release them before joining.
         self.proxy_map.write().unwrap().clear();
-        self.queue.take();
-        self.mem.take();
-        self.interrupt.take();
+        self.reaper_sender = None;
+        if let Some(thread) = self.reaper_thread.take() {
+            thread.join().expect("vsock reaper panicked");
+        }
+        let _ = stop.read();
     }
 
     pub(crate) fn has_pending_rx(&self) -> bool {
@@ -381,7 +337,8 @@ impl VsockMuxer {
                         queue.clone(),
                         self.rxq.clone(),
                     ) {
-                        Ok(proxy) => {
+                        Ok(mut proxy) => {
+                            proxy.socket_policy = self.socket_policy.clone();
                             self.proxy_map
                                 .write()
                                 .unwrap()
@@ -414,7 +371,8 @@ impl VsockMuxer {
                         queue.clone(),
                         self.rxq.clone(),
                     ) {
-                        Ok(proxy) => {
+                        Ok(mut proxy) => {
+                            proxy.socket_policy = self.socket_policy.clone();
                             self.proxy_map
                                 .write()
                                 .unwrap()
@@ -637,6 +595,36 @@ impl VsockMuxer {
                     push_packet(self.cid, rx, &self.rxq, queue, mem);
                     return;
                 }
+                use nix::sys::socket::{SockaddrLike, UnixAddr};
+                let allowed = UnixAddr::new(path)
+                    .ok()
+                    .and_then(|addr| {
+                        // SAFETY: addr owns a valid sockaddr_un of the supplied length.
+                        unsafe {
+                            nix::sys::socket::SockaddrStorage::from_raw(
+                                addr.as_ptr().cast(),
+                                Some(addr.len()),
+                            )
+                        }
+                    })
+                    .is_some_and(|addr| {
+                        self.socket_policy
+                            .check(super::policy::SocketOperation::UnixConnect, &addr)
+                            .is_ok()
+                    });
+                if !allowed {
+                    push_packet(
+                        self.cid,
+                        MuxerRx::Reset {
+                            local_port: pkt.dst_port(),
+                            peer_port: pkt.src_port(),
+                        },
+                        &self.rxq,
+                        queue,
+                        mem,
+                    );
+                    return;
+                }
                 let rxq = self.rxq.clone();
 
                 let mut unix = UnixProxy::new(
@@ -650,6 +638,7 @@ impl VsockMuxer {
                     path.to_path_buf(),
                 )
                 .unwrap();
+                unix.socket_policy = self.socket_policy.clone();
                 let tsi = TsiConnectReq {
                     peer_port: 0,
                     addr: SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0).into(),

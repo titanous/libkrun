@@ -6,14 +6,10 @@ use std::thread;
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use utils::eventfd::EventFd;
 
-#[cfg(target_os = "macos")]
-use crossbeam_channel::Sender;
 use rutabaga_gfx::{
     ResourceCreate3D, ResourceCreateBlob, RutabagaFence, Transfer3D,
     RUTABAGA_PIPE_BIND_RENDER_TARGET, RUTABAGA_PIPE_TEXTURE_2D,
 };
-#[cfg(target_os = "macos")]
-use utils::worker_message::WorkerMessage;
 use vm_memory::{GuestAddress, GuestMemoryMmap};
 
 use super::super::descriptor_utils::{Reader, Writer};
@@ -37,8 +33,6 @@ pub struct Worker {
     interrupt: InterruptTransport,
     shm_region: VirtioShmRegion,
     virgl_flags: u32,
-    #[cfg(target_os = "macos")]
-    map_sender: Sender<WorkerMessage>,
     export_table: Option<ExportTable>,
     displays: Box<[DisplayInfo]>,
     display_backend: DisplayBackend<'static>,
@@ -52,7 +46,6 @@ impl Worker {
         interrupt: InterruptTransport,
         shm_region: VirtioShmRegion,
         virgl_flags: u32,
-        #[cfg(target_os = "macos")] map_sender: Sender<WorkerMessage>,
         export_table: Option<ExportTable>,
         displays: Box<[DisplayInfo]>,
         display_backend: DisplayBackend<'static>,
@@ -72,8 +65,6 @@ impl Worker {
             interrupt,
             shm_region,
             virgl_flags,
-            #[cfg(target_os = "macos")]
-            map_sender,
             export_table,
             displays,
             display_backend,
@@ -93,8 +84,6 @@ impl Worker {
             self.control_queue.clone(),
             self.interrupt.clone(),
             self.virgl_flags,
-            #[cfg(target_os = "macos")]
-            self.map_sender.clone(),
             self.export_table.take(),
             self.displays.clone(),
             self.display_backend,

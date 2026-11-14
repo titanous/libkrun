@@ -5,20 +5,18 @@ authors = ["Amazon Firecracker team <firecracker-devel@amazon.com>"]
 edition = "2021"
 
 [features]
-default = ["hvf"]
+default = []
 tee = []
 amd-sev = [ "blk", "bitfield", "bitflags", "iocuddle", "tee", "kbs-types", "serde_json" ]
 tdx = [ "blk", "tee", "kbs-types", "serde_json", "dep:tdx" ]
-net = []
-blk = []
+net = ["devices/net"]
+blk = ["devices/blk"]
 efi = [ "blk", "net" ]
 gpu = ["krun_display"]
 snd = []
 input = ["krun_input"]
 aws-nitro = []
-snapshot = ["serde_json", "bincode-next", "futures", "tokio", "devices/snapshot", "hvf?/snapshot"]
 vhost-user = ["devices/vhost-user"]
-uffd = ["snapshot", "userfaultfd", "futures", "tokio"]
 shuttle = []
 
 [dependencies]
@@ -40,10 +38,7 @@ kernel = { path = "../kernel" }
 utils = { path = "../utils" }
 polly = { path = "../polly" }
 
-# Dependencies for amd-sev, snapshot, and uffd
-bincode-next = { version = "3.0.0-rc.5", optional = true, features = ["serde"] }
-futures = { version = "0.3", optional = true }
-tokio = { version = "1", features = ["rt", "macros", "sync", "io-util", "net"], optional = true }
+# Dependencies for confidential guests
 kbs-types = { version = "0.13.0", optional = true }
 serde = { version = "1.0.125", features = ["derive"] }
 serde_json = { version = "1.0.64", optional = true }
@@ -60,10 +55,6 @@ zstd = "0.13"
 tdx = { version = "0.1.0", optional = true }
 kvm-bindings = { version = ">=0.11", features = ["fam-wrappers", "serde"] }
 kvm-ioctls = ">=0.21"
-userfaultfd = { version = "0.8", optional = true }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-hvf = { path = "../hvf", optional = true }
 
 [target.'cfg(loom)'.dependencies]
 loom = { version = "0.7", features = ["checkpoint"] }

@@ -13,7 +13,7 @@ name = "test_cases"
 
 [dependencies]
 # libkrun is needed for nested-virt test where L1 guest builds L2 VM
-libkrun = { path = "../../src/libkrun", features = ["embedded_init", "net", "blk", "snapshot", "vhost-user", "uffd"], optional = true }
+libkrun = { path = "../../src/libkrun", features = ["embedded_init", "net", "blk", "vhost-user"], optional = true }
 macros = { path = "../macros" }
 nix = { version = "0.29.0", features = ["socket"] }
 libc = "0.2"

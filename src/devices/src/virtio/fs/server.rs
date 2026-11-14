@@ -882,6 +882,10 @@ impl Server {
             .expect("page size exceeds u32");
         let max_pages = ((MAX_BUFFER_SIZE - 1) / page_size) + 1;
 
+        // Linux virtio-fs sends INIT asynchronously after mount setup. Always
+        // return the backend error in its INIT reply; the driver may already
+        // have returned mount success, so callers must verify a file operation
+        // before treating the mount as ready.
         match self.fs.init(capable) {
             Ok(want) => {
                 let enabled = (capable & (want | supported)).bits();

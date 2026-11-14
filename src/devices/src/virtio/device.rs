@@ -8,9 +8,7 @@
 use std::sync::Arc;
 
 use super::{ActivateResult, InterruptTransport, Queue};
-use crate::snapshot::SnapshotError;
 use crate::virtio::AsAny;
-use std::time::Duration;
 use utils::eventfd::EventFd;
 use vm_memory::GuestMemoryMmap;
 
@@ -111,20 +109,17 @@ pub trait VirtioDevice: AsAny + Send {
     /// The transport uses this to construct the queues during initialization and after reset.
     fn queue_config(&self) -> &[QueueConfig];
 
-    /// Returns the device queues (snapshot buffer).
-    /// Snapshot-capable devices override this to return their queue state.
+    /// Returns device-local queue state when available.
     fn queues(&self) -> &[Queue] {
         &[]
     }
 
-    /// Returns a mutable reference to the device queues (snapshot buffer).
-    /// Used by snapshot restore to inject queue state before re-activation.
+    /// Returns mutable device-local queue state when available.
     fn queues_mut(&mut self) -> &mut [Queue] {
         &mut []
     }
 
     /// Returns the device queue event fds.
-    /// Used by post_restore_kick to notify workers after snapshot restore.
     fn queue_events(&self) -> &[EventFd] {
         &[]
     }
@@ -189,74 +184,6 @@ pub trait VirtioDevice: AsAny + Send {
     fn reset(&mut self) -> bool {
         false
     }
-
-    /// Begin quiescing the device for snapshot save.
-    ///
-    /// Implementations should complete within `timeout` and leave the device in a snapshot-safe
-    /// state. The default implementation is a no-op for backward compatibility.
-    fn begin_snapshot_quiesce(&mut self, _timeout: Duration) -> Result<(), SnapshotError> {
-        Ok(())
-    }
-
-    /// Abort an in-progress snapshot quiesce and return to normal operation.
-    fn abort_snapshot_quiesce(&mut self) {}
-
-    /// Synchronize any runtime queue state into `queues()` before snapshot serialization.
-    fn sync_queues_for_snapshot(&mut self) {}
-
-    /// Begin restore-time resync after state has been loaded.
-    ///
-    /// Implementations should complete within `timeout` and prepare workers/queues to continue
-    /// normal operation. The default implementation is a no-op for backward compatibility.
-    fn begin_restore_resync(&mut self, _timeout: Duration) -> Result<(), SnapshotError> {
-        Ok(())
-    }
-
-    /// End restore-time resync and transition the device to its steady runtime state.
-    fn end_restore_resync(&mut self) {}
-
-    /// Kick all ready queues after snapshot restore so workers process any
-    /// pending work. Skips queues the guest never configured (ready=false)
-    /// to avoid accessing invalid GuestAddress(0) ring pointers.
-    fn post_restore_kick(&mut self) {
-        if !self.is_activated() {
-            return;
-        }
-        for (i, (queue, evt)) in self
-            .queues()
-            .iter()
-            .zip(self.queue_events().iter())
-            .enumerate()
-        {
-            if !queue.ready {
-                continue;
-            }
-            if let Err(e) = evt.write(1) {
-                error!(
-                    "{}: post_restore_kick queue {i} failed: {e}",
-                    self.device_name()
-                );
-            }
-        }
-    }
-
-    /// Perform any device-specific recovery steps after snapshot restore.
-    fn post_snapshot_restore(&mut self) {}
-
-    /// Return the backend's snapshot state, if any.
-    ///
-    /// Called after quiesce during snapshot save. The returned bytes are
-    /// included in the device's serialized state and passed back to
-    /// `restore_backend_state` on restore.
-    fn save_backend_state(&self) -> Option<Vec<u8>> {
-        None
-    }
-
-    /// Provide backend snapshot state for restore.
-    ///
-    /// Called before `post_snapshot_restore`, storing the data so the worker
-    /// can pick it up during resync and call `backend.restore_snapshot_state()`.
-    fn restore_backend_state(&mut self, _data: &[u8]) {}
 
     /// Get base and size of the SHM region
     fn shm_region(&self) -> Option<&VirtioShmRegion> {

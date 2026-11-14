@@ -12,14 +12,10 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 #[cfg(target_os = "linux")]
 use std::os::linux::fs::MetadataExt;
-#[cfg(target_os = "macos")]
-use std::os::macos::fs::MetadataExt;
 use std::path::PathBuf;
 use std::result;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
 
 use imago::io_buffers::{IoVector, IoVectorMut};
 use imago::{
@@ -39,7 +35,6 @@ use super::{
     BlockBackend, Error, NUM_QUEUES, QUEUE_CONFIG, QUEUE_SIZES, SECTOR_SHIFT, SECTOR_SIZE,
 };
 
-use crate::snapshot::SnapshotError;
 use crate::virtio::block::{AsyncBlockBackendFactory, AsyncBlockWorker};
 use crate::virtio::{
     block::{ImageType, SyncMode},
@@ -61,12 +56,7 @@ pub enum CacheType {
 
 impl CacheType {
     /// Picks the appropriate cache type based on disk image or device path.
-    /// Special files like `/dev/rdisk*` on macOS do not support flush/sync.
     pub fn auto(_path: &str) -> CacheType {
-        #[cfg(target_os = "macos")]
-        if _path.starts_with("/dev/rdisk") {
-            return CacheType::Unsafe;
-        }
         CacheType::Writeback
     }
 }
@@ -335,25 +325,13 @@ pub struct Block {
     disk: Option<BlockDeviceBackend>,
     worker_thread: Option<JoinHandle<()>>,
     worker_stopfd: EventFd,
-    worker_resyncfd: EventFd,
-    worker_queue_state: Arc<Mutex<Queue>>,
-    worker_queue_generation: Arc<AtomicU64>,
-
-    /// Signal the async worker to quiesce (drain + publish queues then park).
-    worker_quiesce_fd: EventFd,
-    /// Signal the async worker to resume after quiesce.
-    worker_resume_fd: EventFd,
-    /// Condvar the worker sets when it has drained, published queues and parked.
-    worker_quiesce_ack: Arc<(Mutex<bool>, Condvar)>,
-    /// Shared backend snapshot state for async workers.
-    worker_backend_state: Arc<Mutex<Option<Vec<u8>>>>,
 
     // Virtio fields.
     pub(crate) avail_features: u64,
     pub(crate) acked_features: u64,
     config: VirtioBlkConfig,
 
-    // Queue snapshot buffer.
+    // Device-local queue state.
     queues: Vec<Queue>,
     queue_evts: Vec<EventFd>,
 
@@ -396,8 +374,6 @@ impl Block {
                     .filename(path)
                     .direct(direct_io);
 
-                #[cfg(target_os = "macos")]
-                let file_opts = file_opts.relaxed_sync(sync_mode == SyncMode::Relaxed);
                 let file = ImagoFile::open_sync(file_opts)?;
                 let discard_alignment = file.discard_align() as u32 / 512;
 
@@ -460,6 +436,9 @@ impl Block {
 
         if is_disk_read_only {
             avail_features |= 1u64 << VIRTIO_BLK_F_RO;
+            avail_features &= !((1u64 << VIRTIO_BLK_F_DISCARD)
+                | (1u64 << VIRTIO_BLK_F_WRITE_ZEROES)
+                | (1u64 << VIRTIO_BLK_F_FLUSH));
         };
 
         let queues: Vec<Queue> = QUEUE_SIZES.iter().map(|&s| Queue::new(s)).collect();
@@ -467,9 +446,6 @@ impl Block {
         for _ in QUEUE_SIZES.iter() {
             queue_evts.push(EventFd::new(EFD_NONBLOCK)?);
         }
-
-        let worker_queue_state = Arc::new(Mutex::new(Queue::new(QUEUE_SIZES[0])));
-        let worker_queue_generation = Arc::new(AtomicU64::new(0));
 
         let config = VirtioBlkConfig {
             capacity: disk.nsectors(),
@@ -497,13 +473,6 @@ impl Block {
             device_state: DeviceState::Inactive,
             worker_thread: None,
             worker_stopfd: EventFd::new(EFD_NONBLOCK)?,
-            worker_resyncfd: EventFd::new(EFD_NONBLOCK)?,
-            worker_queue_state,
-            worker_queue_generation,
-            worker_quiesce_fd: EventFd::new(EFD_NONBLOCK)?,
-            worker_resume_fd: EventFd::new(EFD_NONBLOCK)?,
-            worker_quiesce_ack: Arc::new((Mutex::new(false), Condvar::new())),
-            worker_backend_state: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -601,51 +570,35 @@ impl VirtioDevice for Block {
         // Take ownership of the disk - for async factory we need to move it to the worker
         let disk = self.disk.take().ok_or(ActivateError::BadActivate)?;
 
-        if let Ok(mut shared) = self.worker_queue_state.lock() {
-            *shared = blk_q.queue.clone();
-        }
-        self.worker_queue_generation.fetch_add(1, Ordering::SeqCst);
-
         match disk {
             BlockDeviceBackend::Sync(backend) => {
                 log::debug!("block: starting sync worker");
                 // Put the backend back so on_exit can access it
                 self.disk = Some(BlockDeviceBackend::Sync(backend.clone()));
 
-                let worker = BlockWorker::new(
+                let mut worker = BlockWorker::new(
                     blk_q,
                     interrupt.clone(),
                     mem.clone(),
                     backend,
                     self.worker_stopfd.try_clone().unwrap(),
-                    self.worker_queue_state.clone(),
-                    self.worker_queue_generation.clone(),
-                    self.worker_resyncfd.try_clone().unwrap(),
-                    self.worker_quiesce_fd.try_clone().unwrap(),
-                    self.worker_resume_fd.try_clone().unwrap(),
-                    self.worker_quiesce_ack.clone(),
                 );
+                worker.read_only = self.is_read_only();
                 self.worker_thread = Some(worker.run());
             }
             BlockDeviceBackend::AsyncFactory(factory) => {
                 log::debug!("block: starting async worker with factory");
                 // Factory is consumed by the worker, don't put it back
                 let blk_evt = blk_q.event.as_ref().try_clone().unwrap();
-                let worker = AsyncBlockWorker::new(
+                let mut worker = AsyncBlockWorker::new(
                     blk_q.queue.clone(),
                     blk_evt,
                     interrupt.clone(),
                     mem.clone(),
                     factory,
                     self.worker_stopfd.try_clone().unwrap(),
-                    self.worker_resyncfd.try_clone().unwrap(),
-                    self.worker_queue_state.clone(),
-                    self.worker_queue_generation.clone(),
-                    self.worker_quiesce_fd.try_clone().unwrap(),
-                    self.worker_resume_fd.try_clone().unwrap(),
-                    self.worker_quiesce_ack.clone(),
-                    self.worker_backend_state.clone(),
                 );
+                worker.read_only = self.is_read_only();
                 self.worker_thread = Some(worker.run());
             }
         }
@@ -663,77 +616,6 @@ impl VirtioDevice for Block {
         }
         self.device_state = DeviceState::Inactive;
         true
-    }
-
-    fn begin_snapshot_quiesce(
-        &mut self,
-        timeout: Duration,
-    ) -> std::result::Result<(), SnapshotError> {
-        if !self.device_state.is_activated() {
-            return Ok(());
-        }
-
-        // Reset ack flag, then signal the worker to quiesce
-        {
-            let (lock, _) = &*self.worker_quiesce_ack;
-            *lock.lock().unwrap() = false;
-        }
-        let _ = self.worker_quiesce_fd.write(1);
-
-        // Wait for the worker to drain, publish queues and park
-        let (lock, cvar) = &*self.worker_quiesce_ack;
-        let guard = lock.lock().unwrap();
-        let (guard, wait_result) = cvar
-            .wait_timeout_while(guard, timeout, |acked| !*acked)
-            .unwrap();
-        if !*guard || wait_result.timed_out() {
-            return Err(SnapshotError::QuiesceTimeout {
-                device_id: String::new(),
-                timeout_ms: timeout.as_millis() as u64,
-                detail: Some("block worker did not ack quiesce".into()),
-            });
-        }
-        Ok(())
-    }
-
-    fn abort_snapshot_quiesce(&mut self) {
-        if !self.device_state.is_activated() {
-            return;
-        }
-        // Reset ack flag and resume the worker
-        {
-            let (lock, _) = &*self.worker_quiesce_ack;
-            *lock.lock().unwrap() = false;
-        }
-        let _ = self.worker_resume_fd.write(1);
-    }
-
-    fn sync_queues_for_snapshot(&mut self) {
-        let DeviceState::Activated(_, _) = self.device_state else {
-            return;
-        };
-
-        if let Ok(shared) = self.worker_queue_state.lock() {
-            self.queues[0] = shared.clone();
-        }
-    }
-
-    fn save_backend_state(&self) -> Option<Vec<u8>> {
-        self.worker_backend_state.lock().ok()?.clone()
-    }
-
-    fn restore_backend_state(&mut self, data: &[u8]) {
-        if let Ok(mut shared) = self.worker_backend_state.lock() {
-            *shared = Some(data.to_vec());
-        }
-    }
-
-    fn post_snapshot_restore(&mut self) {
-        if let Ok(mut shared) = self.worker_queue_state.lock() {
-            *shared = self.queues[0].clone();
-        }
-        self.worker_queue_generation.fetch_add(1, Ordering::SeqCst);
-        let _ = self.worker_resyncfd.write(1);
     }
 }
 

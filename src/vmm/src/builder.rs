@@ -3,12 +3,8 @@
 
 //! Enables pre-boot setup, instantiation and booting of a Firecracker VMM.
 
-#[cfg(target_os = "macos")]
-use crossbeam_channel::unbounded;
 use crossbeam_channel::Sender;
 use kernel::cmdline::Cmdline;
-#[cfg(target_os = "macos")]
-use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::fs::File;
 use std::io::{self, IsTerminal, Read};
@@ -39,10 +35,6 @@ use devices::legacy::KvmAia;
 #[cfg(target_arch = "x86_64")]
 use devices::legacy::KvmIoapic;
 use devices::legacy::Serial;
-#[cfg(target_os = "macos")]
-use devices::legacy::VcpuList;
-#[cfg(target_os = "macos")]
-use devices::legacy::{GicV3, HvfGicV3};
 #[cfg(target_arch = "x86_64")]
 use devices::legacy::{IoApic, IrqChipT};
 use devices::legacy::{IrqChip, IrqChipDevice};
@@ -119,9 +111,6 @@ static EDK2_BINARY: &[u8] = include_bytes!("../../../edk2/KRUN_EFI.silent.fd");
 pub enum StartMicrovmError {
     /// Unable to attach block device to Vmm.
     AttachBlockDevice(io::Error),
-    #[cfg(target_os = "macos")]
-    /// Failed to create HVF in-kernel IrqChip.
-    CreateHvfIrqChip(hvf::Error),
     #[cfg(target_os = "linux")]
     /// Failed to create KVM in-kernel IrqChip.
     CreateKvmIrqChip(kvm_ioctls::Error),
@@ -275,10 +264,6 @@ impl Display for StartMicrovmError {
         match *self {
             AttachBlockDevice(ref err) => {
                 write!(f, "Unable to attach block device to Vmm. Error: {err}")
-            }
-            #[cfg(target_os = "macos")]
-            CreateHvfIrqChip(ref err) => {
-                write!(f, "Cannot create HVF in-kernel IrqChip: {err}")
             }
             #[cfg(target_os = "linux")]
             CreateKvmIrqChip(ref err) => {
@@ -645,12 +630,6 @@ pub struct BuiltVm {
     pub device_info: VmDeviceInfo,
     /// Shared VM exit state.
     vm_exit: crate::vm_exit::SharedVmExit,
-    /// Boot senders for secondary vCPUs. Used to unblock them during cold
-    /// restore (they wait on boot_receiver for a PSCI CPU_ON that never comes
-    /// when we skip the kernel boot).
-    #[cfg(target_os = "macos")]
-    #[cfg_attr(not(feature = "snapshot"), allow(dead_code))]
-    boot_senders: Vec<Sender<u64>>,
     /// Whether the balloon device should be exposed via BalloonHandle.
     #[cfg(not(feature = "tee"))]
     pub balloon_enabled: bool,
@@ -681,180 +660,6 @@ impl BuiltVm {
             .start_vcpus(vcpus)
             .map_err(StartMicrovmError::Internal)?;
         Ok(self.vmm.clone())
-    }
-
-    /// Cold restore: start vCPU threads paused, load snapshot, then resume.
-    ///
-    /// Unlike `run()` which boots from the kernel entry point, this skips
-    /// kernel boot entirely and restores the VM from a previously-taken
-    /// snapshot. Optionally applies a chain of incremental snapshots on
-    /// top of the base before resuming.
-    ///
-    /// The flow is:
-    ///
-    /// 1. Start vCPU threads (paused in initial event loop)
-    /// 2. Unblock secondary vCPUs (they wait for PSCI CPU_ON which never comes)
-    /// 3. Restore full snapshot (memory, devices, interrupts, vCPU state)
-    /// 4. Apply each incremental snapshot in order (dirty pages, updated
-    ///    device/interrupt/vCPU state — each RestoreState overwrites the last)
-    /// 5. Resume all vCPUs — they continue from the final restored state
-    #[cfg(feature = "snapshot")]
-    pub fn restore_from_snapshot(
-        &mut self,
-        base_path: &std::path::Path,
-        incremental_paths: &[&std::path::Path],
-    ) -> std::result::Result<Arc<Mutex<Vmm>>, StartMicrovmError> {
-        let mut vcpus = self
-            .vcpus
-            .take()
-            .ok_or(StartMicrovmError::MicroVMAlreadyRunning)?;
-
-        let mut vmm = self.vmm.lock().expect("Poisoned vmm lock");
-
-        // Step 1: Start vCPU threads — they park in the initial event loop
-        // waiting for Resume or RestoreState.
-        vmm.start_vcpus_paused(&mut vcpus)
-            .map_err(StartMicrovmError::Internal)?;
-
-        // Step 2 (macOS only): Unblock secondary vCPUs. On HVF they block on
-        // boot_receiver.recv() waiting for PSCI CPU_ON from the kernel. Since
-        // we're skipping boot, send a dummy entry address to unblock them.
-        // On KVM, secondary vCPUs are powered off via KVM_ARM_VCPU_POWER_OFF
-        // and don't need unblocking — they go straight to the paused state.
-        #[cfg(target_os = "macos")]
-        for sender in self.boot_senders.drain(..) {
-            let _ = sender.send(0);
-        }
-
-        let snapshot_err = |e: super::snapshot::SnapshotError| {
-            StartMicrovmError::Internal(super::Error::Snapshot(e.to_string()))
-        };
-
-        // Step 3: Load the full base snapshot (memory, devices, interrupts, vCPU state).
-        // vCPU threads receive RestoreState but stay in the initial event loop.
-        vmm.restore_snapshot(base_path).map_err(snapshot_err)?;
-
-        // Step 4: Apply incremental snapshots in order. Each one patches dirty
-        // pages and sends a fresh RestoreState that overwrites the previous.
-        // Device workers are quiesced/resumed around each incremental to avoid
-        // races with guest memory writes.
-        for inc_path in incremental_paths {
-            vmm.restore_incremental_snapshot(inc_path)
-                .map_err(snapshot_err)?;
-        }
-
-        // Step 5: Resume all vCPUs — they leave the initial event loop and
-        // enter the main execution loop with the final restored state.
-        vmm.resume_vcpus().map_err(StartMicrovmError::Internal)?;
-
-        drop(vmm);
-        Ok(self.vmm.clone())
-    }
-
-    /// Restore from a SnapshotStore (eager restore with preload).
-    /// vCPUs must not yet be started; they will be started paused, memory populated, then resumed.
-    #[cfg(all(target_os = "linux", feature = "snapshot"))]
-    pub fn restore_from_store(
-        &mut self,
-        vmstate_bytes: Vec<u8>,
-        store: Box<dyn super::snapshot_store::SnapshotStore>,
-        rt: &tokio::runtime::Runtime,
-    ) -> std::result::Result<Arc<Mutex<Vmm>>, StartMicrovmError> {
-        let mut vcpus = self
-            .vcpus
-            .take()
-            .ok_or(StartMicrovmError::MicroVMAlreadyRunning)?;
-
-        let mut vmm = self.vmm.lock().expect("Poisoned vmm lock");
-
-        // Step 1: Start vCPU threads — they park in the initial event loop
-        // waiting for Resume or RestoreState.
-        vmm.start_vcpus_paused(&mut vcpus)
-            .map_err(StartMicrovmError::Internal)?;
-
-        // Note: Step 2 (macOS secondary vCPU unblocking) is not needed here because
-        // this method is only available on Linux (gated by #[cfg(all(target_os = "linux", ...))]).
-        // For reference: on macOS we would unblock secondary vCPUs that block on boot_receiver.recv(),
-        // but on KVM they are powered off via KVM_ARM_VCPU_POWER_OFF and don't need unblocking.
-
-        let snapshot_err = |e: super::snapshot::SnapshotError| {
-            StartMicrovmError::Internal(super::Error::Snapshot(e.to_string()))
-        };
-
-        // Step 3: Restore using store (eager restore, drains preload to populate memory)
-        vmm.restore_from_store(vmstate_bytes, store, rt)
-            .map_err(snapshot_err)?;
-
-        // Step 4: Resume all vCPUs — they leave the initial event loop and
-        // enter the main execution loop with the final restored state.
-        vmm.resume_vcpus().map_err(StartMicrovmError::Internal)?;
-
-        drop(vmm);
-        Ok(self.vmm.clone())
-    }
-
-    /// Restore from a SnapshotStore using UFFD demand-paging.
-    /// vCPUs must not yet be started. Vmstate is validated before starting vCPU threads
-    /// or UFFD handler, so validation failures have no cleanup cost.
-    /// Returns `(handler_thread, shutdown_tx)`.
-    #[cfg(all(target_os = "linux", feature = "uffd"))]
-    pub fn restore_from_store_with_uffd(
-        &mut self,
-        vmstate_bytes: Vec<u8>,
-        store: Box<dyn super::snapshot_store::SnapshotStore>,
-        rt: tokio::runtime::Runtime,
-    ) -> std::result::Result<
-        (
-            std::thread::JoinHandle<()>,
-            tokio::sync::oneshot::Sender<()>,
-        ),
-        StartMicrovmError,
-    > {
-        let mut vmm = self.vmm.lock().expect("Poisoned vmm lock");
-
-        let snapshot_err = |e: super::snapshot::SnapshotError| {
-            StartMicrovmError::Internal(super::Error::Snapshot(e.to_string()))
-        };
-
-        // Step 1: Pre-validate vmstate before starting any threads or UFFD.
-        // Use vcpus.len() since vcpus_handles isn't populated until start_vcpus_paused.
-        let vcpu_count = self.vcpus.as_ref().map(|v| v.len()).unwrap_or(0);
-        let vmstate: super::snapshot::VmSnapshot = bincode_next::decode_from_slice(
-            &vmstate_bytes,
-            bincode_next::config::standard()
-                .with_limit::<{ super::snapshot::VMSTATE_MAX_SIZE as usize }>(),
-        )
-        .map(|(val, _)| val)
-        .map_err(|e| snapshot_err(super::snapshot::SnapshotError::Deserialize(e.to_string())))?;
-        super::snapshot::validate_header_for_vm(
-            &vmstate.header,
-            &vmm.guest_memory,
-            vcpu_count,
-            vmm.nested_enabled,
-        )
-        .map_err(snapshot_err)?;
-        // Validation passed — vmstate will be validated again inside Vmm for defense-in-depth.
-        // Re-serialize is wasteful, so pass the bytes through.
-
-        // Step 2: Start vCPU threads — they park in the initial event loop
-        // waiting for Resume or RestoreState.
-        let mut vcpus = self
-            .vcpus
-            .take()
-            .ok_or(StartMicrovmError::MicroVMAlreadyRunning)?;
-        vmm.start_vcpus_paused(&mut vcpus)
-            .map_err(StartMicrovmError::Internal)?;
-
-        // Step 3: Set up UFFD handler, restore device/vCPU states
-        let (handler_thread, shutdown_tx) = vmm
-            .restore_from_store_with_uffd(vmstate_bytes, store, rt)
-            .map_err(snapshot_err)?;
-
-        // Step 4: Resume all vCPUs — page faults will be resolved by the UFFD handler
-        vmm.resume_vcpus().map_err(StartMicrovmError::Internal)?;
-
-        drop(vmm);
-        Ok((handler_thread, shutdown_tx))
     }
 }
 
@@ -917,13 +722,13 @@ pub fn build_microvm(
     #[allow(unused_mut)]
     let mut kernel_cmdline = Cmdline::new(arch::CMDLINE_MAX_SIZE);
     if let Some(cmdline) = payload_config.kernel_cmdline {
-        kernel_cmdline.insert_str(cmdline.as_str()).unwrap();
+        kernel_cmdline.insert_str(cmdline.as_str())?;
     } else if !vm_resources.kernel_cmdline.cmdline.is_empty() {
         for part in vm_resources.kernel_cmdline.cmdline.iter() {
-            kernel_cmdline.insert_str(part).unwrap();
+            kernel_cmdline.insert_str(part)?;
         }
     } else {
-        kernel_cmdline.insert_str(DEFAULT_KERNEL_CMDLINE).unwrap();
+        kernel_cmdline.insert_str(DEFAULT_KERNEL_CMDLINE)?;
     }
 
     // if let Some(cmdline) = &vm_resources.kernel_cmdline.krun_env {
@@ -932,17 +737,9 @@ pub fn build_microvm(
 
     if let Some(kernel_console) = &vm_resources.kernel_console {
         let cmdline = kernel_cmdline.as_str();
-        let console_start_idx = cmdline.find("console=").unwrap();
-        let console_end_idx = cmdline
-            .get(console_start_idx..)
-            .and_then(|s| s.find(" ").map(|i| i + console_start_idx));
-
-        let cmdline = cmdline.replace(
-            &cmdline[console_start_idx..console_end_idx.unwrap()],
-            format!("console={kernel_console}").as_str(),
-        );
+        let rewritten = rewrite_console(cmdline, kernel_console);
         kernel_cmdline = Cmdline::new(arch::CMDLINE_MAX_SIZE);
-        kernel_cmdline.insert_str(cmdline).unwrap();
+        kernel_cmdline.insert_str(rewritten)?;
     }
 
     #[cfg(not(feature = "tee"))]
@@ -1152,24 +949,11 @@ pub fn build_microvm(
         (arch::IRQ_BASE, arch::IRQ_MAX),
     );
 
-    #[cfg(target_os = "macos")]
-    let vcpu_list = {
-        let cpu_count = vm_resources.vm_config().vcpu_count.unwrap();
-        Arc::new(VcpuList::new(cpu_count as u64))
-    };
-
     let vcpus;
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    let boot_senders: Vec<Sender<u64>>;
-    #[cfg(all(target_os = "macos", not(target_arch = "aarch64")))]
-    let mut boot_senders: Vec<Sender<u64>> = Vec::new();
     let intc: IrqChip;
 
-    // Create shared exit flag for vCPUs (Linux/KVM only; macOS HVF handles exits differently)
-    #[cfg(target_os = "linux")]
+    // Create shared exit flag for vCPUs.
     let vcpu_exit_flag = Arc::new(AtomicBool::new(false));
-    #[cfg(target_os = "macos")]
-    let vcpu_exit_flag = Arc::new(AtomicBool::new(false)); // macOS HVF vCPUs exit naturally; flag exists to satisfy Vmm struct but is not polled on this platform.
 
     // For x86_64 we need to create the interrupt controller before calling `KVM_CREATE_VCPUS`
     // while on aarch64 we need to do it the other way around.
@@ -1259,42 +1043,6 @@ pub fn build_microvm(
         )?;
     }
 
-    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
-    {
-        intc = {
-            // If the system supports the in-kernel GIC, use it. Otherwise, fall back to the
-            // userspace implementation.
-            let gic = match HvfGicV3::new(vm_resources.vm_config().vcpu_count.unwrap() as u64) {
-                Ok(hvfgic) => IrqChipDevice::new(Box::new(hvfgic)),
-                Err(_) => IrqChipDevice::new(Box::new(GicV3::new(vcpu_list.clone()))),
-            };
-            Arc::new(Mutex::new(gic))
-        };
-
-        let created;
-        (created, boot_senders) = create_vcpus_aarch64(
-            &vm,
-            &vcpu_config,
-            &arch_memory_info,
-            payload_config.entry_addr,
-            &exit_evt,
-            vcpu_list.clone(),
-            vm_resources.nested_enabled,
-        )
-        .map_err(StartMicrovmError::Internal)?;
-        vcpus = created;
-
-        attach_legacy_devices(
-            &vm,
-            &mut mmio_device_manager,
-            &mut kernel_cmdline,
-            intc.clone(),
-            serial_devices,
-            event_manager,
-            _shutdown_efd,
-        )?;
-    }
-
     #[cfg(all(target_arch = "riscv64", target_os = "linux"))]
     {
         vcpus = create_vcpus_riscv64(
@@ -1339,16 +1087,6 @@ pub fn build_microvm(
         mmio_device_manager,
         #[cfg(target_arch = "x86_64")]
         pio_device_manager,
-        #[cfg(target_os = "macos")]
-        dirty_bitmaps: std::sync::Arc::new(Vec::new()),
-        nested_enabled: vm_resources.nested_enabled,
-        dirty_tracking_enabled: false,
-        #[cfg(target_os = "macos")]
-        vcpu_list: vcpu_list.clone(),
-        #[cfg(target_os = "macos")]
-        intc: intc.clone(),
-        #[cfg(all(target_os = "linux", target_arch = "aarch64", feature = "snapshot"))]
-        intc: intc.clone(),
         #[cfg(not(feature = "tee"))]
         balloon: None,
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -1429,13 +1167,7 @@ pub fn build_microvm(
         intc.clone(),
         vm_resources.rng_backend.take(),
     )?;
-    attach_rtc_device(
-        &mut vmm,
-        event_manager,
-        intc.clone(),
-        #[cfg(target_os = "macos")]
-        vcpu_list.clone(),
-    )?;
+    attach_rtc_device(&mut vmm, event_manager, intc.clone())?;
     let mut console_id = 0;
     if !vm_resources.disable_implicit_console {
         attach_console_devices(
@@ -1465,7 +1197,11 @@ pub fn build_microvm(
 
     // Inject KRUN_*_DEV env vars for named console ports so the guest init
     // can open them directly without scanning sysfs.
-    for port in &device_info.console_ports {
+    for port in device_info
+        .console_ports
+        .iter()
+        .filter(|_| !vm_resources.kernel_cmdline.args.is_empty())
+    {
         match port.name.as_deref() {
             Some("krun-stdin") => {
                 vmm.kernel_cmdline
@@ -1510,8 +1246,6 @@ pub fn build_microvm(
             virgl_flags,
             Box::from(&vm_resources.displays[..]),
             display_backend,
-            #[cfg(target_os = "macos")]
-            _sender.clone(),
         )?;
     }
 
@@ -1575,7 +1309,7 @@ pub fn build_microvm(
 
     if !vm_resources.kernel_cmdline.args.is_empty() {
         for arg in &vm_resources.kernel_cmdline.args {
-            vmm.kernel_cmdline.insert_str(arg).unwrap();
+            vmm.kernel_cmdline.insert_str(arg)?;
         }
     };
 
@@ -1642,11 +1376,33 @@ pub fn build_microvm(
         vcpus: Some(vcpus),
         device_info,
         vm_exit,
-        #[cfg(target_os = "macos")]
-        boot_senders,
         #[cfg(not(feature = "tee"))]
         balloon_enabled: vm_resources.balloon_enabled,
     })
+}
+
+fn rewrite_console(cmdline: &str, console: &str) -> String {
+    let mut parts: Vec<String> = cmdline.split_whitespace().map(str::to_owned).collect();
+    if let Some(part) = parts.iter_mut().find(|part| part.starts_with("console=")) {
+        *part = format!("console={console}");
+    } else {
+        parts.push(format!("console={console}"));
+    }
+    parts.join(" ")
+}
+
+#[test]
+fn console_rewrite_accepts_missing_and_final_tokens() {
+    assert_eq!(rewrite_console("", "hvc0"), "console=hvc0");
+    assert_eq!(rewrite_console("quiet", "hvc0"), "quiet console=hvc0");
+    assert_eq!(
+        rewrite_console("quiet console=ttyS0", "hvc0"),
+        "quiet console=hvc0"
+    );
+    assert_eq!(
+        rewrite_console("notconsole=x", "hvc0"),
+        "notconsole=x console=hvc0"
+    );
 }
 
 fn load_external_kernel(
@@ -1654,15 +1410,21 @@ fn load_external_kernel(
     arch_mem_info: &ArchMemoryInfo,
     external_kernel: &ExternalKernel,
 ) -> std::result::Result<(GuestAddress, Option<InitrdConfig>, Option<String>), StartMicrovmError> {
+    let kernel_end: u64;
     let entry_addr = match external_kernel.format {
         // Raw images are treated as bundled kernels on x86_64
         #[cfg(target_arch = "x86_64")]
-        KernelFormat::Raw => unreachable!(),
+        KernelFormat::Raw => return Err(StartMicrovmError::KernelFormatUnsupported),
         #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
         KernelFormat::Raw => {
             let data: Vec<u8> = std::fs::read(external_kernel.path.clone())
                 .map_err(StartMicrovmError::RawOpenKernel)?;
-            guest_mem.write(&data, GuestAddress(0x8000_0000)).unwrap();
+            kernel_end = 0x8000_0000u64
+                .checked_add(data.len() as u64)
+                .ok_or(StartMicrovmError::InitrdLoad)?;
+            guest_mem
+                .write_slice(&data, GuestAddress(0x8000_0000))
+                .map_err(|_| StartMicrovmError::InitrdLoad)?;
             GuestAddress(0x8000_0000)
         }
         #[cfg(target_arch = "x86_64")]
@@ -1674,6 +1436,7 @@ fn load_external_kernel(
                 .map_err(StartMicrovmError::ElfOpenKernel)?;
             let load_result = loader::Elf::load(guest_mem, None, &mut file, None)
                 .map_err(StartMicrovmError::ElfLoadKernel)?;
+            kernel_end = load_result.kernel_end;
             load_result.kernel_load
         }
         #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
@@ -1690,9 +1453,12 @@ fn load_external_kernel(
                 let mut kernel_data: Vec<u8> = Vec::new();
                 gz.read_to_end(&mut kernel_data)
                     .map_err(StartMicrovmError::PeGzDecoder)?;
+                kernel_end = 0x8000_0000u64
+                    .checked_add(kernel_data.len() as u64)
+                    .ok_or(StartMicrovmError::InitrdLoad)?;
                 guest_mem
-                    .write(&kernel_data, GuestAddress(0x8000_0000))
-                    .unwrap();
+                    .write_slice(&kernel_data, GuestAddress(0x8000_0000))
+                    .map_err(|_| StartMicrovmError::InitrdLoad)?;
                 GuestAddress(0x8000_0000)
             } else {
                 return Err(StartMicrovmError::PeGzInvalid);
@@ -1719,6 +1485,7 @@ fn load_external_kernel(
                     None,
                 )
                 .map_err(StartMicrovmError::ImageBz2LoadKernel)?;
+                kernel_end = load_result.kernel_end;
                 load_result.kernel_load
             } else {
                 return Err(StartMicrovmError::ImageBz2Invalid);
@@ -1745,6 +1512,7 @@ fn load_external_kernel(
                     None,
                 )
                 .map_err(StartMicrovmError::ImageGzLoadKernel)?;
+                kernel_end = load_result.kernel_end;
                 load_result.kernel_load
             } else {
                 return Err(StartMicrovmError::ImageGzInvalid);
@@ -1769,6 +1537,7 @@ fn load_external_kernel(
                     None,
                 )
                 .map_err(StartMicrovmError::ImageZstdLoadKernel)?;
+                kernel_end = load_result.kernel_end;
                 load_result.kernel_load
             } else {
                 return Err(StartMicrovmError::ImageZstdInvalid);
@@ -1781,11 +1550,22 @@ fn load_external_kernel(
 
     let initrd_config = if let Some(initramfs_path) = &external_kernel.initramfs_path {
         let data = std::fs::read(initramfs_path).map_err(StartMicrovmError::InitrdRead)?;
+        #[cfg(target_arch = "x86_64")]
+        let limit = arch_mem_info.ram_below_gap;
+        #[cfg(not(target_arch = "x86_64"))]
+        let limit = arch_mem_info.initrd_addr;
+        let address = limit
+            .checked_sub(data.len() as u64)
+            .ok_or(StartMicrovmError::InitrdLoad)?
+            & !4095u64;
+        if address < kernel_end || address < 0x10_0000 {
+            return Err(StartMicrovmError::InitrdLoad);
+        }
         guest_mem
-            .write(&data, GuestAddress(arch_mem_info.initrd_addr))
-            .unwrap();
+            .write_slice(&data, GuestAddress(address))
+            .map_err(|_| StartMicrovmError::InitrdLoad)?;
         Some(InitrdConfig {
-            address: GuestAddress(arch_mem_info.initrd_addr),
+            address: GuestAddress(address),
             size: data.len(),
         })
     } else {
@@ -2059,13 +1839,9 @@ pub fn create_guest_memory(
                 };
             arch::arch_memory_regions(mem_size, Some(kernel_guest_addr), kernel_size, 0, None)
         }
-        Payload::ExternalKernel(external_kernel) => arch::arch_memory_regions(
-            mem_size,
-            None,
-            0,
-            external_kernel.initramfs_size,
-            firmware_size,
-        ),
+        Payload::ExternalKernel(_) => {
+            arch::arch_memory_regions(mem_size, None, 0, 0, firmware_size)
+        }
         #[cfg(feature = "tee")]
         Payload::Tee => {
             let (kernel_guest_addr, kernel_size) =
@@ -2082,9 +1858,7 @@ pub fn create_guest_memory(
     };
     #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
     let (arch_mem_info, mut arch_mem_regions) = match payload {
-        Payload::ExternalKernel(external_kernel) => {
-            arch::arch_memory_regions(mem_size, external_kernel.initramfs_size, None)
-        }
+        Payload::ExternalKernel(_) => arch::arch_memory_regions(mem_size, 0, None),
         _ => arch::arch_memory_regions(mem_size, 0, firmware_size),
     };
 
@@ -2256,19 +2030,6 @@ pub(crate) fn setup_vm(
         .map_err(StartMicrovmError::Internal)?;
     Ok(vm)
 }
-#[cfg(target_os = "macos")]
-pub(crate) fn setup_vm(
-    guest_memory: &GuestMemoryMmap,
-    nested_enabled: bool,
-) -> std::result::Result<Vm, StartMicrovmError> {
-    let mut vm = Vm::new(nested_enabled)
-        .map_err(Error::Vm)
-        .map_err(StartMicrovmError::Internal)?;
-    vm.memory_init(guest_memory)
-        .map_err(Error::Vm)
-        .map_err(StartMicrovmError::Internal)?;
-    Ok(vm)
-}
 
 /// Sets up the serial device.
 pub fn setup_serial_device(
@@ -2362,43 +2123,6 @@ fn attach_legacy_devices(
     Ok(())
 }
 
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
-fn attach_legacy_devices(
-    vm: &Vm,
-    mmio_device_manager: &mut MMIODeviceManager,
-    kernel_cmdline: &mut kernel::cmdline::Cmdline,
-    intc: IrqChip,
-    serial: Vec<Arc<Mutex<Serial>>>,
-    event_manager: &mut EventManager,
-    shutdown_efd: Option<EventFd>,
-) -> Result<(), StartMicrovmError> {
-    for s in serial {
-        mmio_device_manager
-            .register_mmio_serial(vm, kernel_cmdline, intc.clone(), s)
-            .map_err(Error::RegisterMMIODevice)
-            .map_err(StartMicrovmError::Internal)?;
-    }
-
-    mmio_device_manager
-        .register_mmio_rtc(vm, intc.clone())
-        .map_err(Error::RegisterMMIODevice)
-        .map_err(StartMicrovmError::Internal)?;
-
-    mmio_device_manager
-        .register_mmio_gic(vm, intc.clone())
-        .map_err(Error::RegisterMMIODevice)
-        .map_err(StartMicrovmError::Internal)?;
-
-    if let Some(shutdown_efd) = shutdown_efd {
-        mmio_device_manager
-            .register_mmio_gpio(vm, intc.clone(), event_manager, shutdown_efd)
-            .map_err(Error::RegisterMMIODevice)
-            .map_err(StartMicrovmError::Internal)?;
-    }
-
-    Ok(())
-}
-
 #[cfg(target_arch = "x86_64")]
 #[allow(clippy::too_many_arguments)]
 fn create_vcpus_x86_64(
@@ -2418,7 +2142,6 @@ fn create_vcpus_x86_64(
             cpu_index,
             vm.fd(),
             vm.supported_cpuid().clone(),
-            vm.supported_msrs().clone(),
             io_bus.clone(),
             exit_evt.try_clone().map_err(Error::EventFd)?,
             should_exit.clone(),
@@ -2460,59 +2183,6 @@ fn create_vcpus_aarch64(
         vcpus.push(vcpu);
     }
     Ok(vcpus)
-}
-
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
-/// Returns (vcpus, boot_senders_for_cold_restore).
-///
-/// `boot_senders_for_cold_restore` contains one sender per secondary vCPU.
-/// During normal boot, vCPU 0 sends entry addresses via PSCI CPU_ON.
-/// During cold restore, we send dummy values to unblock secondary vCPUs
-/// before injecting the snapshot state.
-fn create_vcpus_aarch64(
-    _vm: &Vm,
-    vcpu_config: &VcpuConfig,
-    mem_info: &ArchMemoryInfo,
-    entry_addr: GuestAddress,
-    exit_evt: &EventFd,
-    vcpu_list: Arc<VcpuList>,
-    nested_enabled: bool,
-) -> super::Result<(Vec<Vcpu>, Vec<Sender<u64>>)> {
-    let mut vcpus = Vec::with_capacity(vcpu_config.vcpu_count as usize);
-    let mut boot_senders: HashMap<u64, Sender<u64>> = HashMap::new();
-    let mut cold_restore_senders: Vec<Sender<u64>> = Vec::new();
-
-    for cpu_index in 0..vcpu_config.vcpu_count {
-        let (boot_sender, boot_receiver) = if cpu_index != 0 {
-            let (boot_sender, boot_receiver) = unbounded();
-            (Some(boot_sender), Some(boot_receiver))
-        } else {
-            (None, None)
-        };
-
-        let mut vcpu = Vcpu::new_aarch64(
-            cpu_index,
-            entry_addr,
-            boot_receiver,
-            exit_evt.try_clone().map_err(Error::EventFd)?,
-            vcpu_list.clone(),
-            nested_enabled,
-        )
-        .map_err(Error::Vcpu)?;
-
-        vcpu.configure_aarch64(mem_info).map_err(Error::Vcpu)?;
-
-        if let Some(boot_sender) = boot_sender {
-            cold_restore_senders.push(boot_sender.clone());
-            boot_senders.insert(vcpu.get_mpidr(), boot_sender);
-        }
-
-        vcpus.push(vcpu);
-    }
-
-    vcpus[0].set_boot_senders(boot_senders);
-
-    Ok((vcpus, cold_restore_senders))
 }
 
 #[cfg(all(target_arch = "riscv64", target_os = "linux"))]
@@ -2558,10 +2228,6 @@ fn attach_mmio_device(
     let (_mmio_base, _irq) =
         vmm.mmio_device_manager
             .register_mmio_device(vmm.vm.fd(), mmio_device, type_id, id)?;
-    #[cfg(target_os = "macos")]
-    let (_mmio_base, _irq) =
-        vmm.mmio_device_manager
-            .register_mmio_device(mmio_device, type_id, id)?;
 
     #[cfg(target_arch = "x86_64")]
     vmm.mmio_device_manager
@@ -3114,15 +2780,10 @@ fn attach_rtc_device(
     vmm: &mut Vmm,
     event_manager: &mut EventManager,
     intc: IrqChip,
-    #[cfg(target_os = "macos")] vcpu_list: Arc<VcpuList>,
 ) -> std::result::Result<(), StartMicrovmError> {
     use self::StartMicrovmError::*;
 
     let rtc = Arc::new(Mutex::new(devices::virtio::Rtc::new().unwrap()));
-
-    // Set vcpus reference for cross-timestamping support (macOS only)
-    #[cfg(target_os = "macos")]
-    rtc.lock().unwrap().set_vcpus(vcpu_list);
 
     event_manager
         .add_subscriber(rtc.clone())
@@ -3146,19 +2807,11 @@ fn attach_gpu_device(
     virgl_flags: u32,
     displays: Box<[DisplayInfo]>,
     display_backend: DisplayBackend<'static>,
-    #[cfg(target_os = "macos")] map_sender: Sender<WorkerMessage>,
 ) -> std::result::Result<(), StartMicrovmError> {
     use self::StartMicrovmError::*;
 
     let gpu = Arc::new(Mutex::new(
-        devices::virtio::Gpu::new(
-            virgl_flags,
-            displays,
-            display_backend,
-            #[cfg(target_os = "macos")]
-            map_sender,
-        )
-        .unwrap(),
+        devices::virtio::Gpu::new(virgl_flags, displays, display_backend).unwrap(),
     ));
 
     let id = String::from(gpu.lock().unwrap().id());

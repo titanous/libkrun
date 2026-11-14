@@ -9,7 +9,6 @@ build = "build.rs"
 tee = []
 amd-sev = ["blk", "tee"]
 tdx = ["blk", "tee"]
-snapshot = ["bincode-next"]
 net = ["tokio", "bytes"]
 blk = ["tokio", "futures"]
 efi = ["blk", "net"]
@@ -25,7 +24,6 @@ vhost-user = ["vhost"]
 shuttle = ["dep:shuttle"]
 
 [dependencies]
-bincode-next = { version = "3.0.0-rc.5", optional = true }
 bitflags = "1.2.0"
 capng = "0.2.3"
 crossbeam-channel = ">=0.5.15"
@@ -52,10 +50,6 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros", 
 futures = { version = "0.3", optional = true }
 bytes = { version = "1", optional = true }
 shuttle = { version = "0.8", optional = true }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-hvf = { path = "../hvf" }
-lru = ">=0.9"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rutabaga_gfx = { path = "../rutabaga_gfx", features = ["x"], optional = true }

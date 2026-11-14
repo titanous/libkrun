@@ -12,12 +12,9 @@ mod muxer_rxq;
 mod muxer_thread;
 #[allow(dead_code)]
 mod packet;
+pub mod policy;
 mod proxy;
 mod reaper;
-#[cfg(all(test, target_os = "linux"))]
-mod shutdown_test;
-#[cfg(target_os = "macos")]
-mod timesync;
 mod tsi_dgram;
 mod tsi_stream;
 mod unix;

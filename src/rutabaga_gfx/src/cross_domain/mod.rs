@@ -131,7 +131,7 @@ pub(crate) struct CrossDomainItems {
 
 pub(crate) struct CrossDomainState {
     context_resources: CrossDomainResources,
-    #[allow(dead_code)] // `futexes` is never used on macOS.
+    #[allow(dead_code)] // Used with the optional X transport.
     futexes: CrossDomainFutexes,
     query_ring_id: u32,
     channel_ring_id: u32,
@@ -149,11 +149,11 @@ struct CrossDomainWorker {
     protocol_version: u32,
 }
 
-#[allow(dead_code)] // Never used on macOS
+#[allow(dead_code)] // Used with the optional X transport.
 struct FutexPtr(NonNull<c_void>);
 unsafe impl Send for FutexPtr {}
 
-#[allow(dead_code)] // Never used on macOS
+#[allow(dead_code)] // Used with the optional X transport.
 pub(crate) struct CrossDomainFutex {
     address: FutexPtr,
     handle: SafeDescriptor,
@@ -257,7 +257,7 @@ pub(crate) struct CrossDomainContext {
     pub(crate) item_state: CrossDomainItemState,
     pub(crate) futexes: CrossDomainFutexes,
     fence_handler: RutabagaFenceHandler,
-    #[allow(dead_code)] // `export_table` is never used on macOS.
+    #[allow(dead_code)] // Used with the optional X transport.
     export_table: Option<ExportTable>,
     worker_thread: Option<thread::JoinHandle<RutabagaResult<()>>>,
     pub(crate) resample_evt: Option<Sender>,
@@ -1105,8 +1105,6 @@ impl RutabagaContext for CrossDomainContext {
                 blob_mem: resource_create_blob.blob_mem,
                 blob_flags: resource_create_blob.blob_flags,
                 map_info: Some(reqs.map_info | RUTABAGA_MAP_ACCESS_RW),
-                #[cfg(target_os = "macos")]
-                map_ptr: None,
                 info_2d: None,
                 info_3d: Some(info_3d),
                 vulkan_info: reqs.vulkan_info,
@@ -1144,8 +1142,6 @@ impl RutabagaContext for CrossDomainContext {
                     blob_mem: resource_create_blob.blob_mem,
                     blob_flags: resource_create_blob.blob_flags,
                     map_info: Some(RUTABAGA_MAP_CACHE_CACHED | access),
-                    #[cfg(target_os = "macos")]
-                    map_ptr: None,
                     info_2d: None,
                     info_3d: None,
                     vulkan_info: None,
@@ -1173,8 +1169,6 @@ impl RutabagaContext for CrossDomainContext {
                     blob_mem: resource_create_blob.blob_mem,
                     blob_flags: resource_create_blob.blob_flags,
                     map_info: Some(RUTABAGA_MAP_CACHE_CACHED | access),
-                    #[cfg(target_os = "macos")]
-                    map_ptr: None,
                     info_2d: None,
                     info_3d: None,
                     vulkan_info: None,
@@ -1379,8 +1373,6 @@ impl RutabagaComponent for CrossDomain {
             blob_mem: resource_create_blob.blob_mem,
             blob_flags: resource_create_blob.blob_flags,
             map_info: None,
-            #[cfg(target_os = "macos")]
-            map_ptr: None,
             info_2d: None,
             info_3d: None,
             vulkan_info: None,

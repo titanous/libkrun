@@ -18,10 +18,6 @@ use utils::eventfd::EventFd;
 
 use crate::bus::BusDevice;
 use crate::legacy::IrqChip;
-use crate::snapshot::{SnapshotError, Snapshottable};
-
-#[cfg(feature = "snapshot")]
-use crate::snapshot_serde;
 
 const OFS_DATA: u64 = 0x400; // Data Register
 const GPIODIR: u64 = 0x400; // Direction Register
@@ -41,9 +37,6 @@ const GPIO_ID: [u8; 8] = [0x61, 0x10, 0x14, 0x00, 0x0d, 0xf0, 0x05, 0xb1];
 // ID Margins
 const GPIO_ID_LOW: u64 = 0xfe0;
 const GPIO_ID_HIGH: u64 = 0x1000;
-
-// Snapshot serialization constants
-const MAX_SNAPSHOT_BYTES: usize = 128;
 
 #[derive(Debug)]
 pub enum Error {
@@ -83,22 +76,6 @@ pub struct Gpio {
     intc: Option<IrqChip>,
     irq_line: Option<u32>,
     shutdown_efd: EventFd,
-}
-
-#[cfg_attr(
-    feature = "snapshot",
-    derive(bincode_next::Encode, bincode_next::Decode)
-)]
-#[derive(Debug, Clone)]
-struct GpioState {
-    data: u32,
-    dir: u32,
-    isense: u32,
-    ibe: u32,
-    iev: u32,
-    im: u32,
-    istate: u32,
-    afsel: u32,
 }
 
 impl Gpio {
@@ -254,68 +231,6 @@ impl BusDevice for Gpio {
                 offset,
                 data.len()
             );
-        }
-    }
-
-    fn as_snapshottable(&self) -> Option<&dyn Snapshottable> {
-        Some(self)
-    }
-
-    fn as_snapshottable_mut(&mut self) -> Option<&mut dyn Snapshottable> {
-        Some(self)
-    }
-}
-
-impl Snapshottable for Gpio {
-    fn snapshot_id(&self) -> &str {
-        "gpio"
-    }
-
-    fn save_state(&self) -> std::result::Result<Vec<u8>, SnapshotError> {
-        let state = GpioState {
-            data: self.data,
-            dir: self.dir,
-            isense: self.isense,
-            ibe: self.ibe,
-            iev: self.iev,
-            im: self.im,
-            istate: self.istate,
-            afsel: self.afsel,
-        };
-
-        #[cfg(feature = "snapshot")]
-        {
-            snapshot_serde::serialize(&state)
-        }
-        #[cfg(not(feature = "snapshot"))]
-        {
-            let _ = state;
-            Err(SnapshotError::Serialize(
-                "snapshot feature not enabled".to_string(),
-            ))
-        }
-    }
-
-    fn restore_state(&mut self, data: &[u8]) -> std::result::Result<(), SnapshotError> {
-        #[cfg(feature = "snapshot")]
-        {
-            let state: GpioState = snapshot_serde::deserialize::<_, { MAX_SNAPSHOT_BYTES }>(data)?;
-            self.data = state.data;
-            self.dir = state.dir;
-            self.isense = state.isense;
-            self.ibe = state.ibe;
-            self.iev = state.iev;
-            self.im = state.im;
-            self.istate = state.istate;
-            self.afsel = state.afsel;
-            Ok(())
-        }
-        #[cfg(not(feature = "snapshot"))]
-        {
-            let _ = data;
-            Err(SnapshotError::Deserialize(
-                "snapshot feature not enabled".to_string(),
-            ))
         }
     }
 }

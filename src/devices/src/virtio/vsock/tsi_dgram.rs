@@ -7,12 +7,10 @@ use std::sync::{Arc, Mutex};
 
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use nix::sys::socket::{
-    bind, connect, getpeername, recv, send, sendto, socket, AddressFamily, MsgFlags, SockFlag,
-    SockType, SockaddrIn, SockaddrLike, SockaddrStorage,
+    bind, connect, getpeername, recvfrom, send, sendto, socket, AddressFamily, MsgFlags, SockFlag,
+    SockType, SockaddrLike, SockaddrStorage, UnixAddr,
 };
 
-#[cfg(target_os = "macos")]
-use super::super::linux_errno::linux_errno_raw;
 use super::super::Queue as VirtQueue;
 use super::defs;
 use super::defs::uapi;
@@ -21,11 +19,63 @@ use super::muxer_rxq::MuxerRxQ;
 use super::packet::{
     TsiAcceptReq, TsiConnectReq, TsiGetnameRsp, TsiListenReq, TsiSendtoAddr, VsockPacket,
 };
+use super::policy::SocketOperation;
 use super::proxy::{Proxy, ProxyError, ProxyRemoval, ProxyStatus, ProxyUpdate, RecvPkt};
 use utils::epoll::EventSet;
 use vm_memory::GuestMemoryMmap;
 
+fn wildcard_address(family: AddressFamily) -> Option<SockaddrStorage> {
+    match family {
+        AddressFamily::Inet => Some(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0).into()),
+        AddressFamily::Inet6 => {
+            Some(std::net::SocketAddrV6::new(std::net::Ipv6Addr::UNSPECIFIED, 0, 0, 0).into())
+        }
+        AddressFamily::Unix => {
+            let addr = UnixAddr::new_unnamed();
+            // SAFETY: addr owns a valid unnamed sockaddr_un.
+            unsafe { SockaddrStorage::from_raw(addr.as_ptr().cast(), Some(addr.len())) }
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn unix_datagram_autobind_can_send() {
+        let file = utils::tempfile::TempFile::new().unwrap();
+        std::fs::remove_file(file.as_path()).unwrap();
+        let receiver = std::os::unix::net::UnixDatagram::bind(file.as_path()).unwrap();
+        receiver
+            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        let sender = socket(
+            AddressFamily::Unix,
+            SockType::Datagram,
+            SockFlag::empty(),
+            None,
+        )
+        .unwrap();
+        bind(
+            sender.as_raw_fd(),
+            &wildcard_address(AddressFamily::Unix).unwrap(),
+        )
+        .unwrap();
+        let destination = UnixAddr::new(file.as_path()).unwrap();
+        assert_eq!(
+            sendto(sender.as_raw_fd(), b"unix", &destination, MsgFlags::empty()).unwrap(),
+            4
+        );
+        let mut data = [0; 4];
+        assert_eq!(receiver.recv(&mut data).unwrap(), 4);
+        assert_eq!(&data, b"unix");
+    }
+}
+
 pub struct TsiDgramProxy {
+    pub(crate) socket_policy: super::policy::SocketPolicy,
+    family: AddressFamily,
     pub id: u64,
     cid: u64,
     local_port: u32,
@@ -64,7 +114,7 @@ impl TsiDgramProxy {
         let fd = socket(family, SockType::Datagram, SockFlag::empty(), None)
             .map_err(ProxyError::CreatingSocket)?;
 
-        // macOS forces us to do this here instead of just using SockFlag::SOCK_NONBLOCK above.
+        // Set non-blocking mode before using the socket.
         match fcntl(&fd, FcntlArg::F_GETFL) {
             Ok(flags) => match OFlag::from_bits(flags) {
                 Some(flags) => {
@@ -77,22 +127,9 @@ impl TsiDgramProxy {
             Err(e) => error!("couldn't obtain fd flags id={id}, err={e}"),
         };
 
-        #[cfg(target_os = "macos")]
-        {
-            // nix doesn't provide an abstraction for SO_NOSIGPIPE, fall back to libc.
-            let option_value: libc::c_int = 1;
-            unsafe {
-                libc::setsockopt(
-                    fd.as_raw_fd(),
-                    libc::SOL_SOCKET,
-                    libc::SO_NOSIGPIPE,
-                    &option_value as *const _ as *const libc::c_void,
-                    std::mem::size_of_val(&option_value) as libc::socklen_t,
-                )
-            };
-        }
-
         Ok(TsiDgramProxy {
+            socket_policy: Default::default(),
+            family,
             id,
             cid,
             local_port: 0,
@@ -146,6 +183,14 @@ impl TsiDgramProxy {
     }
     */
 
+    fn send_operation(&self) -> SocketOperation {
+        if self.family == AddressFamily::Unix {
+            SocketOperation::UnixDatagramSend
+        } else {
+            SocketOperation::UdpSend
+        }
+    }
+
     fn recv_to_pkt(&self, pkt: &mut VsockPacket) -> RecvPkt {
         if let Some(buf) = pkt.buf_mut() {
             // Disable UDP credit accounting until is fixed in the kernel
@@ -166,8 +211,18 @@ impl TsiDgramProxy {
             }
             */
 
-            match recv(self.fd.as_raw_fd(), &mut buf[..max_len], MsgFlags::empty()) {
-                Ok(cnt) => {
+            let mut data = vec![0; max_len];
+            match recvfrom::<SockaddrStorage>(self.fd.as_raw_fd(), &mut data) {
+                Ok((cnt, source)) => {
+                    let source = source.or_else(|| getpeername(self.fd.as_raw_fd()).ok());
+                    if source.is_none_or(|addr| {
+                        self.socket_policy
+                            .check(SocketOperation::ReceiveDatagram, &addr)
+                            .is_err()
+                    }) {
+                        return RecvPkt::Error;
+                    }
+                    buf[..cnt].copy_from_slice(&data[..cnt]);
                     debug!("recv cnt={cnt}");
                     if cnt > 0 {
                         RecvPkt::Read(cnt)
@@ -244,7 +299,16 @@ impl Proxy for TsiDgramProxy {
 
     fn connect(&mut self, pkt: &VsockPacket, req: TsiConnectReq) -> ProxyUpdate {
         debug!("connect: addr={}", req.addr);
-        let res = match connect(self.fd.as_raw_fd(), &req.addr) {
+        let operation = if self.family == AddressFamily::Unix {
+            SocketOperation::UnixDatagramConnect
+        } else {
+            SocketOperation::UdpConnect
+        };
+        let res = match self
+            .socket_policy
+            .check(operation, &req.addr)
+            .and_then(|()| connect(self.fd.as_raw_fd(), &req.addr))
+        {
             Ok(()) => {
                 debug!("connect: Connected");
                 self.status = ProxyStatus::Connected;
@@ -252,8 +316,6 @@ impl Proxy for TsiDgramProxy {
             }
             Err(e) => {
                 debug!("Error connecting: {e}");
-                #[cfg(target_os = "macos")]
-                let errno = -linux_errno_raw(e as i32);
                 #[cfg(target_os = "linux")]
                 let errno = -(e as i32);
                 errno
@@ -284,8 +346,6 @@ impl Proxy for TsiDgramProxy {
         let (result, addr): (i32, SockaddrStorage) = match getpeername(self.fd.as_raw_fd()) {
             Ok(name) => (0, name),
             Err(e) => {
-                #[cfg(target_os = "macos")]
-                let errno = -linux_errno_raw(e as i32);
                 #[cfg(target_os = "linux")]
                 let errno = -(e as i32);
                 (
@@ -314,12 +374,12 @@ impl Proxy for TsiDgramProxy {
         debug!("sendmsg");
 
         let ret = if let Some(buf) = pkt.buf() {
-            #[cfg(target_os = "macos")]
-            let flags = MsgFlags::empty();
             #[cfg(target_os = "linux")]
             let flags = MsgFlags::MSG_NOSIGNAL;
 
-            match send(self.fd.as_raw_fd(), buf, flags) {
+            let authorization = getpeername::<SockaddrStorage>(self.fd.as_raw_fd())
+                .and_then(|addr| self.socket_policy.check(self.send_operation(), &addr));
+            match authorization.and_then(|()| send(self.fd.as_raw_fd(), buf, flags)) {
                 Ok(sent) => {
                     self.tx_cnt += Wrapping(sent as u32);
                     sent as i32
@@ -331,6 +391,12 @@ impl Proxy for TsiDgramProxy {
         };
 
         debug!("sendmsg ret={ret}");
+        if ret == -libc::EACCES {
+            self.push_pkt(MuxerRx::Reset {
+                local_port: pkt.dst_port(),
+                peer_port: pkt.src_port(),
+            });
+        }
 
         ProxyUpdate::default()
     }
@@ -342,12 +408,26 @@ impl Proxy for TsiDgramProxy {
 
         self.sendto_addr = Some(req.addr);
         if !self.listening {
-            match bind(self.fd.as_raw_fd(), &SockaddrIn::new(0, 0, 0, 0, 0)) {
+            let Some(addr) = wildcard_address(self.family) else {
+                return update;
+            };
+            match self
+                .socket_policy
+                .check(SocketOperation::Bind, &addr)
+                .and_then(|()| bind(self.fd.as_raw_fd(), &addr))
+            {
                 Ok(_) => {
                     self.listening = true;
                     update.polling = Some((self.id, self.fd.as_raw_fd(), EventSet::IN));
                 }
-                Err(e) => debug!("couldn't bind socket: {e}"),
+                Err(e) => {
+                    self.sendto_addr = None;
+                    self.push_pkt(MuxerRx::Reset {
+                        local_port: self.local_port,
+                        peer_port: self.peer_port,
+                    });
+                    debug!("couldn't bind socket: {e}");
+                }
             }
         }
 
@@ -362,16 +442,26 @@ impl Proxy for TsiDgramProxy {
 
         if let Some(addr) = self.sendto_addr {
             if let Some(buf) = pkt.buf() {
-                #[cfg(target_os = "macos")]
-                let flags = MsgFlags::empty();
                 #[cfg(target_os = "linux")]
                 let flags = MsgFlags::MSG_NOSIGNAL;
 
-                match sendto(self.fd.as_raw_fd(), buf, &addr, flags) {
+                match self
+                    .socket_policy
+                    .check(self.send_operation(), &addr)
+                    .and_then(|()| sendto(self.fd.as_raw_fd(), buf, &addr, flags))
+                {
                     Ok(sent) => {
                         self.tx_cnt += Wrapping(sent as u32);
                     }
-                    Err(err) => debug!("error in sendto: {err}"),
+                    Err(err) => {
+                        debug!("error in sendto: {err}");
+                        if err == nix::errno::Errno::EACCES {
+                            self.push_pkt(MuxerRx::Reset {
+                                local_port: pkt.dst_port(),
+                                peer_port: pkt.src_port(),
+                            });
+                        }
+                    }
                 }
             } else {
                 debug!("sendto_data pkt without buffer");

@@ -6,8 +6,7 @@
 //! This module provides a wrapper around the vhost crate's Frontend,
 //! adapting it to work with libkrun's VirtioDevice trait.
 
-use std::fs::File;
-use std::io::{self, ErrorKind, Read as IoRead, Result as IoResult, Write as IoWrite};
+use std::io::{self, ErrorKind, Result as IoResult};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -15,7 +14,6 @@ use std::thread;
 
 use log::{debug, error};
 use utils::eventfd::EventFd;
-use vhost::vhost_user::message::{VhostTransferStateDirection, VhostTransferStatePhase};
 use vhost::vhost_user::{Frontend, VhostUserFrontend, VhostUserProtocolFeatures};
 use vhost::{VhostBackend, VhostUserMemoryRegionInfo, VringConfigData};
 use vm_memory::{Address, GuestMemoryBackend, GuestMemoryMmap, GuestMemoryRegion};
@@ -90,9 +88,6 @@ pub struct VhostUserDevice {
     /// Acknowledged protocol features
     acked_protocol_features: VhostUserProtocolFeatures,
 
-    /// Whether DEVICE_STATE protocol feature is supported by the backend
-    device_state_supported: bool,
-
     /// Device state
     device_state: DeviceState,
 
@@ -110,7 +105,6 @@ impl std::fmt::Debug for VhostUserDevice {
             .field("backend_features", &self.backend_features)
             .field("acked_features", &self.acked_features)
             .field("acked_protocol_features", &self.acked_protocol_features)
-            .field("device_state_supported", &self.device_state_supported)
             .finish_non_exhaustive()
     }
 }
@@ -209,9 +203,6 @@ impl VhostUserDevice {
             if protocol_features.contains(VhostUserProtocolFeatures::CONFIGURE_MEM_SLOTS) {
                 our_protocol_features |= VhostUserProtocolFeatures::CONFIGURE_MEM_SLOTS;
             }
-            if protocol_features.contains(VhostUserProtocolFeatures::DEVICE_STATE) {
-                our_protocol_features |= VhostUserProtocolFeatures::DEVICE_STATE;
-            }
 
             frontend
                 .set_protocol_features(our_protocol_features)
@@ -265,9 +256,6 @@ impl VhostUserDevice {
             })
             .collect();
 
-        let device_state_supported =
-            acked_protocol_features.contains(VhostUserProtocolFeatures::DEVICE_STATE);
-
         Ok(VhostUserDevice {
             frontend: Arc::new(Mutex::new(frontend)),
             device_type,
@@ -277,21 +265,17 @@ impl VhostUserDevice {
             backend_features,
             acked_features: 0,
             acked_protocol_features,
-            device_state_supported,
             device_state: DeviceState::Inactive,
             interrupt_monitor: None,
         })
     }
 
     /// Activate the vhost-user device by setting up memory and vrings.
-    /// `vring_bases`: if Some, use saved vring bases (restore mode).
-    ///                if None, use 0 (normal activation).
     pub(super) fn activate_vhost_user(
         &mut self,
         mem: &GuestMemoryMmap,
         interrupt: &InterruptTransport,
         queues: &[DeviceQueue],
-        vring_bases: Option<&[u16]>,
     ) -> IoResult<()> {
         // Clean up any previous interrupt monitor thread before spawning a new one
         self.stop_interrupt_monitor();
@@ -353,10 +337,7 @@ impl VhostUserDevice {
                 .set_vring_num(queue_index, queue.actual_size())
                 .map_err(io::Error::other)?;
 
-            // Set vring base - use saved value if in restore mode, otherwise 0
-            let base = vring_bases
-                .and_then(|bases| bases.get(queue_index).copied())
-                .unwrap_or(0);
+            let base = 0;
 
             frontend
                 .set_vring_base(queue_index, base)
@@ -473,11 +454,6 @@ impl VhostUserDevice {
         self.acked_protocol_features
     }
 
-    /// Check if DEVICE_STATE protocol feature is supported.
-    pub fn device_state_supported(&self) -> bool {
-        self.device_state_supported
-    }
-
     /// Share an additional memory region with the daemon.
     /// Requires CONFIGURE_MEM_SLOTS protocol feature to have been negotiated.
     pub fn add_mem_region(&self, region_info: &VhostUserMemoryRegionInfo) -> IoResult<()> {
@@ -500,203 +476,11 @@ impl VhostUserDevice {
         Ok(())
     }
 
-    /// Save daemon internal state via DEVICE_STATE protocol.
-    /// Returns the serialized state blob.
-    pub fn save_device_state(&self) -> IoResult<Vec<u8>> {
-        if !self.device_state_supported {
-            return Err(io::Error::new(
-                ErrorKind::InvalidInput,
-                "DEVICE_STATE protocol feature not negotiated",
-            ));
-        }
-
-        // 1. Create pipe
-        let (read_end, write_end) =
-            nix::unistd::pipe().map_err(|e| io::Error::other(format!("pipe: {e}")))?;
-
-        // Wrap in File which CONSUMES the OwnedFd, transferring ownership
-        let read_file = File::from(read_end);
-        let write_file = File::from(write_end);
-
-        // 2. Send SET_DEVICE_STATE_FD with SAVE direction + write end
-        //    The daemon will write its state to the pipe.
-        //    Frontend may return a replacement fd (or None).
-        let reply_fd = self
-            .frontend
-            .lock()
-            .unwrap()
-            .set_device_state_fd(
-                VhostTransferStateDirection::SAVE,
-                VhostTransferStatePhase::STOPPED,
-                &write_file,
-            )
-            .map_err(|e| io::Error::other(format!("set_device_state_fd: {e}")))?;
-
-        // Check if backend returned a replacement fd (not supported)
-        if reply_fd.is_some() {
-            return Err(io::Error::other(
-                "backend returned replacement fd for device state, not supported",
-            ));
-        }
-
-        // 3. Drop write end so we see EOF after daemon finishes writing
-        drop(write_file);
-
-        // 4. Read all data from pipe until EOF
-        let mut state = Vec::new();
-        let mut read_file = read_file;
-        read_file
-            .read_to_end(&mut state)
-            .map_err(|e| io::Error::other(format!("read pipe: {e}")))?;
-
-        // 5. CHECK_DEVICE_STATE confirms transfer completed successfully.
-        //    Returns Result<()> — Ok(()) on success, Err on failure.
-        self.frontend
-            .lock()
-            .unwrap()
-            .check_device_state()
-            .map_err(|e| io::Error::other(format!("check_device_state: {e}")))?;
-
-        Ok(state)
-    }
-
-    /// Load daemon internal state via DEVICE_STATE protocol.
-    pub fn load_device_state(&self, data: &[u8]) -> IoResult<()> {
-        if !self.device_state_supported {
-            return Err(io::Error::new(
-                ErrorKind::InvalidInput,
-                "DEVICE_STATE protocol feature not negotiated",
-            ));
-        }
-
-        // 1. Create pipe
-        let (read_end, write_end) =
-            nix::unistd::pipe().map_err(|e| io::Error::other(format!("pipe: {e}")))?;
-
-        // Wrap in File which CONSUMES the OwnedFd, transferring ownership
-        let read_file = File::from(read_end);
-        let write_file = File::from(write_end);
-
-        // 2. Send SET_DEVICE_STATE_FD with LOAD direction + read end
-        //    The daemon will read state from the pipe.
-        let reply_fd = self
-            .frontend
-            .lock()
-            .unwrap()
-            .set_device_state_fd(
-                VhostTransferStateDirection::LOAD,
-                VhostTransferStatePhase::STOPPED,
-                &read_file,
-            )
-            .map_err(|e| io::Error::other(format!("set_device_state_fd: {e}")))?;
-
-        // Check if backend returned a replacement fd (not supported)
-        if reply_fd.is_some() {
-            return Err(io::Error::other(
-                "backend returned replacement fd for device state, not supported",
-            ));
-        }
-
-        // 3. Drop read end (we only write)
-        drop(read_file);
-
-        // 4. Write state data to pipe, then close to signal EOF
-        let mut write_file = write_file;
-        write_file
-            .write_all(data)
-            .map_err(|e| io::Error::other(format!("write pipe: {e}")))?;
-        drop(write_file); // Signal EOF to daemon
-
-        // 5. CHECK_DEVICE_STATE confirms transfer completed successfully.
-        //    Returns Result<()> — Ok(()) on success, Err on failure.
-        self.frontend
-            .lock()
-            .unwrap()
-            .check_device_state()
-            .map_err(|e| io::Error::other(format!("check_device_state: {e}")))?;
-
-        Ok(())
-    }
-
     /// Stop the interrupt monitor thread if one is running.
     fn stop_interrupt_monitor(&mut self) {
         if let Some(monitor) = self.interrupt_monitor.take() {
             monitor.stop();
         }
-    }
-
-    /// Mark device as inactive. Used during snapshot restore to force
-    /// re-activation via complete_restore() → activate() → activate_restore().
-    // Called from VhostUserFs and VhostUserVsock restore paths (feature-gated by snapshot).
-    #[allow(dead_code)]
-    pub(super) fn mark_inactive(&mut self) {
-        self.device_state = DeviceState::Inactive;
-    }
-
-    /// Mark device as activated with given memory and interrupt.
-    /// Used by subclasses (like VhostUserFs) that perform custom activation logic
-    /// and need to update the device state afterward.
-    // Called from VhostUserFs activate/restore paths (feature-gated by snapshot).
-    #[allow(dead_code)]
-    pub(super) fn mark_activated(&mut self, mem: GuestMemoryMmap, interrupt: InterruptTransport) {
-        self.device_state = DeviceState::Activated(mem, interrupt);
-    }
-
-    /// Replace the Frontend connection for snapshot restore.
-    /// Protocol features use saved set intersected with daemon capabilities;
-    /// base virtio features are re-negotiated fresh from the new daemon.
-    // Called from VhostUserFs and VhostUserVsock restore paths (feature-gated by snapshot).
-    #[allow(dead_code)]
-    pub(super) fn reconnect_for_restore(
-        &mut self,
-        stream: UnixStream,
-        _saved_features: u64,
-        saved_protocol_features: u64,
-    ) -> ActivateResult {
-        let num_queues = self.queue_configs.len() as u64;
-        let frontend = Frontend::from_stream(stream, num_queues);
-        *self.frontend.lock().unwrap() = frontend;
-
-        // Mirror VhostUserDevice::new() negotiation: get features, acknowledge
-        // PROTOCOL_FEATURES bit to enable protocol extensions, then negotiate
-        // protocol features. Do NOT call set_owner() here — activate_vhost_user
-        // does that. Calling it twice is a protocol error.
-        let mut frontend = self.frontend.lock().unwrap();
-
-        const VHOST_USER_F_PROTOCOL_FEATURES: u64 = 1 << 30;
-
-        let backend_features = frontend
-            .get_features()
-            .map_err(|_| ActivateError::BadActivate)?;
-        let protocol_bit = backend_features & VHOST_USER_F_PROTOCOL_FEATURES;
-
-        // Acknowledge just the protocol features bit (same as new())
-        // to enable GET_PROTOCOL_FEATURES. Full features are set by activate_vhost_user.
-        if protocol_bit != 0 {
-            frontend
-                .set_features(protocol_bit)
-                .map_err(|_| ActivateError::BadActivate)?;
-
-            let backend_proto_features = frontend
-                .get_protocol_features()
-                .map_err(|_| ActivateError::BadActivate)?;
-            let desired_proto =
-                VhostUserProtocolFeatures::from_bits_truncate(saved_protocol_features);
-            let negotiated_proto = desired_proto & backend_proto_features;
-            frontend
-                .set_protocol_features(negotiated_proto)
-                .map_err(|_| ActivateError::BadActivate)?;
-
-            self.acked_protocol_features = negotiated_proto;
-            self.device_state_supported =
-                negotiated_proto.contains(VhostUserProtocolFeatures::DEVICE_STATE);
-        }
-
-        // Update available features (daemon may have changed)
-        self.avail_features = backend_features & !VHOST_USER_F_PROTOCOL_FEATURES;
-        self.backend_features = protocol_bit;
-
-        Ok(())
     }
 }
 
@@ -725,7 +509,6 @@ impl VhostUserDevice {
             backend_features: 0,
             acked_features: 0,
             acked_protocol_features: VhostUserProtocolFeatures::empty(),
-            device_state_supported: false,
             device_state: DeviceState::Inactive,
             interrupt_monitor: None,
         }
@@ -788,7 +571,7 @@ impl VirtioDevice for VhostUserDevice {
         interrupt: InterruptTransport,
         queues: Vec<DeviceQueue>,
     ) -> ActivateResult {
-        if let Err(e) = self.activate_vhost_user(&mem, &interrupt, &queues, None) {
+        if let Err(e) = self.activate_vhost_user(&mem, &interrupt, &queues) {
             error!(
                 "{}: failed to activate vhost-user device: {}",
                 self.device_name, e
@@ -831,28 +614,6 @@ impl VirtioDevice for VhostUserDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Test that save_device_state returns error when DEVICE_STATE not supported
-    #[test]
-    fn test_save_device_state_not_supported() {
-        let device = VhostUserDevice::new_for_test_unconnected();
-        assert!(!device.device_state_supported());
-
-        let result = device.save_device_state();
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().kind(), ErrorKind::InvalidInput);
-    }
-
-    /// Test that load_device_state returns error when DEVICE_STATE not supported
-    #[test]
-    fn test_load_device_state_not_supported() {
-        let device = VhostUserDevice::new_for_test_unconnected();
-        assert!(!device.device_state_supported());
-
-        let result = device.load_device_state(b"test data");
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().kind(), ErrorKind::InvalidInput);
-    }
 
     fn spawn_fake_monitor() -> InterruptMonitor {
         let stop = Arc::new(AtomicBool::new(false));

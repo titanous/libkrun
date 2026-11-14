@@ -7,8 +7,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
 
 use utils::byte_order;
 use utils::eventfd::EventFd;
@@ -22,7 +21,6 @@ use super::muxer::VsockMuxer;
 use super::packet::VsockPacket;
 use super::TsiFlags;
 use super::{defs, defs::uapi};
-use crate::snapshot::SnapshotError;
 use crate::virtio::InterruptTransport;
 
 pub(crate) const RXQ_INDEX: usize = 0;
@@ -45,20 +43,14 @@ pub struct Vsock {
     pub(crate) muxer: VsockMuxer,
     pub(crate) queue_rx: Option<Arc<Mutex<VirtQueue>>>,
     pub(crate) queue_tx: Option<Arc<Mutex<VirtQueue>>>,
-    /// Snapshot buffer: holds queue state for save/restore.
+    /// Device-local queue state.
     pub(crate) queues: Vec<VirtQueue>,
     pub(crate) queue_events: Vec<Arc<EventFd>>,
     pub(crate) avail_features: u64,
     pub(crate) acked_features: u64,
     pub(crate) activate_evt: EventFd,
+    stop_evt: EventFd,
     pub(crate) device_state: DeviceState,
-
-    muxer_quiesce_fd: EventFd,
-    muxer_resume_fd: EventFd,
-    muxer_quiesce_ack: Arc<(Mutex<bool>, Condvar)>,
-    timesync_quiesce_fd: EventFd,
-    timesync_resume_fd: EventFd,
-    timesync_quiesce_ack: Arc<(Mutex<bool>, Condvar)>,
 }
 
 impl Vsock {
@@ -88,16 +80,14 @@ impl Vsock {
             acked_features: 0,
             activate_evt: EventFd::new(utils::eventfd::EFD_NONBLOCK)
                 .map_err(super::VsockError::EventFd)?,
+            stop_evt: EventFd::new(utils::eventfd::EFD_NONBLOCK)
+                .map_err(super::VsockError::EventFd)?,
             device_state: DeviceState::Inactive,
-            muxer_quiesce_fd: EventFd::new(utils::eventfd::EFD_NONBLOCK)
-                .map_err(super::VsockError::EventFd)?,
-            muxer_resume_fd: EventFd::new(0).map_err(super::VsockError::EventFd)?,
-            muxer_quiesce_ack: Arc::new((Mutex::new(false), Condvar::new())),
-            timesync_quiesce_fd: EventFd::new(utils::eventfd::EFD_NONBLOCK)
-                .map_err(super::VsockError::EventFd)?,
-            timesync_resume_fd: EventFd::new(0).map_err(super::VsockError::EventFd)?,
-            timesync_quiesce_ack: Arc::new((Mutex::new(false), Condvar::new())),
         })
+    }
+
+    pub fn set_socket_policy(&mut self, policy: super::policy::SocketPolicy) {
+        self.muxer.socket_policy = policy;
     }
 
     pub fn id(&self) -> &str {
@@ -240,6 +230,64 @@ impl Vsock {
     }
 }
 
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use crate::legacy::DummyIrqChip;
+    use vm_memory::GuestAddress;
+
+    fn worker_count() -> usize {
+        std::fs::read_dir("/proc/self/task")
+            .unwrap()
+            .filter_map(|entry| std::fs::read_to_string(entry.ok()?.path().join("comm")).ok())
+            .filter(|name| matches!(name.trim(), "vsock muxer" | "vsock reaper"))
+            .count()
+    }
+
+    fn assert_worker_count(expected: usize) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let count = worker_count();
+            if count == expected {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "expected {expected} vsock workers, found {count}"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn repeated_reset_joins_workers() {
+        let baseline = worker_count();
+        let mut device = Vsock::new(3, None, None, TsiFlags::empty()).unwrap();
+        for _ in 0..16 {
+            let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+            let interrupt =
+                InterruptTransport::new(DummyIrqChip::new().into(), "test-vsock".into()).unwrap();
+            let queues = defs::QUEUE_SIZES
+                .iter()
+                .map(|&size| DeviceQueue {
+                    queue: VirtQueue::new(size),
+                    event: Arc::new(EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap()),
+                })
+                .collect();
+            device.activate(mem, interrupt, queues).unwrap();
+            assert_worker_count(baseline + 2);
+            assert!(device.reset());
+            assert_worker_count(baseline);
+        }
+    }
+}
+
+impl Drop for Vsock {
+    fn drop(&mut self) {
+        self.muxer.stop(&self.stop_evt);
+    }
+}
+
 impl VirtioDevice for Vsock {
     fn avail_features(&self) -> u64 {
         self.avail_features
@@ -334,33 +382,14 @@ impl VirtioDevice for Vsock {
         let rxq_kick = (*self.queue_events[RXQ_INDEX])
             .try_clone()
             .map_err(|_| ActivateError::BadActivate)?;
-        let muxer_quiesce_fd = self
-            .muxer_quiesce_fd
-            .try_clone()
-            .map_err(|_| ActivateError::BadActivate)?;
-        let muxer_resume_fd = self
-            .muxer_resume_fd
-            .try_clone()
-            .map_err(|_| ActivateError::BadActivate)?;
-        let timesync_quiesce_fd = self
-            .timesync_quiesce_fd
-            .try_clone()
-            .map_err(|_| ActivateError::BadActivate)?;
-        let timesync_resume_fd = self
-            .timesync_resume_fd
-            .try_clone()
-            .map_err(|_| ActivateError::BadActivate)?;
         self.muxer.activate(
             mem.clone(),
             self.queue_rx.clone().unwrap(),
             interrupt.clone(),
             rxq_kick,
-            muxer_quiesce_fd,
-            muxer_resume_fd,
-            self.muxer_quiesce_ack.clone(),
-            timesync_quiesce_fd,
-            timesync_resume_fd,
-            self.timesync_quiesce_ack.clone(),
+            self.stop_evt
+                .try_clone()
+                .map_err(|_| ActivateError::BadActivate)?,
         );
 
         self.device_state = DeviceState::Activated(mem, interrupt);
@@ -372,22 +401,8 @@ impl VirtioDevice for Vsock {
         self.device_state.is_activated()
     }
 
-    fn post_restore_kick(&mut self) {
-        if !self.is_activated() {
-            return;
-        }
-        for (i, (queue, evt)) in self.queues.iter().zip(self.queue_events.iter()).enumerate() {
-            if !queue.ready {
-                continue;
-            }
-            if let Err(e) = evt.write(1) {
-                error!("vsock: post_restore_kick queue {i} failed: {e}");
-            }
-        }
-    }
-
     fn reset(&mut self) -> bool {
-        self.muxer.shutdown();
+        self.muxer.stop(&self.stop_evt);
         self.device_state = DeviceState::Inactive;
         self.queue_rx = None;
         self.queue_tx = None;
@@ -398,125 +413,5 @@ impl VirtioDevice for Vsock {
             self.tsi_flags,
         );
         true
-    }
-
-    fn begin_snapshot_quiesce(
-        &mut self,
-        timeout: Duration,
-    ) -> std::result::Result<(), SnapshotError> {
-        debug!(
-            "vsock: begin_snapshot_quiesce, activated={}",
-            self.device_state.is_activated()
-        );
-        if !self.device_state.is_activated() {
-            return Ok(());
-        }
-
-        // Quiesce the muxer thread.
-        {
-            let (lock, _) = &*self.muxer_quiesce_ack;
-            *lock.lock().unwrap() = false;
-        }
-        let _ = self.muxer_quiesce_fd.write(1);
-
-        let (lock, cvar) = &*self.muxer_quiesce_ack;
-        let guard = lock.lock().unwrap();
-        let (guard, wait_result) = cvar
-            .wait_timeout_while(guard, timeout, |acked| !*acked)
-            .unwrap();
-        if !*guard || wait_result.timed_out() {
-            return Err(SnapshotError::QuiesceTimeout {
-                device_id: String::new(),
-                timeout_ms: timeout.as_millis() as u64,
-                detail: Some("vsock muxer thread did not ack quiesce".into()),
-            });
-        }
-        drop(guard);
-
-        // Quiesce the timesync thread (macOS only — not started on Linux).
-        #[cfg(target_os = "macos")]
-        {
-            {
-                let (lock, _) = &*self.timesync_quiesce_ack;
-                *lock.lock().unwrap() = false;
-            }
-            let _ = self.timesync_quiesce_fd.write(1);
-
-            let (lock, cvar) = &*self.timesync_quiesce_ack;
-            let guard = lock.lock().unwrap();
-            let (guard, wait_result) = cvar
-                .wait_timeout_while(guard, timeout, |acked| !*acked)
-                .unwrap();
-            if !*guard || wait_result.timed_out() {
-                // Resume the muxer thread since it already quiesced.
-                let _ = self.muxer_resume_fd.write(1);
-                return Err(SnapshotError::QuiesceTimeout {
-                    device_id: String::new(),
-                    timeout_ms: timeout.as_millis() as u64,
-                    detail: Some("vsock timesync thread did not ack quiesce".into()),
-                });
-            }
-        }
-
-        Ok(())
-    }
-
-    fn abort_snapshot_quiesce(&mut self) {
-        debug!(
-            "vsock: abort_snapshot_quiesce (resume workers), activated={}",
-            self.device_state.is_activated()
-        );
-        if !self.device_state.is_activated() {
-            return;
-        }
-        // Reset ack flags and resume threads.
-        {
-            let (lock, _) = &*self.muxer_quiesce_ack;
-            *lock.lock().unwrap() = false;
-        }
-        let _ = self.muxer_resume_fd.write(1);
-        // Timesync thread is macOS-only — only resume it there.
-        #[cfg(target_os = "macos")]
-        {
-            let (lock, _) = &*self.timesync_quiesce_ack;
-            *lock.lock().unwrap() = false;
-            let _ = self.timesync_resume_fd.write(1);
-        }
-    }
-
-    fn sync_queues_for_snapshot(&mut self) {
-        if let Some(ref qrx) = self.queue_rx {
-            self.queues[RXQ_INDEX] = qrx.lock().unwrap().clone();
-        }
-        if let Some(ref qtx) = self.queue_tx {
-            self.queues[TXQ_INDEX] = qtx.lock().unwrap().clone();
-        }
-        debug!(
-            "vsock: sync_queues_for_snapshot: rx(next_avail={}, next_used={}) tx(next_avail={}, next_used={})",
-            self.queues[RXQ_INDEX].next_avail(), self.queues[RXQ_INDEX].next_used(),
-            self.queues[TXQ_INDEX].next_avail(), self.queues[TXQ_INDEX].next_used(),
-        );
-    }
-
-    fn post_snapshot_restore(&mut self) {
-        debug!(
-            "vsock: post_snapshot_restore called, activated={}",
-            self.device_state.is_activated()
-        );
-
-        let rx_q = &self.queues[RXQ_INDEX];
-        let tx_q = &self.queues[TXQ_INDEX];
-        debug!(
-            "vsock: restore queues from snapshot: rx(ready={}, size={}, next_avail={}, next_used={}) tx(ready={}, size={}, next_avail={}, next_used={})",
-            rx_q.ready, rx_q.size, rx_q.next_avail(), rx_q.next_used(),
-            tx_q.ready, tx_q.size, tx_q.next_avail(), tx_q.next_used(),
-        );
-
-        if let Some(ref qrx) = self.queue_rx {
-            *qrx.lock().unwrap() = self.queues[RXQ_INDEX].clone();
-        }
-        if let Some(ref qtx) = self.queue_tx {
-            *qtx.lock().unwrap() = self.queues[TXQ_INDEX].clone();
-        }
     }
 }

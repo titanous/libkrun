@@ -3,8 +3,8 @@ use super::{
     proxy::{ProxyRemoval, RecvPkt},
 };
 
-use nix::errno::Errno;
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
+use nix::sys::socket::SockaddrLike;
 use nix::sys::socket::{
     accept, bind, connect, listen, recv, send, shutdown, socket, AddressFamily, Backlog, MsgFlags,
     Shutdown, SockFlag, SockType, UnixAddr,
@@ -17,8 +17,6 @@ use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-#[cfg(target_os = "macos")]
-use super::super::linux_errno::linux_errno_raw;
 use super::super::Queue as VirtQueue;
 use super::muxer::{push_packet, MuxerRx};
 use super::muxer_rxq::MuxerRxQ;
@@ -28,6 +26,7 @@ use utils::epoll::EventSet;
 use vm_memory::GuestMemoryMmap;
 
 pub struct UnixProxy {
+    pub(crate) socket_policy: super::policy::SocketPolicy,
     id: u64,
     cid: u64,
     fd: OwnedFd,
@@ -56,7 +55,7 @@ fn proxy_fd_create(id: u64) -> Result<OwnedFd, ProxyError> {
     )
     .map_err(ProxyError::CreatingSocket)?;
 
-    // macOS forces us to do this here instead of just using SockFlag::SOCK_NONBLOCK above.
+    // Set non-blocking mode before using the socket.
     match fcntl(&fd, FcntlArg::F_GETFL) {
         Ok(flags) => match OFlag::from_bits(flags) {
             Some(flags) => {
@@ -68,21 +67,6 @@ fn proxy_fd_create(id: u64) -> Result<OwnedFd, ProxyError> {
         },
         Err(e) => error!("couldn't obtain fd flags id={id}, err={e}"),
     };
-
-    #[cfg(target_os = "macos")]
-    {
-        // nix doesn't provide an abstraction for SO_NOSIGPIPE, fall back to libc.
-        let option_value: libc::c_int = 1;
-        unsafe {
-            libc::setsockopt(
-                fd.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_NOSIGPIPE,
-                &option_value as *const _ as *const libc::c_void,
-                std::mem::size_of_val(&option_value) as libc::socklen_t,
-            )
-        };
-    }
 
     Ok(fd)
 }
@@ -102,6 +86,7 @@ impl UnixProxy {
         let fd = proxy_fd_create(id)?;
 
         Ok(UnixProxy {
+            socket_policy: Default::default(),
             id,
             cid,
             local_port,
@@ -135,6 +120,7 @@ impl UnixProxy {
     ) -> Self {
         debug!("new_reverse: id={id} local_port={local_port} peer_port={peer_port}");
         UnixProxy {
+            socket_policy: Default::default(),
             id,
             cid,
             local_port,
@@ -329,7 +315,16 @@ impl Proxy for UnixProxy {
 
         let addr = UnixAddr::new(&self.path).unwrap();
 
-        let result = match connect(self.fd.as_raw_fd(), &addr) {
+        // SAFETY: addr owns a valid sockaddr_un for its reported length.
+        let storage = unsafe {
+            nix::sys::socket::SockaddrStorage::from_raw(addr.as_ptr().cast(), Some(addr.len()))
+        }
+        .unwrap();
+        let result = match self
+            .socket_policy
+            .check(super::policy::SocketOperation::UnixConnect, &storage)
+            .and_then(|()| connect(self.fd.as_raw_fd(), &addr))
+        {
             Ok(()) => {
                 debug!("connect: Connected");
                 self.switch_to_connected();
@@ -342,10 +337,8 @@ impl Proxy for UnixProxy {
             }
             Err(e) => {
                 debug!("Error connecting: {e}");
-                #[cfg(target_os = "macos")]
-                let errno = -linux_errno_raw(Errno::last_raw());
                 #[cfg(target_os = "linux")]
-                let errno = -Errno::last_raw();
+                let errno = -(e as i32);
                 errno
             }
         };
@@ -395,9 +388,6 @@ impl Proxy for UnixProxy {
         let mut update = ProxyUpdate::default();
 
         let ret = if let Some(buf) = pkt.buf() {
-            #[cfg(target_os = "macos")]
-            let flags = MsgFlags::empty();
-
             #[cfg(target_os = "linux")]
             let flags = MsgFlags::MSG_NOSIGNAL;
 
@@ -410,9 +400,6 @@ impl Proxy for UnixProxy {
                     sent as i32
                 }
                 Err(err) => {
-                    #[cfg(target_os = "macos")]
-                    let errno = -linux_errno_raw(err as i32);
-
                     #[cfg(target_os = "linux")]
                     let errno = -(err as i32);
                     errno
@@ -626,6 +613,7 @@ impl AsRawFd for UnixProxy {
 }
 
 pub struct UnixAcceptorProxy {
+    pub(crate) socket_policy: super::policy::SocketPolicy,
     id: u64,
     fd: OwnedFd,
     peer_port: u32,
@@ -660,7 +648,12 @@ impl UnixAcceptorProxy {
         .map_err(ProxyError::CreatingSocket)?;
         listen(&fd, Backlog::new(5).map_err(ProxyError::CreatingSocket)?)
             .map_err(ProxyError::CreatingSocket)?;
-        Ok(UnixAcceptorProxy { id, fd, peer_port })
+        Ok(UnixAcceptorProxy {
+            id,
+            fd,
+            peer_port,
+            socket_policy: Default::default(),
+        })
     }
 }
 
@@ -718,6 +711,15 @@ impl Proxy for UnixAcceptorProxy {
                 Ok(accept_fd) => {
                     // Safe because we've just obtained the FD from the `accept` call above.
                     let new_fd = unsafe { OwnedFd::from_raw_fd(accept_fd) };
+                    if nix::sys::socket::getpeername::<nix::sys::socket::SockaddrStorage>(accept_fd)
+                        .map_or(true, |addr| {
+                            self.socket_policy
+                                .check(super::policy::SocketOperation::Accept, &addr)
+                                .is_err()
+                        })
+                    {
+                        return update;
+                    }
                     update.new_proxy = Some((
                         self.peer_port,
                         new_fd,

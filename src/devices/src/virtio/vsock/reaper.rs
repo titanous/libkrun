@@ -132,30 +132,17 @@ impl ReaperThread {
                 Ok(id) => {
                     self.released_map.insert(id, Instant::now());
                 }
-                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return,
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
             }
         }
     }
 
-    pub fn run(mut self) -> std::thread::JoinHandle<()> {
+    pub fn run(mut self) -> thread::JoinHandle<()> {
         thread::Builder::new()
             .name("vsock reaper".into())
             .spawn(move || self.work())
             .unwrap()
-    }
-}
-
-#[cfg(test)]
-mod shutdown_tests {
-    use super::*;
-    #[test]
-    fn disconnected_sender_terminates_reaper() {
-        let (sender, receiver) = crossbeam_channel::unbounded();
-        let proxies = std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
-        let handle = ReaperThread::new(receiver, proxies).run();
-        drop(sender);
-        handle.join().unwrap();
     }
 }
 

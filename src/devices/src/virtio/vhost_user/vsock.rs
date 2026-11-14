@@ -14,45 +14,20 @@ use vhost::vhost_user::message::VhostUserConfigFlags;
 use vhost::vhost_user::VhostUserFrontend;
 
 use crate::virtio::device::VirtioDevice;
+use crate::virtio::ActivateResult;
 use crate::virtio::QueueConfig;
-use crate::virtio::{ActivateResult, Queue};
 
 use super::VhostUserDevice;
-
-#[cfg(feature = "snapshot")]
-use crate::snapshot_serde;
-#[cfg(feature = "snapshot")]
-use vhost::VhostBackend;
 
 const VIRTIO_ID_VSOCK: u32 = 19;
 const NUM_QUEUES: usize = 3; // RX, TX, Event
 const QUEUE_SIZE: u16 = 256;
-const MAX_SNAPSHOT_BYTES: usize = 8192;
 
 #[derive(Debug)]
 pub struct VhostUserVsock {
     vhost_user: VhostUserDevice,
     guest_cid: u64,
-    // Only read in snapshot restore paths (feature-gated by snapshot); set unconditionally in new().
-    #[allow(dead_code)]
-    socket_path: Option<String>,
     queue_configs: Vec<QueueConfig>,
-    /// Queue state buffer for snapshot support
-    queues: Vec<Queue>,
-    #[cfg(feature = "snapshot")]
-    pending_restore_state: Option<VhostUserVsockState>,
-}
-
-/// Snapshot state for VhostUserVsock device.
-#[cfg(feature = "snapshot")]
-#[derive(Clone, Debug, bincode_next::Encode, bincode_next::Decode)]
-pub(crate) struct VhostUserVsockState {
-    pub guest_cid: u64,
-    pub acked_features: u64,
-    pub acked_protocol_features: u64,
-    pub vring_bases: Vec<u16>,
-    pub daemon_state: Vec<u8>,
-    pub socket_path: Option<String>,
 }
 
 impl VhostUserVsock {
@@ -66,7 +41,7 @@ impl VhostUserVsock {
             NUM_QUEUES as u16,
             &[QUEUE_SIZE; NUM_QUEUES],
         )?;
-        Self::build_from_device(vhost_user, Some(socket_path.to_string()))
+        Self::build_from_device(vhost_user)
     }
 
     /// Create a new VhostUserVsock from a pre-connected UnixStream.
@@ -79,14 +54,11 @@ impl VhostUserVsock {
             NUM_QUEUES as u16,
             &[QUEUE_SIZE; NUM_QUEUES],
         )?;
-        Self::build_from_device(vhost_user, None)
+        Self::build_from_device(vhost_user)
     }
 
     /// Shared construction: fetch guest_cid from backend config, build struct.
-    fn build_from_device(
-        vhost_user: VhostUserDevice,
-        socket_path: Option<String>,
-    ) -> IoResult<Self> {
+    fn build_from_device(vhost_user: VhostUserDevice) -> IoResult<Self> {
         // Fetch guest_cid from backend via GET_CONFIG
         let guest_cid = {
             let mut frontend = vhost_user.frontend.lock().unwrap();
@@ -109,16 +81,11 @@ impl VhostUserVsock {
         debug!("vhost-user-vsock: guest_cid = {}", guest_cid);
 
         let queue_configs = vec![QueueConfig::new(QUEUE_SIZE); NUM_QUEUES];
-        let queues = (0..NUM_QUEUES).map(|_| Queue::new(QUEUE_SIZE)).collect();
 
         Ok(VhostUserVsock {
             vhost_user,
             guest_cid,
-            socket_path,
             queue_configs,
-            queues,
-            #[cfg(feature = "snapshot")]
-            pending_restore_state: None,
         })
     }
 
@@ -153,14 +120,6 @@ impl VirtioDevice for VhostUserVsock {
         &self.queue_configs
     }
 
-    fn queues(&self) -> &[Queue] {
-        &self.queues
-    }
-
-    fn queues_mut(&mut self) -> &mut [Queue] {
-        &mut self.queues
-    }
-
     fn read_config(&self, offset: u64, data: &mut [u8]) {
         if offset >= 8 {
             warn!(
@@ -185,24 +144,6 @@ impl VirtioDevice for VhostUserVsock {
         interrupt: crate::virtio::InterruptTransport,
         queues: Vec<crate::virtio::DeviceQueue>,
     ) -> ActivateResult {
-        #[cfg(feature = "snapshot")]
-        if let Some(state) = self.pending_restore_state.take() {
-            return self.activate_restore(mem, interrupt, queues, state);
-        }
-
-        // Copy queue state for snapshot (MmioTransport reads device.queues())
-        for (i, dq) in queues.iter().enumerate() {
-            if let Some(q) = self.queues.get_mut(i) {
-                q.size = dq.queue.size;
-                q.ready = dq.queue.ready;
-                q.desc_table = dq.queue.desc_table;
-                q.avail_ring = dq.queue.avail_ring;
-                q.used_ring = dq.queue.used_ring;
-                q.set_next_avail(dq.queue.next_avail().0);
-                q.set_next_used(dq.queue.next_used().0);
-            }
-        }
-
         // Delegate to generic VhostUserDevice activation
         self.vhost_user.activate(mem, interrupt, queues)
     }
@@ -213,124 +154,6 @@ impl VirtioDevice for VhostUserVsock {
 
     fn reset(&mut self) -> bool {
         self.vhost_user.reset()
-    }
-
-    #[cfg(feature = "snapshot")]
-    fn save_backend_state(&self) -> Option<Vec<u8>> {
-        // 1. Get vring bases from daemon (this stops each vring — the quiesce mechanism)
-        let mut vring_bases = Vec::new();
-        let num_queues = self.queue_configs.len();
-        for i in 0..num_queues {
-            match self.vhost_user.frontend.lock().unwrap().get_vring_base(i) {
-                Ok(base) => {
-                    vring_bases.push(base as u16);
-                }
-                Err(e) => {
-                    log::error!("get_vring_base({i}) failed: {e}");
-                    return None;
-                }
-            }
-        }
-
-        // 2. Save daemon internal state via DEVICE_STATE protocol
-        let daemon_state = match self.vhost_user.save_device_state() {
-            Ok(state) => state,
-            Err(e) => {
-                log::error!("save_device_state failed: {e}");
-                return None;
-            }
-        };
-
-        // 3. Build state struct
-        let state = VhostUserVsockState {
-            guest_cid: self.guest_cid,
-            acked_features: self.vhost_user.acked_features(),
-            acked_protocol_features: self.vhost_user.acked_protocol_features().bits(),
-            vring_bases,
-            daemon_state,
-            socket_path: self.socket_path.clone(),
-        };
-
-        // 4. Serialize with bincode-next
-        snapshot_serde::serialize(&state)
-            .map_err(|e| log::error!("serialize VhostUserVsockState: {e}"))
-            .ok()
-    }
-
-    #[cfg(feature = "snapshot")]
-    fn restore_backend_state(&mut self, data: &[u8]) {
-        // 1. Deserialize state
-        let state: VhostUserVsockState = match snapshot_serde::deserialize::<
-            VhostUserVsockState,
-            { MAX_SNAPSHOT_BYTES },
-        >(data)
-        {
-            Ok(s) => s,
-            Err(e) => {
-                log::error!("deserialize VhostUserVsockState: {e}");
-                return;
-            }
-        };
-
-        // 2. Restore local fields
-        // NOTE: socket_path is intentionally NOT restored from snapshot state.
-        // The device uses the socket_path provided at construction time to prevent
-        // a tampered snapshot from redirecting the vhost-user connection.
-        self.guest_cid = state.guest_cid;
-
-        // 3. Mark as inactive so complete_restore() → activate() runs
-        self.vhost_user.mark_inactive();
-
-        // 4. Store state for activate() to consume in restore mode
-        self.pending_restore_state = Some(state);
-    }
-}
-
-#[cfg(feature = "snapshot")]
-impl VhostUserVsock {
-    /// Activate device in restore mode using previously saved state.
-    /// Called by activate() when pending_restore_state is Some.
-    fn activate_restore(
-        &mut self,
-        mem: vm_memory::GuestMemoryMmap,
-        interrupt: crate::virtio::InterruptTransport,
-        queues: Vec<crate::virtio::DeviceQueue>,
-        state: VhostUserVsockState,
-    ) -> ActivateResult {
-        use crate::virtio::ActivateError;
-
-        // Reconnect to fresh backend at the configured socket path.
-        // Uses self.socket_path (set at construction), NOT the snapshot's socket_path,
-        // to prevent snapshot tampering from redirecting the connection.
-        // For fd-based devices (socket_path is None), the orchestrator must
-        // provide a new connection before restore — not yet supported.
-        if let Some(ref path) = self.socket_path {
-            let stream = std::os::unix::net::UnixStream::connect(path)
-                .map_err(|_| ActivateError::BadActivate)?;
-            self.vhost_user
-                .reconnect_for_restore(stream, state.acked_features, state.acked_protocol_features)
-                .map_err(|_| ActivateError::BadActivate)?;
-        }
-
-        // 1. Share guest memory + set up vrings with SAVED bases
-        self.vhost_user
-            .activate_vhost_user(&mem, &interrupt, &queues, Some(&state.vring_bases))
-            .map_err(|_| ActivateError::BadActivate)?;
-
-        // 2. Load daemon state via DEVICE_STATE protocol
-        if self
-            .vhost_user
-            .load_device_state(&state.daemon_state)
-            .is_err()
-        {
-            self.vhost_user.reset();
-            return Err(ActivateError::BadActivate);
-        }
-
-        // 3. Mark as activated
-        self.vhost_user.mark_activated(mem, interrupt);
-
-        Ok(())
     }
 }
 
@@ -357,11 +180,7 @@ impl VhostUserVsock {
         VhostUserVsock {
             vhost_user: VhostUserDevice::new_for_test_unconnected(),
             guest_cid,
-            socket_path: None,
             queue_configs: vec![QueueConfig::new(QUEUE_SIZE); NUM_QUEUES],
-            queues: (0..NUM_QUEUES).map(|_| Queue::new(QUEUE_SIZE)).collect(),
-            #[cfg(feature = "snapshot")]
-            pending_restore_state: None,
         }
     }
 }
@@ -445,61 +264,6 @@ mod tests {
         assert_eq!(device.guest_cid(), 99);
     }
 
-    // AC4.1: Snapshot state roundtrip
-    #[test]
-    #[cfg(feature = "snapshot")]
-    fn test_snapshot_state_roundtrip() {
-        let state = VhostUserVsockState {
-            guest_cid: 42,
-            acked_features: 0x1234_5678,
-            acked_protocol_features: 0x9abc_def0,
-            vring_bases: vec![5, 10, 15],
-            daemon_state: vec![1, 2, 3, 4, 5],
-            socket_path: Some("/tmp/test.sock".to_string()),
-        };
-
-        let serialized = snapshot_serde::serialize(&state).expect("serialize failed");
-        let deserialized: VhostUserVsockState =
-            snapshot_serde::deserialize::<VhostUserVsockState, { MAX_SNAPSHOT_BYTES }>(&serialized)
-                .expect("deserialize failed");
-
-        assert_eq!(deserialized.guest_cid, 42);
-        assert_eq!(deserialized.acked_features, 0x1234_5678);
-        assert_eq!(deserialized.acked_protocol_features, 0x9abc_def0);
-        assert_eq!(deserialized.vring_bases, vec![5, 10, 15]);
-        assert_eq!(deserialized.daemon_state, vec![1, 2, 3, 4, 5]);
-        assert_eq!(deserialized.socket_path, Some("/tmp/test.sock".to_string()));
-    }
-
-    // AC4.1: restore_backend_state stores pending state
-    #[test]
-    #[cfg(feature = "snapshot")]
-    fn test_restore_backend_state_stores_pending() {
-        let mut device = VhostUserVsock::new_for_test(3);
-
-        let state = VhostUserVsockState {
-            guest_cid: 99,
-            acked_features: 0xdead,
-            acked_protocol_features: 0xbeef,
-            vring_bases: vec![1, 2, 3],
-            daemon_state: vec![10, 20],
-            socket_path: Some("/tmp/restore.sock".to_string()),
-        };
-
-        let serialized = snapshot_serde::serialize(&state).expect("serialize");
-        device.restore_backend_state(&serialized);
-
-        assert!(device.pending_restore_state.is_some());
-        let restored = device.pending_restore_state.as_ref().unwrap();
-        assert_eq!(restored.guest_cid, 99);
-        assert_eq!(restored.vring_bases, vec![1, 2, 3]);
-        assert_eq!(restored.socket_path, Some("/tmp/restore.sock".to_string()));
-        // guest_cid on device should also be updated
-        assert_eq!(device.guest_cid(), 99);
-        // socket_path on device must NOT be overwritten from snapshot (security)
-        assert_eq!(device.socket_path, None);
-    }
-
     // Info leak: partial read must zero untouched tail bytes
     #[test]
     fn test_read_config_partial_zeroes_tail() {
@@ -542,52 +306,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    // AC4.4: activate with pending restore fails when backend is unavailable
-    // (test device has a dummy frontend that can't do vhost-user operations)
-    #[test]
-    #[cfg(feature = "snapshot")]
-    fn test_activate_restore_fails_with_dummy_backend() {
-        use crate::legacy::DummyIrqChip;
-        use crate::virtio::DeviceQueue;
-        use std::sync::Arc;
-        use utils::eventfd::EventFd;
-
-        let mut device = VhostUserVsock::new_for_test(3);
-
-        let state = VhostUserVsockState {
-            guest_cid: 3,
-            acked_features: 0,
-            acked_protocol_features: 0,
-            vring_bases: vec![0, 0, 0],
-            daemon_state: vec![],
-            socket_path: None,
-        };
-        device.pending_restore_state = Some(state);
-
-        let mem =
-            vm_memory::GuestMemoryMmap::from_ranges(&[(vm_memory::GuestAddress(0), 1024 * 1024)])
-                .expect("create guest memory");
-
-        let queues: Vec<DeviceQueue> = (0..3)
-            .map(|_| {
-                DeviceQueue::new(
-                    crate::virtio::Queue::new(256),
-                    Arc::new(EventFd::new(0).expect("eventfd")),
-                )
-            })
-            .collect();
-
-        let irqchip: crate::legacy::IrqChip = DummyIrqChip::new().into();
-        let interrupt = crate::virtio::InterruptTransport::new(irqchip, "test-vsock".into())
-            .expect("create interrupt");
-
-        let result = device.activate(mem, interrupt, queues);
-        assert!(
-            result.is_err(),
-            "activate_restore should fail with dummy backend"
-        );
     }
 }
 
