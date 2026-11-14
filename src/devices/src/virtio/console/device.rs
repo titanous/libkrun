@@ -396,9 +396,29 @@ impl VirtioDevice for Console {
     }
 }
 
+#[cfg(test)]
+#[test]
+fn missed_cpu_join_stops_console_host_threads() {
+    let mut console = Console::new(vec![PortDescription {
+        name: "test".into(),
+        input: None,
+        output: None,
+        terminal: None,
+    }])
+    .unwrap();
+    let stop = console.ports[0].install_test_writer();
+    console.on_vmm_exit_with_running_cpu();
+    assert!(stop.load(std::sync::atomic::Ordering::Acquire));
+    console.ports[0].assert_test_writer_joined_without_drain();
+}
+
 impl VmmExitObserver for Console {
     fn on_vmm_exit_with_running_cpu(&mut self) {
         // A detached CPU can still modify rings; do not inspect or drain them.
+        // Stop and join host I/O without enabling the ring-drain path.
+        for port in &mut self.ports {
+            port.shutdown();
+        }
     }
 
     fn on_vmm_exit(&mut self) {

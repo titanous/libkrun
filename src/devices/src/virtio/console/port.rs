@@ -95,6 +95,42 @@ impl Port {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn install_test_writer(&mut self) -> Arc<AtomicBool> {
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer_stop = stop.clone();
+        let tx_thread = thread::spawn(move || {
+            while !writer_stop.load(Ordering::Acquire) {
+                thread::park_timeout(std::time::Duration::from_millis(1));
+            }
+        });
+        self.state = PortState::Active {
+            stopfd: utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
+            stop: stop.clone(),
+            drain: Arc::new(AtomicBool::new(false)),
+            rx_thread: None,
+            tx_thread: Some(tx_thread),
+        };
+        stop
+    }
+
+    #[cfg(test)]
+    pub(crate) fn assert_test_writer_joined_without_drain(&self) {
+        match &self.state {
+            PortState::Active {
+                drain,
+                tx_thread,
+                rx_thread,
+                ..
+            } => {
+                assert!(!drain.load(Ordering::Acquire));
+                assert!(tx_thread.is_none());
+                assert!(rx_thread.is_none());
+            }
+            PortState::Inactive => panic!("test port was not active"),
+        }
+    }
+
     pub(crate) fn set_tx_state(&mut self, state: Arc<super::ConsoleTxState>) {
         self.tx_state = state;
     }
