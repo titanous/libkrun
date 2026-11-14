@@ -22,9 +22,12 @@ impl BootMemory {
         if end <= start || (start | end) & 4095 != 0 {
             return Err(invalid());
         }
-        if self.0.insert(start, end).is_some_and(|old| old != end) {
+        // The pinned loader needs only a handful of early fragments. Bound the
+        // control-plane allocation and reject duplicate publications outright.
+        if self.0.len() >= 64 || self.0.contains_key(&start) {
             return Err(invalid());
         }
+        self.0.insert(start, end);
         Ok(())
     }
     /// Return GPA, host-backing offset and length, after validating the full plan.
