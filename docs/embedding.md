@@ -465,14 +465,15 @@ connect or silence returns `VmExit::LivenessExpired`. Reconnection is supported.
 The mapping remains subject to the embedder's Unix-connect policy; allow its exact
 socket path. Existing paths and port collisions are errors, not overwritten.
 
-The following console-marker classification is legacy compatibility only and is
-not the platform's privileged terminal-reason contract. The maintained kernel's
-`HOLODECK GUEST STOP panic` diagnostic marker returns
-`VmExit::GuestPanic` promptly, even when console output is discarded or its budget
-is exhausted. Marker matching handles split reads and kernel prefixes. This text
-is not an authenticated tenant status channel. Missing markers are not evidence
-of clean shutdown; liveness still bounds a hung guest. Use the maintained kernel
-stop convention and `panic=-1` to avoid an indefinite panic halt.
+The fork does not classify console text as a terminal reason. An embedder may
+observe raw Nitro console bytes with `nitro_console_observer`; the callback runs
+before diagnostic output budgets and sink writes. Holodeck currently uses that
+hook for a temporary compatibility policy: a complete kernel-prefixed
+`HOLODECK GUEST STOP <reason>` line requests stop and supplies its daemon ending.
+That policy belongs to the embedder, not `VmExit`, and guest root can forge the
+text. Missing markers are not evidence of clean shutdown. Configure liveness
+when a guest that states intent but never actually stops must be bounded; a
+stated reason alone never starts a timeout or forces the fork to stop.
 `backend_must_enforce_configured_rule` is a public-API KVM conformance test using
 a live denied host listener; it fails if the configured rule is ignored. Backend
 integration must run that same semantic test or assert explicit unsupported
@@ -484,26 +485,31 @@ requests too, not only guest hijack flags. Forwarding tests and embedders requir
 TSI TCP/UDP/IPv6 must opt in; mapped `vsock-guest-connect` does not require internet
 forwarding and remains subject to its Unix connection rule.
 
-### Privileged terminal-reason channel (API alignment pending)
+### Privileged terminal-reason channel
 
-`nitro_stop_reason(true)` adds a dedicated experimental virtio type 63 device,
-registered after ordinary devices so console indices stay stable. The matching
-kernel patch is 0400 on holodeck `nitro-backend-kernel`, based on kernel lane
-`b94b54c`. It maps private shared region ID 0, stores a one-byte terminal reason,
-orders the store and directly notifies one queue. Panic reporting allocates no
-descriptor, opens no socket, and waits for no interrupt. Panic is sticky across
-its following restart. The VMM wakes on the kick eventfd and reads the byte.
-Console text does not classify exits when this channel is enabled; poweroff
-without a stated byte is an error, not clean shutdown.
+`nitro_stop_reason(true)` opts into a dedicated virtio type 63 device,
+registered after ordinary devices so console indices stay stable. The guest
+maps private shared region ID 0, stores a one-byte terminal reason, orders the
+store and directly notifies one queue. Panic reporting allocates no descriptor,
+opens no socket, and waits for no interrupt. The VMM wakes on the kick eventfd
+and validates the byte. Holodeck has not enabled this transport in production;
+its Nitro compatibility policy remains the console observer described above.
 
-Current provisional codes are 1 poweroff, 2 reboot, 3 halt, 4 panic. The KVM
-exit-kind worker must publish the shared codes and public exit variants before
-this is a stable embedding API. Until alignment, `run` deliberately returns an
-`Error` containing the raw stated reason and host observation timestamp; do not
-consume that diagnostic string as a permanent protocol. `nitro_terminal` retains
-the real-host acceptance probe.
+Shared codes are 0 clear, 1 poweroff, 2 reboot, 3 halt, 4 panic, and 5 preparing.
+Only 0--4 update the retained reason; 5 and invalid values leave it unchanged.
+Panic is sticky, including across a crash-kernel handoff. On a terminal event,
+`run` returns `VmExit::PowerOffRequested`, `RebootRequested`, `Halted`, or `Panic`
+for the retained reason, rather than an error string carrying the raw byte.
+Host errors, explicit host stop, workload exit status, and configured liveness
+or device watchdog failures have higher priority. Without a valid reason the
+result is `Fault`; legacy Nitro firmware poweroff remains `PowerOffRequested`
+only when no stop-reason device was enabled. Neither a reason nor preparing
+alone forces termination. `VmHandle::stated_stop_reason` exposes live typed KVM
+intent without waiting for the VMM lock; it is not itself a terminal outcome.
+`nitro_terminal` retains the real-host acceptance probe.
 
-Observed m8g panic notification upper bounds: ten trials 0.784--0.845 ms from
+Historical opt-in transport measurements (not bounds for the current daemon):
+observed m8g panic notification upper bounds in ten trials 0.784--0.845 ms from
 host sending a go byte to VMM observing the privileged reason, before teardown.
 The bound includes vsock delivery and the guest's panic path. Poweroff/reboot/halt
 were 0.360--0.383 ms. Both timestamps use host CLOCK_MONOTONIC. Guest/host virtual
