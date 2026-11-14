@@ -1705,12 +1705,21 @@ fn load_payload(
                 #[cfg(not(feature = "vhost-user"))]
                 unreachable!()
             } else {
-                // SAFETY: kernel_host_addr points to valid kernel data of size kernel_size.
-                // The memory region is managed by the kernel bundle and remains valid.
+                // A guest modifies its kernel data. Never expose the cached firmware
+                // library's original bytes to KVM or a later VM boots corrupted data.
+                validate_bundle_range(kernel_host_addr, kernel_size as u64)
+                    .map_err(StartMicrovmError::InvalidBundleAddressRange)?;
+                let region =
+                    MmapRegion::new(kernel_size).map_err(StartMicrovmError::InvalidKernelBundle)?;
+                // SAFETY: validated source bundle and newly allocated, disjoint region.
                 unsafe {
-                    MmapRegion::build_raw(kernel_host_addr as *mut u8, kernel_size, 0, 0)
-                        .map_err(StartMicrovmError::InvalidKernelBundle)?
+                    std::ptr::copy_nonoverlapping(
+                        kernel_host_addr as *const u8,
+                        region.as_ptr(),
+                        kernel_size,
+                    );
                 }
+                region
             };
 
             Ok((

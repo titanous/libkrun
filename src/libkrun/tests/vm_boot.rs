@@ -86,6 +86,7 @@ mod tests {
             let mut builder = Builder::new();
             builder.vm_config(1, 256).unwrap();
             builder.set_root(&root_path);
+            builder.console_output(PathBuf::from(&root_path).join("console.log"));
             builder.exec_path("/nonexistent".to_string());
             builder.build().expect("build_vm failed").run()
         });
@@ -135,6 +136,7 @@ mod tests {
             let mut builder = Builder::new();
             builder.vm_config(1, 256).unwrap();
             builder.set_root(&root_path);
+            builder.console_output(PathBuf::from(&root_path).join("console.log"));
             builder.exec_path("/nonexistent".to_string());
             builder.build().expect("build failed").run()
         });
@@ -225,6 +227,7 @@ mod tests {
             let mut builder = Builder::new();
             builder.vm_config(1, 256).unwrap();
             builder.set_root(&root_path);
+            builder.console_output(PathBuf::from(&root_path).join("console.log"));
             builder.exec_path("/nonexistent".to_string());
             let ctx = builder.build().expect("build failed");
             ctx.register_exit_observer(observer_clone);
@@ -253,14 +256,15 @@ mod tests {
             let mut builder = Builder::new();
             builder.vm_config(1, 256).unwrap();
             builder.set_root(&root_path);
+            builder.console_output(PathBuf::from(&root_path).join("console.log"));
             builder.exec_path("/nonexistent".to_string());
-            // Add a dummy net device — the socket doesn't need to work since
-            // init exits before networking is used.
+            // The kernel can activate networking before init exits; provide a peer.
             let sock_path = std::env::temp_dir().join(format!(
                 "krun_test_net_{}_{}",
                 std::process::id(),
                 COUNTER.fetch_add(1, Ordering::Relaxed)
             ));
+            let _peer = std::os::unix::net::UnixDatagram::bind(&sock_path).unwrap();
             builder.add_net_device(
                 VirtioNetBackend::UnixgramPath(sock_path, false),
                 [0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee],

@@ -283,7 +283,7 @@ fn run(mut builder: krun::Builder, mode: &str) -> String {
     ]);
     let result = builder.build().expect("build external guest").run();
     assert!(
-        matches!(result, Ok(krun::VmExit::Shutdown { .. })),
+        matches!(result, Ok(krun::VmExit::RebootRequested)),
         "{result:?}"
     );
     let log = std::fs::read_to_string(&console).unwrap();
