@@ -677,6 +677,7 @@ impl Proxy for TsiStreamProxy {
             result,
         };
         self.push_pkt(rx);
+        update.signal_queue = true;
 
         if result == 0 {
             self.peer_port = req.vm_port;
