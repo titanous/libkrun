@@ -823,10 +823,13 @@ impl Builder {
     /// Device order: balloon(1) + rng(1) + rtc(1) + implicit_console(0 or 1) + consoles_added
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     fn nitro_device_count_before_consoles(&self) -> u32 {
-        self.config.block_cfgs.len() as u32
-            + u32::from(self.config.root_block_cfg.is_some())
-            + u32::from(self.config.data_block_cfg.is_some())
-            + u32::from(!matches!(self.config.vsock_config, VsockConfig::Disabled))
+        let blocks = if self.config.block_cfgs.is_empty() {
+            u32::from(self.config.root_block_cfg.is_some())
+                + u32::from(self.config.data_block_cfg.is_some())
+        } else {
+            self.config.block_cfgs.len() as u32
+        };
+        blocks + u32::from(!matches!(self.config.vsock_config, VsockConfig::Disabled))
     }
 
     fn next_console_device_index(&self) -> u32 {
@@ -1193,7 +1196,10 @@ impl Builder {
             return Err(unsupported());
         }
         #[cfg(feature = "net")]
-        if !self.config.vmr.net.list.is_empty() || self.config.legacy_net_cfg.is_some() {
+        if !self.config.vmr.net.list.is_empty()
+            || self.config.legacy_net_cfg.is_some()
+            || self.config.legacy_mac.is_some()
+        {
             return Err(unsupported());
         }
         #[cfg(feature = "vhost-user")]
@@ -2025,6 +2031,30 @@ impl VmHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    fn nitro_mixed_disk_count_matches_selected_configuration() {
+        use devices::virtio::block::{ImageType, SyncMode};
+        let disk = || BlockDeviceConfig {
+            block_id: "disk".into(),
+            cache_type: devices::virtio::CacheType::Writeback,
+            disk_type: BlockDeviceType::Image {
+                path: "/dev/null".into(),
+                format: ImageType::Raw,
+                sync_mode: SyncMode::None,
+            },
+            is_disk_read_only: false,
+            direct_io: false,
+        };
+        let mut builder = Builder::new();
+        builder.config.root_block_cfg = Some(disk());
+        builder.config.data_block_cfg = Some(disk());
+        builder.config.block_cfgs.push(disk());
+        let count = builder.nitro_device_count_before_consoles();
+        assert_eq!(count, 2); // one selected block and the implicit vsock
+        assert_eq!(count as usize, builder.config.take_block_cfg().len() + 1);
+    }
 
     #[test]
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]

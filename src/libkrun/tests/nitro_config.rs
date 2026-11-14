@@ -16,6 +16,13 @@ fn rejected(mut builder: Builder, expected: &str) {
     }
 }
 #[test]
+#[cfg(feature = "net")]
+fn rejects_ignored_mac_before_allocating_vm() {
+    let mut builder = Builder::new();
+    builder.net_mac([2, 0, 0, 0, 0, 1]);
+    rejected(builder, "EIF");
+}
+#[test]
 fn rejects_eif_incompatible_exec_before_allocating_vm() {
     let mut builder = Builder::new();
     builder.exec_path("/should-not-be-ignored".into());
