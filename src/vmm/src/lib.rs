@@ -488,6 +488,11 @@ impl Vmm {
             .map_err(Error::I8042Error)
     }
 
+    #[cfg(target_arch = "x86_64")]
+    pub fn stated_stop_reason_state(&self) -> Arc<crate::stop_reason::StopReason> {
+        self.pio_device_manager.stop_reason.clone()
+    }
+
     /// Registers an exit observer that will be called when the VM exits.
     pub fn register_exit_observer(&mut self, observer: Arc<Mutex<dyn VmmExitObserver>>) {
         self.exit_observers.push(observer);

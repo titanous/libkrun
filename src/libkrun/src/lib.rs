@@ -2242,6 +2242,8 @@ impl Context {
         if self.built_vm.nitro.is_some() {
             return VmHandle {
                 vmm: None,
+                #[cfg(target_arch = "x86_64")]
+                stated_reason: None,
                 console_tx_states: Vec::new(),
                 nitro_console_dropped: self
                     .built_vm
@@ -2271,6 +2273,14 @@ impl Context {
 
         VmHandle {
             vmm: Some(self.built_vm.vmm().clone()),
+            #[cfg(target_arch = "x86_64")]
+            stated_reason: Some(
+                self.built_vm
+                    .vmm()
+                    .lock()
+                    .unwrap()
+                    .stated_stop_reason_state(),
+            ),
             console_tx_states: self
                 .built_vm
                 .vmm()
@@ -2402,6 +2412,8 @@ pub enum BalloonError {
 #[derive(Clone)]
 pub struct VmHandle {
     vmm: Option<Arc<Mutex<vmm::Vmm>>>,
+    #[cfg(target_arch = "x86_64")]
+    stated_reason: Option<Arc<vmm::stop_reason::StopReason>>,
     console_tx_states: Vec<Arc<devices::virtio::console::ConsoleTxState>>,
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     nitro_console_dropped: Option<Arc<std::sync::atomic::AtomicU64>>,
@@ -2562,6 +2574,18 @@ impl Drop for NitroSigtermGuard {
 }
 
 impl VmHandle {
+    /// Current typed guest stop intent, read without locking teardown. This is
+    /// intent, not a terminal event; final `run` outcome retains error precedence.
+    pub fn stated_stop_reason(&self) -> Option<VmExit> {
+        #[cfg(target_arch = "x86_64")]
+        if let Some(reason) = &self.stated_reason {
+            let reason = reason.0.load(std::sync::atomic::Ordering::Acquire);
+            if (1..=4).contains(&reason) {
+                return Some(VmExit::from_stated_reason(reason));
+            }
+        }
+        None
+    }
     /// Cumulative guest console bytes discarded by bounded host output buffers.
     /// Reads shared atomics without locking the VMM, including during teardown.
     /// Remains readable after `Context::run` returns. Includes Nitro diagnostic
@@ -2913,8 +2937,12 @@ mod tests {
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     fn nitro_handle_controls_without_hardware() {
         let stop = Arc::new(EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap());
+        #[cfg(target_arch = "x86_64")]
+        let reason = Arc::new(vmm::stop_reason::StopReason::default());
         let handle = VmHandle {
             vmm: None,
+            #[cfg(target_arch = "x86_64")]
+            stated_reason: Some(reason.clone()),
             console_tx_states: vec![Arc::new(devices::virtio::console::ConsoleTxState::default())],
             heartbeat_control: None,
             #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
@@ -2938,6 +2966,17 @@ mod tests {
         }
         #[cfg(not(feature = "tee"))]
         assert!(handle.balloon().is_none());
+        #[cfg(target_arch = "x86_64")]
+        {
+            reason.0.store(4, std::sync::atomic::Ordering::Release);
+            assert_eq!(handle.stated_stop_reason(), Some(VmExit::Panic));
+            for ignored in [0, 5, 255] {
+                reason
+                    .0
+                    .store(ignored, std::sync::atomic::Ordering::Release);
+                assert_eq!(handle.stated_stop_reason(), None);
+            }
+        }
         assert_eq!(handle.console_dropped_bytes(), 17);
         handle.trigger_shutdown_event().unwrap();
         assert_eq!(stop.read().unwrap(), 1);
