@@ -95,6 +95,11 @@ pub(crate) fn process_tx(
                     assert_eq!(n, desc_len);
                     bytes_written += n;
                 }
+                Err(e) if e.kind() == io::ErrorKind::TimedOut => {
+                    // Discard this descriptor's unwritable remainder so guest close
+                    // cannot be held hostage by a host that never reads.
+                    bytes_written += desc_len;
+                }
                 Err(e) => {
                     log::error!("Failed to write output: {e}");
                 }
@@ -142,7 +147,7 @@ fn pop_head_blocking<'mem>(
 fn write_desc_to_output(
     desc: DescriptorChain,
     output: &mut (dyn PortOutput + Send),
-    interrupt: &InterruptTransport,
+    _interrupt: &InterruptTransport,
     port_id: u32,
     head_index: u16,
     desc_ordinal: usize,
@@ -150,6 +155,7 @@ fn write_desc_to_output(
 ) -> Result<usize, io::Error> {
     let mut total = 0;
     let mut stop_started = None;
+    let mut stalled_since = None;
     for slice_result in desc.mem.get_slices(desc.addr, desc.len as usize) {
         let src = slice_result.map_err(io::Error::other)?;
         let slice_len = src.len();
@@ -226,8 +232,12 @@ fn write_desc_to_output(
                     if stop.load(Ordering::Acquire) {
                         return Err(e);
                     }
-                    log::trace!("Tx wait for output (would block)");
-                    interrupt.signal_used_queue();
+                    // Backpressure must not retain guest buffers forever: console
+                    // close during reboot waits for these descriptors to complete.
+                    let since = stalled_since.get_or_insert_with(std::time::Instant::now);
+                    if since.elapsed() >= std::time::Duration::from_millis(100) {
+                        return Err(io::ErrorKind::TimedOut.into());
+                    }
                     output.wait_until_writable();
                 }
                 Err(e) => return Err(e),

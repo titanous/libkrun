@@ -73,6 +73,38 @@ fn raw_terminal_mechanisms() {
     }
 }
 
+#[test]
+#[ignore = "requires KVM, EMBED_KERNEL and FLOOD_INITRAMFS; outer timeout required"]
+fn eight_cpu_console_flood_with_unread_pipe_returns() {
+    use std::os::fd::AsRawFd;
+    let (reader, writer) = std::io::pipe().unwrap();
+    let mut builder = krun::Builder::new();
+    builder.vm_config(8, 512).unwrap();
+    builder
+        .external_kernel(
+            std::env::var_os("EMBED_KERNEL").unwrap().into(),
+            krun::KernelFormat::Elf,
+            Some(std::env::var_os("FLOOD_INITRAMFS").unwrap().into()),
+        )
+        .unwrap();
+    builder.console_output(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/embed/flood-primary.log"),
+    );
+    let console = builder.add_virtio_console();
+    builder
+        .add_port_console_fd(&console, -1, writer.as_raw_fd(), 80, 24)
+        .unwrap();
+    builder.set_kernel_cmdline(vec!["console=hvc0", "panic=-1", "reboot=k", "rdinit=/init"]);
+    let started = std::time::Instant::now();
+    assert_eq!(
+        builder.build().unwrap().run().unwrap(),
+        krun::VmExit::PowerOffRequested
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    drop((reader, writer));
+}
+
 fn cases() -> [(&'static str, krun::VmExit); 4] {
     [
         ("embed_stop_poweroff", krun::VmExit::PowerOffRequested),
