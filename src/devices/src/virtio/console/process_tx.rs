@@ -480,6 +480,31 @@ mod tests {
     }
 
     #[test]
+    fn final_drain_does_not_wait_for_stalled_reader() {
+        struct Stalled;
+        impl PortOutput for Stalled {
+            fn write_volatile(&mut self, _: &VolatileSlice) -> io::Result<usize> {
+                Err(io::ErrorKind::WouldBlock.into())
+            }
+            fn wait_until_writable(&self) {
+                panic!("stopped console must never wait for its reader");
+            }
+        }
+        let (mem, queue, _) = make_mem_and_queue(b"pending output");
+        let started = std::time::Instant::now();
+        process_tx(
+            0,
+            mem,
+            queue,
+            make_interrupt(),
+            Arc::new(Mutex::new(Box::new(Stalled))),
+            Arc::new(AtomicBool::new(true)),
+            Arc::new(AtomicBool::new(true)),
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
     fn orderly_exit_drains_final_line_but_reset_does_not_read_queue() {
         for drain in [false, true] {
             let payload = b"final console line\n";
