@@ -520,6 +520,7 @@ pub struct Builder {
     config: ContextConfig,
     kernel_cmdline: Vec<String>,
     kernel_cmdline_configured: bool,
+    configuration_error: Option<std::io::Error>,
     extra_kernel_args: Vec<String>,
     socket_policy: SocketPolicy,
     /// Number of console devices added (for computing device paths)
@@ -737,14 +738,32 @@ impl Builder {
         shm_size: Option<usize>,
         allow_root_dir_delete: bool,
     ) -> &mut Self {
+        match std::fs::metadata(host_path) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => {
+                self.configuration_error = Some(std::io::Error::new(
+                    std::io::ErrorKind::NotADirectory,
+                    "virtio-fs host path is not a directory",
+                ));
+                return self;
+            }
+            Err(error) => {
+                self.configuration_error = Some(error);
+                return self;
+            }
+        }
         let cfg = devices::virtio::fs::passthrough::Config {
             root_dir: host_path.to_string(),
             allow_root_dir_delete,
             ..Default::default()
         };
-        let pt = devices::virtio::fs::passthrough::PassthroughFs::new(cfg)
-            .expect("failed to create PassthroughFs");
-        self.add_virtiofs(tag, Box::new(pt), shm_size)
+        match devices::virtio::fs::passthrough::PassthroughFs::new(cfg) {
+            Ok(pt) => self.add_virtiofs(tag, Box::new(pt), shm_size),
+            Err(error) => {
+                self.configuration_error = Some(error);
+                self
+            }
+        }
     }
 
     /// Configure a vhost-user filesystem device.
@@ -1490,6 +1509,9 @@ impl Builder {
 
     #[allow(unused_mut)] // Mutability is needed only when Nitro selection is compiled.
     pub fn build(mut self) -> Result<Context, StartError> {
+        if let Some(error) = self.configuration_error.take() {
+            return Err(StartError::Configuration(error));
+        }
         if self
             .config
             .tsi_port_map
@@ -1807,6 +1829,8 @@ pub struct Context {
 
 #[derive(Debug, thiserror::Error)]
 pub enum StartError {
+    #[error("invalid builder configuration: {0}")]
+    Configuration(std::io::Error),
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     #[error("Nitro backend: {0}")]
     Nitro(std::io::Error),
@@ -2259,6 +2283,14 @@ impl VmHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(not(feature = "tee"))]
+    fn missing_passthrough_directory_is_a_build_error_not_panic() {
+        let mut builder = Builder::new();
+        builder.add_virtiofs_path("missing", "/does-not-exist/nitro-tree", None, false);
+        assert!(matches!(builder.build(), Err(StartError::Configuration(_))));
+    }
 
     #[test]
     fn inbound_port_map_requires_forwarding_before_allocation() {
