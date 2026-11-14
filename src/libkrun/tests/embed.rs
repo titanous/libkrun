@@ -63,6 +63,89 @@ fn outbound_policy_and_disabled_forwarding() {
     std::fs::remove_file(socket).unwrap();
     assert!(matches!(allowed.accept(),Err(e) if e.kind()==std::io::ErrorKind::WouldBlock));
 }
+#[cfg(target_arch = "x86_64")]
+#[test]
+#[ignore = "requires KVM and external artifacts"]
+fn configured_rule_survives_guest_device_reset() {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixListener;
+    use std::sync::Arc;
+    let tcp = std::net::TcpListener::bind("127.0.0.1:18080").unwrap();
+    tcp.set_nonblocking(true).unwrap();
+    for allowed in [false, true] {
+        let path =
+            std::env::temp_dir().join(format!("embed-reset-{}-{allowed}.sock", std::process::id()));
+        let unix = UnixListener::bind(&path).unwrap();
+        unix.set_nonblocking(true).unwrap();
+        let mut builder = krun::Builder::new();
+        builder
+            .internet_socket_forwarding(false)
+            .add_vsock_port(7000, path.clone(), false);
+        struct AllowedPath(std::path::PathBuf);
+        impl krun::OutboundPolicy for AllowedPath {
+            fn allow(&self, op: krun::SocketOperation, addr: &krun::SocketAddress) -> bool {
+                addr.as_unix_addr().is_none()
+                    || (op == krun::SocketOperation::UnixConnect
+                        && addr.as_unix_addr().and_then(|addr| addr.path())
+                            == Some(self.0.as_path()))
+            }
+        }
+        if allowed {
+            builder.outbound_policy(Arc::new(AllowedPath(path.clone())));
+        } else {
+            builder.outbound_policy(Arc::new(krun::AllowlistPolicy::new([])));
+        }
+        let peer = allowed.then(|| {
+            std::thread::spawn(move || {
+                for _ in 0..2 {
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                    let mut stream = loop {
+                        match unix.accept() {
+                            Ok((stream, _)) => break stream,
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                assert!(
+                                    std::time::Instant::now() < deadline,
+                                    "mapped connection timeout"
+                                );
+                                std::thread::yield_now();
+                            }
+                            Err(e) => panic!("{e}"),
+                        }
+                    };
+                    stream
+                        .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                        .unwrap();
+                    let mut data = [0; 4];
+                    stream.read_exact(&mut data).unwrap();
+                    assert_eq!(&data, b"ping");
+                    stream.write_all(b"pong").unwrap();
+                    let mut ack = [0];
+                    stream.read_exact(&mut ack).unwrap();
+                    assert_eq!(ack, [1]);
+                }
+            })
+        });
+        let log = run(
+            builder,
+            if allowed {
+                "embed_reset_allow"
+            } else {
+                "embed_reset_deny"
+            },
+        );
+        assert!(
+            log.contains("EMBED_RESET_BEFORE_OK")
+                && log.contains("EMBED_VSOCK_RESET_OK")
+                && log.contains("EMBED_RESET_AFTER_OK")
+        );
+        if let Some(peer) = peer {
+            peer.join().unwrap();
+        }
+        assert!(matches!(tcp.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
 /// Backend conformance: a configured deny rule must be enforced, never ignored.
 /// Run this same public-API case when adding a backend; unsupported configuration
 /// must fail build explicitly rather than boot with an unrestricted device.

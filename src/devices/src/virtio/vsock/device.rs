@@ -40,6 +40,7 @@ pub struct Vsock {
     host_port_map: Option<HashMap<u16, u16>>,
     unix_ipc_port_map: Option<HashMap<u32, (PathBuf, bool)>>,
     tsi_flags: TsiFlags,
+    socket_policy: super::policy::SocketPolicy,
     pub(crate) muxer: VsockMuxer,
     pub(crate) queue_rx: Option<Arc<Mutex<VirtQueue>>>,
     pub(crate) queue_tx: Option<Arc<Mutex<VirtQueue>>>,
@@ -66,12 +67,20 @@ impl Vsock {
             .map(|&s| VirtQueue::new(s))
             .collect();
 
+        let socket_policy = super::policy::SocketPolicy::default();
         Ok(Vsock {
             cid,
             host_port_map: host_port_map.clone(),
             unix_ipc_port_map: unix_ipc_port_map.clone(),
             tsi_flags,
-            muxer: VsockMuxer::new(cid, host_port_map, unix_ipc_port_map, tsi_flags),
+            socket_policy: socket_policy.clone(),
+            muxer: VsockMuxer::new(
+                cid,
+                host_port_map,
+                unix_ipc_port_map,
+                tsi_flags,
+                socket_policy,
+            ),
             queue_rx: None,
             queue_tx: None,
             queues,
@@ -87,6 +96,7 @@ impl Vsock {
     }
 
     pub fn set_socket_policy(&mut self, policy: super::policy::SocketPolicy) {
+        self.socket_policy = policy.clone();
         self.muxer.socket_policy = policy;
     }
 
@@ -260,6 +270,58 @@ mod lifecycle_tests {
     }
 
     #[test]
+    fn configured_policy_survives_reset() {
+        use super::super::policy::{AllowlistPolicy, SocketAddress, SocketOperation, SocketPolicy};
+        use nix::errno::Errno;
+        use std::os::fd::AsRawFd;
+        let host_ports = Some(HashMap::from([(18080, 8080)]));
+        let unix_ports = Some(HashMap::from([
+            (7000, (PathBuf::from("/tmp/reset-rule.sock"), false)),
+            (7001, (PathBuf::from("/tmp/reset-listen.sock"), true)),
+        ]));
+        let flags = TsiFlags::HIJACK_UNIX;
+        let mut device = Vsock::new(42, host_ports.clone(), unix_ports.clone(), flags).unwrap();
+        let features = device.avail_features;
+        let activate_fd = device.activate_evt.as_raw_fd();
+        device.set_socket_policy(SocketPolicy {
+            policy: Some(Arc::new(AllowlistPolicy::new([]))),
+            internet_enabled: false,
+        });
+        for _ in 0..2 {
+            let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+            let interrupt =
+                InterruptTransport::new(DummyIrqChip::new().into(), "test-vsock".into()).unwrap();
+            let queues = defs::QUEUE_SIZES
+                .iter()
+                .map(|&size| DeviceQueue {
+                    queue: VirtQueue::new(size),
+                    event: Arc::new(EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap()),
+                })
+                .collect();
+            device.activate(mem, interrupt, queues).unwrap();
+            use nix::sys::socket::SockaddrLike;
+            let unix = nix::sys::socket::UnixAddr::new("/tmp/reset-rule.sock").unwrap();
+            let addr: SocketAddress =
+                unsafe { SocketAddress::from_raw(unix.as_ptr().cast(), Some(unix.len())) }.unwrap();
+            assert_eq!(
+                device
+                    .muxer
+                    .socket_policy
+                    .check(SocketOperation::UnixConnect, &addr),
+                Err(Errno::EACCES)
+            );
+            assert!(!device.muxer.socket_policy.internet_enabled);
+            assert_eq!(device.cid(), 42);
+            device
+                .muxer
+                .assert_configuration(42, &host_ports, &unix_ports, flags);
+            assert_eq!(device.avail_features, features);
+            assert_eq!(device.activate_evt.as_raw_fd(), activate_fd);
+            assert!(device.reset());
+        }
+    }
+
+    #[test]
     fn repeated_reset_joins_workers() {
         let baseline = worker_count();
         let mut device = Vsock::new(3, None, None, TsiFlags::empty()).unwrap();
@@ -411,6 +473,7 @@ impl VirtioDevice for Vsock {
             self.host_port_map.clone(),
             self.unix_ipc_port_map.clone(),
             self.tsi_flags,
+            self.socket_policy.clone(),
         );
         true
     }

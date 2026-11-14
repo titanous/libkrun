@@ -118,11 +118,26 @@ pub struct VsockMuxer {
 }
 
 impl VsockMuxer {
+    #[cfg(test)]
+    pub(super) fn assert_configuration(
+        &self,
+        cid: u64,
+        host_ports: &Option<HashMap<u16, u16>>,
+        unix_ports: &Option<HashMap<u32, (PathBuf, bool)>>,
+        flags: TsiFlags,
+    ) {
+        assert_eq!(self.cid, cid);
+        assert_eq!(&self.host_port_map, host_ports);
+        assert_eq!(&self.unix_ipc_port_map, unix_ports);
+        assert_eq!(self.tsi_flags.bits(), flags.bits());
+    }
+
     pub(crate) fn new(
         cid: u64,
         host_port_map: Option<HashMap<u16, u16>>,
         unix_ipc_port_map: Option<HashMap<u32, (PathBuf, bool)>>,
         tsi_flags: TsiFlags,
+        socket_policy: super::policy::SocketPolicy,
     ) -> Self {
         VsockMuxer {
             cid,
@@ -136,7 +151,7 @@ impl VsockMuxer {
             reaper_sender: None,
             unix_ipc_port_map,
             tsi_flags,
-            socket_policy: Default::default(),
+            socket_policy,
             muxer_thread: None,
             reaper_thread: None,
         }
