@@ -1,5 +1,20 @@
 # Device-copy fixture coverage
 
+## Reproduction
+
+Build the fixture with `tests/cooperative/image.nix` and the release
+`cooperative-console` example as described in `cooperative-clone.md`.
+The regular matrix uses `tests/cooperative/run.py --cycles 20 --concurrent 16`.
+For 50 copies of one template, use the same required `--kernel`,
+`--initramfs`, `--control 0`, and fresh `--output` arguments, adding
+`--single-template-copies 50 --concurrent 10 --passed-fd`. This mode hashes
+the exported template before and after all copies, requires unchanged
+SHA-256, and requires each copy's fresh random bytes to differ from the
+source and all other copies. Results and hashes are in `measurements.json`.
+Concurrency is capped at 16 in this mode.
+
+## Coverage
+
 `tests/cooperative/devices.c` uses userfaultfd only in `block_random_read`
 and `unblock_random_read`. It registers a missing anonymous page, starts a
 thread reading 32 bytes from `/dev/random` into that page, and requires a
