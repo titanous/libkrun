@@ -1404,12 +1404,8 @@ impl Builder {
                 .map_err(StartError::Nitro)?;
         }
         for mount in self.config.vmr.fs.drain(..) {
-            let device = devices::virtio::Fs::new(
-                mount.tag,
-                mount.fs,
-                Arc::new(std::sync::atomic::AtomicI32::new(0)),
-            )
-            .map_err(|error| {
+            let device = devices::virtio::Fs::new(mount.tag, mount.fs, runtime.exit_code_state())
+                .map_err(|error| {
                 StartError::Nitro(std::io::Error::other(format!("virtio-fs: {error:?}")))
             })?;
             runtime
@@ -1901,13 +1897,69 @@ pub enum StartError {
 }
 
 #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+fn nitro_terminal_exit(facts: nitro_sandbox::runtime::TerminalFacts) -> VmExit {
+    let terminal = if facts.host_stop {
+        VmExit::Stopped
+    } else if facts.liveness_expired {
+        VmExit::LivenessExpired
+    } else if facts.device_expired {
+        VmExit::DeviceWatchdog
+    } else {
+        VmExit::Fault
+    };
+    VmExit::resolve(terminal, facts.exit_code, facts.reason)
+}
+
+#[cfg(all(test, target_os = "linux", feature = "nitro-sandbox"))]
 fn nitro_stated_exit(code: u8, _observed_micros: Option<u64>) -> VmExit {
-    VmExit::from_stated_reason(code)
+    nitro_terminal_exit(nitro_sandbox::runtime::TerminalFacts {
+        reason: code,
+        ..Default::default()
+    })
 }
 
 #[cfg(all(test, target_os = "linux", feature = "nitro-sandbox"))]
 #[test]
 fn nitro_stated_exit_table() {
+    use nitro_sandbox::runtime::TerminalFacts;
+    for (facts, expected) in [
+        (TerminalFacts::default(), VmExit::Fault),
+        (
+            TerminalFacts {
+                host_stop: true,
+                reason: 4,
+                exit_code: Some(9),
+                ..Default::default()
+            },
+            VmExit::Stopped,
+        ),
+        (
+            TerminalFacts {
+                reason: 1,
+                exit_code: Some(37),
+                ..Default::default()
+            },
+            VmExit::Shutdown { exit_code: 37 },
+        ),
+        (
+            TerminalFacts {
+                reason: 4,
+                liveness_expired: true,
+                ..Default::default()
+            },
+            VmExit::LivenessExpired,
+        ),
+        (
+            TerminalFacts {
+                reason: 2,
+                device_expired: true,
+                ..Default::default()
+            },
+            VmExit::DeviceWatchdog,
+        ),
+    ] {
+        assert_eq!(nitro_terminal_exit(facts), expected);
+    }
     for (code, expected) in [
         (1, VmExit::PowerOffRequested),
         (2, VmExit::RebootRequested),
@@ -2023,22 +2075,16 @@ impl Context {
     pub fn run(mut self) -> Result<vmm::vm_exit::VmExit, StartError> {
         #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
         if let Some(runtime) = self.built_vm.nitro.take() {
-            return runtime
-                .run()
-                .map(|exit| match exit {
-                    nitro_sandbox::runtime::Exit::PowerOff => vmm::vm_exit::VmExit::Fault,
-                    nitro_sandbox::runtime::Exit::Stopped => vmm::vm_exit::VmExit::Stopped,
-                    nitro_sandbox::runtime::Exit::StatedReason {
-                        code,
-                        observed_micros,
-                    } => nitro_stated_exit(code, observed_micros),
-                    nitro_sandbox::runtime::Exit::Watchdog => vmm::vm_exit::VmExit::DeviceWatchdog,
-                    nitro_sandbox::runtime::Exit::Panic => vmm::vm_exit::VmExit::Panic,
-                    nitro_sandbox::runtime::Exit::LivenessExpired => {
-                        vmm::vm_exit::VmExit::LivenessExpired
-                    }
-                })
-                .map_err(StartError::Nitro);
+            return Ok(match runtime.run_facts() {
+                Ok(facts) => nitro_terminal_exit(facts),
+                Err(error) => VmExit::resolve(
+                    VmExit::Error {
+                        message: error.to_string(),
+                    },
+                    None,
+                    0,
+                ),
+            });
         }
         let t_run_start = std::time::Instant::now();
         // Start the vCPUs

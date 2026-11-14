@@ -58,8 +58,11 @@ so the maintained guest only writes the port on this platform.
 Both backends expose `VmExit`: `PowerOffRequested`, `RebootRequested`, `Halted`,
 `Panic`, `Fault`, `Stopped`, `Shutdown { exit_code }`, `LivenessExpired`,
 `DeviceWatchdog`, and `Error { message }`. Precedence is VMM error, host-requested
-stop, explicit device workload exit code, guest reason, then terminal fallback
-`Fault`. `Shutdown` is reachable only for an explicitly supplied workload code,
+stop, explicit device workload exit code, expired backend liveness/device deadline,
+guest reason, then terminal fallback `Fault`. The backend returns observed facts
+and the public adapter calls the same resolver as KVM. A reason byte alone never
+terminates the backend; its liveness/device deadlines remain active. Console
+markers never classify a terminal outcome. `Shutdown` is reachable only for an explicitly supplied workload code,
 never inferred from reset. Deadline outcomes remain distinct on the second
 backend. Guest reasons are untrusted privileged guest statements: they confer no
 privilege, template-reuse safety, billing treatment, or forensic exemption.

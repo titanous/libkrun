@@ -21,6 +21,42 @@ pub enum Exit {
     },
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct TerminalFacts {
+    pub host_stop: bool,
+    pub liveness_expired: bool,
+    pub device_expired: bool,
+    pub reason: u8,
+    pub observed_micros: Option<u64>,
+    pub exit_code: Option<i32>,
+}
+
+#[cfg(test)]
+#[test]
+fn reason_observation_honors_clear_and_sticky_panic() {
+    let mut facts = TerminalFacts::default();
+    facts.observe_reason(2, Some(10));
+    assert_eq!((facts.reason, facts.observed_micros), (2, Some(10)));
+    facts.observe_reason(0, Some(20));
+    assert_eq!((facts.reason, facts.observed_micros), (0, None));
+    facts.observe_reason(4, Some(30));
+    facts.observe_reason(0, Some(40));
+    facts.observe_reason(1, Some(50));
+    assert_eq!((facts.reason, facts.observed_micros), (4, Some(30)));
+}
+
+impl TerminalFacts {
+    fn observe_reason(&mut self, reason: u8, time: Option<u64>) {
+        if reason > 4 || self.reason == 4 {
+            return;
+        }
+        if reason != self.reason {
+            self.reason = reason;
+            self.observed_micros = if reason == 0 { None } else { time };
+        }
+    }
+}
+
 #[derive(Default)]
 struct ExitObservers(Mutex<Vec<Arc<Mutex<dyn VmmExitObserver>>>>);
 impl ExitObservers {
@@ -62,6 +98,7 @@ pub struct Runtime {
     console: crate::console::Console,
     heartbeat: Option<crate::heartbeat::Heartbeat>,
     stop_reason: Option<crate::stop_reason::StopReason>,
+    exit_code: Arc<std::sync::atomic::AtomicI32>,
 }
 impl Runtime {
     pub fn new(
@@ -98,6 +135,7 @@ impl Runtime {
             console: Default::default(),
             heartbeat: None,
             stop_reason: None,
+            exit_code: Arc::new(std::sync::atomic::AtomicI32::new(i32::MAX)),
         })
     }
     pub fn duplicate_vm_descriptor(&self) -> io::Result<std::os::fd::OwnedFd> {
@@ -201,17 +239,47 @@ impl Runtime {
         Ok(())
     }
 
-    pub fn run(mut self) -> io::Result<Exit> {
-        let result = self.run_inner();
+    pub fn exit_code_state(&self) -> Arc<std::sync::atomic::AtomicI32> {
+        self.exit_code.clone()
+    }
+    pub fn run(self) -> io::Result<Exit> {
+        self.run_facts().map(|facts| {
+            if facts.host_stop {
+                Exit::Stopped
+            } else if facts.liveness_expired {
+                Exit::LivenessExpired
+            } else if facts.device_expired {
+                Exit::Watchdog
+            } else if facts.reason != 0 {
+                Exit::StatedReason {
+                    code: facts.reason,
+                    observed_micros: facts.observed_micros,
+                }
+            } else {
+                Exit::PowerOff
+            }
+        })
+    }
+    pub fn run_facts(mut self) -> io::Result<TerminalFacts> {
+        let result = self.run_inner().map(|mut facts| {
+            let code = self.exit_code.load(std::sync::atomic::Ordering::Acquire);
+            facts.exit_code = (code != i32::MAX).then_some(code);
+            facts
+        });
         let cleanup = self.shutdown();
         match (result, cleanup) {
             (Err(error), _) | (_, Err(error)) => Err(error),
             (Ok(exit), Ok(())) => Ok(exit),
         }
     }
-    fn run_inner(&mut self) -> io::Result<Exit> {
+    fn run_inner(&mut self) -> io::Result<TerminalFacts> {
         match self.stop.read() {
-            Ok(_) => return Ok(Exit::Stopped),
+            Ok(_) => {
+                return Ok(TerminalFacts {
+                    host_stop: true,
+                    ..Default::default()
+                })
+            }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
             Err(error) => return Err(error),
         }
@@ -222,57 +290,22 @@ impl Runtime {
         }
         let mut watchdog = Watchdog::new(Duration::ZERO, self.timeout);
         let mut active = 0usize;
-        let mut stated = None;
+        let mut facts = TerminalFacts::default();
         loop {
-            if stated.is_none() {
-                if let Some(device) = &self.stop_reason {
-                    if let Some(code) = device.reason() {
-                        stated = Some((
-                            Instant::now(),
-                            Exit::StatedReason {
-                                code,
-                                observed_micros: device.observation_micros(),
-                            },
-                        ));
-                    }
-                }
-            }
-            // Intent is reported before the kernel flushes panic/shutdown output.
-            // Continue servicing devices and draining until poweroff or a bounded
-            // grace period; preserve the timestamp of the first observation.
-            if let Some((observed, exit)) = stated {
-                if self.sandbox.powered_off(0)? || observed.elapsed() >= Duration::from_secs(1) {
-                    self.sandbox.drain_console(&mut self.console)?;
-                    return Ok(exit);
-                }
+            if let Some(device) = &self.stop_reason {
+                facts.observe_reason(device.reason().unwrap_or(0), device.observation_micros());
             }
             match self.stop.read() {
-                Ok(_) => return Ok(Exit::Stopped),
+                Ok(_) => {
+                    facts.host_stop = true;
+                    return Ok(facts);
+                }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
                 Err(error) => return Err(error),
             }
             if self.sandbox.powered_off(0)? {
                 self.sandbox.drain_console(&mut self.console)?;
-                if let Some((_, exit)) = stated {
-                    return Ok(exit);
-                }
-                if let Some(device) = &self.stop_reason {
-                    if let Some(code) = device.reason() {
-                        let observed_micros = device.observation_micros();
-                        return Ok(Exit::StatedReason {
-                            code,
-                            observed_micros,
-                        });
-                    }
-                    return Err(io::Error::other(
-                        "Nitro guest stopped without stating a terminal reason",
-                    ));
-                }
-                return Ok(if self.console.panic_seen() {
-                    Exit::Panic
-                } else {
-                    Exit::PowerOff
-                });
+                return Ok(facts);
             }
             for transport in &mut self.transports {
                 match transport.refresh(&self.sandbox, self.memory.as_ref().unwrap())? {
@@ -290,21 +323,19 @@ impl Runtime {
                 watchdog.devices_ready();
             }
             self.sandbox.drain_console(&mut self.console)?;
-            if self.stop_reason.is_none() && self.console.panic_seen() {
-                return Ok(Exit::Panic);
-            }
-            if stated.is_none()
-                && self
-                    .heartbeat
-                    .as_mut()
-                    .map(|heartbeat| heartbeat.refresh(Instant::now()))
-                    .transpose()?
-                    .unwrap_or(false)
+            if self
+                .heartbeat
+                .as_mut()
+                .map(|heartbeat| heartbeat.refresh(Instant::now()))
+                .transpose()?
+                .unwrap_or(false)
             {
-                return Ok(Exit::LivenessExpired);
+                facts.liveness_expired = true;
+                return Ok(facts);
             }
-            if stated.is_none() && watchdog.expired(start.elapsed()) {
-                return Ok(Exit::Watchdog);
+            if watchdog.expired(start.elapsed()) {
+                facts.device_expired = true;
+                return Ok(facts);
             }
             self.wait_events()?;
             self.manager
