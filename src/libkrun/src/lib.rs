@@ -508,6 +508,8 @@ pub struct Builder {
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     nitro_lifecycle_lock: Option<nitro_sandbox::lifecycle::LifecycleLock>,
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    nitro_console: Option<nitro_sandbox::console::Console>,
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     nitro_console_base: Option<u32>,
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     nitro_selected_after_consoles: bool,
@@ -1269,6 +1271,9 @@ impl Builder {
             self.nitro_lifecycle_lock.take(),
         )
         .map_err(StartError::Nitro)?;
+        if let Some(console) = self.nitro_console.take() {
+            runtime.set_console(console);
+        }
         for cfg in self.config.take_block_cfg() {
             let block = Arc::new(Mutex::new(
                 vmm::vmm_config::block::BlockBuilder::create_block(cfg)?,
@@ -1339,6 +1344,24 @@ impl Builder {
     pub fn nitro_backend(&mut self, config: NitroBackendConfig) -> &mut Self {
         self.nitro_selected_after_consoles |= self.console_count != 0 && self.nitro.is_none();
         self.nitro = Some(config);
+        self
+    }
+
+    /// Send kernel console diagnostics to a nonblocking embedder sink. Excess
+    /// bytes beyond either lifetime or per-second budget are dropped, not queued.
+    /// Default: discard console diagnostics.
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    pub fn nitro_console_sink(
+        &mut self,
+        sink: Box<dyn std::io::Write + Send>,
+        total_bytes: usize,
+        bytes_per_second: usize,
+    ) -> &mut Self {
+        self.nitro_console = Some(nitro_sandbox::console::Console::new(
+            Some(sink),
+            total_bytes,
+            bytes_per_second,
+        ));
         self
     }
 

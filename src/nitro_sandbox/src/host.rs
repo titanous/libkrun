@@ -164,7 +164,7 @@ pub struct Sandbox {
     _control: File,
     _info_file: File,
     lifecycle_lock: Option<crate::lifecycle::OpenLock>,
-    console_at: u32,
+    console_at: std::collections::HashMap<usize, u32>,
 }
 impl Sandbox {
     pub fn new(memory: usize, vcpus: u32) -> io::Result<Self> {
@@ -244,7 +244,7 @@ impl Sandbox {
             _control: control,
             _info_file: info_file,
             lifecycle_lock,
-            console_at: 0,
+            console_at: Default::default(),
         };
         for _ in 0..vcpus {
             call(sb.vm.as_ref().unwrap(), 1, 0x2d, &mut -1i32)?;
@@ -544,17 +544,18 @@ impl Sandbox {
                 return Err(io::Error::other("bad console capacity"));
             }
             std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
-            if end.wrapping_sub(self.console_at) > cap {
-                self.console_at = end.wrapping_sub(cap);
+            let cursor = self.console_at.entry(off).or_insert(0);
+            if end.wrapping_sub(*cursor) > cap {
+                *cursor = end.wrapping_sub(cap);
             }
-            while self.console_at != end {
-                let index = self.console_at % cap;
-                let length = end.wrapping_sub(self.console_at).min(cap - index);
+            while *cursor != end {
+                let index = *cursor % cap;
+                let length = end.wrapping_sub(*cursor).min(cap - index);
                 let bytes = self
                     .info
                     .copy_range(off + 8 + index as usize, length as usize)?;
                 output.write_all(&bytes)?;
-                self.console_at = self.console_at.wrapping_add(length);
+                *cursor = cursor.wrapping_add(length);
             }
         }
         output.flush()

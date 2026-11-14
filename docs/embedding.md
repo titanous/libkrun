@@ -179,6 +179,13 @@ transport reset. The repeatable real-host regression is
 the `nitro_reset` example and packaging `guest-reset.c` as `/init`.
 `port_map` requires `internet_socket_forwarding(true)` on both backends. The
 `nitro-sandbox` feature cannot be combined with `tee` or legacy `aws-nitro`.
+Kernel-console diagnostics are discarded by default. Set
+`nitro_console_sink(writer, total_bytes, bytes_per_second)` to receive bounded
+output in a nonblocking embedder writer. Excess bytes are dropped, never queued;
+the lifetime cap does not reset and the rate cap replenishes once per second.
+This is independent of custom virtio-console port sinks. Sink callbacks must not
+block; byte limits cannot bound an arbitrary callback's execution time.
+
 ### Host-owned lifecycle lock
 
 On hosts requiring serialized teardown, call

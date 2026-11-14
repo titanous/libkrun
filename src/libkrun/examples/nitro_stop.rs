@@ -9,6 +9,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "usage: nitro_stop IMAGE LOCK handle|signal|poweroff CID"
     );
     let mut builder = Builder::new();
+    builder.nitro_console_sink(Box::new(std::io::stdout()), 1024 * 1024, 256 * 1024);
     builder.nitro_backend(NitroBackendConfig {
         image: args[1].clone().into(),
         cid: args[4].parse()?,

@@ -9,6 +9,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("usage: nitro_smoke EIF DISK UNIX_SOCKET".into());
     }
     let mut builder = Builder::new();
+    builder.nitro_console_sink(Box::new(std::io::stdout()), 1024 * 1024, 256 * 1024);
     let memory_mib = std::env::var("NITRO_MEMORY_MIB")
         .unwrap_or_else(|_| "1024".into())
         .parse()?;

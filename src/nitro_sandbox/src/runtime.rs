@@ -43,6 +43,7 @@ pub struct Runtime {
     cid: u64,
     observers: ExitObservers,
     stop: Arc<utils::eventfd::EventFd>,
+    console: crate::console::Console,
 }
 impl Runtime {
     pub fn new(
@@ -76,7 +77,11 @@ impl Runtime {
             cid,
             observers: ExitObservers::default(),
             stop: Arc::new(utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK)?),
+            console: Default::default(),
         })
+    }
+    pub fn set_console(&mut self, console: crate::console::Console) {
+        self.console = console;
     }
     pub fn stop_event(&self) -> Arc<utils::eventfd::EventFd> {
         self.stop.clone()
@@ -115,7 +120,7 @@ impl Runtime {
                 Err(error) => return Err(error),
             }
             if self.sandbox.powered_off(0)? {
-                self.sandbox.drain_console(&mut io::stdout())?;
+                self.sandbox.drain_console(&mut self.console)?;
                 return Ok(Exit::PowerOff);
             }
             for transport in &mut self.transports {
@@ -133,7 +138,7 @@ impl Runtime {
             if !self.transports.is_empty() && active == self.transports.len() {
                 watchdog.devices_ready();
             }
-            self.sandbox.drain_console(&mut io::stdout())?;
+            self.sandbox.drain_console(&mut self.console)?;
             if watchdog.expired(start.elapsed()) {
                 return Ok(Exit::Watchdog);
             }
