@@ -1273,14 +1273,7 @@ impl Vcpu {
         // KVM_SET_DEVICE_ATTR = _IOW(KVMIO, 0xe1, struct kvm_device_attr).
         // SAFETY: the vCPU descriptor and both pointed-to values remain valid
         // for this synchronous ioctl; the kernel reads a 24-byte UAPI structure.
-        if unsafe {
-            libc::ioctl(
-                self.fd.as_raw_fd(),
-                0x4018_aee1 as libc::c_ulong,
-                &attribute,
-            )
-        } < 0
-        {
+        if unsafe { libc::ioctl(self.fd.as_raw_fd(), 0x4018_aee1_u32 as _, &attribute) } < 0 {
             return Err(Error::VcpuSetMsrs(kvm_ioctls::Error::new(
                 std::io::Error::last_os_error()
                     .raw_os_error()
@@ -1608,6 +1601,7 @@ impl Vcpu {
                 // So we pause vCPU0 and send a signal to the emulation thread to stop the VMM.
                 Ok(VcpuEmulation::Stopped) => return self.exit(FC_EXIT_CODE_OK),
                 Ok(VcpuEmulation::Rebooted) => return self.exit(FC_EXIT_CODE_REBOOT),
+                #[cfg(target_arch = "x86_64")]
                 Ok(VcpuEmulation::Frozen(control)) => {
                     self.response_sender
                         .send(VcpuResponse::Frozen(control))
@@ -1616,6 +1610,7 @@ impl Vcpu {
                         .write(1)
                         .expect("failed to signal cooperative freeze");
                     match self.event_receiver.recv() {
+                        #[cfg(target_arch = "x86_64")]
                         Ok(VcpuEvent::FreezeRejected(error)) => {
                             let mut regs = match self.fd.get_regs() {
                                 Ok(regs) => regs,
@@ -1858,6 +1853,7 @@ enum VcpuEmulation {
     Interrupted,
     Stopped,
     Rebooted,
+    #[cfg(target_arch = "x86_64")]
     Frozen(u64),
 }
 

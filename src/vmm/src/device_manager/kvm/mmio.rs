@@ -279,6 +279,7 @@ impl MMIODeviceManager {
     }
 
     /// A cooperative template may contain only reset virtio transports.
+    #[cfg(target_arch = "x86_64")]
     pub fn all_virtio_reset(&self) -> bool {
         self.id_to_dev_info
             .iter()

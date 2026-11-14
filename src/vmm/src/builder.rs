@@ -953,7 +953,10 @@ pub fn build_microvm(
         (arch::IRQ_BASE, arch::IRQ_MAX),
     );
 
+    #[cfg(target_arch = "x86_64")]
     let mut vcpus;
+    #[cfg(target_arch = "aarch64")]
+    let vcpus;
     let intc: IrqChip;
 
     // Create shared exit flag for vCPUs.
