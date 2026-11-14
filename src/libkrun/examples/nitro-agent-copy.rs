@@ -156,41 +156,52 @@ mod probe {
             .map_err(|_| "source I/O thread panicked")??;
         let template = handle.wait_template_capture()?;
         eprintln!("AGENT_TEMPLATE_CAPTURED");
-        let mut receiver = builder(&args[2], 712, &socket)?;
-        let _readiness = receiver.start_from_template(
-            TemplateSource::Descriptor(template.file.try_clone()?),
-            Duration::from_secs(15),
-            |_| Ok(()),
-        )?;
-        let context = receiver.build()?;
-        let receiver_thread = std::thread::spawn(move || -> io::Result<()> {
-            let mut connection = accept(&listener)?;
-            let copied = response(&mut connection, "hello")?;
-            if copied["boot_id"] != hello["boot_id"]
-                || copied["generation"] != 0
-                || copied["token"] != "clone-test-token"
-            {
-                return Err(io::Error::other("resumed agent identity mismatch"));
-            }
-            send(
-                &mut connection,
-                json!({"type":"welcome","version":3,"features":[]}),
+        let copies = std::env::var("AGENT_COPIES")
+            .unwrap_or_else(|_| "1".into())
+            .parse::<u64>()?;
+        if !(1..=80).contains(&copies) {
+            return Err("AGENT_COPIES must be1..80".into());
+        }
+        for copy in 0..copies {
+            let started = Instant::now();
+            let mut receiver = builder(&args[2], 712 + copy, &socket)?;
+            let _readiness = receiver.start_from_template(
+                TemplateSource::Descriptor(template.file.try_clone()?),
+                Duration::from_secs(15),
+                |_| Ok(()),
             )?;
-            send(
-                &mut connection,
-                json!({"type":"copied","request":3,"generation":1}),
-            )?;
-            response(&mut connection, "ack")?;
-            send(&mut connection, json!({"type":"power_off","request":4}))?;
-            response(&mut connection, "ack")?;
-            Ok(())
-        });
-        let _exit = context.run()?;
-        receiver_thread
-            .join()
-            .map_err(|_| "receiver I/O thread panicked")??;
+            let context = receiver.build()?;
+            let copy_listener = listener.try_clone()?;
+            let hello = hello.clone();
+            let receiver_thread = std::thread::spawn(move || -> io::Result<()> {
+                let mut connection = accept(&copy_listener)?;
+                let copied = response(&mut connection, "hello")?;
+                if copied["boot_id"] != hello["boot_id"]
+                    || copied["generation"] != 0
+                    || copied["token"] != "clone-test-token"
+                {
+                    return Err(io::Error::other("resumed agent identity mismatch"));
+                }
+                send(
+                    &mut connection,
+                    json!({"type":"welcome","version":3,"features":[]}),
+                )?;
+                send(
+                    &mut connection,
+                    json!({"type":"copied","request":3,"generation":1}),
+                )?;
+                response(&mut connection, "ack")?;
+                send(&mut connection, json!({"type":"power_off","request":4}))?;
+                response(&mut connection, "ack")?;
+                Ok(())
+            });
+            let _exit = context.run()?;
+            receiver_thread
+                .join()
+                .map_err(|_| "receiver I/O thread panicked")??;
+            println!("AGENT_COPY_RECONNECTED copy={} cid={} total_us={} quiescent=1 armed_before_trigger=1 generation=1",copy,712+copy,started.elapsed().as_micros());
+        }
         std::fs::remove_file(socket)?;
-        println!("AGENT_COPY_RECONNECTED quiescent=1 armed_before_trigger=1 generation=1");
         Ok(())
     }
 }
