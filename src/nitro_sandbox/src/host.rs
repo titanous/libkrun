@@ -286,14 +286,19 @@ impl Sandbox {
         };
         let raw = call(&control, 3, 0x30, &mut c)?;
         let vm = unsafe { File::from_raw_fd(raw) };
-        let sb = Self {
+        // The guard held now (either mode) lives in the sandbox from here on, so that an early
+        // return below closes the VM under it: `close_vm` uses `start_guard` instead of taking
+        // the lock again. (A guard kept in a local would still be held by this thread when the
+        // sandbox is dropped on an error, and `close_vm` would wait for this thread forever,
+        // holding the host lock: observed on the m8g when the daemon died during a create.)
+        let mut sb = Self {
             vm: Some(vm),
             ram,
             info,
             _control: control,
             _info_file: info_file,
             lifecycle_lock,
-            start_guard: std::sync::Mutex::new(creation_guard),
+            start_guard: std::sync::Mutex::new(creation_guard.or(window_guard)),
             console_at: Default::default(),
             device_regions: Vec::new(),
         };
@@ -302,7 +307,14 @@ impl Sandbox {
         if let Some(socket) = handoff {
             crate::lifecycle::send_vm_descriptor(socket, sb.vm.as_ref().unwrap())?;
         }
-        drop(window_guard);
+        if teardown_only {
+            // End of the create window: release the lock (`StartAndTeardown` keeps it until
+            // `start`).
+            sb.start_guard
+                .get_mut()
+                .unwrap_or_else(|e| e.into_inner())
+                .take();
+        }
         for _ in 0..vcpus {
             call(sb.vm.as_ref().unwrap(), 1, 0x2d, &mut -1i32)?;
         }
@@ -806,6 +818,39 @@ mod tests {
         finished
             .recv_timeout(Duration::from_secs(120))
             .expect("two sandboxes in one process did not finish: lifecycle lock deadlock");
+    }
+    /// A create whose descriptor handoff fails (the daemon end is already closed) must return
+    /// an error, close its VM under the lock it holds, and leave the lock free; it used to wait
+    /// for itself forever while holding the host lock. Needs a Nitro host (as above).
+    #[test]
+    #[ignore = "needs /dev/nitro_enclaves and NITRO_SANDBOX_TEST_LOCK"]
+    fn a_failed_handoff_closes_the_vm_and_frees_the_lock() {
+        let path = std::path::PathBuf::from(std::env::var_os("NITRO_SANDBOX_TEST_LOCK").unwrap());
+        let lock = crate::lifecycle::LifecycleLock {
+            path,
+            serialization: crate::lifecycle::Serialization::Teardown,
+        };
+        let (done, finished) = std::sync::mpsc::channel();
+        let attempt = lock.clone();
+        std::thread::spawn(move || {
+            let (vmm, daemon) = std::os::unix::net::UnixStream::pair().unwrap();
+            drop(daemon);
+            let result = Sandbox::create(128 << 20, 1, None, Some(attempt), Some(&vmm));
+            let _ = done.send(result.is_err());
+        });
+        let failed = finished
+            .recv_timeout(Duration::from_secs(60))
+            .expect("create with a dead handoff peer did not return: it holds the lock");
+        assert!(failed, "the handoff to a closed peer must fail");
+        // The lock is free again for this process (another thread takes it at once).
+        let (taken, got) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let open = lock.open().unwrap();
+            let _guard = open.acquire().unwrap();
+            let _ = taken.send(());
+        });
+        got.recv_timeout(Duration::from_secs(30))
+            .expect("the lifecycle lock is still held after the failed create");
     }
     #[test]
     fn uapi_structure_sizes() {
