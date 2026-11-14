@@ -7,7 +7,7 @@ edition = "2021"
 [features]
 default = []
 tee = []
-nitro-sandbox = []
+nitro-sandbox = ["nitro_sandbox/devices"]
 amd-sev = [ "blk", "bitfield", "bitflags", "iocuddle", "tee", "kbs-types", "serde_json" ]
 tdx = [ "blk", "tee", "kbs-types", "serde_json", "dep:tdx" ]
 net = ["devices/net"]

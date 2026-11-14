@@ -24,6 +24,12 @@ pub mod signal_handler;
 /// VM exit reasons and shared exit state.
 pub mod vm_exit;
 
+#[cfg(all(
+    target_os = "linux",
+    target_arch = "aarch64",
+    feature = "nitro-sandbox"
+))]
+pub mod nitro_capture;
 #[cfg(target_os = "linux")]
 pub mod template_memory;
 
