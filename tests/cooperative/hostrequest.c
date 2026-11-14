@@ -3,10 +3,17 @@
  */
 #include <fcntl.h>
 #include <stdio.h>
+#include <sys/mount.h>
+#include <sys/stat.h>
 #include <unistd.h>
 int main(void)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
+    mkdir("/sys", 0755);
+    if (mount("sysfs", "/sys", "sysfs", 0, NULL)) {
+        perror("mount sysfs");
+        return 1;
+    }
     puts("HOSTREQUEST USER READY");
     int fd = open("/sys/power/nitro_freeze", O_WRONLY);
     if (fd < 0 || write(fd, "1", 1) != 1) {
