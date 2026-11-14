@@ -1169,15 +1169,13 @@ impl Builder {
         let unsupported = || {
             StartError::Nitro(std::io::Error::new(std::io::ErrorKind::Unsupported, "unsupported on this backend: Nitro supports EIF boot with block, userspace vsock and custom console ports only"))
         };
-        if self.config.vmr.external_kernel.is_some()
-            || self.config.vmr.kernel_bundle.is_some()
-            || self.config.vmr.firmware_config.is_some()
-        {
-            return Err(StartError::Nitro(std::io::Error::new(std::io::ErrorKind::Unsupported, "unsupported on this backend: Nitro requires one EIF v4 image containing kernel, initramfs and command line; separate external_kernel images are not accepted")));
+        if self.config.vmr.kernel_bundle.is_some() || self.config.vmr.firmware_config.is_some() {
+            return Err(unsupported());
         }
-        if self.kernel_cmdline_configured
-            || !self.kernel_cmdline.is_empty()
-            || !self.extra_kernel_args.is_empty()
+        if self.config.vmr.external_kernel.is_none()
+            && (self.kernel_cmdline_configured
+                || !self.kernel_cmdline.is_empty()
+                || !self.extra_kernel_args.is_empty())
         {
             return Err(StartError::Nitro(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
@@ -1190,7 +1188,6 @@ impl Builder {
             || self.config.env.is_some()
             || self.config.args.is_some()
             || self.config.workdir.is_some()
-            || !self.extra_kernel_args.is_empty()
             || self.config.vmr.nested_enabled
             || self.config.gpu_virgl_flags.is_some()
             || !self.config.vmr.serial_consoles.is_empty()
@@ -1278,6 +1275,41 @@ impl Builder {
                 "unsupported on this backend: memory must be at least 64 MiB and a multiple of 2 MiB; watchdog must be nonzero",
             )));
         }
+        let packaged = if let Some(kernel) = self.config.vmr.external_kernel.as_ref() {
+            if !matches!(kernel.format, KernelFormat::Raw) {
+                return Err(StartError::Nitro(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "unsupported on this backend: external_kernel requires an arm64 Raw Image",
+                )));
+            }
+            let kernel_bytes = std::fs::read(&kernel.path).map_err(StartError::Nitro)?;
+            let initrd = kernel
+                .initramfs_path
+                .as_ref()
+                .map(std::fs::read)
+                .transpose()
+                .map_err(StartError::Nitro)?;
+            let mut args = self.kernel_cmdline.clone();
+            args.extend(self.extra_kernel_args.iter().cloned());
+            let cmdline = args.join(" ");
+            let (file, _) = nitro_sandbox::image::cached(
+                &kernel_bytes,
+                initrd.as_deref(),
+                cmdline.as_bytes(),
+                memory_mib as u64 * 1024 * 1024,
+                u64::from(config.vcpu_count.unwrap_or(1)),
+            )
+            .map_err(StartError::Nitro)?;
+            Some(file)
+        } else {
+            None
+        };
+        let image_path = if let Some(file) = &packaged {
+            use std::os::fd::AsRawFd;
+            PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()))
+        } else {
+            options.image.clone()
+        };
         let mut device_info = vmm::resources::VmDeviceInfo {
             console_ports: Vec::new(),
             vcpu_count: config.vcpu_count.unwrap_or(1),
@@ -1285,8 +1317,7 @@ impl Builder {
         };
         let mut console_id = self.nitro_device_count_before_consoles();
         let mut runtime = nitro_sandbox::runtime::Runtime::with_lifecycle_lock(
-            options
-                .image
+            image_path
                 .to_str()
                 .ok_or_else(|| StartError::Nitro(std::io::Error::other("non-UTF8 EIF path")))?,
             config.mem_size_mib.unwrap_or(1024) * 1024 * 1024,

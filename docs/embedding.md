@@ -148,12 +148,17 @@ Every backend must honour each configured method, or fail build with a clear
 The Nitro backend (`nitro-sandbox` feature) applies the same socket rule and
 forwarding switch to its shared userspace vsock device. It boots an EIF v4 image
 through `nitro_backend`: the image contains the arm64 Linux Image, initramfs and
-command line, with flags matching PCI virtio and CPU-overcommit mode. Separate
-`external_kernel` inputs, command-line replacement/append (including an empty
-replacement), virtio-fs and unsupported device/configuration methods fail build
-with `unsupported on this backend`; they are never silently discarded. Use the
-EIF builder to package the platform kernel/initramfs and exact command line before
-calling the Nitro builder. Caller-supplied block storage and its read-only setting
+command line, with flags matching PCI virtio and CPU-overcommit mode.
+Alternatively, `external_kernel` accepts an arm64 Raw Image, optional initramfs,
+and the configured replacement/appended command line: the fork packages EIF v4
+internally. Packaged-image command lines cannot be overridden; virtio-fs and other
+unsupported device/configuration methods still fail build with
+`unsupported on this backend`, never silently discarded. The Rust packager is
+byte-for-byte tested against the kernel lane's deterministic Python builder.
+A SHA-256 content key includes all inputs, memory and CPUs; up to eight immutable
+sealed memfd images are cached per process. Cache hits still read/hash inputs to
+avoid stale path metadata but skip image packaging/CRC/copy. The packaged EIF path
+remains available and bypasses packaging. Caller-supplied block storage and its read-only setting
 are shared with KVM unchanged. Select Nitro and configure block/vsock devices
 before adding custom consoles, and call `disable_implicit_console()`. Returned
 console paths follow Nitro's actual block/vsock/console registration order; build

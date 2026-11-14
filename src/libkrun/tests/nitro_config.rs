@@ -65,15 +65,16 @@ fn rejects_even_empty_commandline_override() {
     rejected(builder, "command line");
 }
 #[test]
-fn rejects_separate_external_kernel_before_allocating_vm() {
+#[cfg(target_arch = "x86_64")]
+fn rejects_non_arm64_external_format_before_allocating_vm() {
     let mut builder = Builder::new();
-    let format = if cfg!(target_arch = "x86_64") {
-        krun::KernelFormat::Elf
-    } else {
-        krun::KernelFormat::Raw
-    };
+    builder.disable_implicit_console().unwrap();
     builder
-        .external_kernel("/does-not-exist.kernel".into(), format, None)
+        .external_kernel(
+            "/does-not-exist.kernel".into(),
+            krun::KernelFormat::Elf,
+            None,
+        )
         .unwrap();
-    rejected(builder, "separate external_kernel");
+    rejected(builder, "arm64 Raw Image");
 }

@@ -1108,9 +1108,11 @@ dependencies = [
 name = "nitro_sandbox"
 version = "0.1.0"
 dependencies = [
+ "crc32fast",
  "devices",
  "libc",
  "polly",
+ "sha2",
  "utils",
  "vm-memory",
 ]
