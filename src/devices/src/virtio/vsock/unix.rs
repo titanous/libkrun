@@ -9,7 +9,6 @@ use nix::sys::socket::{
     accept, bind, connect, listen, recv, shutdown, socket, AddressFamily, Backlog, MsgFlags,
     Shutdown, SockFlag, SockType, UnixAddr,
 };
-use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::num::Wrapping;
 use std::os::fd::{FromRawFd, OwnedFd};
@@ -447,7 +446,7 @@ impl Proxy for UnixProxy {
         &mut self,
         _pkt: &VsockPacket,
         _req: TsiListenReq,
-        _host_port_map: &Option<HashMap<u16, u16>>,
+        _host_port_map: &Option<super::HostPortMap>,
     ) -> ProxyUpdate {
         todo!();
     }
@@ -711,7 +710,7 @@ impl Proxy for UnixAcceptorProxy {
         &mut self,
         _: &VsockPacket,
         _: TsiListenReq,
-        _: &Option<HashMap<u16, u16>>,
+        _: &Option<super::HostPortMap>,
     ) -> ProxyUpdate {
         unreachable!()
     }

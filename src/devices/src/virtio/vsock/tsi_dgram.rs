@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::num::Wrapping;
 use std::os::fd::OwnedFd;
@@ -475,7 +474,7 @@ impl Proxy for TsiDgramProxy {
         &mut self,
         _pkt: &VsockPacket,
         _req: TsiListenReq,
-        _host_port_map: &Option<HashMap<u16, u16>>,
+        _host_port_map: &Option<super::HostPortMap>,
     ) -> ProxyUpdate {
         ProxyUpdate::default()
     }

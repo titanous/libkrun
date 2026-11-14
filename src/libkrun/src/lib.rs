@@ -207,7 +207,7 @@ pub struct ContextConfig {
     #[cfg(feature = "net")]
     legacy_mac: Option<[u8; 6]>,
     net_index: u8,
-    tsi_port_map: Option<HashMap<u16, u16>>,
+    tsi_port_map: Option<devices::virtio::HostPortMap>,
     vsock_config: VsockConfig,
     #[cfg(feature = "blk")]
     block_cfgs: Vec<BlockDeviceConfig>,
@@ -1076,7 +1076,10 @@ impl Builder {
     }
 
     #[allow(clippy::result_unit_err)]
-    pub fn port_map(&mut self, new_port_map: HashMap<u16, u16>) -> Result<&mut Self, ()> {
+    pub fn port_map(
+        &mut self,
+        new_port_map: devices::virtio::HostPortMap,
+    ) -> Result<&mut Self, ()> {
         if self.config.net_index != 0 {
             return Err(());
         }
@@ -1325,7 +1328,7 @@ impl Builder {
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     fn create_nitro_vsock(
         cid: u64,
-        port_map: Option<HashMap<u16, u16>>,
+        port_map: Option<devices::virtio::HostPortMap>,
         unix_map: Option<HashMap<u32, (PathBuf, bool)>>,
         flags: TsiFlags,
         policy: devices::virtio::vsock::policy::SocketPolicy,
@@ -2699,7 +2702,8 @@ mod tests {
     #[test]
     fn inbound_port_map_requires_forwarding_before_allocation() {
         let mut builder = Builder::new();
-        builder.config.tsi_port_map = Some(HashMap::from([(8080, 80)]));
+        builder.config.tsi_port_map =
+            Some(HashMap::from([(8080, "127.0.0.1:80".parse().unwrap())]));
         assert!(matches!(
             builder.build(),
             Err(StartError::UnsupportedPortMap)
@@ -3572,7 +3576,7 @@ mod tests {
     fn test_builder_port_map_success_when_no_net() {
         let mut builder = Builder::new();
         let mut map = HashMap::new();
-        map.insert(8080u16, 8080u16);
+        map.insert(8080u16, "127.0.0.1:8080".parse().unwrap());
         let result = builder.port_map(map);
         assert!(result.is_ok());
         assert!(builder.config.tsi_port_map.is_some());
@@ -3584,7 +3588,7 @@ mod tests {
         let mut builder = Builder::new();
         builder.add_net_device(VirtioNetBackend::UnixstreamFd(-1), [0u8; 6], 0);
         let mut map = HashMap::new();
-        map.insert(8080u16, 8080u16);
+        map.insert(8080u16, "127.0.0.1:8080".parse().unwrap());
         let result = builder.port_map(map);
         assert!(result.is_err(), "port_map should fail when net_index != 0");
     }

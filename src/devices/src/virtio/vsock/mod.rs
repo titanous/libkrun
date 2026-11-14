@@ -26,6 +26,11 @@ pub use self::defs::uapi::VIRTIO_ID_VSOCK as TYPE_VSOCK;
 pub use self::defs::TsiFlags;
 pub use self::device::Vsock;
 
+/// Inbound TCP mappings: a guest listening port mapped to the host address and port the VMM
+/// listens on for it. The host listener binds exactly this address, whatever address the
+/// guest bound (a guest listening on all of its addresses must not open every host interface).
+pub type HostPortMap = std::collections::HashMap<u16, std::net::SocketAddr>;
+
 use bitflags::bitflags;
 use vm_memory::GuestMemoryError;
 

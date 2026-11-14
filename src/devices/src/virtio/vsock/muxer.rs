@@ -104,7 +104,7 @@ pub fn push_packet(
 
 pub struct VsockMuxer {
     cid: u64,
-    host_port_map: Option<HashMap<u16, u16>>,
+    host_port_map: Option<super::HostPortMap>,
     queue: Option<Arc<Mutex<VirtQueue>>>,
     mem: Option<GuestMemoryMmap>,
     rxq: Arc<Mutex<MuxerRxQ>>,
@@ -137,7 +137,7 @@ impl VsockMuxer {
     pub(super) fn assert_configuration(
         &self,
         cid: u64,
-        host_ports: &Option<HashMap<u16, u16>>,
+        host_ports: &Option<super::HostPortMap>,
         unix_ports: &Option<HashMap<u32, (PathBuf, bool)>>,
         flags: TsiFlags,
     ) {
@@ -149,7 +149,7 @@ impl VsockMuxer {
 
     pub(crate) fn new(
         cid: u64,
-        host_port_map: Option<HashMap<u16, u16>>,
+        host_port_map: Option<super::HostPortMap>,
         unix_ipc_port_map: Option<HashMap<u32, (PathBuf, bool)>>,
         tsi_flags: TsiFlags,
         socket_policy: super::policy::SocketPolicy,
