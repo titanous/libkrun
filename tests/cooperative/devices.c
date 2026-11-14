@@ -133,15 +133,25 @@ int main(void)
     if(atomic_load(&errors)) fail("writer before freeze");
     uint64_t before=ns(CLOCK_MONOTONIC);
     unsigned long frozen_seq=atomic_load(&sequence);
-    uint64_t sentinel[2]={0x1020304050607080ULL,0x90a0b0c0d0e0f001ULL}, restored[2];
+    uint64_t sentinel[4]={0x1020304050607080ULL,0x90a0b0c0d0e0f001ULL,
+        0x9182736455463728ULL,0xfedcba9876543210ULL}, restored[4]={0};
+    __builtin_cpu_init();
+    int wide_simd=__builtin_cpu_supports("avx2");
     int freeze=open("/sys/power/nitro_freeze",O_WRONLY);
     printf("CLONE FREEZE seq=%lu mono=%llu realtime_ns=%llu cpus=%ld\n",frozen_seq,(unsigned long long)before,(unsigned long long)ns(CLOCK_REALTIME),sysconf(_SC_NPROCESSORS_ONLN));
     /* Keep xstate live across the syscall rather than relying on compiler spills. */
     long result;
-    asm volatile("movdqu %2, %%xmm15; syscall; movdqu %%xmm15, %1"
-        : "=a"(result), "=m"(restored) : "m"(sentinel), "0"(1L), "D"((long)freeze), "S"("1"), "d"(1L)
-        : "rcx","r11","memory","xmm15");
-    if(result!=1 || memcmp(sentinel,restored,sizeof(sentinel))) fail("freeze or SIMD");
+    if(wide_simd) {
+        asm volatile("vmovdqu %2, %%ymm15; syscall; vmovdqu %%ymm15, %1"
+            : "=a"(result), "=m"(restored) : "m"(sentinel), "0"(1L), "D"((long)freeze), "S"("1"), "d"(1L)
+            : "rcx","r11","memory","xmm15");
+    } else {
+        asm volatile("movdqu %2, %%xmm15; syscall; movdqu %%xmm15, %1"
+            : "=a"(result), "=m"(restored) : "m"(sentinel), "0"(1L), "D"((long)freeze), "S"("1"), "d"(1L)
+            : "rcx","r11","memory","xmm15");
+    }
+    if(result!=1 || memcmp(sentinel,restored,wide_simd ? 32 : 16)) fail("freeze or SIMD");
+    printf("CLONE VECTOR width=%d preserved\n",wide_simd ? 256 : 128);
     if(ptrace(PTRACE_DETACH,reader,NULL,NULL)) fail("reader detach");
     unsigned char pending_random[32];
     struct pollfd random_ready={.fd=random_pipe[0],.events=POLLIN};
