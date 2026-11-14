@@ -1,13 +1,9 @@
 use std::cell::RefCell;
-use std::fs::File;
 use std::sync::{Arc, RwLock};
 
-use bincode_next::{Decode, Encode};
 use clap::Parser;
 use log::debug;
-use vhost::vhost_user::message::{
-    VhostTransferStateDirection, VhostTransferStatePhase, VhostUserProtocolFeatures,
-};
+use vhost::vhost_user::message::VhostUserProtocolFeatures;
 use vhost_user_backend::{VhostUserBackendMut, VhostUserDaemon, VringMutex, VringT};
 use virtio_queue::{QueueOwnedT, QueueT};
 use vm_memory::{Bytes, GuestAddressSpace, GuestMemoryAtomic, GuestMemoryMmap};
@@ -83,7 +79,7 @@ impl VsockHdr {
     }
 }
 
-#[derive(Encode, Decode, Debug, Clone)]
+#[derive(Debug, Clone)]
 struct ProxyState {
     bytes_echoed: u64,
 }
@@ -91,8 +87,6 @@ struct ProxyState {
 struct VsockProxyBackend {
     guest_cid: u64,
     state: RefCell<ProxyState>,
-    device_state_result: RefCell<Option<std::io::Result<()>>>,
-    pending_load_fd: RefCell<Option<File>>,
     mem: Option<GuestMemoryAtomic<GuestMemoryMmap>>,
 }
 
@@ -105,8 +99,6 @@ impl VsockProxyBackend {
         Self {
             guest_cid,
             state: RefCell::new(ProxyState { bytes_echoed: 0 }),
-            device_state_result: RefCell::new(None),
-            pending_load_fd: RefCell::new(None),
             mem: None,
         }
     }
@@ -135,7 +127,6 @@ impl VhostUserBackendMut for VsockProxyBackend {
         VhostUserProtocolFeatures::CONFIG
             | VhostUserProtocolFeatures::MQ
             | VhostUserProtocolFeatures::CONFIGURE_MEM_SLOTS
-            | VhostUserProtocolFeatures::DEVICE_STATE
     }
 
     fn get_config(&self, offset: u32, size: u32) -> Vec<u8> {
@@ -182,68 +173,9 @@ impl VhostUserBackendMut for VsockProxyBackend {
         }
         Ok(())
     }
-
-    fn set_device_state_fd(
-        &mut self,
-        direction: VhostTransferStateDirection,
-        _phase: VhostTransferStatePhase,
-        fd: File,
-    ) -> std::io::Result<Option<File>> {
-        match direction {
-            VhostTransferStateDirection::SAVE => {
-                *self.device_state_result.get_mut() = Some(self.save_state_to_fd(&fd));
-            }
-            VhostTransferStateDirection::LOAD => {
-                // Defer read to check_device_state: the frontend writes to the
-                // pipe only AFTER receiving our reply, so reading here deadlocks.
-                *self.pending_load_fd.get_mut() = Some(fd);
-                *self.device_state_result.get_mut() = None;
-            }
-        }
-        Ok(None) // No fd to return
-    }
-
-    fn check_device_state(&self) -> std::io::Result<()> {
-        // Complete deferred LOAD if pending
-        if let Some(fd) = self.pending_load_fd.borrow_mut().take() {
-            use std::io::Read;
-            let mut buf = Vec::new();
-            let mut file = fd.try_clone()?;
-            file.read_to_end(&mut buf)?;
-            let result: Result<ProxyState, _> =
-                bincode_next::decode_from_slice(&buf, bincode_next::config::standard())
-                    .map(|v| v.0);
-            match result {
-                Ok(state) => {
-                    *self.state.borrow_mut() = state;
-                    *self.device_state_result.borrow_mut() = Some(Ok(()));
-                }
-                Err(e) => {
-                    *self.device_state_result.borrow_mut() =
-                        Some(Err(std::io::Error::other(e.to_string())));
-                }
-            }
-        }
-        let result = self.device_state_result.borrow();
-        match result.as_ref() {
-            Some(Ok(())) => Ok(()),
-            Some(Err(e)) => Err(std::io::Error::new(e.kind(), e.to_string())),
-            None => Err(std::io::Error::other("no state transfer in progress")),
-        }
-    }
 }
 
 impl VsockProxyBackend {
-    fn save_state_to_fd(&mut self, fd: &File) -> std::io::Result<()> {
-        use std::io::Write;
-        let state = self.state.get_mut();
-        let buf = bincode_next::encode_to_vec(&*state, bincode_next::config::standard())
-            .map_err(|e| std::io::Error::other(format!("serialize error: {}", e)))?;
-        let mut file = fd.try_clone()?;
-        file.write_all(&buf)?;
-        Ok(())
-    }
-
     fn process_tx_queue(
         &mut self,
         tx_vring: &VringMutex,

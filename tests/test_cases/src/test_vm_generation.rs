@@ -66,7 +66,11 @@ mod guest_side {
         // SYSLOG_ACTION_READ_ALL reads without consuming the kernel log.
         let mut log = vec![0u8; 1 << 20];
         let len = unsafe { libc::klogctl(3, log.as_mut_ptr().cast(), log.len() as i32) };
-        assert!(len >= 0, "cannot read guest kernel log: {}", std::io::Error::last_os_error());
+        assert!(
+            len >= 0,
+            "cannot read guest kernel log: {}",
+            std::io::Error::last_os_error()
+        );
         String::from_utf8_lossy(&log[..len as usize])
             .matches("crng reseeded due to virtual machine fork")
             .count()
@@ -84,7 +88,10 @@ mod guest_side {
                 stream.read_exact(&mut [0u8; 1]).unwrap();
                 let deadline = Instant::now() + Duration::from_secs(10);
                 while reseeds() <= before {
-                    assert!(Instant::now() < deadline, "guest kernel did not handle generation change");
+                    assert!(
+                        Instant::now() < deadline,
+                        "guest kernel did not handle generation change"
+                    );
                     std::thread::yield_now();
                 }
             }

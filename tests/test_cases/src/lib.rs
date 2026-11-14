@@ -1,3 +1,6 @@
+mod test_fs_dax;
+use test_fs_dax::TestFsDax;
+
 mod test_vm_generation;
 use test_vm_generation::TestVmGenerationChange;
 
@@ -77,6 +80,10 @@ use test_nested_virt::TestNestedVirt;
 pub fn test_cases() -> Vec<TestCase> {
     // Register your test here:
     vec![
+        TestCase::new("vhost-user-fs-dax-always", Box::new(TestFsDax("always"))),
+        TestCase::new("vhost-user-fs-dax-inode", Box::new(TestFsDax("inode"))),
+        TestCase::new("vhost-user-fs-dax-never", Box::new(TestFsDax("never"))),
+        TestCase::new("virtiofs-dax", Box::new(TestFsDax("in-process"))),
         TestCase::new("vm-generation-change", Box::new(TestVmGenerationChange)),
         TestCase::new(
             "configure-vm-1cpu-256MiB",
