@@ -9,8 +9,6 @@ pub struct Console {
     total: usize,
     interval_bytes: usize,
     interval: Instant,
-    panic_match: usize,
-    panic_seen: bool,
 }
 impl Default for Console {
     fn default() -> Self {
@@ -29,30 +27,11 @@ impl Console {
             total: 0,
             interval_bytes: 0,
             interval: Instant::now(),
-            panic_match: 0,
-            panic_seen: false,
         }
-    }
-}
-impl Console {
-    pub fn panic_seen(&self) -> bool {
-        self.panic_seen
     }
 }
 impl Write for Console {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        const MARKER: &[u8] = b"HOLODECK GUEST STOP panic";
-        for &byte in bytes {
-            if byte == MARKER[self.panic_match] {
-                self.panic_match += 1;
-                if self.panic_match == MARKER.len() {
-                    self.panic_seen = true;
-                    self.panic_match = 0;
-                }
-            } else {
-                self.panic_match = usize::from(byte == MARKER[0]);
-            }
-        }
         if self.interval.elapsed() >= Duration::from_secs(1) {
             self.interval = Instant::now();
             self.interval_bytes = 0;
@@ -92,18 +71,6 @@ mod tests {
             Ok(())
         }
     }
-    #[test]
-    fn panic_marker_survives_every_split_and_discarded_output() {
-        let marker = b"HOLODECK GUEST STOP panic";
-        for split in 0..=marker.len() {
-            let mut console = Console::default();
-            console.write_all(b"[timestamp] reboot: ").unwrap();
-            console.write_all(&marker[..split]).unwrap();
-            console.write_all(&marker[split..]).unwrap();
-            assert!(console.panic_seen());
-        }
-    }
-
     #[test]
     fn sink_receives_raw_bytes_and_default_discards() {
         let bytes = b"\x1b[2J\xffforged\n";

@@ -198,6 +198,25 @@ pub trait VirtioDevice: AsAny + Send {
 pub trait VmmExitObserver: Send {
     /// Callback to finish processing or cleanup the device resources
     fn on_vmm_exit(&mut self) {}
+    /// Cleanup after a CPU missed its join deadline. Guest rings may still change.
+    fn on_vmm_exit_with_running_cpu(&mut self) {
+        self.on_vmm_exit();
+    }
+}
+
+#[cfg(test)]
+mod exit_observer_tests {
+    use super::VmmExitObserver;
+    #[test]
+    fn running_cpu_cleanup_still_notifies_ordinary_observer() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = calls.clone();
+        let mut observer = move || {
+            observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        };
+        observer.on_vmm_exit_with_running_cpu();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
 }
 
 impl<F: Fn() + Send> VmmExitObserver for F {

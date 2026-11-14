@@ -8,19 +8,6 @@ use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Exit {
-    PowerOff,
-    Watchdog,
-    Stopped,
-    Panic,
-    LivenessExpired,
-    StatedReason {
-        code: u8,
-        observed_micros: Option<u64>,
-    },
-}
-
 #[derive(Clone, Debug, Default)]
 pub struct TerminalFacts {
     pub host_stop: bool,
@@ -247,24 +234,6 @@ impl Runtime {
     pub fn exit_code_state(&self) -> Arc<std::sync::atomic::AtomicI32> {
         self.exit_code.clone()
     }
-    pub fn run(self) -> io::Result<Exit> {
-        self.run_facts().map(|facts| {
-            if facts.host_stop {
-                Exit::Stopped
-            } else if facts.liveness_expired {
-                Exit::LivenessExpired
-            } else if facts.device_expired {
-                Exit::Watchdog
-            } else if facts.reason != 0 {
-                Exit::StatedReason {
-                    code: facts.reason,
-                    observed_micros: facts.observed_micros,
-                }
-            } else {
-                Exit::PowerOff
-            }
-        })
-    }
     pub fn run_facts(mut self) -> io::Result<TerminalFacts> {
         let result = self.run_inner().map(|mut facts| {
             let code = self.exit_code.load(std::sync::atomic::Ordering::Acquire);
@@ -411,9 +380,15 @@ mod tests {
     #[test]
     fn observers_notify_exactly_once_for_all_exit_results() {
         let outcomes = [
-            Ok(Exit::PowerOff),
-            Ok(Exit::Watchdog),
-            Ok(Exit::Stopped),
+            Ok(TerminalFacts::default()),
+            Ok(TerminalFacts {
+                device_expired: true,
+                ..Default::default()
+            }),
+            Ok(TerminalFacts {
+                host_stop: true,
+                ..Default::default()
+            }),
             Err(io::Error::other("device error")),
         ];
         for outcome in outcomes {

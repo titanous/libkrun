@@ -1,6 +1,6 @@
 #[cfg(feature = "devices")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use nitro_sandbox::runtime::{Exit, Runtime};
+    use nitro_sandbox::runtime::Runtime;
     let image = std::env::args()
         .nth(1)
         .ok_or("usage: watchdog SILENT_EIF")?;
@@ -12,7 +12,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         211,
         std::time::Duration::from_secs(3),
     )?;
-    assert_eq!(runtime.run()?, Exit::Watchdog);
+    assert!(runtime.run_facts()?.device_expired);
     eprintln!("WATCHDOG_OK seconds={:.3}", start.elapsed().as_secs_f64());
     Ok(())
 }

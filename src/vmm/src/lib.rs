@@ -454,13 +454,27 @@ impl Vmm {
             vm_exit
         };
         self.vcpus_handles.clear();
+        #[cfg(target_arch = "x86_64")]
+        let vm_exit = crate::vm_exit::VmExit::resolve(
+            vm_exit,
+            match self.exit_code.load(Ordering::Acquire) {
+                i32::MAX => None,
+                code => Some(code),
+            },
+            self.pio_device_manager
+                .stop_reason
+                .0
+                .load(Ordering::Acquire),
+        );
 
         // A detached CPU may still access rings: final drain is unsafe in that case.
-        for observer in self.exit_observers.iter().filter(|_| joined) {
-            observer
-                .lock()
-                .expect("Poisoned mutex for exit observer")
-                .on_vmm_exit();
+        for observer in &self.exit_observers {
+            let mut observer = observer.lock().expect("Poisoned mutex for exit observer");
+            if joined {
+                observer.on_vmm_exit();
+            } else {
+                observer.on_vmm_exit_with_running_cpu();
+            }
         }
 
         // Store the exit reason for Context::run() to read
@@ -504,15 +518,6 @@ impl Subscriber for Vmm {
             }
 
             let vm_exit = resolve_vm_exit(vcpu_exit_code, vmm_exit_code);
-            #[cfg(target_arch = "x86_64")]
-            let vm_exit = crate::vm_exit::VmExit::resolve(
-                vm_exit,
-                (vmm_exit_code != i32::MAX).then_some(vmm_exit_code),
-                self.pio_device_manager
-                    .stop_reason
-                    .0
-                    .load(Ordering::Acquire),
-            );
             self.stop(vm_exit);
         } else {
             error!("Spurious EventManager event for handler: Vmm");

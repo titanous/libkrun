@@ -397,6 +397,10 @@ impl VirtioDevice for Console {
 }
 
 impl VmmExitObserver for Console {
+    fn on_vmm_exit_with_running_cpu(&mut self) {
+        // A detached CPU can still modify rings; do not inspect or drain them.
+    }
+
     fn on_vmm_exit(&mut self) {
         self.prepare_exit();
         self.reset();

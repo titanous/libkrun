@@ -25,6 +25,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cid: 212,
         watchdog: std::time::Duration::from_secs(5),
     });
+    builder.nitro_stop_reason(true);
     builder.disable_implicit_console()?;
     builder.vm_config(1, 1024)?;
     let captured = Arc::new(Mutex::new(Vec::new()));

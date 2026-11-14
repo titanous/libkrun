@@ -5,15 +5,25 @@ use std::sync::{Arc, Mutex};
 /// Terminal outcome shared by the KVM and Nitro Sandbox backends.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VmExit {
+    /// An explicit workload exit code, including zero; not a kernel power-off.
     Shutdown { exit_code: i32 },
+    /// The guest kernel stated power-off intent before its terminal event.
     PowerOffRequested,
+    /// The guest kernel requested reboot; the VMM does not restart it in place.
     RebootRequested,
+    /// The guest kernel requested halt.
     Halted,
+    /// The guest kernel reported panic; this report is sticky.
     Panic,
+    /// A guest terminal event without a valid final reason, or invalid guest state.
     Fault,
+    /// The host explicitly stopped the guest.
     Stopped,
+    /// The host's guest-liveness deadline expired.
     LivenessExpired,
+    /// The host's device-progress deadline expired.
     DeviceWatchdog,
+    /// A host/backend failure, distinct from guest failure.
     Error { message: String },
 }
 impl VmExit {
