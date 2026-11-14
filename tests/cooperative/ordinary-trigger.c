@@ -26,6 +26,7 @@ int main(void)
     }
     if (send(socket_fd, "B", 1, MSG_NOSIGNAL) != 1 || recv(socket_fd, &byte, 1, 0) != 1 || byte != 'B') return 4;
     puts("ORDINARY TRIGGER PASS absent vsock-alive");
+    sleep(2);
     close(socket_fd);
     reboot(RB_POWER_OFF);
     return 0;

@@ -36,6 +36,16 @@ struct State {
 pub struct CaptureRequest(Arc<(Mutex<State>, Condvar)>);
 
 impl CaptureRequest {
+    pub fn require_marker(&self) -> io::Result<()> {
+        if !self.0 .0.lock().unwrap().marker_confirmed {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                crate::cooperative::TemplateMarkerMissing,
+            ));
+        }
+        Ok(())
+    }
+
     pub fn confirm_marker(&self, active: bool) {
         self.0 .0.lock().unwrap().marker_confirmed = active;
     }

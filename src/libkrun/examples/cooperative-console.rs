@@ -105,6 +105,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
     let context = builder.build()?;
+    let unmarked_probe =
+        if args[1] == "ordinary" && std::env::var_os("CLONE_TEST_UNMARKED_ARM").is_some() {
+            let handle = context.vm_handle();
+            Some(std::thread::spawn(move || {
+                std::thread::park_timeout(std::time::Duration::from_secs(1));
+                let error = handle
+                    .arm_template_capture(std::time::Duration::from_secs(1))
+                    .unwrap_err();
+                assert!(error
+                    .get_ref()
+                    .is_some_and(|cause| cause.is::<vmm::cooperative::TemplateMarkerMissing>()));
+                eprintln!("UNMARKED ARM typed TemplateMarkerMissing");
+            }))
+        } else {
+            None
+        };
     let mut arm = if args[1] == "freeze" || args[1] == "refuse" || args[1] == "host-freeze" {
         let handle = context.vm_handle();
         Some(std::thread::spawn(move || -> std::io::Result<()> {
@@ -142,6 +158,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
     let result = context.run()?;
+    if let Some(probe) = unmarked_probe {
+        probe.join().expect("unmarked arm probe");
+    }
     if let Some(arm) = arm {
         arm.join().expect("arm worker")?;
     }

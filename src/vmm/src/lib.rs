@@ -277,6 +277,7 @@ impl Vmm {
         &self,
         timeout: std::time::Duration,
     ) -> std::io::Result<crate::capture_request::CaptureRequest> {
+        self.capture_request.require_marker()?;
         if self.cooperative_capture.is_none() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,

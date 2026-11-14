@@ -45,6 +45,8 @@ try:
     result = subprocess.run(['target/release/examples/cooperative-console', 'ordinary', 'unused', '0'], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=45)
     (a.output / 'guest.log').write_bytes(result.stdout)
     assert result.returncode == 0 and b'ORDINARY TRIGGER PASS absent vsock-alive' in result.stdout
+    if os.environ.get('CLONE_TEST_UNMARKED_ARM'):
+        assert b'UNMARKED ARM typed TemplateMarkerMissing' in result.stdout
     print('PASS ordinary trigger absent; established vsock survives')
 finally:
     stop.set()
