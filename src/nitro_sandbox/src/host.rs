@@ -304,6 +304,30 @@ impl Sandbox {
         GuestMemoryMmap::from_regions(regions)
             .map_err(|e| io::Error::other(format!("RAM table: {e:?}")))
     }
+    /// Build a capture view restricted to boot-reported guest-owned extents.
+    ///
+    /// # Safety
+    /// The caller must stop all device workers and keep this Sandbox alive until
+    /// every returned memory clone is dropped. Guest freeze must remain held.
+    #[cfg(feature = "devices")]
+    pub unsafe fn owned_guest_memory(
+        &self,
+        boot: &crate::owned_memory::BootMemory,
+    ) -> io::Result<vm_memory::GuestMemoryMmap> {
+        use vm_memory::{GuestAddress, GuestMemoryMmap, GuestRegionMmap, MmapRegion};
+        let mut regions = Vec::new();
+        for (gpa, offset, len) in boot.ranges(self.ram.len)? {
+            let pointer = unsafe { self.ram.address.as_ptr().add(offset) };
+            let mapping = unsafe { MmapRegion::build_raw(pointer, len, 3, 1) }
+                .map_err(|error| io::Error::other(format!("owned RAM mapping: {error:?}")))?;
+            regions.push(
+                GuestRegionMmap::new(mapping, GuestAddress(gpa))
+                    .ok_or_else(|| io::Error::other("owned RAM region overflow"))?,
+            );
+        }
+        GuestMemoryMmap::from_regions(regions).map_err(io::Error::other)
+    }
+
     pub fn load(&mut self, path: &str) -> io::Result<()> {
         let started = Instant::now();
         let vm = self.vm.as_ref().unwrap();
