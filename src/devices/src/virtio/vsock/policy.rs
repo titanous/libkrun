@@ -186,7 +186,10 @@ mod tests {
             internet_enabled: true,
         };
         for op in operations {
-            assert_eq!(SocketPolicy::default().check(op, &denied), Err(Errno::EACCES));
+            assert_eq!(
+                SocketPolicy::default().check(op, &denied),
+                Err(Errno::EACCES)
+            );
             assert_eq!(policy.check(op, &denied), Err(Errno::EACCES));
             assert!(policy.check(op, &allowed).is_ok());
         }

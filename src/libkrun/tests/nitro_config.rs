@@ -2,7 +2,8 @@
 use krun::{Builder, NitroBackendConfig, StartError};
 fn rejected(mut builder: Builder, expected: &str) {
     builder.nitro_backend(NitroBackendConfig {
-        image: "/does-not-exist.eif".into(), cid: 200,
+        image: "/does-not-exist.eif".into(),
+        cid: 200,
         watchdog: std::time::Duration::from_secs(3),
     });
     match builder.build() {
@@ -29,7 +30,13 @@ fn rejects_even_empty_commandline_override() {
 #[test]
 fn rejects_separate_external_kernel_before_allocating_vm() {
     let mut builder = Builder::new();
-    let format = if cfg!(target_arch = "x86_64") { krun::KernelFormat::Elf } else { krun::KernelFormat::Raw };
-    builder.external_kernel("/does-not-exist.kernel".into(), format, None).unwrap();
+    let format = if cfg!(target_arch = "x86_64") {
+        krun::KernelFormat::Elf
+    } else {
+        krun::KernelFormat::Raw
+    };
+    builder
+        .external_kernel("/does-not-exist.kernel".into(), format, None)
+        .unwrap();
     rejected(builder, "separate external_kernel");
 }

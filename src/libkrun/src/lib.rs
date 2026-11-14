@@ -1111,61 +1111,126 @@ impl Builder {
 
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     fn build_nitro(mut self, options: NitroBackendConfig) -> Result<Context, StartError> {
-        let unsupported = || StartError::Nitro(std::io::Error::new(std::io::ErrorKind::Unsupported, "unsupported on this backend: Nitro supports EIF boot with block, userspace vsock and custom console ports only"));
-        if self.config.vmr.external_kernel.is_some() || self.config.vmr.kernel_bundle.is_some() || self.config.vmr.firmware_config.is_some() {
+        let unsupported = || {
+            StartError::Nitro(std::io::Error::new(std::io::ErrorKind::Unsupported, "unsupported on this backend: Nitro supports EIF boot with block, userspace vsock and custom console ports only"))
+        };
+        if self.config.vmr.external_kernel.is_some()
+            || self.config.vmr.kernel_bundle.is_some()
+            || self.config.vmr.firmware_config.is_some()
+        {
             return Err(StartError::Nitro(std::io::Error::new(std::io::ErrorKind::Unsupported, "unsupported on this backend: Nitro requires one EIF v4 image containing kernel, initramfs and command line; separate external_kernel images are not accepted")));
         }
-        if self.kernel_cmdline_configured || !self.kernel_cmdline.is_empty() || !self.extra_kernel_args.is_empty() {
-            return Err(StartError::Nitro(std::io::Error::new(std::io::ErrorKind::Unsupported, "unsupported on this backend: Nitro command line must be encoded in the EIF image")));
+        if self.kernel_cmdline_configured
+            || !self.kernel_cmdline.is_empty()
+            || !self.extra_kernel_args.is_empty()
+        {
+            return Err(StartError::Nitro(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "unsupported on this backend: Nitro command line must be encoded in the EIF image",
+            )));
         }
-        if self.config.vmm_uid.is_some() || self.config.vmm_gid.is_some()
-            || self.config.exec_path.is_some() || self.config.env.is_some() || self.config.args.is_some()
-            || self.config.workdir.is_some() || !self.extra_kernel_args.is_empty()
-            || self.config.vmr.nested_enabled || self.config.gpu_virgl_flags.is_some()
+        if self.config.vmm_uid.is_some()
+            || self.config.vmm_gid.is_some()
+            || self.config.exec_path.is_some()
+            || self.config.env.is_some()
+            || self.config.args.is_some()
+            || self.config.workdir.is_some()
+            || !self.extra_kernel_args.is_empty()
+            || self.config.vmr.nested_enabled
+            || self.config.gpu_virgl_flags.is_some()
             || !self.config.vmr.serial_consoles.is_empty()
-            || self.config.rlimits.is_some() || self.config.block_root.is_some()
-            || self.config.console_output.is_some() || self.config.gpu_shm_size.is_some()
-            || self.config.vmr.console_output.is_some() || self.config.vmr.kernel_console.is_some()
-        { return Err(unsupported()); }
+            || self.config.rlimits.is_some()
+            || self.config.block_root.is_some()
+            || self.config.console_output.is_some()
+            || self.config.gpu_shm_size.is_some()
+            || self.config.vmr.console_output.is_some()
+            || self.config.vmr.kernel_console.is_some()
+        {
+            return Err(unsupported());
+        }
         #[cfg(not(feature = "tee"))]
-        if self.config.vmr.balloon_enabled || self.config.vmr.rng_backend.is_some() { return Err(unsupported()); }
+        if self.config.vmr.balloon_enabled || self.config.vmr.rng_backend.is_some() {
+            return Err(unsupported());
+        }
         #[cfg(feature = "snd")]
-        if self.config.enable_snd || self.config.vmr.snd_device { return Err(unsupported()); }
+        if self.config.enable_snd || self.config.vmr.snd_device {
+            return Err(unsupported());
+        }
         #[cfg(feature = "gpu")]
-        if self.config.vmr.display_backend.is_some() || !self.config.vmr.displays.is_empty() { return Err(unsupported()); }
+        if self.config.vmr.display_backend.is_some() || !self.config.vmr.displays.is_empty() {
+            return Err(unsupported());
+        }
         #[cfg(feature = "input")]
-        if !self.config.vmr.input_backends.is_empty() { return Err(unsupported()); }
+        if !self.config.vmr.input_backends.is_empty() {
+            return Err(unsupported());
+        }
         #[cfg(not(feature = "tee"))]
-        if !self.config.vmr.fs.is_empty() { return Err(unsupported()); }
+        if !self.config.vmr.fs.is_empty() {
+            return Err(unsupported());
+        }
         #[cfg(feature = "net")]
-        if !self.config.vmr.net.list.is_empty() || self.config.legacy_net_cfg.is_some() { return Err(unsupported()); }
+        if !self.config.vmr.net.list.is_empty() || self.config.legacy_net_cfg.is_some() {
+            return Err(unsupported());
+        }
         #[cfg(feature = "vhost-user")]
-        if self.config.vhost_user_vsock || !self.config.vmr.vhost_user_devices.is_empty() || !self.config.vmr.vhost_user_fs.is_empty() { return Err(unsupported()); }
+        if self.config.vhost_user_vsock
+            || !self.config.vmr.vhost_user_devices.is_empty()
+            || !self.config.vmr.vhost_user_fs.is_empty()
+        {
+            return Err(unsupported());
+        }
         let config = self.config.vmr.vm_config();
         let mut runtime = nitro_sandbox::runtime::Runtime::new(
-            options.image.to_str().ok_or_else(|| StartError::Nitro(std::io::Error::other("non-UTF8 EIF path")))?,
+            options
+                .image
+                .to_str()
+                .ok_or_else(|| StartError::Nitro(std::io::Error::other("non-UTF8 EIF path")))?,
             config.mem_size_mib.unwrap_or(1024) * 1024 * 1024,
-            u32::from(config.vcpu_count.unwrap_or(1)), options.cid, options.watchdog,
-        ).map_err(StartError::Nitro)?;
+            u32::from(config.vcpu_count.unwrap_or(1)),
+            options.cid,
+            options.watchdog,
+        )
+        .map_err(StartError::Nitro)?;
         for cfg in self.config.take_block_cfg() {
             let block = vmm::vmm_config::block::BlockBuilder::create_block(cfg)?;
-            runtime.add_worker_device(Arc::new(Mutex::new(block))).map_err(StartError::Nitro)?;
+            runtime
+                .add_worker_device(Arc::new(Mutex::new(block)))
+                .map_err(StartError::Nitro)?;
         }
         if !matches!(self.config.vsock_config, VsockConfig::Disabled) {
-            let mut flags = match self.config.vsock_config { VsockConfig::Explicit { tsi_flags } => tsi_flags, _ => TsiFlags::empty() };
-            if !self.socket_policy.internet_enabled { flags.remove(TsiFlags::HIJACK_INET); }
-            let mut vsock = devices::virtio::Vsock::new(options.cid, self.config.tsi_port_map, self.config.unix_ipc_port_map, flags)
-                .map_err(|e| StartError::Nitro(std::io::Error::other(format!("vsock: {e:?}"))))?;
+            let mut flags = match self.config.vsock_config {
+                VsockConfig::Explicit { tsi_flags } => tsi_flags,
+                _ => TsiFlags::empty(),
+            };
+            if !self.socket_policy.internet_enabled {
+                flags.remove(TsiFlags::HIJACK_INET);
+            }
+            let mut vsock = devices::virtio::Vsock::new(
+                options.cid,
+                self.config.tsi_port_map,
+                self.config.unix_ipc_port_map,
+                flags,
+            )
+            .map_err(|e| StartError::Nitro(std::io::Error::other(format!("vsock: {e:?}"))))?;
             vsock.set_socket_policy(self.socket_policy.clone());
-            runtime.add_device(Arc::new(Mutex::new(vsock))).map_err(StartError::Nitro)?;
+            runtime
+                .add_device(Arc::new(Mutex::new(vsock)))
+                .map_err(StartError::Nitro)?;
         }
         for console in self.config.vmr.virtio_consoles {
             let ports = match console {
                 VirtioConsoleConfigMode::Custom(ports) => ports,
-                _ => return Err(StartError::Nitro(std::io::Error::other("Nitro console requires custom port descriptions"))),
+                _ => {
+                    return Err(StartError::Nitro(std::io::Error::other(
+                        "Nitro console requires custom port descriptions",
+                    )))
+                }
             };
-            let console = devices::virtio::Console::new(ports).map_err(|e| StartError::Nitro(std::io::Error::other(format!("console: {e:?}"))))?;
-            runtime.add_device(Arc::new(Mutex::new(console))).map_err(StartError::Nitro)?;
+            let console = devices::virtio::Console::new(ports)
+                .map_err(|e| StartError::Nitro(std::io::Error::other(format!("console: {e:?}"))))?;
+            runtime
+                .add_device(Arc::new(Mutex::new(console)))
+                .map_err(StartError::Nitro)?;
         }
         Context::from_nitro(runtime)
     }
@@ -1455,14 +1520,26 @@ struct ContextVm {
 }
 impl Deref for ContextVm {
     type Target = vmm::builder::BuiltVm;
-    fn deref(&self) -> &Self::Target { self.kvm.as_ref().expect("this control operation is only available on KVM") }
+    fn deref(&self) -> &Self::Target {
+        self.kvm
+            .as_ref()
+            .expect("this control operation is only available on KVM")
+    }
 }
 impl DerefMut for ContextVm {
-    fn deref_mut(&mut self) -> &mut Self::Target { self.kvm.as_mut().expect("this control operation is only available on KVM") }
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.kvm
+            .as_mut()
+            .expect("this control operation is only available on KVM")
+    }
 }
 impl From<vmm::builder::BuiltVm> for ContextVm {
     fn from(vm: vmm::builder::BuiltVm) -> Self {
-        Self { kvm: Some(vm), #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))] nitro: None }
+        Self {
+            kvm: Some(vm),
+            #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+            nitro: None,
+        }
     }
 }
 
@@ -1517,7 +1594,10 @@ impl Context {
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     fn from_nitro(runtime: nitro_sandbox::runtime::Runtime) -> Result<Self, StartError> {
         Ok(Self {
-            built_vm: ContextVm { kvm: None, nitro: Some(runtime) },
+            built_vm: ContextVm {
+                kvm: None,
+                nitro: Some(runtime),
+            },
             event_manager: EventManager::new().map_err(StartError::EventManager)?,
             shutdown_efd: None,
             vm_exit: Arc::new(Mutex::new(None)),
@@ -1569,10 +1649,17 @@ impl Context {
     pub fn run(mut self) -> Result<vmm::vm_exit::VmExit, StartError> {
         #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
         if let Some(runtime) = self.built_vm.nitro.take() {
-            return runtime.run().map(|exit| match exit {
-                nitro_sandbox::runtime::Exit::PowerOff => vmm::vm_exit::VmExit::Shutdown { exit_code: 0 },
-                nitro_sandbox::runtime::Exit::Watchdog => vmm::vm_exit::VmExit::Error { message: "Nitro guest watchdog expired".into() },
-            }).map_err(StartError::Nitro);
+            return runtime
+                .run()
+                .map(|exit| match exit {
+                    nitro_sandbox::runtime::Exit::PowerOff => {
+                        vmm::vm_exit::VmExit::Shutdown { exit_code: 0 }
+                    }
+                    nitro_sandbox::runtime::Exit::Watchdog => vmm::vm_exit::VmExit::Error {
+                        message: "Nitro guest watchdog expired".into(),
+                    },
+                })
+                .map_err(StartError::Nitro);
         }
         let t_run_start = std::time::Instant::now();
         // Start the vCPUs

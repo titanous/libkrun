@@ -109,7 +109,10 @@ impl InterruptTransport {
     /// queue-agnostic, so notify every queue; unused notifications are harmless.
     pub fn new_nitro(calls: Vec<EventFd>, log_target: String) -> std::io::Result<Self> {
         if calls.is_empty() {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "no Nitro call fds"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "no Nitro call fds",
+            ));
         }
         Ok(Self(Arc::new(InterruptTransportInner {
             log_target,
@@ -156,7 +159,8 @@ impl InterruptTransport {
     fn try_signal(&self, status: u32) -> Result<(), crate::Error> {
         if self.0.intc.is_none() {
             for call in &self.0.direct_calls {
-                call.write(1).map_err(crate::Error::FailedSignalingUsedQueue)?;
+                call.write(1)
+                    .map_err(crate::Error::FailedSignalingUsedQueue)?;
             }
             return Ok(());
         }
