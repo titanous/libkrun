@@ -11,7 +11,6 @@ unsafe extern "C" {
     fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
     fn munmap(addr: *mut u8, len: usize) -> i32;
     fn memfd_create(name: *const u8, flags: u32) -> i32;
-    fn flock(fd: i32, operation: i32) -> i32;
     fn eventfd(initial: u32, flags: i32) -> i32;
     fn poll(fds: *mut PollFd, count: usize, timeout: i32) -> i32;
 }
@@ -164,7 +163,7 @@ pub struct Sandbox {
     pub info: Mapping,
     _control: File,
     _info_file: File,
-    teardown_lock: File,
+    lifecycle_lock: Option<crate::lifecycle::OpenLock>,
     console_at: u32,
 }
 impl Sandbox {
@@ -172,18 +171,34 @@ impl Sandbox {
         Self::with_mapping(memory, vcpus, None)
     }
     pub fn with_mapping(memory: usize, vcpus: u32, reused: Option<Mapping>) -> io::Result<Self> {
+        Self::with_lifecycle_lock(memory, vcpus, reused, None)
+    }
+    pub fn with_lifecycle_lock(
+        memory: usize,
+        vcpus: u32,
+        reused: Option<Mapping>,
+        lifecycle_lock: Option<crate::lifecycle::LifecycleLock>,
+    ) -> io::Result<Self> {
         if memory < 64 * 1024 * 1024 || !memory.is_multiple_of(INFO_PAGE_SIZE) || vcpus == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "memory/vCPU geometry",
             ));
         }
-        let teardown_lock = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open("/tmp/libkrun-nitro-teardown.lock")?;
+        let lifecycle_lock = lifecycle_lock
+            .as_ref()
+            .map(|lock| lock.open())
+            .transpose()?;
+        let mut creation_guard = lifecycle_lock
+            .as_ref()
+            .map(|lock| lock.acquire())
+            .transpose()?;
+        if lifecycle_lock
+            .as_ref()
+            .is_some_and(|lock| lock.serialization == crate::lifecycle::Serialization::Teardown)
+        {
+            creation_guard.take();
+        }
         let control = OpenOptions::new()
             .read(true)
             .write(true)
@@ -221,13 +236,14 @@ impl Sandbox {
         };
         let raw = call(&control, 3, 0x30, &mut c)?;
         let vm = unsafe { File::from_raw_fd(raw) };
+        drop(creation_guard);
         let sb = Self {
             vm: Some(vm),
             ram,
             info,
             _control: control,
             _info_file: info_file,
-            teardown_lock,
+            lifecycle_lock,
             console_at: 0,
         };
         for _ in 0..vcpus {
@@ -485,6 +501,12 @@ impl Sandbox {
         Ok(None)
     }
     pub fn start(&self, cid: u64) -> io::Result<()> {
+        let _guard = self
+            .lifecycle_lock
+            .as_ref()
+            .filter(|lock| lock.serialization == crate::lifecycle::Serialization::StartAndTeardown)
+            .map(|lock| lock.acquire())
+            .transpose()?;
         call(
             self.vm.as_ref().unwrap(),
             3,
@@ -588,20 +610,19 @@ impl Sandbox {
         if self.vm.is_none() {
             return;
         }
-        // EINTR must not allow an unlocked close.
-        loop {
-            if unsafe { flock(self.teardown_lock.as_raw_fd(), 2) } == 0 {
-                break;
+        let _guard = self.lifecycle_lock.as_ref().map(|lock| {
+            loop {
+                match lock.acquire() {
+                    Ok(guard) => break guard,
+                    Err(_) => {
+                        // Keep VM and backing memory alive. The daemon must
+                        // repair its lock path or reap us under the same lock.
+                        std::thread::park_timeout(Duration::from_secs(1));
+                    }
+                }
             }
-            if io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
-                // Avoid unsafe overlapping teardown if the host lock is unusable.
-                std::process::abort();
-            }
-        }
+        });
         drop(self.vm.take());
-        unsafe {
-            flock(self.teardown_lock.as_raw_fd(), 8);
-        }
     }
 }
 impl Drop for Sandbox {

@@ -3,6 +3,8 @@
 
 #[cfg(target_os = "linux")]
 pub mod host;
+#[cfg(target_os = "linux")]
+pub mod lifecycle;
 #[cfg(all(target_os = "linux", feature = "devices"))]
 pub mod runtime;
 #[cfg(all(target_os = "linux", feature = "devices"))]

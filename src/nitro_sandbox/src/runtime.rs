@@ -52,7 +52,17 @@ impl Runtime {
         cid: u64,
         timeout: Duration,
     ) -> io::Result<Self> {
-        let mut sandbox = Sandbox::new(memory, vcpus)?;
+        Self::with_lifecycle_lock(image, memory, vcpus, cid, timeout, None)
+    }
+    pub fn with_lifecycle_lock(
+        image: &str,
+        memory: usize,
+        vcpus: u32,
+        cid: u64,
+        timeout: Duration,
+        lock: Option<crate::lifecycle::LifecycleLock>,
+    ) -> io::Result<Self> {
+        let mut sandbox = Sandbox::with_lifecycle_lock(memory, vcpus, None, lock)?;
         sandbox.load(image)?;
         let memory = Some(unsafe { sandbox.guest_memory()? });
         let manager =

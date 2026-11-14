@@ -179,6 +179,25 @@ transport reset. The repeatable real-host regression is
 the `nitro_reset` example and packaging `guest-reset.c` as `/init`.
 `port_map` requires `internet_socket_forwarding(true)` on both backends. The
 `nitro-sandbox` feature cannot be combined with `tee` or legacy `aws-nitro`.
+### Host-owned lifecycle lock
+
+On hosts requiring serialized teardown, call
+`nitro_lifecycle_lock(path, NitroSerialization::Teardown)` before build.
+`StartAndTeardown` additionally serializes VM creation and start ioctls. The daemon
+creates a regular lock file with service-owned permissions before launching VMMs;
+the library opens it without following symlinks and retains that inode. Do not
+unlink, replace, or rotate the file while any VMM exists. No lock is used by default;
+that default is not safe on hosts requiring serialized teardown, including m9g.
+
+**Before killing a VMM**, the daemon must open this same file and take exclusive
+`flock`, send the kill signal, wait for the process to be reaped and for its guest
+to be gone, then release the lock. Hold it across all those steps. Killing a VMM
+without the lock bypasses library teardown serialization. Prefer a handle stop
+request, which stops workers and closes the VM under the configured lock.
+All cooperating VMMs and the daemon must resolve the path to the same inode,
+including across mount namespaces. Starts/stops in different processes are
+serialized by the kernel's flock, not a process-local mutex.
+
 The current watchdog bounds device readiness/reset recovery, not a hung workload
 whose devices remain ready. General liveness and panic detection are not yet
 provided.

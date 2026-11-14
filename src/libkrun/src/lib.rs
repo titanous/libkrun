@@ -492,6 +492,9 @@ pub struct ConsoleDeviceInfo {
 }
 
 #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+pub use nitro_sandbox::lifecycle::Serialization as NitroSerialization;
+
+#[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
 pub struct NitroBackendConfig {
     pub image: PathBuf,
     pub cid: u64,
@@ -502,6 +505,8 @@ pub struct NitroBackendConfig {
 pub struct Builder {
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     nitro: Option<NitroBackendConfig>,
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    nitro_lifecycle_lock: Option<nitro_sandbox::lifecycle::LifecycleLock>,
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
     nitro_console_base: Option<u32>,
     #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
@@ -1252,7 +1257,7 @@ impl Builder {
             ram_mib: config.mem_size_mib.unwrap_or(1024) as u32,
         };
         let mut console_id = self.nitro_device_count_before_consoles();
-        let mut runtime = nitro_sandbox::runtime::Runtime::new(
+        let mut runtime = nitro_sandbox::runtime::Runtime::with_lifecycle_lock(
             options
                 .image
                 .to_str()
@@ -1261,6 +1266,7 @@ impl Builder {
             u32::from(config.vcpu_count.unwrap_or(1)),
             options.cid,
             options.watchdog,
+            self.nitro_lifecycle_lock.take(),
         )
         .map_err(StartError::Nitro)?;
         for cfg in self.config.take_block_cfg() {
@@ -1333,6 +1339,21 @@ impl Builder {
     pub fn nitro_backend(&mut self, config: NitroBackendConfig) -> &mut Self {
         self.nitro_selected_after_consoles |= self.console_count != 0 && self.nitro.is_none();
         self.nitro = Some(config);
+        self
+    }
+
+    /// Serialize lifecycle operations using a daemon-created regular lock file.
+    /// The daemon must take this same flock before SIGKILL and hold it through reaping.
+    #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
+    pub fn nitro_lifecycle_lock(
+        &mut self,
+        path: PathBuf,
+        serialization: NitroSerialization,
+    ) -> &mut Self {
+        self.nitro_lifecycle_lock = Some(nitro_sandbox::lifecycle::LifecycleLock {
+            path,
+            serialization,
+        });
         self
     }
 
