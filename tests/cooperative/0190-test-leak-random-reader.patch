@@ -2,17 +2,18 @@ Subject: [PATCH] TEST ONLY: keep 64 bytes per task that reads random bytes
 
 --- a/drivers/char/random.c
 +++ b/drivers/char/random.c
-@@ -643,6 +643,13 @@ static ssize_t cooperative_random_read(struct iov_iter *iter)
+@@ -796,6 +796,14 @@ static ssize_t cooperative_random_read(struct iov_iter *iter)
+ 	    !(iter_is_ubuf(iter) || iter_is_iovec(iter)) ||
  	    (current->flags & (PF_KTHREAD | PF_IO_WORKER)))
  		return get_random_bytes_user(iter);
- 	buffer = iter->ubuf + iter->iov_offset;
 +	/* TEST ONLY (fork tests/cooperative): keep 64 bytes for every task that reads random bytes
-+	 * and never free them, so the memory-growth test has a kernel it must fail on. */
-+	if (!slot->len) {
++	 * and never free them, so the memory-growth test has a kernel it must fail on. slot->ip
++	 * stays 0 until the task's first random read has returned: once per task. */
++	if (!slot->ip) {
 +		static void *volatile cooperative_test_leak;
 +
 +		cooperative_test_leak = kmalloc(64, GFP_KERNEL);
 +	}
- 	ret = get_random_bytes_user(iter);
- 	if (ret <= 0)
- 		return ret;
+ 
+ 	/* A previous result of this task is superseded: this is a system call (a second
+ 	 * random read in one io_uring call replaces the first). Keep its allocation for reuse.
