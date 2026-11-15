@@ -123,7 +123,12 @@ Parked receiver contract:
 
 ## Limits
 
-- Memory 1 GiB to 4 GiB per guest; CPU counts 1, 4 and 8 were tested.
+- Memory 1 GiB to 16 GiB per guest. The first GiB maps at GPA 0x40000000;
+  the remaining contiguous backing maps at GPA 0x400000000. Template lengths,
+  offsets and control-page addresses are 64-bit. The receiver's 2 MiB reservation
+  remains in the first GiB, independent of total RAM. Sizes outside this supported
+  range fail validation with `RestoreMismatch::MemorySize` before receiver writes.
+  CPU counts 1, 4 and 8 were tested.
 - At most 256 interrupt-controller register writes are replayed.
 - Copying is serial through a 1 MiB buffer (about 60–70 ms per GiB measured);
   receiver boot to READY is about 213 ms; both are paid per copy unless the

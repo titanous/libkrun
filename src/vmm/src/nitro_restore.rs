@@ -131,7 +131,9 @@ pub fn validate(
     if template.vcpus != vcpus {
         return Err(mismatch(RestoreMismatch::CpuCount));
     }
-    if template.ram_mib != ram_mib {
+    // The two-region layout uses 64-bit addresses and offsets. Bound the tested
+    // allocation size before receiver creation or any write into its mapping.
+    if template.ram_mib != ram_mib || !(1024..=16384).contains(&ram_mib) {
         return Err(mismatch(RestoreMismatch::MemorySize));
     }
     if template.topology != topology {
@@ -265,6 +267,35 @@ mod tests {
         assert_eq!(unsafe { libc::munmap(mapping, 1 << 30) }, 0);
     }
     #[test]
+    fn accepts_large_two_region_layout_and_refuses_above_limit() {
+        for ram_mib in [1024, 2048, 4096, 8192, 16384, 17408] {
+            let mut t = template();
+            t.ram_mib = ram_mib;
+            if ram_mib > 1024 {
+                t.regions[0].1 = 1 << 30;
+                t.regions.push((
+                    0x400000000,
+                    ((ram_mib - 1024) << 20) as usize,
+                    (1 << 30) + 24576,
+                ));
+            }
+            let result = validate(&t, 4, ram_mib, b"devices", b"kernel-cpu");
+            if ram_mib <= 16384 {
+                result.unwrap();
+            } else {
+                assert_eq!(
+                    result
+                        .unwrap_err()
+                        .get_ref()
+                        .unwrap()
+                        .downcast_ref::<RestoreMismatch>(),
+                    Some(&RestoreMismatch::MemorySize)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn refuses_layout_outside_receiver_backing() {
         for (gpa, len) in [
             (0, 0x3f600000),
@@ -312,7 +343,7 @@ pub unsafe fn copy_and_release(
     seed: [u8; 32],
 ) -> io::Result<()> {
     use nitro_sandbox::{cooperative::ResumeEntry, receiver};
-    if base.is_null() || ram_mib != template.ram_mib || !(1024..=4096).contains(&ram_mib) {
+    if base.is_null() {
         return Err(invalid());
     }
     validate(
