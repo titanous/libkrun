@@ -12,10 +12,13 @@ in cross.stdenv.mkDerivation {
   name = "random-copy-arm64";
   src = ./.;
   dontConfigure = true;
-  buildPhase = "$CC -O2 -Wall -Wextra -Werror -static -pthread random.c -o random-arm64";
+  buildPhase = ''
+    $CC -O2 -Wall -Wextra -Werror -static -pthread random.c -o random-arm64
+    $CC -O2 -Wall -Wextra -Werror -static -pthread randbench.c -o randbench-arm64
+  '';
   installPhase = ''
     mkdir -p $out
-    cp random-arm64 $out/
+    cp random-arm64 randbench-arm64 $out/
     cp ${cross.busybox}/bin/busybox $out/busybox-arm64
   '';
 }
