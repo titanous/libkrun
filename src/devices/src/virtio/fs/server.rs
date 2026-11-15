@@ -81,13 +81,40 @@ const COUNTERS_XATTR: &[u8] = b"trusted.holodeck.fs-counters";
 
 fn opcode_name(opcode: usize) -> String {
     const NAMES: [(usize, &str); 34] = [
-        (1, "lookup"), (2, "forget"), (3, "getattr"), (4, "setattr"), (5, "readlink"),
-        (6, "symlink"), (9, "mkdir"), (10, "unlink"), (11, "rmdir"), (12, "rename"),
-        (14, "open"), (15, "read"), (16, "write"), (17, "statfs"), (18, "release"),
-        (20, "fsync"), (21, "setxattr"), (22, "getxattr"), (23, "listxattr"), (25, "flush"),
-        (26, "init"), (27, "opendir"), (28, "readdir"), (29, "releasedir"), (30, "fsyncdir"),
-        (34, "access"), (35, "create"), (39, "ioctl"), (42, "batch_forget"), (44, "readdirplus"),
-        (45, "rename2"), (46, "lseek"), (48, "setupmapping"), (49, "removemapping"),
+        (1, "lookup"),
+        (2, "forget"),
+        (3, "getattr"),
+        (4, "setattr"),
+        (5, "readlink"),
+        (6, "symlink"),
+        (9, "mkdir"),
+        (10, "unlink"),
+        (11, "rmdir"),
+        (12, "rename"),
+        (14, "open"),
+        (15, "read"),
+        (16, "write"),
+        (17, "statfs"),
+        (18, "release"),
+        (20, "fsync"),
+        (21, "setxattr"),
+        (22, "getxattr"),
+        (23, "listxattr"),
+        (25, "flush"),
+        (26, "init"),
+        (27, "opendir"),
+        (28, "readdir"),
+        (29, "releasedir"),
+        (30, "fsyncdir"),
+        (34, "access"),
+        (35, "create"),
+        (39, "ioctl"),
+        (42, "batch_forget"),
+        (44, "readdirplus"),
+        (45, "rename2"),
+        (46, "lseek"),
+        (48, "setupmapping"),
+        (49, "removemapping"),
     ];
     NAMES
         .iter()
@@ -110,6 +137,33 @@ impl Measure {
     }
 }
 
+/// The reply to a getxattr of `name` when it is the counters attribute and measurement is on;
+/// `None` passes the request to the file system unchanged (always so when measurement is off).
+fn counters_reply(
+    measure: Option<&Measure>,
+    name: &[u8],
+    size: u32,
+) -> Option<io::Result<GetxattrReply>> {
+    let measure = measure.filter(|_| name == COUNTERS_XATTR)?;
+    let text = measure.text();
+    Some(if size == 0 {
+        Ok(GetxattrReply::Count(text.len() as u32))
+    } else if (size as usize) < text.len() {
+        Err(io::Error::from_raw_os_error(libc::ERANGE))
+    } else {
+        Ok(GetxattrReply::Value(text))
+    })
+}
+
+impl Measure {
+    fn new() -> Self {
+        Measure {
+            counts: std::array::from_fn(|_| AtomicU64::new(0)),
+            nanos: std::array::from_fn(|_| AtomicU64::new(0)),
+        }
+    }
+}
+
 impl Server {
     pub fn set_dax_mapper(&mut self, mapper: Option<Arc<dyn DaxMapper>>) {
         self.dax_mapper = mapper;
@@ -119,12 +173,7 @@ impl Server {
             fs,
             options: AtomicU64::new(FsOptions::empty().bits()),
             dax_mapper: None,
-            measure: std::env::var_os("HOLODECK_FS_MEASURE").map(|_| {
-                Box::new(Measure {
-                    counts: std::array::from_fn(|_| AtomicU64::new(0)),
-                    nanos: std::array::from_fn(|_| AtomicU64::new(0)),
-                })
-            }),
+            measure: std::env::var_os("HOLODECK_FS_MEASURE").map(|_| Box::new(Measure::new())),
         }
     }
 
@@ -808,24 +857,15 @@ impl Server {
         }
 
         let name = bytes_to_cstr(&name)?;
-        let reply = match self.measure.as_ref() {
-            Some(measure) if name.to_bytes() == COUNTERS_XATTR => {
-                let text = measure.text();
-                if size == 0 {
-                    Ok(GetxattrReply::Count(text.len() as u32))
-                } else if (size as usize) < text.len() {
-                    Err(io::Error::from_raw_os_error(libc::ERANGE))
-                } else {
-                    Ok(GetxattrReply::Value(text))
-                }
-            }
-            _ => self.fs.getxattr(
-                Context::from(in_header),
-                in_header.nodeid.into(),
-                name,
-                size,
-            ),
-        };
+        let reply =
+            counters_reply(self.measure.as_deref(), name.to_bytes(), size).unwrap_or_else(|| {
+                self.fs.getxattr(
+                    Context::from(in_header),
+                    in_header.nodeid.into(),
+                    name,
+                    size,
+                )
+            });
         match reply {
             Ok(GetxattrReply::Value(val)) => reply_ok(None::<u8>, Some(&val), in_header.unique, w),
             Ok(GetxattrReply::Count(count)) => {
@@ -1761,4 +1801,44 @@ fn get_extensions(options: FsOptions, skip: usize, request_bytes: &[u8]) -> Resu
     }
 
     Ok(extensions)
+}
+
+#[cfg(test)]
+mod measure_tests {
+    use super::*;
+
+    #[test]
+    fn counters_pass_through_when_measurement_is_off() {
+        assert!(counters_reply(None, COUNTERS_XATTR, 0).is_none());
+        assert!(counters_reply(None, COUNTERS_XATTR, 4096).is_none());
+    }
+
+    #[test]
+    fn other_attributes_pass_through_when_measurement_is_on() {
+        let measure = Measure::new();
+        assert!(counters_reply(Some(&measure), b"user.other", 4096).is_none());
+        assert!(counters_reply(Some(&measure), b"trusted.holodeck.fs-counter", 4096).is_none());
+    }
+
+    #[test]
+    fn counters_report_count_value_and_erange() {
+        let measure = Measure::new();
+        measure.counts[1].fetch_add(3, Ordering::Relaxed);
+        measure.nanos[1].fetch_add(300, Ordering::Relaxed);
+        measure.counts[44].fetch_add(1, Ordering::Relaxed);
+        measure.counts[60].fetch_add(2, Ordering::Relaxed);
+        let text = b"lookup=3:300 readdirplus=1:0 op60=2:0 ".to_vec();
+        assert!(matches!(
+            counters_reply(Some(&measure), COUNTERS_XATTR, 0),
+            Some(Ok(GetxattrReply::Count(n))) if n as usize == text.len()
+        ));
+        assert!(matches!(
+            counters_reply(Some(&measure), COUNTERS_XATTR, 4),
+            Some(Err(e)) if e.raw_os_error() == Some(libc::ERANGE)
+        ));
+        assert!(matches!(
+            counters_reply(Some(&measure), COUNTERS_XATTR, 4096),
+            Some(Ok(GetxattrReply::Value(value))) if value == text
+        ));
+    }
 }
