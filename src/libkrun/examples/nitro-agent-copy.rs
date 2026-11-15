@@ -898,7 +898,10 @@ mod probe {
         let source_cid = std::env::var("AGENT_SOURCE_CID")
             .unwrap_or_else(|_| "711".into())
             .parse::<u64>()?;
-        if !(700..=899).contains(&source_cid) {
+        let stop_capture = std::env::var_os("AGENT_STOP_DURING_CAPTURE").is_some();
+        if !(700..=899).contains(&source_cid)
+            && !(stop_capture && (3..u64::from(u32::MAX)).contains(&source_cid))
+        {
             return Err("source CID outside lane range".into());
         }
         let mut source = builder(&args[1], source_cid, &socket)?;
@@ -947,7 +950,6 @@ mod probe {
         eprintln!("AGENT_SOURCE_RUN");
         let handle = context.vm_handle();
         let arm_handle = context.vm_handle();
-        let stop_capture = std::env::var_os("AGENT_STOP_DURING_CAPTURE").is_some();
         let stop_handle = context.vm_handle();
         let (freeze_tx, freeze_rx) = std::sync::mpsc::sync_channel(1);
         let source_listener = listener.try_clone()?;
