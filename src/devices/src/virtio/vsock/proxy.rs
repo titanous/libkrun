@@ -69,6 +69,22 @@ impl fmt::Display for ProxyError {
 
 pub trait Proxy: Send + AsRawFd {
     fn id(&self) -> u64;
+    /// vsock port of the guest control socket whose TSI_PROXY_CREATE made this proxy. Control
+    /// requests name their proxy by a number in the message body; only this sender may act
+    /// on the proxy. `None` for proxies the VMM made itself (accepted connections), which
+    /// have no creating control socket.
+    fn control_port(&self) -> Option<u32> {
+        None
+    }
+    /// When this proxy was made. The reaper removes a released proxy's id only while that
+    /// same proxy still holds it, never a newer proxy created under the same id.
+    fn created(&self) -> Option<std::time::Instant> {
+        None
+    }
+    /// The creating control socket has released this proxy; it only waits for removal.
+    fn released(&self) -> bool {
+        false
+    }
     #[allow(dead_code)]
     fn status(&self) -> ProxyStatus;
     fn connect(&mut self, pkt: &VsockPacket, req: TsiConnectReq) -> ProxyUpdate;
