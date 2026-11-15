@@ -60,6 +60,7 @@ impl FsWorker {
     }
 
     fn work(mut self, mount: String) -> Box<dyn FileSystem + Send + Sync> {
+        self.server.register_request_stats(&mount);
         let virtq_hpq_ev_fd = self.queue_evts[HPQ_INDEX].as_raw_fd();
         let virtq_req_ev_fd = self.queue_evts[REQ_INDEX].as_raw_fd();
         let stop_ev_fd = self.stop_fd.as_raw_fd();

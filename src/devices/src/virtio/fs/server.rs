@@ -8,7 +8,7 @@ use std::fs::File;
 use std::io::{self, Read, Write};
 use std::mem::size_of;
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use vm_memory::ByteValued;
 
@@ -60,12 +60,41 @@ impl io::Write for ZCWriter<'_> {
     }
 }
 
+struct RequestStats {
+    counts: [AtomicU64; 64],
+    nanos: [AtomicU64; 64],
+}
+
+type MountStats = Vec<(String, Weak<RequestStats>)>;
+static MOUNT_STATS: OnceLock<Mutex<MountStats>> = OnceLock::new();
+
+#[cfg(test)]
+mod request_stats_tests {
+    use super::*;
+
+    struct EmptyFs;
+    impl FileSystem for EmptyFs {}
+
+    #[test]
+    fn snapshots_keep_counts_and_drop_ended_mounts() {
+        let server = Server::new(Box::new(EmptyFs));
+        let mount = "request-stats-unit-test";
+        server.register_request_stats(mount);
+        server.stats.counts[15].store(7, Ordering::Relaxed);
+        server.stats.nanos[15].store(1234, Ordering::Relaxed);
+        for _ in 0..2 {
+            assert!(Server::request_stats().contains(&(mount.to_owned(), 15, 7, 1234)));
+        }
+        drop(server);
+        assert!(Server::request_stats().iter().all(|row| row.0 != mount));
+    }
+}
+
 pub struct Server {
     fs: Box<dyn FileSystem + Send + Sync>,
     options: AtomicU64,
     dax_mapper: Option<Arc<dyn DaxMapper>>,
-    request_counts: [AtomicU64; 64],
-    request_nanos: [AtomicU64; 64],
+    stats: Arc<RequestStats>,
 }
 
 impl Server {
@@ -77,14 +106,48 @@ impl Server {
             fs,
             options: AtomicU64::new(FsOptions::empty().bits()),
             dax_mapper: None,
-            request_counts: std::array::from_fn(|_| AtomicU64::new(0)),
-            request_nanos: std::array::from_fn(|_| AtomicU64::new(0)),
+            stats: Arc::new(RequestStats {
+                counts: std::array::from_fn(|_| AtomicU64::new(0)),
+                nanos: std::array::from_fn(|_| AtomicU64::new(0)),
+            }),
         }
     }
 
+    pub fn register_request_stats(&self, mount: &str) {
+        MOUNT_STATS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .push((mount.to_owned(), Arc::downgrade(&self.stats)));
+    }
+
+    /// Read the existing per-mount counters without resetting them. Counts and service times
+    /// are independent relaxed loads; callers take differences at quiescent boundaries.
+    pub fn request_stats() -> Vec<(String, u32, u64, u64)> {
+        let mut mounts = MOUNT_STATS.get_or_init(Default::default).lock().unwrap();
+        mounts.retain(|(_, stats)| stats.strong_count() != 0);
+        let mut result = Vec::new();
+        for (mount, stats) in mounts.iter() {
+            if let Some(stats) = stats.upgrade() {
+                for opcode in 0..stats.counts.len() {
+                    let count = stats.counts[opcode].load(Ordering::Relaxed);
+                    if count != 0 {
+                        result.push((
+                            mount.clone(),
+                            opcode as u32,
+                            count,
+                            stats.nanos[opcode].load(Ordering::Relaxed),
+                        ));
+                    }
+                }
+            }
+        }
+        result
+    }
+
     pub fn log_request_stats(&self, mount: &str) {
-        for opcode in 0..self.request_counts.len() {
-            let count = self.request_counts[opcode].load(Ordering::Relaxed);
+        for opcode in 0..self.stats.counts.len() {
+            let count = self.stats.counts[opcode].load(Ordering::Relaxed);
             if count != 0 {
                 eprintln!(
                     "fuse_stats pid={} mount={} opcode={} count={} nanos={}",
@@ -92,7 +155,7 @@ impl Server {
                     mount,
                     opcode,
                     count,
-                    self.request_nanos[opcode].load(Ordering::Relaxed)
+                    self.stats.nanos[opcode].load(Ordering::Relaxed)
                 );
             }
         }
@@ -121,7 +184,7 @@ impl Server {
         }
         debug!("opcode: {}", in_header.opcode);
         let started = std::time::Instant::now();
-        let opcode = (in_header.opcode as usize).min(self.request_counts.len() - 1);
+        let opcode = (in_header.opcode as usize).min(self.stats.counts.len() - 1);
         let result = match fuse_dispatch::classify_opcode(in_header.opcode) {
             Some(Opcode::Lookup) => self.lookup(in_header, r, w),
             Some(Opcode::Forget) => self.forget(in_header, r), // No reply.
@@ -194,9 +257,8 @@ impl Server {
                 w,
             ),
         };
-        self.request_counts[opcode].fetch_add(1, Ordering::Relaxed);
-        self.request_nanos[opcode]
-            .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        self.stats.counts[opcode].fetch_add(1, Ordering::Relaxed);
+        self.stats.nanos[opcode].fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
         result
     }
 
