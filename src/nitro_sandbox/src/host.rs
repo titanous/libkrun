@@ -798,13 +798,12 @@ impl Sandbox {
         let started = Instant::now();
         drop(self.vm.take());
         let close_end_ns = crate::lifecycle::monotonic_ns();
-        if std::env::var_os("NITRO_PROFILE").is_some() {
-            eprintln!(
-                "NITRO_PROFILE vm_close_micros={}",
-                started.elapsed().as_micros()
-            );
-        }
+        let close_micros = started.elapsed().as_micros();
         drop(guard);
+        // After the unlock: a full stderr pipe must never stall every lifecycle on the host.
+        if std::env::var_os("NITRO_PROFILE").is_some() {
+            eprintln!("NITRO_PROFILE vm_close_micros={close_micros}");
+        }
         crate::lifecycle::trace(format_args!(
             "TEARDOWN holder=vmm pid={} vm={}:{} final={} locked={} lock_ns={lock_ns} close_start_ns={lock_ns} close_end_ns={close_end_ns} unlock_ns={}",
             std::process::id(),

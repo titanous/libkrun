@@ -107,11 +107,13 @@ fn stop_line(line: &[u8], reason: &[u8]) -> bool {
 
 impl Write for Console {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if let Some(observer) = &mut self.observer {
-            observer(bytes);
-        }
+        // Freeze discovery first, on the raw bytes, before the observer, the stop-line match
+        // and any budget (merger notes of the copying branch).
         if let Some(discovery) = &mut self.discovery {
             discovery.observe(bytes)?;
+        }
+        if let Some(observer) = &mut self.observer {
+            observer(bytes);
         }
         for &byte in bytes {
             if byte == b'\n' {
