@@ -1466,7 +1466,8 @@ pub fn build_microvm(
     // The new VM generation ID is a second fresh seed for the copy (the guest's vmgenid driver
     // reseeds from it); the test-only omission withholds it too.
     #[cfg(target_arch = "x86_64")]
-    if vm_resources.cooperative_template.is_some() && !crate::cooperative::omit_copy_seed_for_test() {
+    if vm_resources.cooperative_template.is_some() && !crate::cooperative::omit_copy_seed_for_test()
+    {
         let generation = vmm
             .notify_vm_generation_change()
             .map_err(StartMicrovmError::Internal)?;
