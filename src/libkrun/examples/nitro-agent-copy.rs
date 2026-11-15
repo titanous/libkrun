@@ -947,6 +947,8 @@ mod probe {
         eprintln!("AGENT_SOURCE_RUN");
         let handle = context.vm_handle();
         let arm_handle = context.vm_handle();
+        let stop_capture = std::env::var_os("AGENT_STOP_DURING_CAPTURE").is_some();
+        let stop_handle = context.vm_handle();
         let (freeze_tx, freeze_rx) = std::sync::mpsc::sync_channel(1);
         let source_listener = listener.try_clone()?;
         let source_thread = std::thread::spawn(move || -> io::Result<Value> {
@@ -1087,6 +1089,13 @@ mod probe {
                 arm_handle.arm_template_capture(Duration::from_secs(12))?;
                 eprintln!("AGENT_SOURCE_ARMED");
             }
+            if stop_capture {
+                stop_handle
+                    .trigger_shutdown_event()
+                    .map_err(|error| io::Error::other(format!("{error:?}")))?;
+                eprintln!("AGENT_CAPTURE_HOST_STOP_REQUESTED");
+                return Ok(hello);
+            }
             freeze_tx.send(Instant::now()).map_err(io::Error::other)?;
             send(&mut connection, json!({"type":"freeze","request":2}))?;
             eprintln!("AGENT_FREEZE_SENT");
@@ -1146,6 +1155,37 @@ mod probe {
             Ok(hello)
         });
         let source_exit = context.run()?;
+        if stop_capture {
+            source_thread
+                .join()
+                .map_err(|_| "source capture-stop thread panicked")??;
+            let error = match handle.wait_template_capture() {
+                Ok(_) => return Err("host-stopped source published a template".into()),
+                Err(error) => error,
+            };
+            if error
+                .get_ref()
+                .and_then(|cause| cause.downcast_ref::<krun::GuestStoppedDuringCapture>())
+                .is_none()
+            {
+                return Err(format!(
+                    "capture refusal was not GuestStoppedDuringCapture: {error:?}"
+                )
+                .into());
+            }
+            if source_exit != VmExit::Stopped {
+                return Err(format!("host-stopped source ended {source_exit:?}").into());
+            }
+            let templates = std::fs::read_dir("/proc/self/fd")?
+                .filter_map(|entry| std::fs::read_link(entry.ok()?.path()).ok())
+                .filter(|path| path.to_string_lossy().contains("guest-template"))
+                .count();
+            if templates != 0 {
+                return Err("host-stopped capture retained a template descriptor".into());
+            }
+            println!("AGENT_CAPTURE_STOP_REFUSED_TYPED template_fds=0 exit={source_exit:?}");
+            return Ok(());
+        }
         if std::env::var_os("AGENT_UNARMED_RECOVERY").is_some()
             || std::env::var_os("AGENT_EXPIRED_RECOVERY").is_some()
         {
