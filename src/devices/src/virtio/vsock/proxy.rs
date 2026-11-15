@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::fmt;
 use std::os::fd::OwnedFd;
 use std::os::unix::io::{AsRawFd, RawFd};
@@ -37,7 +36,7 @@ pub enum ProxyStatus {
     WaitingOnAccept,
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, PartialEq, Eq)]
 pub enum ProxyRemoval {
     #[default]
     Keep,
@@ -84,7 +83,7 @@ pub trait Proxy: Send + AsRawFd {
         &mut self,
         pkt: &VsockPacket,
         req: TsiListenReq,
-        host_port_map: &Option<HashMap<u16, u16>>,
+        host_port_map: &Option<super::HostPortMap>,
     ) -> ProxyUpdate;
     fn accept(&mut self, req: TsiAcceptReq) -> ProxyUpdate;
     fn update_peer_credit(&mut self, pkt: &VsockPacket) -> ProxyUpdate;
@@ -98,4 +97,9 @@ pub trait Proxy: Send + AsRawFd {
         None
     }
     fn process_event(&mut self, evset: EventSet) -> ProxyUpdate;
+    /// If this proxy holds no host socket, when it was created. Such proxies cost VMM memory
+    /// only, so the muxer bounds how many a guest may hold.
+    fn unallocated_since(&self) -> Option<std::time::Instant> {
+        None
+    }
 }
