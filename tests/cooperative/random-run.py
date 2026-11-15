@@ -48,7 +48,30 @@ parser.add_argument("--memory", default="512")
 parser.add_argument("--keep-going", action="store_true", help="measure every freeze even after a failure")
 parser.add_argument("--no-shell", action="store_true",
                     help="the image has no /bin/busybox: do not require the shell loop of short processes")
+parser.add_argument("--no-churn", action="store_true",
+                    help="guest test mode randcopy_churn=0: no exiting-task phase (isolates another property)")
+parser.add_argument("--protect", action="store_true",
+                    help="guest test mode randcopy_protect=1 (one CPU): each copy makes the buffers of system-call "
+                         "workers caught in their call read-only before they resume; their refresh must be skipped "
+                         "with a warning and every copy must finish")
+parser.add_argument("--samesite", action="store_true",
+                    help="guest test mode randcopy_samesite=1: reads of /dev/zero from the instruction of an earlier "
+                         "/dev/urandom read, with identical registers, must never be rewritten in a copy")
+parser.add_argument("--bomb", type=int, default=0,
+                    help="guest test mode randcopy_bomb=N: N short getrandom processes and N/4 threads before the "
+                         "freeze; available memory must come back within 16 MiB")
+parser.add_argument("--omit-seed", action="store_true",
+                    help="copies start with KRUN_TEST_OMIT_COPY_SEED=1 (launcher built with the copy-fault-injection "
+                         "feature: the host gives no fresh seed); every copy must stop with the guest's refusal "
+                         "before running user space")
 args = parser.parse_args()
+if args.protect and args.cpus != "1" and not args.nitro_results:
+    parser.error("--protect needs --cpus 1")
+GUEST_ARGS = " ".join(word for word, on in (
+    ("randcopy_churn=0", args.no_churn), ("randcopy_protect=1", args.protect),
+    ("randcopy_samesite=1", args.samesite), (f"randcopy_bomb={args.bomb}", args.bomb > 0)) if on)
+SEED_REFUSAL = b"copy resumed without a fresh random seed from the host"
+mode_stats = collections.Counter()
 # Tasks that read random bytes and exited before the freeze (random.c churn phase): the source must have
 # run them, and every copy must thaw, reap them and report so.
 CHURN_BEFORE = re.compile(rb"RANDCOPY CHURN before-freeze shell=(\d+) processes=(\d+) threads=(\d+)")
@@ -56,6 +79,16 @@ CHURN_AFTER = b"RANDCOPY CHURN after-resume"
 
 
 def check_churn_source(label, output):
+    if args.bomb:
+        b = re.search(rb"RANDCOPY BOMB processes=(\d+) threads=(\d+) mem_available_kib=(-?\d+)\.\.(-?\d+)", output)
+        if b is None or int(b.group(1)) != args.bomb:
+            raise RuntimeError(f"{label}: fork bomb did not run")
+        drop = int(b.group(3)) - int(b.group(4))
+        mode_stats["bomb max drop kib"] = max(mode_stats["bomb max drop kib"], drop)
+        if drop >= 16384:
+            raise RuntimeError(f"{label}: memory did not come back after the fork bomb: {b.group(0).decode()}")
+    if args.no_churn:
+        return
     m = CHURN_BEFORE.search(output)
     if m is None:
         raise RuntimeError(f"{label}: source did not run the exiting-task phase")
@@ -64,8 +97,40 @@ def check_churn_source(label, output):
 
 
 def check_churn_copy(name, output):
-    if CHURN_AFTER not in output or not re.search(rb"RANDCOPY CHURN after-resume .* ok", output):
+    if args.no_churn:
+        if b"RANDCOPY CHURN off" not in output:
+            raise RuntimeError(f"copy failed: {name}: did not finish (console kept)")
+    elif CHURN_AFTER not in output or not re.search(rb"RANDCOPY CHURN after-resume .* ok", output):
         raise RuntimeError(f"copy failed: {name}: exiting tasks not reaped after resume (console kept)")
+
+
+def check_modes_copy(name, output):
+    """Per-copy checks of the test modes; returns the threads this copy protected (excluded from analysis)."""
+    protected = set()
+    if args.protect:
+        if not re.search(rb"RANDCOPY PROTECT protected=\d+ survived", output):
+            raise RuntimeError(f"copy failed: {name}: protected workers did not survive (console kept)")
+        protected = {int(m) for m in re.findall(rb"RANDCOPY PROTECT thread=(\d+)", output)}
+    if args.samesite:
+        m = re.search(rb"RANDCOPY SAMESITE frozen_phase=(\d+) zero_reads=(\d+) failures=(\d+)", output)
+        if m is None:
+            raise RuntimeError(f"copy failed: {name}: same-site thread did not report (console kept)")
+        mode_stats[f"samesite frozen_phase={int(m.group(1))}"] += 1
+        if int(m.group(3)):
+            raise RuntimeError(f"SAMESITE FAIL {name}: a zero read returned random bytes: a result was rewritten "
+                               f"after the task had run ({m.group(0).decode()})")
+    return protected
+
+
+def check_protect_skips(label, states, outputs, protected):
+    """A protected thread caught after the kernel generated its bytes must produce a skipped refresh."""
+    needs = [i for i in protected if classify(KINDS[i // 4], states[i])[0]
+             in ("kernel-finished-not-returned", "kernel-mid-fill")]
+    mode_stats["protect threads with a pending refresh"] += len(needs)
+    for c, output in enumerate(outputs):
+        if needs and b"random refresh skipped: buffer not writable" not in output:
+            raise RuntimeError(f"{label} copy {c}: protected threads {needs} had a pending refresh but no skip "
+                               f"was reported")
 if not args.nitro_results and not (args.kernel and args.initramfs):
     parser.error("--kernel and --initramfs are required unless --nitro-results is given")
 args.output.mkdir(parents=True, exist_ok=False)
@@ -84,14 +149,17 @@ def hash_words(data):
     return h
 
 
-def environment(cpus, disk):
-    return dict(os.environ, CLONE_KERNEL=args.kernel, CLONE_INITRAMFS=args.initramfs, CLONE_VCPUS=str(cpus),
-                CLONE_DISK=str(disk), CLONE_MEMORY=args.memory)
+def environment(kind, cpus, disk):
+    env = dict(os.environ, CLONE_KERNEL=args.kernel, CLONE_INITRAMFS=args.initramfs, CLONE_VCPUS=str(cpus),
+               CLONE_DISK=str(disk), CLONE_MEMORY=args.memory, CLONE_KERNEL_ARGS=GUEST_ARGS)
+    if args.omit_seed and kind == "resume":
+        env["KRUN_TEST_OMIT_COPY_SEED"] = "1"
+    return env
 
 
 def run(kind, image, cpus, disk, log):
     try:
-        result = subprocess.run([launcher, kind, str(image), "0"], env=environment(cpus, disk),
+        result = subprocess.run([launcher, kind, str(image), "0"], env=environment(kind, cpus, disk),
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
     except subprocess.TimeoutExpired as expired:
         # A guest that never thaws (for example a kernel oops at the copy) gives no exit: keep its console.
@@ -209,13 +277,18 @@ failures = []
 examples = []
 
 
-def analyse(label, states, copies):
+def analyse(label, states, copies, protected=frozenset()):
     bad = 0
     for i, t in enumerate(states):
         kind, size = KINDS[i // 4], SIZES[i % 4]
         name = f"{kind}-{size}"
         category, first = classify(kind, t)
         stats[(name, category)] += 1
+        if i in protected:
+            # --protect: this thread's buffer became read-only in the copies, so it keeps the template's
+            # bytes by construction; check_protect_skips covers it.
+            stats[(name, "protected")] += 1
+            continue
         values, firsts = [], []
         for c, rings in enumerate(copies):
             records = rings[i]
@@ -267,14 +340,25 @@ try:
         logs = sorted(args.nitro_results.glob(f"{label}-copy*.log"))
         if len(logs) != args.copies:
             raise RuntimeError(f"{label}: expected {args.copies} copy consoles, found {len(logs)}")
-        copies = []
+        copies, outputs, protected = [], [], set()
         for log in logs:
             data = log.read_bytes()
+            if args.omit_seed:
+                if SEED_REFUSAL not in data or b"RANDCOPY DONE" in data:
+                    raise RuntimeError(f"OMIT-SEED FAIL {log.name}: a copy without a host seed was not refused")
+                continue
             if b"RANDCOPY DONE" not in data or b"RANDCOPY FAIL" in data:
                 raise RuntimeError(f"copy failed: {log.name}")
             check_churn_copy(log.name, data)
+            protected |= check_modes_copy(log.name, data)
             copies.append(console_rings(data))
-        bad = analyse(label, states, copies)
+            outputs.append(data)
+        if args.omit_seed:
+            cycle_count += 1
+            print(f"PASS {label} every copy refused without a host seed", flush=True)
+            continue
+        check_protect_skips(label, states, outputs, protected)
+        bad = analyse(label, states, copies, protected)
         cycle_count += 1
         caught = [f"{KINDS[i // 4]}-{SIZES[i % 4]}:{classify(KINDS[i // 4], s)[0]}"
                   for i, s in enumerate(states) if classify(KINDS[i // 4], s)[0] != "outside-call"]
@@ -298,16 +382,35 @@ try:
                 child = args.output / f"{label}-copy{c}.disk"
                 subprocess.run(["cp", "--reflink=auto", str(disk), str(child)], check=True)
                 result = run("resume", image, cpus, child, args.output / f"{label}-copy{c}.log")
+                if args.omit_seed:
+                    child.unlink()
+                    if SEED_REFUSAL not in result.stdout or b"RANDCOPY DONE" in result.stdout \
+                            or b"RANDCOPY CHURN after-resume" in result.stdout:
+                        raise RuntimeError(f"OMIT-SEED FAIL {label} copy {c}: a copy without a host seed was not "
+                                           f"refused before user space ran (console kept)")
+                    return None, result.stdout
                 if result.returncode or b"RANDCOPY DONE" not in result.stdout or b"RANDCOPY FAIL" in result.stdout:
                     raise RuntimeError(f"copy failed: {label} copy {c} (console kept in {label}-copy{c}.log)")
                 check_churn_copy(f"{label} copy {c}", result.stdout)
                 rings = read_rings(child)
                 child.unlink()
-                return rings
+                return rings, result.stdout
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=args.copies) as pool:
-                copies = list(pool.map(copy, range(args.copies)))
-            bad = analyse(label, states, copies)
+                results = list(pool.map(copy, range(args.copies)))
+            if args.omit_seed:
+                cycle_count += 1
+                print(f"PASS {label} every copy refused without a host seed", flush=True)
+                image.unlink()
+                disk.unlink()
+                continue
+            copies = [rings for rings, _ in results]
+            outputs = [output for _, output in results]
+            protected = set()
+            for c, output in enumerate(outputs):
+                protected |= check_modes_copy(f"{label} copy {c}", output)
+            check_protect_skips(label, states, outputs, protected)
+            bad = analyse(label, states, copies, protected)
             cycle_count += 1
             caught = [f"{KINDS[i // 4]}-{SIZES[i % 4]}:{classify(KINDS[i // 4], s)[0]}"
                       for i, s in enumerate(states) if classify(KINDS[i // 4], s)[0] != "outside-call"]
@@ -320,7 +423,8 @@ try:
             if bad and not args.keep_going:
                 raise SystemExit(1)
 finally:
-    summary = {"freezes": cycle_count, "copies_per_freeze": args.copies,
+    summary = {"freezes": cycle_count, "copies_per_freeze": args.copies, "guest_args": GUEST_ARGS,
+               "omit_seed": args.omit_seed, "modes": dict(mode_stats),
                "counts": {f"{k[0]} {k[1]}": v for k, v in sorted(stats.items())},
                "failures": len(failures), "kept_templates": examples}
     (args.output / "summary.json").write_text(json.dumps(summary, indent=2))

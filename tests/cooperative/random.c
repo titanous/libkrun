@@ -72,6 +72,9 @@ _Static_assert(sizeof(struct record) == 64, "record layout");
 struct worker {
     unsigned char *control_page;
     struct control *control;
+    unsigned char *region;        /* the buffer's pages, markers included */
+    size_t region_length;
+    int protected_buffer;         /* test mode randcopy_protect: buffer made read-only after resume */
     unsigned char *buffer;
     struct record *ring;
     void *vdso_state;
@@ -80,7 +83,7 @@ struct worker {
     pthread_t thread;
 };
 static struct worker workers[THREADS];
-static atomic_int resumed, parked, stop;
+static atomic_int resumed, parked, stop, protect_now;
 static unsigned char nonce[16];
 typedef long (*vgetrandom_t)(void *, size_t, unsigned int, void *, size_t);
 static vgetrandom_t vgetrandom;
@@ -205,6 +208,8 @@ static void *worker_loop(void *argument)
             break;
         }
         atomic_signal_fence(memory_order_seq_cst);
+        /* randcopy_protect: a call that starts after the buffer became read-only fails with EFAULT. */
+        if (ret == -EFAULT && atomic_load(&protect_now) && w->protected_buffer) break;
         if (ret <= 0) fail("random call");
         struct record *r = &w->ring[seq % RING];
         r->seq = seq; r->ret = ret; r->hash = hash_words(w->buffer, n);
@@ -214,6 +219,8 @@ static void *worker_loop(void *argument)
         c->recorded = seq;
         atomic_signal_fence(memory_order_seq_cst);
         c->state = 0;
+        /* randcopy_protect: stop before the next prefill would write the read-only buffer. */
+        if (atomic_load(&protect_now) && w->protected_buffer) break;
     }
     atomic_fetch_add(&parked, 1);
     while (!atomic_load(&stop)) usleep(1000);
@@ -356,6 +363,76 @@ static pthread_t churn_before_freeze(void)
     return churn;
 }
 
+/* ---- Test mode randcopy_bomb=N: a fork bomb of getrandom callers before the freeze ---- */
+static void bomb(long processes)
+{
+    long before = mem_available_kib(), threads = processes / 4;
+    pid_t wave[64];
+    for (long done = 0; done < processes;) {
+        int n = 0;
+        for (; n < 64 && done < processes; n++, done++) wave[n] = short_process((unsigned long)done);
+        for (int i = 0; i < n; i++) reap(wave[i], "bomb process");
+    }
+    for (long done = 0; done < threads;) {
+        pthread_t batch[64];
+        int n = 0;
+        for (; n < 64 && done < threads; n++, done++)
+            if (pthread_create(&batch[n], NULL, short_thread, (void *)(unsigned long)done)) fail("bomb thread");
+        for (int i = 0; i < n; i++) if (pthread_join(batch[i], NULL)) fail("bomb join");
+    }
+    printf("RANDCOPY BOMB processes=%ld threads=%ld mem_available_kib=%ld..%ld\n", processes, threads, before,
+           mem_available_kib());
+}
+
+/* ---- Test mode randcopy_samesite=1: a result must not be rewritten after the task ran ----
+ * One instruction (in site_read) reads 8 bytes from descriptor 100 into the same buffer, with the same
+ * stack: first while 100 is /dev/urandom, then, after dup2 makes 100 /dev/zero, fifty times more. The
+ * zero reads return with exactly the registers of the random read (same ip, sp, descriptor, buffer,
+ * length, result and system-call number). A copy that rewrote the random result there would put random
+ * bytes where the program has just read zeros. */
+static atomic_int samesite_stop, samesite_failures;
+static atomic_long samesite_zero_reads;
+static volatile int samesite_phase;          /* 1 random read, 2 zero read, 0 elsewhere */
+static volatile int64_t samesite_commit;
+static uint64_t samesite_buffer __attribute__((aligned(64)));
+
+static long __attribute__((noinline)) site_read(long fd, void *buffer, long length)
+{
+    return syscall3_commit(SYS_read, fd, (long)buffer, length, &samesite_commit);
+}
+
+static void *samesite_loop(void *unused)
+{
+    (void)unused;
+    int urandom = open("/dev/urandom", O_RDONLY), zero = open("/dev/zero", O_RDONLY);
+    if (urandom < 0 || zero < 0) fail("samesite open");
+    while (!atomic_load(&samesite_stop)) {
+        if (dup2(urandom, 100) != 100) fail("samesite dup2");
+        samesite_phase = 1;
+        if (site_read(100, &samesite_buffer, 8) != 8) fail("samesite random read");
+        samesite_phase = 0;
+        if (dup2(zero, 100) != 100) fail("samesite dup2");
+        for (int i = 0; i < 50; i++) {
+            samesite_buffer = ~0ULL;
+            samesite_phase = 2;
+            if (site_read(100, &samesite_buffer, 8) != 8) fail("samesite zero read");
+            samesite_phase = 0;
+            if (samesite_buffer != 0) {
+                atomic_fetch_add(&samesite_failures, 1);
+                printf("RANDCOPY SAMESITE FAIL zero read returned %016llx\n", (unsigned long long)samesite_buffer);
+            }
+            atomic_fetch_add(&samesite_zero_reads, 1);
+        }
+    }
+    return NULL;
+}
+
+static int mode(const char *name)
+{
+    const char *value = getenv(name);
+    return value ? atoi(value) : -1;
+}
+
 static void churn_after_resume(pthread_t churn)
 {
     atomic_store(&churn_stop, 1);
@@ -388,7 +465,8 @@ int main(int argc, char **argv)
         w->control = (struct control *)(w->control_page + 32);
         w->control->kind = i / 4; w->control->size = sizes[i % 4];
         size_t n = w->control->size;
-        unsigned char *region = pages((LEAD + n + 32 + 4095) / 4096 * 4096);
+        w->region_length = (LEAD + n + 32 + 4095) / 4096 * 4096;
+        unsigned char *region = w->region = pages(w->region_length);
         mark(region, 'H', i);
         w->buffer = region + LEAD;
         mark(w->buffer + n, 'T', i);
@@ -407,8 +485,16 @@ int main(int argc, char **argv)
         }
     }
     if (mlockall(MCL_CURRENT | MCL_FUTURE)) fail("mlockall");
+    /* Test modes (kernel arguments, which reach /init as environment). randcopy_churn=0 turns the
+     * exiting-task phase off (to isolate another property on an older kernel). */
+    int churn_on = mode("randcopy_churn") != 0, protect = mode("randcopy_protect") == 1;
+    int samesite = mode("randcopy_samesite") == 1;
+    long bomb_processes = mode("randcopy_bomb");
+    if (protect && sysconf(_SC_NPROCESSORS_ONLN) != 1) fail("randcopy_protect needs one CPU");
     /* Before the main thread becomes real-time: the churn tasks use normal scheduling. */
-    pthread_t churn = churn_before_freeze();
+    pthread_t churn = 0;
+    if (churn_on) churn = churn_before_freeze();
+    if (bomb_processes > 0) bomb(bomb_processes);
     /* Workers inherit normal scheduling; the real-time main thread runs as soon as a copy thaws, so the
      * workers stop well before their record rings wrap past the freeze point. */
     struct sched_param realtime = { .sched_priority = 10 };
@@ -423,8 +509,11 @@ int main(int argc, char **argv)
     printf("\n");
     for (int i = 0; i < THREADS; i++)
         if (pthread_create(&workers[i].thread, &normal, worker_loop, &workers[i])) fail("pthread");
+    pthread_t samesite_thread;
+    if (samesite && pthread_create(&samesite_thread, &normal, samesite_loop, NULL)) fail("samesite thread");
     for (int i = 0; i < THREADS; i++)
         while (workers[i].control->recorded < 3) usleep(1000);
+    while (samesite && atomic_load(&samesite_zero_reads) < 100) usleep(1000);
     /* Spread the freeze over the workers' loop phases. */
     unsigned int jitter;
     if (syscall(SYS_getrandom, &jitter, sizeof(jitter), 0) != sizeof(jitter)) fail("jitter");
@@ -433,13 +522,36 @@ int main(int argc, char **argv)
     if (freeze < 0) fail("trigger open");
     printf("RANDCOPY FREEZE cpus=%ld threads=%d\n", sysconf(_SC_NPROCESSORS_ONLN), THREADS);
     if (write(freeze, "1", 1) != 1) fail("freeze");
-    /* Only copies get here. */
+    /* Only copies get here. On one CPU the real-time main thread runs before any thawed worker. */
+    int frozen_phase = samesite_phase, protected_count = 0;
+    if (protect) {
+        /* Make the buffer of every system-call worker caught in its call read-only before it resumes:
+         * its refresh must be skipped without a signal. Nothing that can sleep before this is done. */
+        for (int i = 0; i < THREADS; i++) {
+            struct worker *w = &workers[i];
+            if (w->control->kind == KIND_VDSO || w->control->state != 1 || w->control->commit != PENDING) continue;
+            if (mprotect(w->region, w->region_length, PROT_READ)) fail("protect");
+            w->protected_buffer = 1;
+            protected_count++;
+        }
+        atomic_store(&protect_now, 1);
+    }
     atomic_store(&resumed, 1);
     for (int waited = 0; atomic_load(&parked) < THREADS; waited++) {
         if (waited > 20000) fail("workers did not record after resume");
         usleep(1000);
     }
-    churn_after_resume(churn);
+    for (int i = 0; protect && i < THREADS; i++)
+        if (workers[i].protected_buffer) printf("RANDCOPY PROTECT thread=%d\n", i);
+    if (protect) printf("RANDCOPY PROTECT protected=%d survived\n", protected_count);
+    if (samesite) {
+        atomic_store(&samesite_stop, 1);
+        if (pthread_join(samesite_thread, NULL)) fail("samesite join");
+        printf("RANDCOPY SAMESITE frozen_phase=%d zero_reads=%ld failures=%d\n", frozen_phase,
+               atomic_load(&samesite_zero_reads), atomic_load(&samesite_failures));
+    }
+    if (churn_on) churn_after_resume(churn);
+    else printf("RANDCOPY CHURN off\n");
     for (int i = 0; disk < 0 && i < THREADS; i++) {
         /* The copy point is the largest wall-clock gap between consecutive records; print records
          * around it. The host checks that the call in flight at the freeze lies in the window. */

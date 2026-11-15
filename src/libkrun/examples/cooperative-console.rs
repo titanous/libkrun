@@ -72,6 +72,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var_os("CLONE_TEST_INIT_ARGS").is_some() {
         builder.add_kernel_cmdline_args(&["-- daemon-argument"]);
     }
+    // Extra guest kernel arguments (the random-copy workload's test modes reach /init as environment).
+    if let Ok(extra) = std::env::var("CLONE_KERNEL_ARGS") {
+        let words: Vec<&str> = extra.split_whitespace().collect();
+        if !words.is_empty() {
+            builder.add_kernel_cmdline_args(&words);
+        }
+    }
     if std::env::var_os("CLONE_FS").is_some_and(|mode| mode == "dax") {
         builder.add_kernel_cmdline_args(&["clone_dax"]);
     }
