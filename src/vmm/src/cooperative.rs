@@ -31,6 +31,19 @@ pub fn require_template_marker(page: &[u8; CONTROL_SIZE]) -> io::Result<()> {
     Ok(())
 }
 
+/// Test-only (feature `copy-fault-injection`, never in a product build): with
+/// `KRUN_TEST_OMIT_COPY_SEED` set, a copy starts without the host's fresh random seed and
+/// seed-ready word, so tests can show that the guest refuses such a copy instead of handing out
+/// its template's random state. Always false without the feature.
+pub fn omit_copy_seed_for_test() -> bool {
+    #[cfg(feature = "copy-fault-injection")]
+    if std::env::var_os("KRUN_TEST_OMIT_COPY_SEED").is_some() {
+        log::warn!("test: copy starts WITHOUT a fresh random seed (KRUN_TEST_OMIT_COPY_SEED)");
+        return true;
+    }
+    false
+}
+
 /// Word offsets shared with the carried cooperative kernel protocol.
 pub mod word {
     pub const MAGIC: usize = 0;

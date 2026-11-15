@@ -404,8 +404,10 @@ pub unsafe fn copy_and_release(
     record_receiver_write();
     unsafe {
         guest.add(8).write_volatile(realtime);
-        std::ptr::copy_nonoverlapping(seed.as_ptr(), guest.add(10) as *mut u8, 32);
-        guest.add(14).write_volatile(1);
+        if !crate::cooperative::omit_copy_seed_for_test() {
+            std::ptr::copy_nonoverlapping(seed.as_ptr(), guest.add(10) as *mut u8, 32);
+            guest.add(14).write_volatile(1);
+        }
         receiver::release(control, entry)?;
     }
     Ok(())

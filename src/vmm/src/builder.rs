@@ -1064,15 +1064,17 @@ pub fn build_microvm(
                 .as_nanos() as u64;
             use crate::cooperative::word;
             page[word::REALTIME * 8..(word::REALTIME + 1) * 8].copy_from_slice(&now.to_le_bytes());
-            let mut random = std::fs::File::open("/dev/urandom")
+            if !crate::cooperative::omit_copy_seed_for_test() {
+                let mut random = std::fs::File::open("/dev/urandom")
+                    .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
+                std::io::Read::read_exact(
+                    &mut random,
+                    &mut page[word::RANDOM_START * 8..word::RANDOM_END * 8],
+                )
                 .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
-            std::io::Read::read_exact(
-                &mut random,
-                &mut page[word::RANDOM_START * 8..word::RANDOM_END * 8],
-            )
-            .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;
-            page[word::SEED_READY * 8..(word::SEED_READY + 1) * 8]
-                .copy_from_slice(&1u64.to_le_bytes());
+                page[word::SEED_READY * 8..(word::SEED_READY + 1) * 8]
+                    .copy_from_slice(&1u64.to_le_bytes());
+            }
             guest_memory
                 .write_slice(&page, GuestAddress(template.control_page_address))
                 .map_err(|e| StartMicrovmError::GuestMemoryMmap(e.to_string()))?;

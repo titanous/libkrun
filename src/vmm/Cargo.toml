@@ -19,6 +19,9 @@ input = ["krun_input"]
 aws-nitro = []
 vhost-user = ["devices/vhost-user"]
 shuttle = []
+# Test-only: KRUN_TEST_OMIT_COPY_SEED=1 makes a copy start without the host's fresh random seed, to test
+# that the guest refuses such a copy. Never enabled in a product build.
+copy-fault-injection = []
 
 [dependencies]
 crossbeam-channel = ">=0.5.15"

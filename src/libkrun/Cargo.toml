@@ -23,6 +23,8 @@ nitro-sandbox = ["dep:nitro_sandbox", "dep:signal-hook", "vmm/nitro-sandbox", "b
 # Embed the init binary. Disable if you provide a custom init.
 embedded_init = ["devices/embedded_init"]
 vhost-user = ["vmm/vhost-user", "devices/vhost-user"]
+# Test-only, see vmm's feature of the same name.
+copy-fault-injection = ["vmm/copy-fault-injection"]
 # Link libkrunfw statically instead of dlopen. Used for static musl binaries
 # (e.g. guest-agent in nested virt tests) that cannot use dlopen.
 static-firmware = []
