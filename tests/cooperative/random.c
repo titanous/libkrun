@@ -364,9 +364,9 @@ static pthread_t churn_before_freeze(void)
 }
 
 /* ---- Test mode randcopy_bomb=N: a fork bomb of getrandom callers before the freeze ----
- * Two equal waves, each N short processes and N/4 short threads (64 alive at a time) that read random bytes
+ * Three equal waves, each N short processes and N/4 short threads (64 alive at a time) that read random bytes
  * and exit. The first wave also warms the kernel's caches; anything kept per exited task would make the
- * second wave cost as much memory as the first. */
+ * second and third waves cost as much memory as the first. */
 static void bomb_wave(long processes)
 {
     long threads = processes / 4;
@@ -385,14 +385,59 @@ static void bomb_wave(long processes)
     }
 }
 
+/* Kernel memory that per-task state would occupy: unreclaimable slab + kernel stacks + page tables (KiB). */
+static long kernel_kib(void)
+{
+    static const char *const fields[] = {"SUnreclaim:", "KernelStack:", "PageTables:"};
+    char text[4096];
+    int fd = open("/proc/meminfo", O_RDONLY);
+    if (fd < 0) return -1;
+    long n = read(fd, text, sizeof(text) - 1), sum = 0;
+    close(fd);
+    if (n <= 0) return -1;
+    text[n] = 0;
+    for (unsigned i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
+        char *at = strstr(text, fields[i]);
+        if (!at) return -1;
+        sum += strtol(at + strlen(fields[i]), NULL, 10);
+    }
+    return sum;
+}
+
+/* A settled MemAvailable sample: exited tasks are freed after an RCU grace period and freed pages pass through
+ * per-CPU lists, so a sample taken right after a wave is noisy (observed: the base kernel, which keeps nothing per
+ * task, lost 3544 KiB in one second wave). Drop caches, then wait until two samples 200 ms apart agree within
+ * 64 KiB (at most 5 s). A kernel leak does not settle away. */
+static long settled_kib(void)
+{
+    sync();
+    int fd = open("/proc/sys/vm/drop_caches", O_WRONLY);
+    if (fd >= 0) {
+        if (write(fd, "3", 1) != 1) fail("drop_caches");
+        close(fd);
+    }
+    long previous = mem_available_kib();
+    for (int i = 0; i < 25; i++) {
+        struct timespec pause = {0, 200 * 1000 * 1000};
+        nanosleep(&pause, NULL);
+        long now = mem_available_kib();
+        if (labs(now - previous) < 64) return now;
+        previous = now;
+    }
+    return previous;
+}
+
 static void bomb(long processes)
 {
-    long before = mem_available_kib();
-    bomb_wave(processes);
-    long middle = mem_available_kib();
-    bomb_wave(processes);
-    printf("RANDCOPY BOMB processes=%ld threads=%ld mem_available_kib=%ld..%ld..%ld\n", 2 * processes,
-           2 * (processes / 4), before, middle, mem_available_kib());
+    long mem[4], kernel[4];
+    for (int wave = 0; wave < 4; wave++) {
+        if (wave) bomb_wave(processes);
+        mem[wave] = settled_kib();
+        kernel[wave] = kernel_kib();
+    }
+    printf("RANDCOPY BOMB processes=%ld threads=%ld mem_available_kib=%ld..%ld..%ld..%ld"
+           " kernel_kib=%ld..%ld..%ld..%ld\n", 3 * processes, 3 * (processes / 4), mem[0], mem[1], mem[2], mem[3],
+           kernel[0], kernel[1], kernel[2], kernel[3]);
 }
 
 /* ---- Test mode randcopy_samesite=1: a result must not be rewritten after the task ran ----

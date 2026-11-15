@@ -58,8 +58,8 @@ parser.add_argument("--samesite", action="store_true",
                     help="guest test mode randcopy_samesite=1: reads of /dev/zero from the instruction of an earlier "
                          "/dev/urandom read, with identical registers, must never be rewritten in a copy")
 parser.add_argument("--bomb", type=int, default=0,
-                    help="guest test mode randcopy_bomb=N: two waves of N short getrandom processes and N/4 threads "
-                         "before the freeze; the second wave must keep less than 2 MiB of available memory")
+                    help="guest test mode randcopy_bomb=N: three waves of N short getrandom processes and N/4 threads "
+                         "before the freeze; waves 2 and 3 must each keep less than 2 MiB of settled available memory")
 parser.add_argument("--omit-seed", action="store_true",
                     help="copies start with KRUN_TEST_OMIT_COPY_SEED=1 (launcher built with the copy-fault-injection "
                          "feature: the host gives no fresh seed); every copy must stop with the guest's refusal "
@@ -80,16 +80,23 @@ CHURN_AFTER = b"RANDCOPY CHURN after-resume"
 
 def check_churn_source(label, output):
     if args.bomb:
-        b = re.search(rb"RANDCOPY BOMB processes=(\d+) threads=(\d+) mem_available_kib=(-?\d+)\.\.(-?\d+)\.\.(-?\d+)",
-                      output)
-        if b is None or int(b.group(1)) != 2 * args.bomb:
+        b = re.search(rb"RANDCOPY BOMB processes=(\d+) threads=(\d+) mem_available_kib=(-?\d+)\.\.(-?\d+)\.\.(-?\d+)"
+                      rb"\.\.(-?\d+) kernel_kib=(-?\d+)\.\.(-?\d+)\.\.(-?\d+)\.\.(-?\d+)", output)
+        if b is None or int(b.group(1)) != 3 * args.bomb:
             raise RuntimeError(f"{label}: fork bomb did not run")
-        first, second = int(b.group(3)) - int(b.group(4)), int(b.group(4)) - int(b.group(5))
-        mode_stats["bomb first wave max drop kib"] = max(mode_stats["bomb first wave max drop kib"], first)
-        mode_stats["bomb second wave max drop kib"] = max(mode_stats["bomb second wave max drop kib"], second)
-        # Bounded: the second, equal wave must not keep memory (anything held per exited task would).
-        if second >= 2048:
-            raise RuntimeError(f"{label}: the second fork-bomb wave kept memory: {b.group(0).decode()}")
+        mem = [int(b.group(i)) for i in range(3, 7)]
+        kernel = [int(b.group(i)) for i in range(7, 11)]
+        if min(mem) < 0 or min(kernel) < 0:
+            raise RuntimeError(f"{label}: fork bomb could not read /proc/meminfo: {b.group(0).decode()}")
+        for wave in (1, 2, 3):
+            key = f"bomb wave {wave} max drop kib"
+            mode_stats[key] = max(mode_stats[key], mem[wave - 1] - mem[wave])
+            key = f"bomb wave {wave} max kernel growth kib"
+            mode_stats[key] = max(mode_stats[key], kernel[wave] - kernel[wave - 1])
+        # Bounded: the second and third equal waves must not keep memory (anything held per exited task would).
+        for wave in (2, 3):
+            if mem[wave - 1] - mem[wave] >= 2048:
+                raise RuntimeError(f"{label}: fork-bomb wave {wave} kept memory: {b.group(0).decode()}")
     if args.no_churn:
         return
     m = CHURN_BEFORE.search(output)
