@@ -59,7 +59,7 @@ parser.add_argument("--samesite", action="store_true",
                          "/dev/urandom read, with identical registers, must never be rewritten in a copy")
 parser.add_argument("--bomb", type=int, default=0,
                     help="guest test mode randcopy_bomb=N: three waves of N short getrandom processes and N/4 threads "
-                         "before the freeze; waves 2 and 3 must each keep less than 2 MiB of settled available memory")
+                         "before the freeze; waves 2 and 3 together must keep less than 2 MiB of settled available memory and 1 MiB of kernel memory")
 parser.add_argument("--omit-seed", action="store_true",
                     help="copies start with KRUN_TEST_OMIT_COPY_SEED=1 (launcher built with the copy-fault-injection "
                          "feature: the host gives no fresh seed); every copy must stop with the guest's refusal "
@@ -93,10 +93,13 @@ def check_churn_source(label, output):
             mode_stats[key] = max(mode_stats[key], mem[wave - 1] - mem[wave])
             key = f"bomb wave {wave} max kernel growth kib"
             mode_stats[key] = max(mode_stats[key], kernel[wave] - kernel[wave - 1])
-        # Bounded: the second and third equal waves must not keep memory (anything held per exited task would).
-        for wave in (2, 3):
-            if mem[wave - 1] - mem[wave] >= 2048:
-                raise RuntimeError(f"{label}: fork-bomb wave {wave} kept memory: {b.group(0).decode()}")
+        # Bounded: the second and third equal waves (2 x (N + N/4) exited tasks) must not keep memory. One wave's
+        # settled MemAvailable still moves by up to ~3 MiB either way on a kernel that keeps nothing per task
+        # (observed on the base kernel, x86 and arm64), so the check is over both waves together, where a
+        # per-task leak adds up and noise does not: < 2 MiB available memory (~42 bytes per task) and < 1 MiB of
+        # unreclaimable slab + kernel stacks + page tables (~21 bytes per task; that sum moves < 100 KiB per wave).
+        if mem[1] - mem[3] >= 2048 or kernel[3] - kernel[1] >= 1024:
+            raise RuntimeError(f"{label}: fork-bomb waves 2 and 3 kept memory: {b.group(0).decode()}")
     if args.no_churn:
         return
     m = CHURN_BEFORE.search(output)
