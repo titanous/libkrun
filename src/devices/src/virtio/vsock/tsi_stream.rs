@@ -54,6 +54,7 @@ pub struct TsiStreamProxy {
     pending: super::stream_buffer::StreamBuffer,
     rx_paused: bool,
     created: std::time::Instant,
+    released: bool,
     /// Counts this proxy's host socket against the guest's ceiling while it exists.
     pub(crate) host_socket_permit: Option<super::host_sockets::HostSocketPermit>,
 }
@@ -103,6 +104,7 @@ impl TsiStreamProxy {
             pending: Default::default(),
             rx_paused: false,
             created: std::time::Instant::now(),
+            released: false,
             host_socket_permit: None,
         })
     }
@@ -146,6 +148,7 @@ impl TsiStreamProxy {
             pending: Default::default(),
             rx_paused: false,
             created: std::time::Instant::now(),
+            released: false,
             host_socket_permit: None,
         }
     }
@@ -526,6 +529,19 @@ impl Proxy for TsiStreamProxy {
         self.id
     }
 
+    fn control_port(&self) -> Option<u32> {
+        // A proxy the VMM made for an accepted connection has no creating control socket.
+        (self.control_port != 0).then_some(self.control_port)
+    }
+
+    fn created(&self) -> Option<std::time::Instant> {
+        Some(self.created)
+    }
+
+    fn released(&self) -> bool {
+        self.released
+    }
+
     fn status(&self) -> ProxyStatus {
         self.status
     }
@@ -835,6 +851,7 @@ impl Proxy for TsiStreamProxy {
             "release: id={}, tx_cnt={}, last_tx_cnt={}",
             self.id, self.tx_cnt, self.last_tx_cnt_sent
         );
+        self.released = true;
         // A proxy that never carried data (still connecting, or never connected) has nothing
         // to flush: its host socket is closed at once instead of after the removal delay, so
         // a guest opening and closing half-open connects does not pile up host sockets.

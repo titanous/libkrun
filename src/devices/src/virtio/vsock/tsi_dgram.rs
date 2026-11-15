@@ -92,6 +92,11 @@ pub struct TsiDgramProxy {
     peer_fwd_cnt: Wrapping<u32>,
     /// Counts this proxy's host socket against the guest's ceiling while it exists.
     pub(crate) host_socket_permit: Option<super::host_sockets::HostSocketPermit>,
+    /// vsock port of the guest control socket whose request created this proxy: the only
+    /// sender whose control requests may act on it (see `Proxy::control_port`).
+    pub(crate) control_port: u32,
+    created: std::time::Instant,
+    released: bool,
 }
 
 impl TsiDgramProxy {
@@ -131,6 +136,9 @@ impl TsiDgramProxy {
         Ok(TsiDgramProxy {
             socket_policy: Default::default(),
             host_socket_permit: None,
+            control_port: 0,
+            created: std::time::Instant::now(),
+            released: false,
             family,
             id,
             cid,
@@ -293,6 +301,18 @@ impl TsiDgramProxy {
 impl Proxy for TsiDgramProxy {
     fn id(&self) -> u64 {
         self.id
+    }
+
+    fn control_port(&self) -> Option<u32> {
+        (self.control_port != 0).then_some(self.control_port)
+    }
+
+    fn created(&self) -> Option<std::time::Instant> {
+        Some(self.created)
+    }
+
+    fn released(&self) -> bool {
+        self.released
     }
 
     fn status(&self) -> ProxyStatus {
@@ -508,6 +528,7 @@ impl Proxy for TsiDgramProxy {
 
     fn release(&mut self) -> ProxyUpdate {
         debug!("release");
+        self.released = true;
         let remove_proxy = if self.status == ProxyStatus::Listening {
             ProxyRemoval::Immediate
         } else {
