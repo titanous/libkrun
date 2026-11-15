@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Write a newc initramfs holding /init plus /dev/console (5:1) and /dev/null (1:3).
+"""Write a newc initramfs holding /init plus /dev/console (5:1) and /dev/null (1:3), and optionally
+/bin/busybox (a static busybox: random.c then runs its shell loop of short processes before the freeze).
 
-usage: random-initramfs.py INIT_BINARY OUT.cpio
+usage: random-initramfs.py INIT_BINARY OUT.cpio [BUSYBOX]
 Used for the arm64 Nitro run of the random-copy test, where the fixture is cross-built rather than
 packaged by tests/cooperative/image.nix.
 """
@@ -17,12 +18,15 @@ def entry(name, mode, data=b"", rdev=(0, 0), ino=1):
 
 
 init = pathlib.Path(sys.argv[1]).read_bytes()
-archive = b"".join([
+entries = [
     entry("dev", 0o040755, ino=1),
     entry("dev/console", 0o020600, rdev=(5, 1), ino=2),
     entry("dev/null", 0o020666, rdev=(1, 3), ino=3),
     entry("init", 0o100755, init, ino=4),
-    entry("TRAILER!!!", 0, ino=0),
-])
+]
+if len(sys.argv) > 3:
+    entries += [entry("bin", 0o040755, ino=5),
+                entry("bin/busybox", 0o100755, pathlib.Path(sys.argv[3]).read_bytes(), ino=6)]
+archive = b"".join(entries + [entry("TRAILER!!!", 0, ino=0)])
 archive += b"\0" * (-len(archive) % 512)
 pathlib.Path(sys.argv[2]).write_bytes(archive)

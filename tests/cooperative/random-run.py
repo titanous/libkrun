@@ -46,7 +46,26 @@ parser.add_argument("--copies", type=int, default=4)
 parser.add_argument("--cpus", default="1,4,8")
 parser.add_argument("--memory", default="512")
 parser.add_argument("--keep-going", action="store_true", help="measure every freeze even after a failure")
+parser.add_argument("--no-shell", action="store_true",
+                    help="the image has no /bin/busybox: do not require the shell loop of short processes")
 args = parser.parse_args()
+# Tasks that read random bytes and exited before the freeze (random.c churn phase): the source must have
+# run them, and every copy must thaw, reap them and report so.
+CHURN_BEFORE = re.compile(rb"RANDCOPY CHURN before-freeze shell=(\d+) processes=(\d+) threads=(\d+)")
+CHURN_AFTER = b"RANDCOPY CHURN after-resume"
+
+
+def check_churn_source(label, output):
+    m = CHURN_BEFORE.search(output)
+    if m is None:
+        raise RuntimeError(f"{label}: source did not run the exiting-task phase")
+    if int(m.group(1)) != (0 if args.no_shell else 300) or int(m.group(2)) < 158 or int(m.group(3)) < 100:
+        raise RuntimeError(f"{label}: exiting-task phase incomplete: {m.group(0).decode()}")
+
+
+def check_churn_copy(name, output):
+    if CHURN_AFTER not in output or not re.search(rb"RANDCOPY CHURN after-resume .* ok", output):
+        raise RuntimeError(f"copy failed: {name}: exiting tasks not reaped after resume (console kept)")
 if not args.nitro_results and not (args.kernel and args.initramfs):
     parser.error("--kernel and --initramfs are required unless --nitro-results is given")
 args.output.mkdir(parents=True, exist_ok=False)
@@ -71,8 +90,13 @@ def environment(cpus, disk):
 
 
 def run(kind, image, cpus, disk, log):
-    result = subprocess.run([launcher, kind, str(image), "0"], env=environment(cpus, disk),
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
+    try:
+        result = subprocess.run([launcher, kind, str(image), "0"], env=environment(cpus, disk),
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
+    except subprocess.TimeoutExpired as expired:
+        # A guest that never thaws (for example a kernel oops at the copy) gives no exit: keep its console.
+        log.write_bytes((expired.stdout or b"") + b"\n[random-run: launcher killed after 120 s]\n")
+        raise RuntimeError(f"{kind} timed out, console kept in {log}") from None
     log.write_bytes(result.stdout)
     return result
 
@@ -238,6 +262,7 @@ try:
         nonce = re.search(rb"RANDCOPY NONCE ([0-9a-f]{32})", source_log)
         if nonce is None:
             raise RuntimeError(f"no nonce in {label}.source.log")
+        check_churn_source(label, source_log)
         states = find_markers(template_path, bytes.fromhex(nonce.group(1).decode()))
         logs = sorted(args.nitro_results.glob(f"{label}-copy*.log"))
         if len(logs) != args.copies:
@@ -247,6 +272,7 @@ try:
             data = log.read_bytes()
             if b"RANDCOPY DONE" not in data or b"RANDCOPY FAIL" in data:
                 raise RuntimeError(f"copy failed: {log.name}")
+            check_churn_copy(log.name, data)
             copies.append(console_rings(data))
         bad = analyse(label, states, copies)
         cycle_count += 1
@@ -265,6 +291,7 @@ try:
             if source.returncode or b"result=Frozen" not in source.stdout or b"RANDCOPY FREEZE" not in source.stdout \
                     or nonce is None:
                 raise RuntimeError(f"source failed: {label}")
+            check_churn_source(label, source.stdout)
             states = find_markers(image, bytes.fromhex(nonce.group(1).decode()))
 
             def copy(c):
@@ -272,7 +299,8 @@ try:
                 subprocess.run(["cp", "--reflink=auto", str(disk), str(child)], check=True)
                 result = run("resume", image, cpus, child, args.output / f"{label}-copy{c}.log")
                 if result.returncode or b"RANDCOPY DONE" not in result.stdout or b"RANDCOPY FAIL" in result.stdout:
-                    raise RuntimeError(f"copy failed: {label} copy {c}")
+                    raise RuntimeError(f"copy failed: {label} copy {c} (console kept in {label}-copy{c}.log)")
+                check_churn_copy(f"{label} copy {c}", result.stdout)
                 rings = read_rings(child)
                 child.unlink()
                 return rings

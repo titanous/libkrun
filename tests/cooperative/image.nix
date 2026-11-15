@@ -18,4 +18,7 @@ let
 in import (holodeck + /guest/image) {
   inherit pkgs;
   initBinary = "${init}/init";
+  # The random workload runs an ordinary shell loop of short processes before each freeze.
+  extraFiles = pkgs.lib.optional (workload == "random")
+    { destination = "bin/busybox"; source = "${pkgs.pkgsStatic.busybox}/bin/busybox"; };
 }
