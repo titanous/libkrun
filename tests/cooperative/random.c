@@ -268,7 +268,10 @@ static int read_random_once(unsigned long which)
         return syscall(SYS_getrandom, bytes, sizeof(bytes), 0) == (long)sizeof(bytes) ? 0 : -1;
     int fd = open(which % 3 == 1 ? "/dev/urandom" : "/dev/random", O_RDONLY);
     if (fd < 0) return -1;
-    long got = read(fd, bytes, sizeof(bytes));
+    /* /dev/random by readv into 4 segments: more than the kernel keeps inline, so each such task
+     * holds the per-task segment allocation when it exits (the memory rule then covers its free). */
+    struct iovec iov[4] = { { bytes, 4 }, { bytes + 4, 4 }, { bytes + 8, 4 }, { bytes + 12, 4 } };
+    long got = which % 3 == 1 ? read(fd, bytes, sizeof(bytes)) : readv(fd, iov, 4);
     close(fd);
     return got == (long)sizeof(bytes) ? 0 : -1;
 }
