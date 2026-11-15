@@ -56,6 +56,25 @@ cooperative-clone kernel initramfs control output cycles="20" concurrent="16" mo
     CARGO_BUILD_JOBS=12 cargo build --release -p libkrun --example cooperative-console --features net,blk,vhost-user
     python3 tests/cooperative/run.py --kernel "{{kernel}}" --initramfs "{{initramfs}}" --control "{{control}}" --output "{{output}}" --cycles "{{cycles}}" --concurrent "{{concurrent}}" {{mode}}
 
+# Real-KVM random bytes across copies (tests/cooperative/random.c): running threads, tasks that read
+# random bytes and exit before and during the freeze, and the refresh's safety properties (unwritable
+# buffer, same-site other read, fork bomb, copy without a host seed). Builds the production x86 guest
+# kernel and the image from a holodeck tree. Pass: every run ends "RANDOM ACCEPTANCE PASS".
+cooperative-random holodeck output freezes="10":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    CARGO_BUILD_JOBS=12 cargo build --release -p libkrun --example cooperative-console --features net,blk,vhost-user,copy-fault-injection
+    kernel="$(nix-build --no-out-link "{{holodeck}}/guest" --argstr arch x86_64)/vmlinux"
+    image="$(nix build --no-link --print-out-paths --impure --file tests/cooperative/image.nix --arg holodeck "{{holodeck}}" --argstr workload random)/initramfs.cpio"
+    mkdir -p "{{output}}"
+    run() { name=$1; shift; python3 tests/cooperative/random-run.py --kernel "$kernel" --initramfs "$image" --output "{{output}}/$name" "$@" 2>&1 | tee "{{output}}/$name.log" | grep -E '^(PASS|FAILED) |ACCEPTANCE|FAIL '; }
+    run copies --freezes "{{freezes}}"
+    run protect --cpus 1 --freezes 3 --protect
+    run samesite --cpus 1,4 --freezes 4 --samesite
+    run bomb --cpus 1 --freezes 1 --bomb 20000
+    run omit-seed --cpus 1 --freezes 1 --omit-seed
+    echo "COOPERATIVE RANDOM GATE PASS"
+
 # Real-copy virtio-fs clone matrix with retained files, mappings and watches.
 cooperative-fs kernel initramfs output children="20":
     CARGO_BUILD_JOBS=12 cargo build --release -p libkrun --example cooperative-console --features net,blk,vhost-user
