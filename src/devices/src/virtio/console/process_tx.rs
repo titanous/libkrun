@@ -79,9 +79,8 @@ pub(crate) fn process_tx_with_state(
         super::tx_buffer::BufferedOutput(buffer.clone()),
     )));
     process_tx_copied(port_id, mem, queue, interrupt, copied, stop, drain, state);
-    buffer.finish();
-    if writer.join().is_err() {
-        log::error!("console writer panicked on port {port_id}");
+    if !super::tx_buffer::finish_and_join(&buffer, writer) {
+        log::error!("console writer panicked or was abandoned on port {port_id}");
     }
 }
 

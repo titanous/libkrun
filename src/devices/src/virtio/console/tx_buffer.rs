@@ -20,6 +20,8 @@ struct Inner {
     bytes: usize,
     lost: u64,
     finished: Option<Instant>,
+    /// The writer was given up (`finish_and_join`); it must not account anything any more.
+    abandoned: bool,
 }
 
 pub(super) struct Buffer {
@@ -78,6 +80,18 @@ impl Buffer {
         self.inner.lock().unwrap().finished = Some(Instant::now());
         self.changed.notify_all();
     }
+    /// Count every byte not yet written as dropped (once) and stop all accounting by the writer.
+    fn abandon(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.abandoned {
+            return;
+        }
+        inner.abandoned = true;
+        let dropped = std::mem::take(&mut inner.bytes) as u64;
+        inner.chunks.clear();
+        self.state.dropped.fetch_add(dropped, Ordering::Relaxed);
+        self.changed.notify_all();
+    }
     pub fn write(&self, output: &mut (dyn PortOutput + Send)) {
         loop {
             let (mut bytes, counted) = {
@@ -134,7 +148,12 @@ impl Buffer {
                 let slice = unsafe {
                     vm_memory::VolatileSlice::new(bytes[offset..end].as_mut_ptr(), end - offset)
                 };
-                match output.write_volatile(&slice) {
+                let result = output.write_volatile(&slice);
+                if self.inner.lock().unwrap().abandoned {
+                    // Given up while blocked in that write: everything was counted already.
+                    return;
+                }
+                match result {
                     Ok(n) if n > 0 => {
                         offset += n;
                         if counted {
@@ -165,6 +184,29 @@ impl Buffer {
             }
         }
     }
+}
+
+/// How long the writer may take after `finish` before it is abandoned: the final drain plus
+/// time to notice it.
+const WRITER_JOIN: Duration = Duration::from_millis(200);
+
+/// After the copier has ended: finish the buffer and wait for its writer thread, at most
+/// `WRITER_JOIN`. A writer blocked inside one write on a stalled blocking descriptor (a character
+/// device that can only be shared through the caller's description, `port_io`) cannot see the
+/// drain deadline; it is abandoned: its unwritten bytes are counted as dropped once and the
+/// thread, which writes only from its own copies and never guest memory, ends with the process.
+/// Returns false when the writer panicked or was abandoned.
+pub(super) fn finish_and_join(buffer: &Buffer, writer: std::thread::JoinHandle<()>) -> bool {
+    buffer.finish();
+    let deadline = Instant::now() + WRITER_JOIN;
+    while !writer.is_finished() {
+        if Instant::now() >= deadline {
+            buffer.abandon();
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    writer.join().is_ok()
 }
 
 pub(super) struct BufferedOutput(pub Arc<Buffer>);
@@ -223,6 +265,43 @@ mod tests {
         fn wait_until_writable(&self) {
             std::thread::sleep(Duration::from_millis(1));
         }
+    }
+    /// A blocking write that does not return until released (a stalled character device shared
+    /// through the caller's blocking description).
+    struct BlockedWrite(std::sync::mpsc::Receiver<()>);
+    impl PortOutput for BlockedWrite {
+        fn write_volatile(&mut self, bytes: &vm_memory::VolatileSlice) -> std::io::Result<usize> {
+            let _ = self.0.recv();
+            Ok(bytes.len())
+        }
+        fn wait_until_writable(&self) {}
+    }
+    #[test]
+    fn a_writer_blocked_in_a_write_cannot_hold_the_vmm_exit() {
+        let state = Arc::new(ConsoleTxState::default());
+        let buffer = Arc::new(Buffer::new(state.clone()));
+        let (release, blocked) = std::sync::mpsc::channel();
+        let writer_buffer = buffer.clone();
+        let writer = std::thread::spawn(move || writer_buffer.write(&mut BlockedWrite(blocked)));
+        buffer.push(&[7; 1000]);
+        std::thread::sleep(Duration::from_millis(20));
+        let (done, joined) = std::sync::mpsc::channel();
+        let joiner_buffer = buffer.clone();
+        std::thread::spawn(move || {
+            let _ = done.send(finish_and_join(&joiner_buffer, writer));
+        });
+        let began = Instant::now();
+        let finished = joined.recv_timeout(Duration::from_secs(2));
+        assert!(
+            finished.is_ok(),
+            "the join waited for a write that never returns"
+        );
+        assert!(began.elapsed() < Duration::from_millis(500));
+        // The unwritten bytes are counted once, also after the stuck write finally returns.
+        assert_eq!(state.dropped_bytes(), 1000);
+        let _ = release.send(());
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(state.dropped_bytes(), 1000);
     }
     #[test]
     fn reset_finishes_with_no_bytes_to_inherit_and_counts_once() {
