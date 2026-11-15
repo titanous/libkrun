@@ -7,12 +7,17 @@
 #   target/release/examples/nitro-random-copy (fork example)
 # usage: random-nitro-run.sh OUTDIR FREEZES_PER_CPU_COUNT [CPU_COUNTS]
 # RANDCOPY_CMDLINE: extra guest kernel arguments (test modes of random.c, passed to /init as environment).
+# RANDCOPY_ANALYSIS: extra random-run.py options for those modes (--no-churn --protect --samesite
+#   --bomb N --omit-seed). RANDCOPY_HOST_ENV: host environment for the launcher, for example
+#   KRUN_TEST_OMIT_COPY_SEED=1 (launcher built with --features nitro-sandbox,copy-fault-injection).
 # CIDs 2900 (source) and 2901-2904 (copies); at most 4 guests alive at once (the source closes before
 # copies start). The launcher takes /run/holodeck/nitro-lifecycle.lock for every start and teardown and
 # stops a copy that has not powered off after 90 s.
 set -eu
 out=$1; freezes=$2; cpu_counts=${3:-"1 4 8"}
 extra=${RANDCOPY_CMDLINE:-}
+analysis=${RANDCOPY_ANALYSIS:-}
+hostenv=${RANDCOPY_HOST_ENV:-}
 mkdir -p "$out"
 counters() {
     printf '%s slots_in_use=%s pool_in_use=%s leaked=%s\n' "$1" \
@@ -36,16 +41,17 @@ for cpus in $cpu_counts; do
         dir="$out/$label"
         mkdir -p "$dir"
         set +e
-        timeout 300 sudo target/release/examples/nitro-random-copy "source-$cpus.eif" "receiver-$cpus.eif" \
+        timeout 300 sudo env $hostenv target/release/examples/nitro-random-copy "source-$cpus.eif" "receiver-$cpus.eif" \
             "$dir" "$label" "$cpus" 4 2900 > "$dir/run.log" 2>&1
         r=$?
         set -e
         sudo chown -R "$(id -u):$(id -g)" "$dir"
         echo "$label exit=$r" >> "$out/runs.log"
-        if [ "$r" != 0 ]; then counters "after-failed-$label"; exit "$r"; fi
+        # A refused copy (--omit-seed) makes the launcher fail by design; the analysis decides.
+        if [ "$r" != 0 ] && [ -z "$hostenv" ]; then counters "after-failed-$label"; exit "$r"; fi
         # Analyse now; templates are 1 GiB each. Keep the first three failing templates.
         set +e
-        timeout 600 python3 random-run.py --nitro-results "$dir" --output "$dir/analysis" --copies 4 \
+        timeout 600 python3 random-run.py --nitro-results "$dir" --output "$dir/analysis" --copies 4 $analysis \
             > "$dir/analysis.log" 2>&1
         a=$?
         set -e
