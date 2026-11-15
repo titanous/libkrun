@@ -31,8 +31,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cpus: u32 = args[5].parse()?;
     let copies: u64 = args[6].parse()?;
     let source_cid: u64 = args[7].parse()?;
-    if !(2100..=2299).contains(&source_cid) || source_cid + copies > 2299 {
-        return Err("CIDs must stay within 2100-2299".into());
+    // The random-copy lane's address range on the shared instance.
+    if !(2900..=3099).contains(&source_cid) || source_cid + copies > 3099 {
+        return Err("CIDs must stay within 2900-3099".into());
     }
     let lock = || {
         Some(LifecycleLock {
@@ -126,7 +127,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     1024 * 1024,
                     1024 * 1024,
                 ));
-                match receiver.run().map_err(|e| e.to_string())? {
+                // A copy that never thaws (for example a kernel oops before thaw) gives no exit:
+                // stop it after a deadline through the runtime, which tears it down under the
+                // lifecycle lock and keeps its console.
+                let stop = std::sync::Arc::new(
+                    utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK)
+                        .map_err(|e| e.to_string())?,
+                );
+                receiver.set_stop_event(stop.clone());
+                let (finished, deadline) = std::sync::mpsc::channel::<()>();
+                let watchdog = std::thread::spawn(move || {
+                    if deadline.recv_timeout(Duration::from_secs(90)).is_err() {
+                        let _ = stop.write(1);
+                    }
+                });
+                let exit = receiver.run().map_err(|e| e.to_string());
+                let _ = finished.send(());
+                let _ = watchdog.join();
+                match exit? {
                     Exit::PowerOff => Ok(()),
                     other => Err(format!("copy {index} ended {other:?}")),
                 }
