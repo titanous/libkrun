@@ -87,7 +87,8 @@ impl Server {
             let count = self.request_counts[opcode].load(Ordering::Relaxed);
             if count != 0 {
                 eprintln!(
-                    "fuse_stats mount={} opcode={} count={} nanos={}",
+                    "fuse_stats pid={} mount={} opcode={} count={} nanos={}",
+                    std::process::id(),
                     mount,
                     opcode,
                     count,
