@@ -32,9 +32,10 @@ pub fn require_template_marker(page: &[u8; CONTROL_SIZE]) -> io::Result<()> {
 }
 
 /// Test-only (feature `copy-fault-injection`, never in a product build): with
-/// `KRUN_TEST_OMIT_COPY_SEED` set, a copy starts without the host's fresh random seed and
-/// seed-ready word, so tests can show that the guest refuses such a copy instead of handing out
-/// its template's random state. Always false without the feature.
+/// `KRUN_TEST_OMIT_COPY_SEED` set, a copy starts without any fresh random seed from the host (no
+/// seed and seed-ready word in the control page and, on KVM, no new VM generation ID), so tests
+/// can show that the guest refuses such a copy instead of handing out its template's random
+/// state. Always false without the feature.
 pub fn omit_copy_seed_for_test() -> bool {
     #[cfg(feature = "copy-fault-injection")]
     if std::env::var_os("KRUN_TEST_OMIT_COPY_SEED").is_some() {
