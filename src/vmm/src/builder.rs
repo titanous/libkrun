@@ -1049,6 +1049,12 @@ pub fn build_microvm(
                 .configure_cooperative_entry(&entry)
                 .map_err(Error::Vcpu)
                 .map_err(StartMicrovmError::Internal)?;
+            // Secondary vCPUs get the boot MSRs (before the TSC, which setup_msrs also writes).
+            for cpu in &vcpus[1..] {
+                cpu.configure_cooperative_secondary()
+                    .map_err(Error::Vcpu)
+                    .map_err(StartMicrovmError::Internal)?;
+            }
             // One offset keeps all guest CPUs on the same counter timeline.
             // SAFETY: x86_64 provides RDTSC; template frequency is fenced above.
             let host_tsc = unsafe { std::arch::x86_64::_rdtsc() };

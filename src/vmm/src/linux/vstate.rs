@@ -1262,6 +1262,15 @@ impl Vcpu {
         Ok(())
     }
 
+    /// A secondary vCPU of a copy: it stays offline until the guest starts it with INIT/SIPI, as
+    /// at boot, so it gets the MSRs every vCPU had at boot (fast strings in IA32_MISC_ENABLE, the
+    /// MTRR default type). Without them the guest finds a CPU that differs from the one it booted
+    /// with (Linux clears the fast-string features after boot and warns).
+    #[cfg(target_arch = "x86_64")]
+    pub fn configure_cooperative_secondary(&self) -> Result<()> {
+        arch::x86_64::msr::setup_msrs(&self.fd).map_err(Error::MSRSConfiguration)
+    }
+
     #[cfg(target_arch = "x86_64")]
     pub fn restore_cooperative_tsc(&self, tsc: u64, offset: u64) -> Result<()> {
         use std::os::fd::AsRawFd;
