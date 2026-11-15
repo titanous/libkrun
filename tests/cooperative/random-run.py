@@ -30,7 +30,9 @@ RING_STRIDE = 5 << 20
 LEAD = 64
 THREADS = 16
 RECORD = struct.Struct("<QqQ16s16sQ")
-KINDS = ("getrandom", "vdso", "urandom", "random")
+# "readv-random": readv of /dev/random into 2 or 3 contiguous segments of the buffer (alternating), so a
+# refresh must cover every segment for the buffer's hash, head and tail to change.
+KINDS = ("getrandom", "vdso", "urandom", "readv-random")
 SIZES = (8, 32, 4096, 1 << 20)
 M64 = (1 << 64) - 1
 
@@ -145,6 +147,12 @@ def check_modes_copy(name, output):
         if m.group(2) != b"ok":
             raise RuntimeError(f"USERLOOP FAIL {name}: the buffer of a task that had returned to user mode was "
                                f"rewritten ({m.group(0).decode()})")
+        # The loop whose head is the return address itself is the kernel's one documented residue
+        # (patch 0102): counted and printed, not failed.
+        m = re.search(rb"RANDCOPY USERLOOP-RETADDR seen=([0-9a-f]{16}) (ok|rewritten)", output)
+        if m is None:
+            raise RuntimeError(f"copy failed: {name}: return-address loop thread did not report (console kept)")
+        mode_stats[f"userloop-retaddr {m.group(2).decode()}"] += 1
     return protected
 
 

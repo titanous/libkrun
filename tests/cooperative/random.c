@@ -40,6 +40,7 @@
 #include <sys/reboot.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/uio.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <time.h>
@@ -55,7 +56,10 @@
 #define LEAD 64                           /* marker area before the buffer, in the same page */
 
 enum kind { KIND_SYSCALL = 0, KIND_VDSO = 1, KIND_URANDOM = 2, KIND_RANDOM = 3 };
-static const char *kind_names[] = { "getrandom", "vdso", "urandom", "random" };
+/* KIND_RANDOM reads /dev/random with readv into 2 or 3 contiguous segments of the buffer (alternating
+ * per call): the kernel keeps up to 2 segments inline and allocates beyond, and a refresh must rewrite
+ * every segment for the buffer's hash, head and tail to change. */
+static const char *kind_names[] = { "getrandom", "vdso", "urandom", "readv-random" };
 static const size_t sizes[] = { 8, 32, 4096, 1 << 20 };
 
 /* Read by the host from template RAM at offset 32 of the control page: keep in step with random-run.py. */
@@ -203,6 +207,15 @@ static void *worker_loop(void *argument)
             ret = vgetrandom(w->buffer, n, 0, w->vdso_state, w->vdso_state_size);
             c->commit = ret;
             break;
+        case KIND_RANDOM: {
+            int segments = 2 + (int)(seq & 1);
+            size_t a = n / segments, b = segments == 3 ? 2 * (n / 3) : n;
+            struct iovec iov[3] = {
+                { w->buffer, a }, { w->buffer + a, b - a }, { w->buffer + b, n - b },
+            };
+            ret = syscall3_commit(SYS_readv, w->fd, (long)iov, segments, &c->commit);
+            break;
+        }
         default:
             ret = syscall3_commit(SYS_read, w->fd, (long)w->buffer, (long)n, &c->commit);
             break;
@@ -489,80 +502,108 @@ static void *samesite_loop(void *unused)
  * the call returned them (scratch registers and flags are saved and restored around each round). Each
  * round records a non-zero buffer (after the first round) and zeroes it. A copy that rewrote the buffer
  * after the return (for example because the frozen task's registers still equal those of the return)
- * leaves a non-zero record. */
-static volatile uint64_t userloop_buffer, userloop_seen;
-static volatile int32_t userloop_armed, userloop_stop, userloop_running;
+ * leaves a non-zero record.
+ *
+ * Two such threads run. In "past" the loop head is one instruction AFTER the return address, so the
+ * thread never stands at the return address again: the kernel must never rewrite it (hard failure).
+ * In "retaddr" the loop head IS the return address: this is the one documented residue of the kernel's
+ * rule (patch 0102): if every kernel entry since the return was an interrupt taken exactly at that
+ * address, the kernel cannot tell the thread from one that has not run yet, and a copy refreshes this
+ * program's own buffer. Any interrupt elsewhere in the loop ends that, so in practice it is not
+ * rewritten; its result is reported ("RANDCOPY USERLOOP-RETADDR"), not failed. */
+struct userloop {
+    volatile uint64_t buffer, seen;
+    volatile int32_t armed;
+};
+static struct userloop userloop_past, userloop_retaddr;
+static volatile int32_t userloop_stop, userloop_running;
 
-static void *userloop_thread(void *unused)
+/* PRE: instructions between the system call and the loop head ("" or a nop). */
+#if defined(__x86_64__)
+#define USERLOOP_ASM(PRE) \
+    asm volatile("sub $128, %%rsp\n\t"           /* below the red zone: the pushes clobber nothing */ \
+                 "syscall\n" PRE \
+                 "1:\n\t" \
+                 "pushfq\n\t" \
+                 "push %%rax\n\t" \
+                 "movq (%%rdi), %%rax\n\t" \
+                 "cmpl $0, (%[armed])\n\t" \
+                 "je 2f\n\t" \
+                 "test %%rax, %%rax\n\t" \
+                 "jz 2f\n\t" \
+                 "movq %%rax, (%[seen])\n" \
+                 "2:\n\t" \
+                 "movq $0, (%%rdi)\n\t" \
+                 "movl $1, (%[armed])\n\t" \
+                 "cmpl $0, (%[stop])\n\t" \
+                 "jne 3f\n\t" \
+                 "pop %%rax\n\t" \
+                 "popfq\n\t" \
+                 "jmp 1b\n" \
+                 "3:\n\t" \
+                 "pop %%rax\n\t" \
+                 "popfq\n\t" \
+                 "add $128, %%rsp" \
+                 : "=a"(ret) \
+                 : "0"((long)SYS_getrandom), "D"(&u->buffer), "S"(8L), "d"(0L), \
+                   [armed] "r"(&u->armed), [seen] "r"(&u->seen), [stop] "r"(&userloop_stop) \
+                 : "rcx", "r11", "memory", "cc")
+#elif defined(__aarch64__)
+#define USERLOOP_ASM(PRE) \
+    asm volatile("svc #0\n" PRE \
+                 "1:\n\t" \
+                 "sub sp, sp, #32\n\t" \
+                 "stp x9, x10, [sp]\n\t" \
+                 "mrs x9, nzcv\n\t" \
+                 "str x9, [sp, #16]\n\t" \
+                 "ldr x10, [%[buf]]\n\t" \
+                 "ldr w9, [%[armed]]\n\t" \
+                 "cbz w9, 2f\n\t" \
+                 "cbz x10, 2f\n\t" \
+                 "str x10, [%[seen]]\n" \
+                 "2:\n\t" \
+                 "str xzr, [%[buf]]\n\t" \
+                 "mov w9, #1\n\t" \
+                 "str w9, [%[armed]]\n\t" \
+                 "ldr w9, [%[stop]]\n\t" \
+                 "ldr x10, [sp, #16]\n\t" \
+                 "msr nzcv, x10\n\t" \
+                 "cbnz w9, 3f\n\t" \
+                 "ldp x9, x10, [sp]\n\t" \
+                 "add sp, sp, #32\n\t" \
+                 "b 1b\n" \
+                 "3:\n\t" \
+                 "ldp x9, x10, [sp]\n\t" \
+                 "add sp, sp, #32" \
+                 : "+r"(x0) \
+                 : "r"(x8), "r"(x1), "r"(x2), [buf] "r"(x3), [armed] "r"(x4), [seen] "r"(x5), \
+                   [stop] "r"(x6) \
+                 : "x9", "x10", "memory", "cc")
+#else
+#error "unsupported architecture"
+#endif
+
+static void *userloop_thread(void *arg)
 {
-    (void)unused;
-    userloop_armed = 0;
+    struct userloop *u = arg;
+    u->armed = 0;
     userloop_running = 1;
 #if defined(__x86_64__)
     long ret;
-    asm volatile("sub $128, %%rsp\n\t"           /* below the red zone: the pushes clobber nothing */
-                 "syscall\n"
-                 "1:\n\t"
-                 "pushfq\n\t"
-                 "push %%rax\n\t"
-                 "movq (%%rdi), %%rax\n\t"
-                 "cmpl $0, (%[armed])\n\t"
-                 "je 2f\n\t"
-                 "test %%rax, %%rax\n\t"
-                 "jz 2f\n\t"
-                 "movq %%rax, (%[seen])\n"
-                 "2:\n\t"
-                 "movq $0, (%%rdi)\n\t"
-                 "movl $1, (%[armed])\n\t"
-                 "cmpl $0, (%[stop])\n\t"
-                 "jne 3f\n\t"
-                 "pop %%rax\n\t"
-                 "popfq\n\t"
-                 "jmp 1b\n"
-                 "3:\n\t"
-                 "pop %%rax\n\t"
-                 "popfq\n\t"
-                 "add $128, %%rsp"
-                 : "=a"(ret)
-                 : "0"((long)SYS_getrandom), "D"(&userloop_buffer), "S"(8L), "d"(0L),
-                   [armed] "r"(&userloop_armed), [seen] "r"(&userloop_seen), [stop] "r"(&userloop_stop)
-                 : "rcx", "r11", "memory", "cc");
+    if (u == &userloop_past)
+        USERLOOP_ASM("\tnop\n");
+    else
+        USERLOOP_ASM("");
 #elif defined(__aarch64__)
-    register long x8 asm("x8") = SYS_getrandom, x0 asm("x0") = (long)&userloop_buffer, x1 asm("x1") = 8,
+    register long x8 asm("x8") = SYS_getrandom, x0 asm("x0") = (long)&u->buffer, x1 asm("x1") = 8,
         x2 asm("x2") = 0;
-    register volatile void *x3 asm("x3") = &userloop_buffer, *x4 asm("x4") = &userloop_armed,
-        *x5 asm("x5") = &userloop_seen, *x6 asm("x6") = &userloop_stop;
-    asm volatile("svc #0\n"
-                 "1:\n\t"
-                 "sub sp, sp, #32\n\t"
-                 "stp x9, x10, [sp]\n\t"
-                 "mrs x9, nzcv\n\t"
-                 "str x9, [sp, #16]\n\t"
-                 "ldr x10, [%[buf]]\n\t"
-                 "ldr w9, [%[armed]]\n\t"
-                 "cbz w9, 2f\n\t"
-                 "cbz x10, 2f\n\t"
-                 "str x10, [%[seen]]\n"
-                 "2:\n\t"
-                 "str xzr, [%[buf]]\n\t"
-                 "mov w9, #1\n\t"
-                 "str w9, [%[armed]]\n\t"
-                 "ldr w9, [%[stop]]\n\t"
-                 "ldr x10, [sp, #16]\n\t"
-                 "msr nzcv, x10\n\t"
-                 "cbnz w9, 3f\n\t"
-                 "ldp x9, x10, [sp]\n\t"
-                 "add sp, sp, #32\n\t"
-                 "b 1b\n"
-                 "3:\n\t"
-                 "ldp x9, x10, [sp]\n\t"
-                 "add sp, sp, #32"
-                 : "+r"(x0)
-                 : "r"(x8), "r"(x1), "r"(x2), [buf] "r"(x3), [armed] "r"(x4), [seen] "r"(x5), [stop] "r"(x6)
-                 : "x9", "x10", "memory", "cc");
+    register volatile void *x3 asm("x3") = &u->buffer, *x4 asm("x4") = &u->armed,
+        *x5 asm("x5") = &u->seen, *x6 asm("x6") = &userloop_stop;
+    if (u == &userloop_past)
+        USERLOOP_ASM("\tnop\n");
+    else
+        USERLOOP_ASM("");
     long ret = x0;
-#else
-#error "unsupported architecture"
 #endif
     if (ret != 8) fail("userloop getrandom");
     return NULL;
@@ -652,9 +693,11 @@ int main(int argc, char **argv)
         if (pthread_create(&workers[i].thread, &normal, worker_loop, &workers[i])) fail("pthread");
     pthread_t samesite_thread;
     if (samesite && pthread_create(&samesite_thread, &normal, samesite_loop, NULL)) fail("samesite thread");
-    pthread_t userloop_handle;
-    if (userloop && pthread_create(&userloop_handle, &normal, userloop_thread, NULL)) fail("userloop thread");
-    while (userloop && !userloop_armed) usleep(1000);
+    pthread_t userloop_handle[2];
+    if (userloop && (pthread_create(&userloop_handle[0], &normal, userloop_thread, &userloop_past) ||
+                     pthread_create(&userloop_handle[1], &normal, userloop_thread, &userloop_retaddr)))
+        fail("userloop thread");
+    while (userloop && !(userloop_past.armed && userloop_retaddr.armed)) usleep(1000);
     for (int i = 0; i < THREADS; i++)
         while (workers[i].control->recorded < 3) usleep(1000);
     while (samesite && atomic_load(&samesite_zero_reads) < 100) usleep(1000);
@@ -698,9 +741,15 @@ int main(int argc, char **argv)
         /* The loop thread has run since the thaw (the workers all recorded): any refresh is done. */
         usleep(20000);
         userloop_stop = 1;
-        if (pthread_join(userloop_handle, NULL)) fail("userloop join");
-        printf("RANDCOPY USERLOOP seen=%016llx %s\n", (unsigned long long)userloop_seen,
-               userloop_seen ? "FAIL" : "ok");
+        if (pthread_join(userloop_handle[0], NULL) || pthread_join(userloop_handle[1], NULL))
+            fail("userloop join");
+        /* Loop head past the return address: must never be rewritten. */
+        printf("RANDCOPY USERLOOP seen=%016llx %s\n", (unsigned long long)userloop_past.seen,
+               userloop_past.seen ? "FAIL" : "ok");
+        /* Loop head at the return address: the documented residue, reported. */
+        printf("RANDCOPY USERLOOP-RETADDR seen=%016llx %s\n",
+               (unsigned long long)userloop_retaddr.seen,
+               userloop_retaddr.seen ? "rewritten" : "ok");
     }
     if (churn_on) churn_after_resume(churn);
     else printf("RANDCOPY CHURN off\n");
