@@ -64,6 +64,8 @@ pub struct Server {
     fs: Box<dyn FileSystem + Send + Sync>,
     options: AtomicU64,
     dax_mapper: Option<Arc<dyn DaxMapper>>,
+    request_counts: [AtomicU64; 64],
+    request_nanos: [AtomicU64; 64],
 }
 
 impl Server {
@@ -75,6 +77,23 @@ impl Server {
             fs,
             options: AtomicU64::new(FsOptions::empty().bits()),
             dax_mapper: None,
+            request_counts: std::array::from_fn(|_| AtomicU64::new(0)),
+            request_nanos: std::array::from_fn(|_| AtomicU64::new(0)),
+        }
+    }
+
+    pub fn log_request_stats(&self, mount: &str) {
+        for opcode in 0..self.request_counts.len() {
+            let count = self.request_counts[opcode].load(Ordering::Relaxed);
+            if count != 0 {
+                log::info!(
+                    "fuse_stats mount={} opcode={} count={} nanos={}",
+                    mount,
+                    opcode,
+                    count,
+                    self.request_nanos[opcode].load(Ordering::Relaxed)
+                );
+            }
         }
     }
 
@@ -100,7 +119,9 @@ impl Server {
             );
         }
         debug!("opcode: {}", in_header.opcode);
-        match fuse_dispatch::classify_opcode(in_header.opcode) {
+        let started = std::time::Instant::now();
+        let opcode = (in_header.opcode as usize).min(self.request_counts.len() - 1);
+        let result = match fuse_dispatch::classify_opcode(in_header.opcode) {
             Some(Opcode::Lookup) => self.lookup(in_header, r, w),
             Some(Opcode::Forget) => self.forget(in_header, r), // No reply.
             Some(Opcode::Getattr) => self.getattr(in_header, r, w),
@@ -171,7 +192,11 @@ impl Server {
                 in_header.unique,
                 w,
             ),
-        }
+        };
+        self.request_counts[opcode].fetch_add(1, Ordering::Relaxed);
+        self.request_nanos[opcode]
+            .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        result
     }
 
     fn lookup(&self, in_header: InHeader, mut r: Reader, w: Writer) -> Result<usize> {

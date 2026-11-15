@@ -173,7 +173,14 @@ impl VirtioDevice for Fs {
             self.exit_code.clone(),
         );
         worker.set_dax_mapper(self.dax_mapper.clone());
-        self.worker_thread = Some(worker.run());
+        let tag_len = self
+            .config
+            .tag
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(self.config.tag.len());
+        let mount = String::from_utf8_lossy(&self.config.tag[..tag_len]).into_owned();
+        self.worker_thread = Some(worker.run(mount));
 
         self.device_state = DeviceState::Activated(mem, interrupt);
         Ok(())

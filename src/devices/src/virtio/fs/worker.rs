@@ -52,14 +52,14 @@ impl FsWorker {
     pub fn set_dax_mapper(&mut self, mapper: Option<Arc<dyn super::dax_mapper::DaxMapper>>) {
         self.server.set_dax_mapper(mapper);
     }
-    pub fn run(self) -> thread::JoinHandle<Box<dyn FileSystem + Send + Sync>> {
+    pub fn run(self, mount: String) -> thread::JoinHandle<Box<dyn FileSystem + Send + Sync>> {
         thread::Builder::new()
             .name("fs worker".into())
-            .spawn(|| self.work())
+            .spawn(move || self.work(mount))
             .unwrap()
     }
 
-    fn work(mut self) -> Box<dyn FileSystem + Send + Sync> {
+    fn work(mut self, mount: String) -> Box<dyn FileSystem + Send + Sync> {
         let virtq_hpq_ev_fd = self.queue_evts[HPQ_INDEX].as_raw_fd();
         let virtq_req_ev_fd = self.queue_evts[REQ_INDEX].as_raw_fd();
         let stop_ev_fd = self.stop_fd.as_raw_fd();
@@ -82,10 +82,15 @@ impl FsWorker {
             &EpollEvent::new(EventSet::IN, stop_ev_fd as u64),
         );
 
+        let mut last_report = std::time::Instant::now();
         loop {
             let mut epoll_events = vec![EpollEvent::new(EventSet::empty(), 0); 32];
-            match epoll.wait(epoll_events.len(), -1, epoll_events.as_mut_slice()) {
+            match epoll.wait(epoll_events.len(), 1000, epoll_events.as_mut_slice()) {
                 Ok(ev_cnt) => {
+                    if last_report.elapsed() >= std::time::Duration::from_secs(1) {
+                        self.server.log_request_stats(&mount);
+                        last_report = std::time::Instant::now();
+                    }
                     for event in &epoll_events[0..ev_cnt] {
                         let source = event.fd();
                         let event_set = event.event_set();
