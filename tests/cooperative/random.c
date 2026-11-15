@@ -483,6 +483,91 @@ static void *samesite_loop(void *unused)
     return NULL;
 }
 
+/* ---- Test mode randcopy_userloop=1: a task that returned to user mode owns its bytes ----
+ * One getrandom of 8 bytes, then a loop that never enters the kernel and passes the instruction right
+ * after the system call again and again with every register, the stack pointer and the flags exactly as
+ * the call returned them (scratch registers and flags are saved and restored around each round). Each
+ * round records a non-zero buffer (after the first round) and zeroes it. A copy that rewrote the buffer
+ * after the return (for example because the frozen task's registers still equal those of the return)
+ * leaves a non-zero record. */
+static volatile uint64_t userloop_buffer, userloop_seen;
+static volatile int32_t userloop_armed, userloop_stop, userloop_running;
+
+static void *userloop_thread(void *unused)
+{
+    (void)unused;
+    userloop_armed = 0;
+    userloop_running = 1;
+#if defined(__x86_64__)
+    long ret;
+    asm volatile("sub $128, %%rsp\n\t"           /* below the red zone: the pushes clobber nothing */
+                 "syscall\n"
+                 "1:\n\t"
+                 "pushfq\n\t"
+                 "push %%rax\n\t"
+                 "movq (%%rdi), %%rax\n\t"
+                 "cmpl $0, (%[armed])\n\t"
+                 "je 2f\n\t"
+                 "test %%rax, %%rax\n\t"
+                 "jz 2f\n\t"
+                 "movq %%rax, (%[seen])\n"
+                 "2:\n\t"
+                 "movq $0, (%%rdi)\n\t"
+                 "movl $1, (%[armed])\n\t"
+                 "cmpl $0, (%[stop])\n\t"
+                 "jne 3f\n\t"
+                 "pop %%rax\n\t"
+                 "popfq\n\t"
+                 "jmp 1b\n"
+                 "3:\n\t"
+                 "pop %%rax\n\t"
+                 "popfq\n\t"
+                 "add $128, %%rsp"
+                 : "=a"(ret)
+                 : "0"((long)SYS_getrandom), "D"(&userloop_buffer), "S"(8L), "d"(0L),
+                   [armed] "r"(&userloop_armed), [seen] "r"(&userloop_seen), [stop] "r"(&userloop_stop)
+                 : "rcx", "r11", "memory", "cc");
+#elif defined(__aarch64__)
+    register long x8 asm("x8") = SYS_getrandom, x0 asm("x0") = (long)&userloop_buffer, x1 asm("x1") = 8,
+        x2 asm("x2") = 0;
+    register volatile void *x3 asm("x3") = &userloop_buffer, *x4 asm("x4") = &userloop_armed,
+        *x5 asm("x5") = &userloop_seen, *x6 asm("x6") = &userloop_stop;
+    asm volatile("svc #0\n"
+                 "1:\n\t"
+                 "sub sp, sp, #32\n\t"
+                 "stp x9, x10, [sp]\n\t"
+                 "mrs x9, nzcv\n\t"
+                 "str x9, [sp, #16]\n\t"
+                 "ldr x10, [%[buf]]\n\t"
+                 "ldr w9, [%[armed]]\n\t"
+                 "cbz w9, 2f\n\t"
+                 "cbz x10, 2f\n\t"
+                 "str x10, [%[seen]]\n"
+                 "2:\n\t"
+                 "str xzr, [%[buf]]\n\t"
+                 "mov w9, #1\n\t"
+                 "str w9, [%[armed]]\n\t"
+                 "ldr w9, [%[stop]]\n\t"
+                 "ldr x10, [sp, #16]\n\t"
+                 "msr nzcv, x10\n\t"
+                 "cbnz w9, 3f\n\t"
+                 "ldp x9, x10, [sp]\n\t"
+                 "add sp, sp, #32\n\t"
+                 "b 1b\n"
+                 "3:\n\t"
+                 "ldp x9, x10, [sp]\n\t"
+                 "add sp, sp, #32"
+                 : "+r"(x0)
+                 : "r"(x8), "r"(x1), "r"(x2), [buf] "r"(x3), [armed] "r"(x4), [seen] "r"(x5), [stop] "r"(x6)
+                 : "x9", "x10", "memory", "cc");
+    long ret = x0;
+#else
+#error "unsupported architecture"
+#endif
+    if (ret != 8) fail("userloop getrandom");
+    return NULL;
+}
+
 static int mode(const char *name)
 {
     const char *value = getenv(name);
@@ -544,7 +629,7 @@ int main(int argc, char **argv)
     /* Test modes (kernel arguments, which reach /init as environment). randcopy_churn=0 turns the
      * exiting-task phase off (to isolate another property on an older kernel). */
     int churn_on = mode("randcopy_churn") != 0, protect = mode("randcopy_protect") == 1;
-    int samesite = mode("randcopy_samesite") == 1;
+    int samesite = mode("randcopy_samesite") == 1, userloop = mode("randcopy_userloop") == 1;
     long bomb_processes = mode("randcopy_bomb");
     if (protect && sysconf(_SC_NPROCESSORS_ONLN) != 1) fail("randcopy_protect needs one CPU");
     /* Before the main thread becomes real-time: the churn tasks use normal scheduling. */
@@ -567,6 +652,9 @@ int main(int argc, char **argv)
         if (pthread_create(&workers[i].thread, &normal, worker_loop, &workers[i])) fail("pthread");
     pthread_t samesite_thread;
     if (samesite && pthread_create(&samesite_thread, &normal, samesite_loop, NULL)) fail("samesite thread");
+    pthread_t userloop_handle;
+    if (userloop && pthread_create(&userloop_handle, &normal, userloop_thread, NULL)) fail("userloop thread");
+    while (userloop && !userloop_armed) usleep(1000);
     for (int i = 0; i < THREADS; i++)
         while (workers[i].control->recorded < 3) usleep(1000);
     while (samesite && atomic_load(&samesite_zero_reads) < 100) usleep(1000);
@@ -605,6 +693,14 @@ int main(int argc, char **argv)
         if (pthread_join(samesite_thread, NULL)) fail("samesite join");
         printf("RANDCOPY SAMESITE frozen_phase=%d zero_reads=%ld failures=%d\n", frozen_phase,
                atomic_load(&samesite_zero_reads), atomic_load(&samesite_failures));
+    }
+    if (userloop) {
+        /* The loop thread has run since the thaw (the workers all recorded): any refresh is done. */
+        usleep(20000);
+        userloop_stop = 1;
+        if (pthread_join(userloop_handle, NULL)) fail("userloop join");
+        printf("RANDCOPY USERLOOP seen=%016llx %s\n", (unsigned long long)userloop_seen,
+               userloop_seen ? "FAIL" : "ok");
     }
     if (churn_on) churn_after_resume(churn);
     else printf("RANDCOPY CHURN off\n");

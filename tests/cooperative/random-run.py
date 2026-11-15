@@ -57,6 +57,10 @@ parser.add_argument("--protect", action="store_true",
 parser.add_argument("--samesite", action="store_true",
                     help="guest test mode randcopy_samesite=1: reads of /dev/zero from the instruction of an earlier "
                          "/dev/urandom read, with identical registers, must never be rewritten in a copy")
+parser.add_argument("--userloop", action="store_true",
+                    help="guest test mode randcopy_userloop=1: a thread that returned from getrandom and loops in "
+                         "user mode only, passing the return instruction with every register restored, must never "
+                         "have its buffer rewritten in a copy")
 parser.add_argument("--bomb", type=int, default=0,
                     help="guest test mode randcopy_bomb=N: three waves of N short getrandom processes and N/4 threads "
                          "before the freeze; waves 2 and 3 together must keep less than 1 MiB of kernel memory")
@@ -69,7 +73,8 @@ if args.protect and args.cpus != "1" and not args.nitro_results:
     parser.error("--protect needs --cpus 1")
 GUEST_ARGS = " ".join(word for word, on in (
     ("randcopy_churn=0", args.no_churn), ("randcopy_protect=1", args.protect),
-    ("randcopy_samesite=1", args.samesite), (f"randcopy_bomb={args.bomb}", args.bomb > 0)) if on)
+    ("randcopy_samesite=1", args.samesite), ("randcopy_userloop=1", args.userloop),
+    (f"randcopy_bomb={args.bomb}", args.bomb > 0)) if on)
 SEED_REFUSAL = b"copy resumed without a fresh random seed from the host"
 mode_stats = collections.Counter()
 # Tasks that read random bytes and exited before the freeze (random.c churn phase): the source must have
@@ -132,6 +137,14 @@ def check_modes_copy(name, output):
         if int(m.group(3)):
             raise RuntimeError(f"SAMESITE FAIL {name}: a zero read returned random bytes: a result was rewritten "
                                f"after the task had run ({m.group(0).decode()})")
+    if args.userloop:
+        m = re.search(rb"RANDCOPY USERLOOP seen=([0-9a-f]{16}) (ok|FAIL)", output)
+        if m is None:
+            raise RuntimeError(f"copy failed: {name}: user-loop thread did not report (console kept)")
+        mode_stats["userloop copies"] += 1
+        if m.group(2) != b"ok":
+            raise RuntimeError(f"USERLOOP FAIL {name}: the buffer of a task that had returned to user mode was "
+                               f"rewritten ({m.group(0).decode()})")
     return protected
 
 

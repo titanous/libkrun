@@ -71,8 +71,19 @@ cooperative-random holodeck output freezes="10":
     run copies --freezes "{{freezes}}"
     run protect --cpus 1 --freezes 3 --protect
     run samesite --cpus 1,4 --freezes 4 --samesite
+    run userloop --cpus 1,4 --freezes 6 --userloop
     run bomb --cpus 1 --freezes 1 --bomb 20000
     run omit-seed --cpus 1 --freezes 1 --omit-seed
+    # Self-check of the memory-growth rule: on a test kernel that keeps 64 bytes per task that reads
+    # random bytes (tests/cooperative/0190-test-leak-random-reader.patch) the bomb run must fail on it.
+    leak="$(nix-build --no-out-link tests/cooperative/test-kernel.nix --arg holodeck "{{holodeck}}" --arg leakRandomReader true)/vmlinux"
+    if python3 tests/cooperative/random-run.py --kernel "$leak" --initramfs "$image" --output "{{output}}/bomb-selfcheck" --cpus 1 --freezes 1 --bomb 20000 > "{{output}}/bomb-selfcheck.log" 2>&1; then
+        echo "BOMB SELF-CHECK FAIL: the memory-growth rule passed on a kernel that keeps 64 bytes per reader"; exit 1
+    fi
+    if ! grep -q "fork-bomb waves 2 and 3 kept memory" "{{output}}/bomb-selfcheck.log"; then
+        echo "BOMB SELF-CHECK FAIL: the leaking kernel failed for another reason (see bomb-selfcheck.log)"; exit 1
+    fi
+    echo "BOMB SELF-CHECK PASS: $(grep -m1 -o 'kernel_kib=[-0-9.]*' "{{output}}/bomb-selfcheck.log")"
     echo "COOPERATIVE RANDOM GATE PASS"
 
 # Forwarded guest sockets across a real copy; INIT is tests/cooperative/sockets.c built
