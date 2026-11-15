@@ -86,7 +86,7 @@ impl Server {
         for opcode in 0..self.request_counts.len() {
             let count = self.request_counts[opcode].load(Ordering::Relaxed);
             if count != 0 {
-                log::info!(
+                eprintln!(
                     "fuse_stats mount={} opcode={} count={} nanos={}",
                     mount,
                     opcode,
