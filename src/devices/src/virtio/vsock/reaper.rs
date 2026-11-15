@@ -82,6 +82,8 @@ pub struct ReaperThread {
     receiver: Receiver<u64>,
     proxy_map: ProxyMap,
     released_map: HashMap<u64, Instant>,
+    /// Creation time of the proxy each released id referred to when it was released.
+    released_instance: HashMap<u64, Option<Instant>>,
 }
 
 impl ReaperThread {
@@ -90,6 +92,7 @@ impl ReaperThread {
             receiver,
             proxy_map,
             released_map: HashMap::new(),
+            released_instance: HashMap::new(),
         }
     }
 
@@ -110,8 +113,16 @@ impl ReaperThread {
         if !expired.is_empty() {
             let mut pmap = self.proxy_map.write().unwrap();
             for id in expired {
-                debug!("removing proxy: {id}");
-                pmap.remove(&id);
+                // Remove the id only while the released proxy still holds it: a proxy created
+                // later under the same id belongs to another guest socket.
+                let released = self.released_instance.remove(&id).flatten();
+                let current = pmap.get(&id).and_then(|p| p.lock().unwrap().created());
+                if released.is_none() || current == released {
+                    debug!("removing proxy: {id}");
+                    pmap.remove(&id);
+                } else {
+                    debug!("not removing proxy {id}: a newer proxy holds the id");
+                }
                 self.released_map.remove(&id);
             }
             debug!("remainig proxies: {}", pmap.len());
@@ -130,6 +141,13 @@ impl ReaperThread {
             let timeout = self.check_expiration();
             match self.receiver.recv_timeout(timeout) {
                 Ok(id) => {
+                    let instance = self
+                        .proxy_map
+                        .read()
+                        .unwrap()
+                        .get(&id)
+                        .and_then(|p| p.lock().unwrap().created());
+                    self.released_instance.insert(id, instance);
                     self.released_map.insert(id, Instant::now());
                 }
                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,

@@ -121,6 +121,9 @@ pub struct VsockMuxer {
     /// the request that follows a refused creation gets ENOBUFS rather than ECONNREFUSED.
     refused_creates: Mutex<VecDeque<u32>>,
     refused_total: AtomicU64,
+    /// Control requests refused because they came from a control socket other than the one
+    /// that created the proxy they name.
+    foreign_total: AtomicU64,
 }
 
 /// Most stream proxies one guest may hold without a host socket. Such a proxy exists between
@@ -171,6 +174,7 @@ impl VsockMuxer {
             reaper_thread: None,
             refused_creates: Mutex::new(VecDeque::new()),
             refused_total: AtomicU64::new(0),
+            foreign_total: AtomicU64::new(0),
         }
     }
 
@@ -234,6 +238,47 @@ impl VsockMuxer {
             refused.pop_front();
         }
         refused.push_back(peer_port);
+    }
+
+    /// Control requests name their proxy by a number in the message body, which any guest
+    /// process can write. Only the control socket that created a proxy (the sender of its
+    /// TSI_PROXY_CREATE) may act on it: a request from another sender is refused (answered as
+    /// for a missing proxy where the request has an answer) and counted in the log.
+    fn foreign_request(
+        &self,
+        proxy: &Mutex<Box<dyn Proxy>>,
+        pkt: &VsockPacket,
+        what: &str,
+    ) -> bool {
+        let Some(owner) = proxy.lock().unwrap().control_port() else {
+            return false;
+        };
+        if owner == pkt.src_port() {
+            return false;
+        }
+        let total = self.foreign_total.fetch_add(1, Ordering::Relaxed);
+        if total.is_power_of_two() || total == 0 {
+            warn!(
+                "refusing {what} from guest vsock port {} for a proxy created by port {owner} ({} so far)",
+                pkt.src_port(),
+                total + 1
+            );
+        }
+        true
+    }
+
+    /// A TSI_PROXY_CREATE for an id that another control socket's live proxy holds: refused,
+    /// so that a guest process cannot replace another socket's proxy; the refused sender's
+    /// later requests then fail as foreign. The creating control socket may create again under
+    /// its id (a datagram socket forwarded again after a guest-local connect), and any sender
+    /// may reuse the id of a proxy its owner has released (a guest socket that replaced its
+    /// control socket after a timed-out connect releases its proxy and makes a new one).
+    fn foreign_create(&self, id: u64, pkt: &VsockPacket) -> bool {
+        match self.proxy_map.read().unwrap().get(&id) {
+            Some(existing) if existing.lock().unwrap().released() => false,
+            Some(existing) => self.foreign_request(existing, pkt, "proxy creation"),
+            None => false,
+        }
     }
 
     /// The error for a request naming a proxy that does not exist.
@@ -437,6 +482,9 @@ impl VsockMuxer {
                         warn!("rejecting stream inet proxy because HIJACK_INET is disabled");
                         return;
                     }
+                    if self.foreign_create(id, pkt) {
+                        return;
+                    }
                     if !self.admit_unallocated_proxy() {
                         self.refuse_create(req.peer_port);
                         return;
@@ -477,6 +525,9 @@ impl VsockMuxer {
                         warn!("rejecting dgram inet proxy because HIJACK_INET is disabled");
                         return;
                     }
+                    if self.foreign_create(id, pkt) {
+                        return;
+                    }
                     // A datagram proxy opens its host socket at once: count it first.
                     let Ok(permit) = super::host_sockets::acquire(&self.socket_policy.host_sockets)
                     else {
@@ -495,6 +546,7 @@ impl VsockMuxer {
                         Ok(mut proxy) => {
                             proxy.socket_policy = self.socket_policy.clone();
                             proxy.host_socket_permit = permit;
+                            proxy.control_port = pkt.src_port();
                             self.proxy_map
                                 .write()
                                 .unwrap()
@@ -513,7 +565,11 @@ impl VsockMuxer {
         if let Some(req) = pkt.read_connect_req() {
             let id = ((req.peer_port as u64) << 32) | (defs::TSI_PROXY_PORT as u64);
             debug!("proxy connect request: id={id}");
-            match self.proxy_map.read().unwrap().get(&id) {
+            let map = self.proxy_map.read().unwrap();
+            match map
+                .get(&id)
+                .filter(|p| !self.foreign_request(p, pkt, "connect"))
+            {
                 Some(proxy) => {
                     self.process_proxy_update(id, proxy.lock().unwrap().connect(pkt, req));
                 }
@@ -535,7 +591,11 @@ impl VsockMuxer {
                 id, req.peer_port, req.local_port
             );
 
-            match self.proxy_map.read().unwrap().get(&id) {
+            let map = self.proxy_map.read().unwrap();
+            match map
+                .get(&id)
+                .filter(|p| !self.foreign_request(p, pkt, "getname"))
+            {
                 Some(proxy) => proxy.lock().unwrap().getpeername(pkt),
                 None => self.push_packet(MuxerRx::GetnameResponse {
                     local_port: pkt.dst_port(),
@@ -560,6 +620,7 @@ impl VsockMuxer {
                 .read()
                 .unwrap()
                 .get(&id)
+                .filter(|p| !self.foreign_request(p, pkt, "sendto address"))
                 .map(|proxy| proxy.lock().unwrap().sendto_addr(req));
 
             if let Some(update) = update {
@@ -581,7 +642,11 @@ impl VsockMuxer {
         if let Some(req) = pkt.read_listen_req() {
             let id = ((req.peer_port as u64) << 32) | (defs::TSI_PROXY_PORT as u64);
             debug!("DGRAM listen request: id={id}");
-            match self.proxy_map.read().unwrap().get(&id) {
+            let map = self.proxy_map.read().unwrap();
+            match map
+                .get(&id)
+                .filter(|p| !self.foreign_request(p, pkt, "listen"))
+            {
                 Some(proxy) => self.process_proxy_update(
                     id,
                     proxy.lock().unwrap().listen(pkt, req, &self.host_port_map),
@@ -600,7 +665,11 @@ impl VsockMuxer {
         if let Some(req) = pkt.read_accept_req() {
             let id = ((req.peer_port as u64) << 32) | (defs::TSI_PROXY_PORT as u64);
             debug!("DGRAM accept request: id={id}");
-            match self.proxy_map.read().unwrap().get(&id) {
+            let map = self.proxy_map.read().unwrap();
+            match map
+                .get(&id)
+                .filter(|p| !self.foreign_request(p, pkt, "accept"))
+            {
                 Some(proxy) => self.process_proxy_update(id, proxy.lock().unwrap().accept(req)),
                 None => self.push_packet(MuxerRx::AcceptResponse {
                     local_port: pkt.dst_port(),
@@ -619,16 +688,18 @@ impl VsockMuxer {
                 "DGRAM release request: id={} local_port={} peer_port={}",
                 id, req.local_port, req.peer_port
             );
-            let update = if let Some(proxy) = self.proxy_map.read().unwrap().get(&id) {
+            let map = self.proxy_map.read().unwrap();
+            let update = if let Some(proxy) = map.get(&id) {
+                if self.foreign_request(proxy, pkt, "release") {
+                    return;
+                }
                 Some(proxy.lock().unwrap().release())
             } else {
-                debug!(
-                    "release without proxy: id={}, proxies={}",
-                    id,
-                    self.proxy_map.read().unwrap().len()
-                );
+                debug!("release without proxy: id={}, proxies={}", id, map.len());
                 None
             };
+            // Applying the update may remove the proxy, which takes the map's write lock.
+            drop(map);
 
             if let Some(update) = update {
                 self.process_proxy_update(id, update);
