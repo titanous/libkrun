@@ -244,7 +244,12 @@ impl VsockMuxer {
     /// process can write. Only the control socket that created a proxy (the sender of its
     /// TSI_PROXY_CREATE) may act on it: a request from another sender is refused (answered as
     /// for a missing proxy where the request has an answer) and counted in the log.
-    fn foreign_request(&self, proxy: &Mutex<Box<dyn Proxy>>, pkt: &VsockPacket, what: &str) -> bool {
+    fn foreign_request(
+        &self,
+        proxy: &Mutex<Box<dyn Proxy>>,
+        pkt: &VsockPacket,
+        what: &str,
+    ) -> bool {
         let Some(owner) = proxy.lock().unwrap().control_port() else {
             return false;
         };
@@ -561,7 +566,10 @@ impl VsockMuxer {
             let id = ((req.peer_port as u64) << 32) | (defs::TSI_PROXY_PORT as u64);
             debug!("proxy connect request: id={id}");
             let map = self.proxy_map.read().unwrap();
-            match map.get(&id).filter(|p| !self.foreign_request(p, pkt, "connect")) {
+            match map
+                .get(&id)
+                .filter(|p| !self.foreign_request(p, pkt, "connect"))
+            {
                 Some(proxy) => {
                     self.process_proxy_update(id, proxy.lock().unwrap().connect(pkt, req));
                 }
@@ -584,7 +592,10 @@ impl VsockMuxer {
             );
 
             let map = self.proxy_map.read().unwrap();
-            match map.get(&id).filter(|p| !self.foreign_request(p, pkt, "getname")) {
+            match map
+                .get(&id)
+                .filter(|p| !self.foreign_request(p, pkt, "getname"))
+            {
                 Some(proxy) => proxy.lock().unwrap().getpeername(pkt),
                 None => self.push_packet(MuxerRx::GetnameResponse {
                     local_port: pkt.dst_port(),
@@ -632,7 +643,10 @@ impl VsockMuxer {
             let id = ((req.peer_port as u64) << 32) | (defs::TSI_PROXY_PORT as u64);
             debug!("DGRAM listen request: id={id}");
             let map = self.proxy_map.read().unwrap();
-            match map.get(&id).filter(|p| !self.foreign_request(p, pkt, "listen")) {
+            match map
+                .get(&id)
+                .filter(|p| !self.foreign_request(p, pkt, "listen"))
+            {
                 Some(proxy) => self.process_proxy_update(
                     id,
                     proxy.lock().unwrap().listen(pkt, req, &self.host_port_map),
@@ -652,7 +666,10 @@ impl VsockMuxer {
             let id = ((req.peer_port as u64) << 32) | (defs::TSI_PROXY_PORT as u64);
             debug!("DGRAM accept request: id={id}");
             let map = self.proxy_map.read().unwrap();
-            match map.get(&id).filter(|p| !self.foreign_request(p, pkt, "accept")) {
+            match map
+                .get(&id)
+                .filter(|p| !self.foreign_request(p, pkt, "accept"))
+            {
                 Some(proxy) => self.process_proxy_update(id, proxy.lock().unwrap().accept(req)),
                 None => self.push_packet(MuxerRx::AcceptResponse {
                     local_port: pkt.dst_port(),
