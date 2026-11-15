@@ -510,7 +510,7 @@ pub struct ConsoleDeviceInfo {
 #[cfg(all(target_os = "linux", feature = "nitro-sandbox"))]
 pub use nitro_sandbox::lifecycle::{
     LifecycleLock as NitroLifecycleLock, OpenLock as NitroOpenLifecycleLock,
-    Serialization as NitroSerialization,
+    Serialization as NitroSerialization, LIFECYCLE_LOCK_PATH as NITRO_LIFECYCLE_LOCK_PATH,
 };
 
 #[cfg(all(
@@ -3292,16 +3292,6 @@ mod nitro_cmdline_tests {
         );
     }
     #[test]
-    fn builder_vsock_cid_rejects_reserved_values() {
-        let mut builder = Builder::new();
-        assert_eq!(builder.guest_vsock_cid, None);
-        for cid in [0, 1, 2, u32::MAX] {
-            assert!(builder.vsock_cid(cid).is_err());
-        }
-        builder.vsock_cid(41).unwrap();
-        assert_eq!(builder.guest_vsock_cid, Some(41));
-    }
-    #[test]
     fn builder_flags_follow_internet_forwarding() {
         let mut builder = Builder::new();
         assert_eq!(
@@ -3332,6 +3322,17 @@ mod tests {
         );
     }
     use super::*;
+
+    #[test]
+    fn builder_vsock_cid_rejects_reserved_values() {
+        let mut builder = Builder::new();
+        assert_eq!(builder.guest_vsock_cid, None);
+        for cid in [0, 1, 2, u32::MAX] {
+            assert!(builder.vsock_cid(cid).is_err());
+        }
+        builder.vsock_cid(41).unwrap();
+        assert_eq!(builder.guest_vsock_cid, Some(41));
+    }
 
     #[test]
     #[cfg(not(feature = "tee"))]
