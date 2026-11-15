@@ -34,7 +34,11 @@ mod host {
             let mut builder = krun::Builder::new();
             builder.internet_socket_forwarding(true);
             let mut port_mapping = HashMap::new();
-            port_mapping.insert(PORT, PORT);
+            // The host listener binds the mapping's address, whatever the guest binds.
+            port_mapping.insert(
+                PORT,
+                std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, PORT)),
+            );
             builder
                 .port_map(port_mapping)
                 .map_err(|_| anyhow::anyhow!("port_map failed"))?;

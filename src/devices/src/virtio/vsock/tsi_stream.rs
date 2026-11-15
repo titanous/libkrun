@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::fs;
 use std::net::{Ipv4Addr, SocketAddrV4, SocketAddrV6};
 use std::num::Wrapping;
@@ -54,6 +53,9 @@ pub struct TsiStreamProxy {
     unixsock_path: Option<PathBuf>,
     pending: super::stream_buffer::StreamBuffer,
     rx_paused: bool,
+    created: std::time::Instant,
+    /// Counts this proxy's host socket against the guest's ceiling while it exists.
+    pub(crate) host_socket_permit: Option<super::host_sockets::HostSocketPermit>,
 }
 
 impl TsiStreamProxy {
@@ -100,6 +102,8 @@ impl TsiStreamProxy {
             unixsock_path: None,
             pending: Default::default(),
             rx_paused: false,
+            created: std::time::Instant::now(),
+            host_socket_permit: None,
         })
     }
 
@@ -141,6 +145,8 @@ impl TsiStreamProxy {
             unixsock_path: None,
             pending: Default::default(),
             rx_paused: false,
+            created: std::time::Instant::now(),
+            host_socket_permit: None,
         }
     }
 
@@ -148,7 +154,10 @@ impl TsiStreamProxy {
     // host socket until an authorized operation actually needs one.
     fn ensure_socket(&mut self) -> nix::Result<()> {
         if self.fd.is_none() {
+            // At the guest's ceiling the connect or listen fails with ENOBUFS.
+            let permit = super::host_sockets::acquire(&self.socket_policy.host_sockets)?;
             let fd = socket(self.family, SockType::Stream, SockFlag::SOCK_NONBLOCK, None)?;
+            self.host_socket_permit = permit;
             if self.family == AddressFamily::Unix {
                 setsockopt(&fd, sockopt::ReuseAddr, &true)?;
             } else {
@@ -157,6 +166,11 @@ impl TsiStreamProxy {
             self.fd = Some(fd);
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn age_for_test(&mut self, by: std::time::Duration) {
+        self.created -= by;
     }
 
     fn init_data_pkt(&self, pkt: &mut VsockPacket) {
@@ -174,7 +188,11 @@ impl TsiStreamProxy {
             .set_fwd_cnt(self.tx_cnt.0);
     }
 
-    fn try_listen(&mut self, req: &TsiListenReq, host_port_map: &Option<HashMap<u16, u16>>) -> i32 {
+    fn try_listen(
+        &mut self,
+        req: &TsiListenReq,
+        host_port_map: &Option<super::HostPortMap>,
+    ) -> i32 {
         if self.status == ProxyStatus::Listening || self.status == ProxyStatus::WaitingOnAccept {
             return 0;
         }
@@ -194,29 +212,26 @@ impl TsiStreamProxy {
             }
         }
 
-        let addr: SockaddrStorage = if let Some(port_map) = host_port_map {
-            if let Some(sin) = req.addr.as_sockaddr_in() {
-                debug!("sockaddr is ipv4");
-                if let Some(port) = port_map.get(&sin.port()) {
-                    SocketAddrV4::new(sin.ip(), *port).into()
-                } else {
-                    req.addr
+        // An Internet listener binds the host address from its mapping, never the guest's
+        // address (a guest bound to 0.0.0.0 must not open every host interface).
+        let addr: SockaddrStorage = match guest_port {
+            Some(port) => {
+                let Some(host) = host_port_map.as_ref().and_then(|map| map.get(&port)) else {
+                    return -libc::EPERM;
+                };
+                match (*host, req.addr.as_sockaddr_in6().is_some()) {
+                    (std::net::SocketAddr::V4(v4), false) => v4.into(),
+                    // An IPv6 guest socket gets an IPv6 host socket: map an IPv4 address.
+                    (std::net::SocketAddr::V4(v4), true) => {
+                        SocketAddrV6::new(v4.ip().to_ipv6_mapped(), v4.port(), 0, 0).into()
+                    }
+                    (std::net::SocketAddr::V6(v6), true) => v6.into(),
+                    // An IPv4 guest socket cannot listen on an IPv6 host address.
+                    (std::net::SocketAddr::V6(_), false) => return -libc::EADDRNOTAVAIL,
                 }
-            } else if let Some(sin6) = req.addr.as_sockaddr_in6() {
-                debug!("sockaddr is ipv6");
-                if let Some(port) = port_map.get(&sin6.port()) {
-                    SocketAddrV6::new(sin6.ip(), *port, sin6.flowinfo(), sin6.scope_id()).into()
-                } else {
-                    req.addr
-                }
-            } else if req.addr.as_unix_addr().is_some() {
-                debug!("sockaddr is unix");
-                req.addr
-            } else {
-                return -libc::EINVAL;
             }
-        } else {
-            req.addr
+            None if req.addr.as_unix_addr().is_some() => req.addr,
+            None => return -libc::EINVAL,
         };
 
         use super::policy::SocketOperation;
@@ -660,7 +675,7 @@ impl Proxy for TsiStreamProxy {
         &mut self,
         pkt: &VsockPacket,
         req: TsiListenReq,
-        host_port_map: &Option<HashMap<u16, u16>>,
+        host_port_map: &Option<super::HostPortMap>,
     ) -> ProxyUpdate {
         debug!(
             "listen: id={} addr={}, vm_port={} backlog={}",
@@ -693,7 +708,12 @@ impl Proxy for TsiStreamProxy {
 
         let mut update = ProxyUpdate::default();
 
-        if self.pending_accepts > 0 {
+        if self.status != ProxyStatus::Listening && self.status != ProxyStatus::WaitingOnAccept {
+            // Linux returns EINVAL for accept on a socket that is not listening. Waiting here
+            // would leave the guest blocked for ever and stop a connected proxy's data path.
+            self.push_accept_rsp(-libc::EINVAL);
+            update.signal_queue = true;
+        } else if self.pending_accepts > 0 {
             self.pending_accepts -= 1;
             self.push_accept_rsp(0);
             update.signal_queue = true;
@@ -815,15 +835,23 @@ impl Proxy for TsiStreamProxy {
             "release: id={}, tx_cnt={}, last_tx_cnt={}",
             self.id, self.tx_cnt, self.last_tx_cnt_sent
         );
-        let remove_proxy = if self.status == ProxyStatus::Listening {
-            ProxyRemoval::Immediate
-        } else {
-            ProxyRemoval::Deferred
+        // A proxy that never carried data (still connecting, or never connected) has nothing
+        // to flush: its host socket is closed at once instead of after the removal delay, so
+        // a guest opening and closing half-open connects does not pile up host sockets.
+        let remove_proxy = match self.status {
+            ProxyStatus::Listening | ProxyStatus::Connecting | ProxyStatus::Idle => {
+                ProxyRemoval::Immediate
+            }
+            _ => ProxyRemoval::Deferred,
         };
         ProxyUpdate {
             remove_proxy,
             ..Default::default()
         }
+    }
+
+    fn unallocated_since(&self) -> Option<std::time::Instant> {
+        self.fd.is_none().then_some(self.created)
     }
 
     fn resume_rx(&mut self) -> Option<ProxyUpdate> {
@@ -896,7 +924,8 @@ impl Proxy for TsiStreamProxy {
                     Ok(accept_fd) => {
                         // Safe because we've just obtained the FD from the `accept` call above.
                         let new_fd = unsafe { OwnedFd::from_raw_fd(accept_fd) };
-                        if nix::sys::socket::getsockname::<SockaddrStorage>(accept_fd).map_or(
+                        // Authorize the connecting peer, not the local address it reached.
+                        if nix::sys::socket::getpeername::<SockaddrStorage>(accept_fd).map_or(
                             true,
                             |addr| {
                                 self.socket_policy
@@ -944,6 +973,7 @@ impl Proxy for TsiStreamProxy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use vm_memory::GuestAddress;
 
     #[test]
@@ -974,9 +1004,146 @@ mod tests {
         assert_eq!(proxy.status, ProxyStatus::Idle);
         // A mapping does not bypass the independent policy refusal.
         proxy.socket_policy.internet_enabled = false;
-        let mapping = Some(HashMap::from([(34567, 34568)]));
-        assert_eq!(proxy.try_listen(&req, &mapping), -libc::EPERM);
+        assert_eq!(
+            proxy.try_listen(&req, &loopback_mapping(34567, 34568)),
+            -libc::EPERM
+        );
         assert!(proxy.fd.is_none());
+    }
+
+    fn test_proxy() -> TsiStreamProxy {
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+        TsiStreamProxy::new(
+            1,
+            42,
+            defs::LINUX_AF_INET,
+            1234,
+            5678,
+            9012,
+            mem,
+            Arc::new(Mutex::new(VirtQueue::new(256))),
+            Arc::new(Mutex::new(MuxerRxQ::new())),
+        )
+        .unwrap()
+    }
+
+    /// The mapping of one guest port to a host listener on the loopback address.
+    fn loopback_mapping(guest: u16, host: u16) -> Option<super::super::HostPortMap> {
+        Some(HashMap::from([(
+            guest,
+            SocketAddrV4::new(Ipv4Addr::LOCALHOST, host).into(),
+        )]))
+    }
+
+    /// Allows binding and listening on the mapped host port, and Accept only from peers whose
+    /// port differs from it (that is, only when Accept is checked against the peer).
+    struct PeerAccept {
+        host: u16,
+    }
+
+    impl super::super::policy::OutboundPolicy for PeerAccept {
+        fn allow(
+            &self,
+            op: super::super::policy::SocketOperation,
+            address: &super::super::policy::SocketAddress,
+        ) -> bool {
+            use super::super::policy::SocketOperation::{Accept, Bind, Listen};
+            let port = address.as_sockaddr_in().map(|a| a.port());
+            match op {
+                Bind | Listen => port == Some(self.host),
+                Accept => port.is_some() && port != Some(self.host),
+                _ => false,
+            }
+        }
+    }
+
+    fn free_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
+    #[test]
+    fn mapped_listener_binds_the_mapped_address_and_accept_checks_the_peer() {
+        let host = free_port();
+        let mut proxy = test_proxy();
+        proxy.socket_policy.internet_enabled = true;
+        proxy.socket_policy.policy = Some(Arc::new(PeerAccept { host }));
+        // The guest listens on all of its addresses; the host side must use the mapping's.
+        let req = TsiListenReq {
+            peer_port: 5678,
+            vm_port: 1234,
+            backlog: 8,
+            addr: SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 8080).into(),
+        };
+        assert_eq!(proxy.try_listen(&req, &loopback_mapping(8080, host)), 0);
+        let bound: SockaddrStorage = nix::sys::socket::getsockname(proxy.as_raw_fd()).unwrap();
+        assert_eq!(
+            bound.as_sockaddr_in().map(|a| (a.ip(), a.port())),
+            Some((Ipv4Addr::LOCALHOST, host)),
+            "a mapped listener binds the address from the mapping, not the guest's"
+        );
+        proxy.status = ProxyStatus::Listening;
+        let _client = std::net::TcpStream::connect(("127.0.0.1", host)).unwrap();
+        let update = proxy.process_event(EventSet::IN);
+        assert!(
+            update.new_proxy.is_some(),
+            "Accept is authorized against the connecting peer"
+        );
+    }
+
+    fn connect_req(port: u16) -> TsiConnectReq {
+        TsiConnectReq {
+            peer_port: 5678,
+            addr: SocketAddrV4::new(Ipv4Addr::LOCALHOST, port).into(),
+        }
+    }
+
+    #[test]
+    fn host_sockets_stop_at_the_guest_ceiling_and_return_on_drop() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let budget = super::super::host_sockets::HostSocketBudget::new(1);
+        let policy = super::super::policy::SocketPolicy {
+            internet_enabled: true,
+            host_sockets: Some(budget.clone()),
+            ..Default::default()
+        };
+        let mut header = [0u8; super::super::packet::VSOCK_PKT_HDR_SIZE];
+        let pkt = VsockPacket::header_only_for_test(&mut header);
+        let mut first = test_proxy();
+        first.socket_policy = policy.clone();
+        let mut second = test_proxy();
+        second.socket_policy = policy;
+        first.connect(&pkt, connect_req(port));
+        assert!(first.fd.is_some());
+        assert_eq!(budget.in_use(), 1);
+        second.connect(&pkt, connect_req(port));
+        assert!(second.fd.is_none(), "no host socket beyond the ceiling");
+        assert_eq!(budget.in_use(), 1);
+        // A proxy released while still connecting is removed at once, not after a delay.
+        first.status = ProxyStatus::Connecting;
+        assert_eq!(first.release().remove_proxy, ProxyRemoval::Immediate);
+        drop(first);
+        assert_eq!(budget.in_use(), 0);
+        second.connect(&pkt, connect_req(port));
+        assert!(second.fd.is_some());
+    }
+
+    #[test]
+    fn accept_on_a_proxy_that_is_not_listening_is_refused() {
+        let mut proxy = test_proxy();
+        let update = proxy.accept(TsiAcceptReq {
+            peer_port: 5678,
+            flags: 0,
+        });
+        assert_ne!(proxy.status, ProxyStatus::WaitingOnAccept);
+        assert!(
+            update.signal_queue,
+            "the guest gets an answer instead of waiting for ever"
+        );
     }
 }
 

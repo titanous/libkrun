@@ -1,7 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::os::unix::io::RawFd;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
 use super::super::Queue as VirtQueue;
 use super::defs;
@@ -102,7 +104,7 @@ pub fn push_packet(
 
 pub struct VsockMuxer {
     cid: u64,
-    host_port_map: Option<HashMap<u16, u16>>,
+    host_port_map: Option<super::HostPortMap>,
     queue: Option<Arc<Mutex<VirtQueue>>>,
     mem: Option<GuestMemoryMmap>,
     rxq: Arc<Mutex<MuxerRxQ>>,
@@ -115,14 +117,27 @@ pub struct VsockMuxer {
     pub(crate) socket_policy: super::policy::SocketPolicy,
     muxer_thread: Option<std::thread::JoinHandle<()>>,
     reaper_thread: Option<std::thread::JoinHandle<()>>,
+    /// Guest ports whose proxy creation was refused at the limit below, newest last, so that
+    /// the request that follows a refused creation gets ENOBUFS rather than ECONNREFUSED.
+    refused_creates: Mutex<VecDeque<u32>>,
+    refused_total: AtomicU64,
 }
+
+/// Most stream proxies one guest may hold without a host socket. Such a proxy exists between
+/// TSI_PROXY_CREATE and the connect or listen that follows, or after a refused connect; it
+/// costs VMM memory only, so the descriptor limit does not bound it. Any guest process can
+/// send TSI_PROXY_CREATE (vsock datagrams need no privilege), so the number must be capped.
+pub(crate) const MAX_UNALLOCATED_PROXIES: usize = 1024;
+/// At the limit, unallocated proxies at least this old are removed to admit a new one.
+pub(crate) const UNALLOCATED_PROXY_TIMEOUT: Duration = Duration::from_secs(10);
+const REFUSED_CREATES_REMEMBERED: usize = 256;
 
 impl VsockMuxer {
     #[cfg(test)]
     pub(super) fn assert_configuration(
         &self,
         cid: u64,
-        host_ports: &Option<HashMap<u16, u16>>,
+        host_ports: &Option<super::HostPortMap>,
         unix_ports: &Option<HashMap<u32, (PathBuf, bool)>>,
         flags: TsiFlags,
     ) {
@@ -134,7 +149,7 @@ impl VsockMuxer {
 
     pub(crate) fn new(
         cid: u64,
-        host_port_map: Option<HashMap<u16, u16>>,
+        host_port_map: Option<super::HostPortMap>,
         unix_ipc_port_map: Option<HashMap<u32, (PathBuf, bool)>>,
         tsi_flags: TsiFlags,
         socket_policy: super::policy::SocketPolicy,
@@ -154,6 +169,79 @@ impl VsockMuxer {
             socket_policy,
             muxer_thread: None,
             reaper_thread: None,
+            refused_creates: Mutex::new(VecDeque::new()),
+            refused_total: AtomicU64::new(0),
+        }
+    }
+
+    /// Whether another stream proxy without a host socket may be created. Under the limit this
+    /// is free; at the limit, unallocated proxies older than the time-out are removed first.
+    fn admit_unallocated_proxy(&self) -> bool {
+        let mut map = self.proxy_map.write().unwrap();
+        if map.len() < MAX_UNALLOCATED_PROXIES {
+            return true;
+        }
+        let now = Instant::now();
+        let mut unallocated = 0;
+        let mut expired = Vec::new();
+        for (id, proxy) in map.iter() {
+            if let Some(since) = proxy.lock().unwrap().unallocated_since() {
+                if now.duration_since(since) >= UNALLOCATED_PROXY_TIMEOUT {
+                    expired.push(*id);
+                } else {
+                    unallocated += 1;
+                }
+            }
+        }
+        for id in &expired {
+            // No host socket, so nothing is registered for polling.
+            map.remove(id);
+        }
+        unallocated < MAX_UNALLOCATED_PROXIES
+    }
+
+    fn refuse_create(&self, peer_port: u32) {
+        let total = self.refused_total.fetch_add(1, Ordering::Relaxed);
+        if total.is_power_of_two() || total == 0 {
+            warn!(
+                "refusing stream proxy creation ({} so far): {MAX_UNALLOCATED_PROXIES} proxies without a host socket",
+                total + 1
+            );
+        }
+        let mut refused = self.refused_creates.lock().unwrap();
+        if refused.len() == REFUSED_CREATES_REMEMBERED {
+            refused.pop_front();
+        }
+        refused.push_back(peer_port);
+    }
+
+    /// A proxy refused at the guest's host-socket ceiling: the request that follows gets
+    /// ENOBUFS, like a creation refused at the unallocated-proxy limit.
+    fn refuse_host_socket(&self, peer_port: u32) {
+        let total = self.refused_total.fetch_add(1, Ordering::Relaxed);
+        if total.is_power_of_two() || total == 0 {
+            warn!(
+                "refusing proxy creation ({} so far): guest at its ceiling of {} host sockets",
+                total + 1,
+                self.socket_policy
+                    .host_sockets
+                    .as_ref()
+                    .map_or(0, |budget| budget.limit())
+            );
+        }
+        let mut refused = self.refused_creates.lock().unwrap();
+        if refused.len() == REFUSED_CREATES_REMEMBERED {
+            refused.pop_front();
+        }
+        refused.push_back(peer_port);
+    }
+
+    /// The error for a request naming a proxy that does not exist.
+    fn missing_proxy_error(&self, peer_port: u32) -> i32 {
+        if self.refused_creates.lock().unwrap().contains(&peer_port) {
+            -libc::ENOBUFS
+        } else {
+            -libc::ECONNREFUSED
         }
     }
 
@@ -349,6 +437,10 @@ impl VsockMuxer {
                         warn!("rejecting stream inet proxy because HIJACK_INET is disabled");
                         return;
                     }
+                    if !self.admit_unallocated_proxy() {
+                        self.refuse_create(req.peer_port);
+                        return;
+                    }
                     match TsiStreamProxy::new(
                         id,
                         self.cid,
@@ -385,6 +477,12 @@ impl VsockMuxer {
                         warn!("rejecting dgram inet proxy because HIJACK_INET is disabled");
                         return;
                     }
+                    // A datagram proxy opens its host socket at once: count it first.
+                    let Ok(permit) = super::host_sockets::acquire(&self.socket_policy.host_sockets)
+                    else {
+                        self.refuse_host_socket(req.peer_port);
+                        return;
+                    };
                     match TsiDgramProxy::new(
                         id,
                         self.cid,
@@ -396,6 +494,7 @@ impl VsockMuxer {
                     ) {
                         Ok(mut proxy) => {
                             proxy.socket_policy = self.socket_policy.clone();
+                            proxy.host_socket_permit = permit;
                             self.proxy_map
                                 .write()
                                 .unwrap()
@@ -421,7 +520,7 @@ impl VsockMuxer {
                 None => self.push_packet(MuxerRx::ConnResponse {
                     local_port: pkt.dst_port(),
                     peer_port: pkt.src_port(),
-                    result: -libc::ECONNREFUSED,
+                    result: self.missing_proxy_error(req.peer_port),
                 }),
             }
         }
@@ -807,5 +906,78 @@ impl VsockMuxer {
             _ => warn!("stream: unhandled op={}", pkt.op()),
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vm_memory::GuestAddress;
+
+    fn idle_proxy(muxer: &VsockMuxer, port: u32, age: Duration) {
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let id = ((port as u64) << 32) | (defs::TSI_PROXY_PORT as u64);
+        let mut proxy = TsiStreamProxy::new(
+            id,
+            3,
+            defs::LINUX_AF_INET,
+            defs::TSI_PROXY_PORT,
+            port,
+            9012,
+            mem,
+            Arc::new(Mutex::new(VirtQueue::new(256))),
+            muxer.rxq.clone(),
+        )
+        .unwrap();
+        proxy.age_for_test(age);
+        muxer
+            .proxy_map
+            .write()
+            .unwrap()
+            .insert(id, Mutex::new(Box::new(proxy)));
+    }
+
+    #[test]
+    fn proxies_without_host_socket_are_bounded_and_expire() {
+        let muxer = VsockMuxer::new(3, None, None, TsiFlags::empty(), Default::default());
+        for port in 0..MAX_UNALLOCATED_PROXIES as u32 {
+            assert!(muxer.admit_unallocated_proxy(), "port {port}");
+            idle_proxy(&muxer, port, Duration::ZERO);
+        }
+        // At the limit and nothing old enough to remove: refused, with ENOBUFS afterwards.
+        assert!(!muxer.admit_unallocated_proxy());
+        muxer.refuse_create(70000);
+        assert_eq!(muxer.missing_proxy_error(70000), -libc::ENOBUFS);
+        assert_eq!(muxer.missing_proxy_error(70001), -libc::ECONNREFUSED);
+        assert_eq!(
+            muxer.proxy_map.read().unwrap().len(),
+            MAX_UNALLOCATED_PROXIES
+        );
+
+        // Proxies past the time-out make room again and are removed.
+        let mut map = muxer.proxy_map.write().unwrap();
+        map.clear();
+        drop(map);
+        for port in 0..MAX_UNALLOCATED_PROXIES as u32 {
+            let age = if port < 10 {
+                UNALLOCATED_PROXY_TIMEOUT + Duration::from_secs(1)
+            } else {
+                Duration::ZERO
+            };
+            idle_proxy(&muxer, port, age);
+        }
+        assert!(muxer.admit_unallocated_proxy());
+        assert_eq!(
+            muxer.proxy_map.read().unwrap().len(),
+            MAX_UNALLOCATED_PROXIES - 10
+        );
+        // The remembered refusals are bounded.
+        for port in 0..(2 * REFUSED_CREATES_REMEMBERED as u32) {
+            muxer.refuse_create(100000 + port);
+        }
+        assert_eq!(
+            muxer.refused_creates.lock().unwrap().len(),
+            REFUSED_CREATES_REMEMBERED
+        );
     }
 }

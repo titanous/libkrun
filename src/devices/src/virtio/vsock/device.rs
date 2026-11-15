@@ -37,7 +37,7 @@ pub(crate) const AVAIL_FEATURES: u64 = (1 << uapi::VIRTIO_F_VERSION_1 as u64)
 
 pub struct Vsock {
     cid: u64,
-    host_port_map: Option<HashMap<u16, u16>>,
+    host_port_map: Option<super::HostPortMap>,
     unix_ipc_port_map: Option<HashMap<u32, (PathBuf, bool)>>,
     tsi_flags: TsiFlags,
     socket_policy: super::policy::SocketPolicy,
@@ -58,7 +58,7 @@ impl Vsock {
     /// Create a new virtio-vsock device with the given VM CID.
     pub fn new(
         cid: u64,
-        host_port_map: Option<HashMap<u16, u16>>,
+        host_port_map: Option<super::HostPortMap>,
         unix_ipc_port_map: Option<HashMap<u32, (PathBuf, bool)>>,
         tsi_flags: TsiFlags,
     ) -> super::Result<Vsock> {
@@ -282,7 +282,7 @@ mod lifecycle_tests {
         use super::super::policy::{AllowlistPolicy, SocketAddress, SocketOperation, SocketPolicy};
         use nix::errno::Errno;
         use std::os::fd::AsRawFd;
-        let host_ports = Some(HashMap::from([(18080, 8080)]));
+        let host_ports = Some(HashMap::from([(18080, "127.0.0.1:8080".parse().unwrap())]));
         let unix_ports = Some(HashMap::from([
             (7000, (PathBuf::from("/tmp/reset-rule.sock"), false)),
             (7001, (PathBuf::from("/tmp/reset-listen.sock"), true)),
@@ -294,6 +294,7 @@ mod lifecycle_tests {
         device.set_socket_policy(SocketPolicy {
             policy: Some(Arc::new(AllowlistPolicy::new([]))),
             internet_enabled: false,
+            host_sockets: None,
         });
         for _ in 0..2 {
             let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();

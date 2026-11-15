@@ -54,7 +54,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             == Some(self.0.as_path()))
             }
         }
-        builder.internet_socket_forwarding(false);
+        // CLONE_INTERNET forwards guest Internet sockets (the socket copy test).
+        builder.internet_socket_forwarding(std::env::var_os("CLONE_INTERNET").is_some());
         if std::env::var_os("CLONE_DENY").is_some() {
             builder.outbound_policy(std::sync::Arc::new(krun::AllowlistPolicy::new([])));
         } else {
