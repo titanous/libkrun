@@ -530,6 +530,9 @@ pub use nitro_sandbox::runtime::ParkedReceiverError;
 ))]
 pub use vmm::nitro_restore::RestoreMismatch;
 
+/// The typed refusal of a capture whose source ended (a stated final reason, or the host's stop
+/// as `VmExit::Stopped`): downcast the `io::Error` cause to match it.
+pub use vmm::capture_request::GuestStoppedDuringCapture;
 #[cfg(all(
     target_os = "linux",
     target_arch = "aarch64",

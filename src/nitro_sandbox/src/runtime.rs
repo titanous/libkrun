@@ -649,6 +649,15 @@ impl Runtime {
     pub fn exit_code_state(&self) -> Arc<std::sync::atomic::AtomicI32> {
         self.exit_code.clone()
     }
+    /// A capture that was armed but never accepted when the run ended: the waiter must learn,
+    /// typed, that the source ended (a stated final reason or the host's stop), instead of
+    /// waiting for its deadline and an untyped time-out.
+    fn unanswered_capture_stop(facts: &TerminalFacts) -> Option<crate::capture::GuestStop> {
+        (facts.final_reason() || facts.host_stop).then_some(crate::capture::GuestStop {
+            reason: facts.reason,
+            host_stop: facts.host_stop,
+        })
+    }
     pub fn run_facts(mut self) -> io::Result<TerminalFacts> {
         let mut result = self
             .run_inner()
@@ -660,6 +669,13 @@ impl Runtime {
             });
         let cleanup = self.shutdown();
         let accepted = self.accepted_capture.take();
+        if accepted.is_none() {
+            if let (Some(capture), Ok(facts)) = (self.capture.as_mut(), &result) {
+                if let Some(stop) = Self::unanswered_capture_stop(facts) {
+                    capture.guest_stopped(stop);
+                }
+            }
+        }
         // Recheck the capture guard after the source's devices stopped and
         // before the source is closed and the template published.
         let mut late = None;
@@ -911,6 +927,37 @@ fn guest_error_facts(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn an_unanswered_capture_learns_why_the_source_ended() {
+        let host = TerminalFacts {
+            host_stop: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            Runtime::unanswered_capture_stop(&host),
+            Some(crate::capture::GuestStop {
+                reason: 0,
+                host_stop: true
+            })
+        );
+        let panic = TerminalFacts {
+            reason: 4,
+            ..Default::default()
+        };
+        assert_eq!(
+            Runtime::unanswered_capture_stop(&panic),
+            Some(crate::capture::GuestStop {
+                reason: 4,
+                host_stop: false
+            })
+        );
+        // Not an ending the guard knows: the capture's own deadline answers.
+        assert_eq!(
+            Runtime::unanswered_capture_stop(&TerminalFacts::default()),
+            None
+        );
+    }
 
     #[test]
     fn pending_host_stop_survives_guest_data_fault() {
