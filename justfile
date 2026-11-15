@@ -110,7 +110,8 @@ cooperative-gate holodeck kernel output:
     gate clone just cooperative-clone "{{kernel}}" "$devices" 0 "$out/clone"
     gate fs just cooperative-fs "{{kernel}}" "$fs" "$out/fs"
     gate sockets just cooperative-sockets "{{kernel}}" "$sockets" "$out/sockets"
-    if grep -rl "WARNING: CPU" "$out" > /dev/null; then echo "GATE FAIL: a kernel WARNING in a guest console"; exit 1; fi
+    # Text files only (-I): kept guest RAM images contain the kernel's own format string.
+    if grep -rIl "WARNING: CPU" "$out" > /dev/null; then echo "GATE FAIL: a kernel WARNING in a guest console"; exit 1; fi
     echo "COOPERATIVE COPY GATE PASS"
 
 # Forwarded guest sockets across a real copy; INIT is tests/cooperative/sockets.c built
