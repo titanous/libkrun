@@ -172,6 +172,7 @@ impl UnixProxy {
             Ok(count) => self.tx_cnt += Wrapping(count as u32),
             Err(_) => {
                 self.push_reset();
+                self.close_host_socket();
                 self.status = ProxyStatus::Closed;
                 update.signal_queue = true;
                 update.remove_proxy = ProxyRemoval::Deferred;
@@ -205,6 +206,17 @@ impl UnixProxy {
             result,
         };
         self.push_pkt(rx);
+    }
+
+    /// The connection is over (the guest sent RST, or this proxy reset the guest after the host
+    /// side ended or failed): shut the host socket down in both directions now, so the host peer
+    /// reads end of file at once. Only the proxy's own removal is deferred (to the reaper, about
+    /// 5 s later); before this, the host socket stayed open until then, and a host service that
+    /// counts open connections (the holodeck daemon's relay limit) still counted it.
+    fn close_host_socket(&self) {
+        if let Err(e) = shutdown(self.fd.as_raw_fd(), Shutdown::Both) {
+            debug!("close_host_socket: id={}: {e}", self.id);
+        }
     }
 
     fn push_reset(&self) {
@@ -541,10 +553,14 @@ impl Proxy for UnixProxy {
             "release: id={}, tx_cnt={}, last_tx_cnt={}",
             self.id, self.tx_cnt, self.last_tx_cnt_sent
         );
+        // The guest reset the connection: nothing more crosses it in either direction.
+        self.status = ProxyStatus::Closed;
+        self.close_host_socket();
         let remove_proxy = ProxyRemoval::Deferred;
 
         ProxyUpdate {
             remove_proxy,
+            polling: Some((self.id, self.fd.as_raw_fd(), EventSet::empty())),
             ..Default::default()
         }
     }
@@ -571,6 +587,7 @@ impl Proxy for UnixProxy {
             } else {
                 self.push_reset();
             }
+            self.close_host_socket();
 
             self.status = ProxyStatus::Closed;
             update.polling = Some((self.id, self.fd.as_raw_fd(), EventSet::empty()));
@@ -604,6 +621,7 @@ impl Proxy for UnixProxy {
                     );
 
                     self.push_reset();
+                    self.close_host_socket();
                     update.signal_queue = true;
                     update.polling = Some((self.id(), self.fd.as_raw_fd(), EventSet::empty()));
                     return update;
@@ -769,5 +787,36 @@ impl Proxy for UnixAcceptorProxy {
 impl AsRawFd for UnixAcceptorProxy {
     fn as_raw_fd(&self) -> RawFd {
         self.fd.as_raw_fd()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Read;
+    use vm_memory::GuestAddress;
+
+    #[test]
+    fn guest_reset_gives_the_host_peer_end_of_file_at_once() {
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let (proxy_side, mut host) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut proxy = UnixProxy::new_reverse(
+            1,
+            3,
+            1024,
+            7004,
+            OwnedFd::from(proxy_side),
+            mem,
+            Arc::new(Mutex::new(VirtQueue::new(16))),
+            Arc::new(Mutex::new(MuxerRxQ::new())),
+        );
+        let update = proxy.release();
+        assert!(matches!(update.remove_proxy, ProxyRemoval::Deferred));
+        // The proxy (and its descriptor) still exists until the reaper removes it, but the host
+        // peer already reads end of file: no wait for the reaper.
+        host.set_read_timeout(Some(std::time::Duration::from_millis(500)))
+            .unwrap();
+        assert_eq!(host.read(&mut [0u8; 8]).unwrap(), 0);
+        drop(proxy);
     }
 }
