@@ -363,10 +363,13 @@ static pthread_t churn_before_freeze(void)
     return churn;
 }
 
-/* ---- Test mode randcopy_bomb=N: a fork bomb of getrandom callers before the freeze ---- */
-static void bomb(long processes)
+/* ---- Test mode randcopy_bomb=N: a fork bomb of getrandom callers before the freeze ----
+ * Two equal waves, each N short processes and N/4 short threads (64 alive at a time) that read random bytes
+ * and exit. The first wave also warms the kernel's caches; anything kept per exited task would make the
+ * second wave cost as much memory as the first. */
+static void bomb_wave(long processes)
 {
-    long before = mem_available_kib(), threads = processes / 4;
+    long threads = processes / 4;
     pid_t wave[64];
     for (long done = 0; done < processes;) {
         int n = 0;
@@ -380,8 +383,16 @@ static void bomb(long processes)
             if (pthread_create(&batch[n], NULL, short_thread, (void *)(unsigned long)done)) fail("bomb thread");
         for (int i = 0; i < n; i++) if (pthread_join(batch[i], NULL)) fail("bomb join");
     }
-    printf("RANDCOPY BOMB processes=%ld threads=%ld mem_available_kib=%ld..%ld\n", processes, threads, before,
-           mem_available_kib());
+}
+
+static void bomb(long processes)
+{
+    long before = mem_available_kib();
+    bomb_wave(processes);
+    long middle = mem_available_kib();
+    bomb_wave(processes);
+    printf("RANDCOPY BOMB processes=%ld threads=%ld mem_available_kib=%ld..%ld..%ld\n", 2 * processes,
+           2 * (processes / 4), before, middle, mem_available_kib());
 }
 
 /* ---- Test mode randcopy_samesite=1: a result must not be rewritten after the task ran ----
