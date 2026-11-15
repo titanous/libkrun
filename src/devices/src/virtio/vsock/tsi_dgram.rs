@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::num::Wrapping;
 use std::os::fd::OwnedFd;
@@ -91,6 +90,8 @@ pub struct TsiDgramProxy {
     tx_cnt: Wrapping<u32>,
     peer_buf_alloc: u32,
     peer_fwd_cnt: Wrapping<u32>,
+    /// Counts this proxy's host socket against the guest's ceiling while it exists.
+    pub(crate) host_socket_permit: Option<super::host_sockets::HostSocketPermit>,
 }
 
 impl TsiDgramProxy {
@@ -129,6 +130,7 @@ impl TsiDgramProxy {
 
         Ok(TsiDgramProxy {
             socket_policy: Default::default(),
+            host_socket_permit: None,
             family,
             id,
             cid,
@@ -475,7 +477,7 @@ impl Proxy for TsiDgramProxy {
         &mut self,
         _pkt: &VsockPacket,
         _req: TsiListenReq,
-        _host_port_map: &Option<HashMap<u16, u16>>,
+        _host_port_map: &Option<super::HostPortMap>,
     ) -> ProxyUpdate {
         ProxyUpdate::default()
     }

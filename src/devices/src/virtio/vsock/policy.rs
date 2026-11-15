@@ -71,6 +71,8 @@ fn normalize(destination: &SocketAddress) -> SocketAddress {
 pub struct SocketPolicy {
     pub policy: Option<Arc<dyn OutboundPolicy>>,
     pub internet_enabled: bool,
+    /// The guest's ceiling on host sockets, shared by all of its proxies (None: no ceiling).
+    pub host_sockets: Option<Arc<super::host_sockets::HostSocketBudget>>,
 }
 
 impl SocketPolicy {
@@ -109,6 +111,7 @@ mod tests {
         let policy = SocketPolicy {
             policy: Some(Arc::new(DenyPort)),
             internet_enabled: true,
+            host_sockets: None,
         };
         assert_eq!(
             policy.check(SocketOperation::TcpConnect, &mapped),
@@ -144,6 +147,7 @@ mod tests {
         let policy = SocketPolicy {
             policy: Some(Arc::new(Slow(gate.clone(), entered))),
             internet_enabled: true,
+            host_sockets: None,
         };
         let other = policy.clone();
         let addr: SocketAddress = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 80).into();
@@ -184,6 +188,7 @@ mod tests {
         let policy = SocketPolicy {
             policy: Some(Arc::new(DenyPort)),
             internet_enabled: true,
+            host_sockets: None,
         };
         for op in operations {
             assert_eq!(
