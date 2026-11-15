@@ -59,7 +59,7 @@ parser.add_argument("--samesite", action="store_true",
                          "/dev/urandom read, with identical registers, must never be rewritten in a copy")
 parser.add_argument("--bomb", type=int, default=0,
                     help="guest test mode randcopy_bomb=N: three waves of N short getrandom processes and N/4 threads "
-                         "before the freeze; waves 2 and 3 together must keep less than 2 MiB of settled available memory and 1 MiB of kernel memory")
+                         "before the freeze; waves 2 and 3 together must keep less than 1 MiB of kernel memory")
 parser.add_argument("--omit-seed", action="store_true",
                     help="copies start with KRUN_TEST_OMIT_COPY_SEED=1 (launcher built with the copy-fault-injection "
                          "feature: the host gives no fresh seed); every copy must stop with the guest's refusal "
@@ -93,12 +93,12 @@ def check_churn_source(label, output):
             mode_stats[key] = max(mode_stats[key], mem[wave - 1] - mem[wave])
             key = f"bomb wave {wave} max kernel growth kib"
             mode_stats[key] = max(mode_stats[key], kernel[wave] - kernel[wave - 1])
-        # Bounded: the second and third equal waves (2 x (N + N/4) exited tasks) must not keep memory. One wave's
-        # settled MemAvailable still moves by up to ~3 MiB either way on a kernel that keeps nothing per task
-        # (observed on the base kernel, x86 and arm64), so the check is over both waves together, where a
-        # per-task leak adds up and noise does not: < 2 MiB available memory (~42 bytes per task) and < 1 MiB of
-        # unreclaimable slab + kernel stacks + page tables (~21 bytes per task; that sum moves < 100 KiB per wave).
-        if mem[1] - mem[3] >= 2048 or kernel[3] - kernel[1] >= 1024:
+        # Bounded: the second and third equal waves (2 x (N + N/4) exited tasks) must not keep kernel memory:
+        # unreclaimable slab + kernel stacks + page tables must grow < 1 MiB over both (~21 bytes per task; on
+        # the base kernel that sum moves < 100 KiB per wave on x86 and < 250 KiB on arm64 Nitro). MemAvailable
+        # is reported, not checked: even settled, on the base kernel, which keeps nothing per task, it dropped
+        # 3608 KiB over waves 2 and 3 on arm64 Nitro and 8904 KiB in one wave on x86 (observed).
+        if kernel[3] - kernel[1] >= 1024:
             raise RuntimeError(f"{label}: fork-bomb waves 2 and 3 kept memory: {b.group(0).decode()}")
     if args.no_churn:
         return
