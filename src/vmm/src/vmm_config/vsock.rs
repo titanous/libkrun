@@ -36,8 +36,8 @@ pub struct VsockDeviceConfig {
     pub vsock_id: String,
     /// A 32-bit Context Identifier (CID) used to identify the guest.
     pub guest_cid: u32,
-    /// An optional map of host to guest port mappings.
-    pub host_port_map: Option<HashMap<u16, u16>>,
+    /// An optional map of guest listening ports to the host addresses the VMM listens on.
+    pub host_port_map: Option<devices::virtio::HostPortMap>,
     /// An optional map of guest port to host UNIX domain sockets for IPC.
     pub unix_ipc_port_map: Option<HashMap<u32, (PathBuf, bool)>>,
     /// TSI feature flags
