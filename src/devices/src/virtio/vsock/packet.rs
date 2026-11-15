@@ -709,6 +709,17 @@ impl VsockPacket {
         }
     }
 
+    /// A control packet (header only) over a caller-owned header buffer, for unit tests.
+    #[cfg(test)]
+    pub(crate) fn header_only_for_test(hdr_buf: &mut [u8; VSOCK_PKT_HDR_SIZE]) -> Self {
+        VsockPacket {
+            hdr: hdr_buf.as_mut_ptr(),
+            buf: None,
+            buf_size: 0,
+            owned_buf: None,
+        }
+    }
+
     /// Construct a `VsockPacket` backed by a freshly-allocated header buffer for use in
     /// Kani proofs.
     ///

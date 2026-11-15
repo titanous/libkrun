@@ -120,22 +120,40 @@ impl MuxerThread {
 
         let mut should_signal = update.signal_queue;
 
-        if let Some((peer_port, accept_fd, family, proxy_type)) = update.new_proxy {
+        // A connection accepted on a mapped listener is a host socket of this guest too: at the
+        // ceiling it is closed (the peer sees the connection end) instead of admitted.
+        let accepted = update.new_proxy.and_then(|new| match new.3 {
+            NewProxyType::Tcp => {
+                match super::host_sockets::acquire(&self.socket_policy.host_sockets) {
+                    Ok(permit) => Some((new, permit)),
+                    Err(_) => {
+                        warn!("closing an accepted connection: guest at its host socket ceiling");
+                        None
+                    }
+                }
+            }
+            NewProxyType::Unix => Some((new, None)),
+        });
+        if let Some(((peer_port, accept_fd, family, proxy_type), permit)) = accepted {
             let local_port: u32 = thread_rng.random_range(1024..u32::MAX);
             let new_id: u64 = ((peer_port as u64) << 32) | (local_port as u64);
             let new_proxy: Box<dyn Proxy> = match proxy_type {
-                NewProxyType::Tcp => Box::new(TsiStreamProxy::new_reverse(
-                    new_id,
-                    self.cid,
-                    id,
-                    family,
-                    local_port,
-                    peer_port,
-                    accept_fd,
-                    self.mem.clone(),
-                    self.queue.clone(),
-                    self.rxq.clone(),
-                )),
+                NewProxyType::Tcp => {
+                    let mut proxy = TsiStreamProxy::new_reverse(
+                        new_id,
+                        self.cid,
+                        id,
+                        family,
+                        local_port,
+                        peer_port,
+                        accept_fd,
+                        self.mem.clone(),
+                        self.queue.clone(),
+                        self.rxq.clone(),
+                    );
+                    proxy.host_socket_permit = permit;
+                    Box::new(proxy)
+                }
                 NewProxyType::Unix => Box::new(UnixProxy::new_reverse(
                     new_id,
                     self.cid,
