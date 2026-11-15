@@ -75,6 +75,12 @@ cooperative-random holodeck output freezes="10":
     run omit-seed --cpus 1 --freezes 1 --omit-seed
     echo "COOPERATIVE RANDOM GATE PASS"
 
+# Forwarded guest sockets across a real copy; INIT is tests/cooperative/sockets.c built
+# static for x86-64 (see docs/cooperative-clone.md).
+cooperative-sockets kernel init output:
+    CARGO_BUILD_JOBS=12 cargo build --release -p libkrun --example cooperative-console --features net,blk,vhost-user
+    python3 tests/cooperative/sockets.py --kernel "{{kernel}}" --init "{{init}}" --output "{{output}}"
+
 # Real-copy virtio-fs clone matrix with retained files, mappings and watches.
 cooperative-fs kernel initramfs output children="20":
     CARGO_BUILD_JOBS=12 cargo build --release -p libkrun --example cooperative-console --features net,blk,vhost-user
