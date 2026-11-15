@@ -59,12 +59,14 @@ cooperative-clone kernel initramfs control output cycles="20" concurrent="16" mo
 # Real-KVM random bytes across copies (tests/cooperative/random.c): running threads, tasks that read
 # random bytes and exit before and during the freeze, and the refresh's safety properties (unwritable
 # buffer, same-site other read, fork bomb, copy without a host seed). Builds the production x86 guest
-# kernel and the image from a holodeck tree. Pass: every run ends "RANDOM ACCEPTANCE PASS".
-cooperative-random holodeck output freezes="10":
+# kernel and the image from a holodeck tree, or uses KERNEL (an x86-64 vmlinux) when given. Pass: every
+# run ends "RANDOM ACCEPTANCE PASS".
+cooperative-random holodeck output freezes="10" kernel="":
     #!/usr/bin/env bash
     set -euo pipefail
     CARGO_BUILD_JOBS=12 cargo build --release -p libkrun --example cooperative-console --features net,blk,vhost-user,copy-fault-injection
-    kernel="$(nix-build --no-out-link "{{holodeck}}/guest" --argstr arch x86_64)/vmlinux"
+    kernel="{{kernel}}"
+    [ -n "$kernel" ] || kernel="$(nix-build --no-out-link "{{holodeck}}/guest" --argstr arch x86_64)/vmlinux"
     image="$(nix build --no-link --print-out-paths --impure --file tests/cooperative/image.nix --arg holodeck "{{holodeck}}" --argstr workload random)/initramfs.cpio"
     mkdir -p "{{output}}"
     run() { name=$1; shift; python3 tests/cooperative/random-run.py --kernel "$kernel" --initramfs "$image" --output "{{output}}/$name" "$@" 2>&1 | tee "{{output}}/$name.log" | grep -E '^(PASS|FAILED) |ACCEPTANCE|FAIL '; }
@@ -85,6 +87,31 @@ cooperative-random holodeck output freezes="10":
     fi
     echo "BOMB SELF-CHECK PASS: $(grep -m1 -o 'kernel_kib=[-0-9.]*' "{{output}}/bomb-selfcheck.log")"
     echo "COOPERATIVE RANDOM GATE PASS"
+
+# Every real-KVM copy test with a given x86-64 guest kernel (KERNEL: a vmlinux), images built from the
+# holodeck tree HOLODECK: the random-copy gate, the device clone matrix, the virtio-fs clone matrix and
+# the forwarded-socket copy test. Exits non-zero on the first failure; one log per test under OUTPUT.
+cooperative-gate holodeck kernel output:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    out="$(realpath -m "{{output}}")"; mkdir -p "$out"
+    img() { nix build --no-link --print-out-paths --impure --file tests/cooperative/image.nix --arg holodeck "{{holodeck}}" --argstr workload "$1"; }
+    devices="$(img devices)/initramfs.cpio"; fs="$(img fs)/initramfs.cpio"
+    sockets="$(nix build --no-link --print-out-paths --impure --expr "
+      let lock = builtins.fromJSON (builtins.readFile {{holodeck}}/flake.lock); node = lock.nodes.nixpkgs.locked;
+          pkgs = import (builtins.fetchTree { type = \"github\"; inherit (node) owner repo rev narHash; }) {};
+      in pkgs.pkgsStatic.stdenv.mkDerivation { name = \"sockets-init\"; src = $PWD/tests/cooperative;
+           dontConfigure = true; buildPhase = \"\$CC -O2 -Wall -Wextra -Werror -static -pthread sockets.c -o sockets\";
+           installPhase = \"mkdir -p \$out; cp sockets \$out/\"; }")/sockets"
+    gate() { name=$1; shift; echo "GATE $name start $(date -u +%T)"
+             if ! "$@" > "$out/$name.log" 2>&1; then echo "GATE $name FAIL (log $out/$name.log)"; tail -n 5 "$out/$name.log"; exit 1; fi
+             echo "GATE $name PASS $(date -u +%T)"; }
+    gate random just cooperative-random "{{holodeck}}" "$out/random" 10 "{{kernel}}"
+    gate clone just cooperative-clone "{{kernel}}" "$devices" 0 "$out/clone"
+    gate fs just cooperative-fs "{{kernel}}" "$fs" "$out/fs"
+    gate sockets just cooperative-sockets "{{kernel}}" "$sockets" "$out/sockets"
+    if grep -rl "WARNING: CPU" "$out" > /dev/null; then echo "GATE FAIL: a kernel WARNING in a guest console"; exit 1; fi
+    echo "COOPERATIVE COPY GATE PASS"
 
 # Forwarded guest sockets across a real copy; INIT is tests/cooperative/sockets.c built
 # static for x86-64 (see docs/cooperative-clone.md).
