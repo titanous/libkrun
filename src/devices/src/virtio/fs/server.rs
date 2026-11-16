@@ -86,14 +86,16 @@ impl Server {
         for opcode in 0..self.request_counts.len() {
             let count = self.request_counts[opcode].load(Ordering::Relaxed);
             if count != 0 {
-                eprintln!(
-                    "fuse_stats pid={} mount={} opcode={} count={} nanos={}",
+                let record = format!(
+                    "fuse_stats pid={} mount={} opcode={} count={} nanos={}\n",
                     std::process::id(),
                     mount,
                     opcode,
                     count,
                     self.request_nanos[opcode].load(Ordering::Relaxed)
                 );
+                // A second process shares stderr; write each complete record together.
+                let _ = io::Write::write_all(&mut io::stderr(), record.as_bytes());
             }
         }
     }
