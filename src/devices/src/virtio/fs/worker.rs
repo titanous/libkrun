@@ -82,12 +82,13 @@ impl FsWorker {
             &EpollEvent::new(EventSet::IN, stop_ev_fd as u64),
         );
 
+        let report_stats = std::env::var_os("HOLODECK_FS_MEASURE").is_some();
         let mut last_report = std::time::Instant::now();
         loop {
             let mut epoll_events = vec![EpollEvent::new(EventSet::empty(), 0); 32];
             match epoll.wait(epoll_events.len(), 1000, epoll_events.as_mut_slice()) {
                 Ok(ev_cnt) => {
-                    if last_report.elapsed() >= std::time::Duration::from_secs(1) {
+                    if report_stats && last_report.elapsed() >= std::time::Duration::from_secs(1) {
                         self.server.log_request_stats(&mount);
                         last_report = std::time::Instant::now();
                     }
